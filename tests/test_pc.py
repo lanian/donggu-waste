@@ -133,7 +133,7 @@ def main():
     ok(r2["id"] in routed and "09:00" <= routed[r2["id"]][1] <= "10:00", f"방문 약속 9~10시 → 예상 도착 {routed[r2['id']][1]}")
 
     # 배정 확정 (1팀에 r1, r2, r4)
-    out = S.confirm_plan(con, day, {c1: [{"request_id": r1["id"], "eta": "09:20"}, {"request_id": r2["id"], "eta": "09:40"}, {"request_id": r4["id"], "eta": "10:10"}]})
+    out = S.confirm_plan(con, day, {c1: [{"request_id": r1["id"], "eta": "09:20"}, {"request_id": r2["id"], "eta": "09:40", "unload_after": {"eta": "10:00", "label": "가상 반입지", "minutes": 20, "volume_m3": 5.2}}, {"request_id": r4["id"], "eta": "10:10"}]})
     b1 = out[0]["batch_id"]
     raises(lambda: S.confirm_plan(con, day, {c2: [{"request_id": r1["id"]}]}), "이미 다른 배정", "같은 접수를 다른 팀에 동시 배정 거부")
 
@@ -142,6 +142,9 @@ def main():
     head, payload, receipt = phone.receive(bun["frames"])
     s1 = next(s for s in payload["stops"] if s["request_id"] == r1["id"])
     ok(s1["name"] == "가상일" and s1["phone"] == "01000001111" and "101호" in s1["address"], "휴대폰에 이름·연락처·주소(수정본) 전달")
+    s2u = next(s for s in payload["stops"] if s["request_id"] == r2["id"])
+    ok(s2u.get("unload_after", {}).get("label") == "가상 반입지" and s2u["unload_after"]["eta"] == "10:00" and not s1.get("unload_after"),
+       "배정 확정한 반입지 경유(하차) 위치가 휴대폰 목록에 전달")
     S.confirm_receipt(con, bun["bundle_id"][:8], receipt)
     ok(S.list_batches(con, day)[0]["bundles"][0]["receipt_confirmed_at"], f"수신 확인 코드 대조 ({receipt})")
 
@@ -228,6 +231,16 @@ def main():
     raises(lambda: S.make_bundle(con, out2[0]["batch_id"]), "사용 중지", "분실 기기로는 목록 전송 안 됨")
     S.set_device_status(con, dev, "ACTIVE")
 
+    # 휴대폰에서 기록한 하차 → 결과 파일 → PC 하차 기록
+    phone.seq += 1
+    uev = {"event_id": str(uuid.uuid4()), "seq": phone.seq, "request_id": "", "assign_ver": 1, "base_req_ver": None, "kind": "UNLOAD",
+           "body": {"place": "가상 반입지", "at_time": "11:40", "volume_m3": 4.5, "weight_kg": 380, "note": "", "work_date": day}, "device_ts": "2026-11-03T02:40:00Z"}
+    ur = S.import_result(con, phone.seal({"schema": "dg.result/1", "work_date": day, "events": [uev]}, P.TYPE_RESULT))
+    ul = [u for u in S.list_unloads(con, day) if u["id"] == uev["event_id"]]
+    ok(ur.get("unloads") == 1 and ul and ul[0]["volume_m3"] == 4.5 and "휴대폰" in ul[0]["note"], "휴대폰 하차 기록 → PC 하차 기록에 반영 (작업팀 자동 연결)")
+    ur2 = S.import_result(con, phone.seal({"schema": "dg.result/1", "work_date": day, "events": [uev]}, P.TYPE_RESULT))
+    ok(ur2["skipped_duplicate"] == 1 and len([u for u in S.list_unloads(con, day) if u["id"] == uev["event_id"]]) == 1, "같은 하차 기록은 한 번만")
+
     # 수납: 계산 금액·납부 금액·상태 분리, 정정은 지우지 않고 사유 기록
     ps = S.payment_status(con, r4["id"])
     ok(ps["status"] == "AMOUNT_PENDING" and ps["calculated"] is None, "금액 미확정 건은 '금액 확인 대기' (미납으로 단정하지 않음)")
@@ -263,7 +276,7 @@ def main():
     # 마감
     sm = S.day_summary(con, day)
     ok(sm["by_status"] == {"CANCELLED": 1, "RECEIVED": 1, "DONE": 1}, f"마감 요약 {day}: 완료 1·취소 1·미배정 1 {sm['by_status']}")
-    ok(sm["unload_total"] == {"volume_m3": 5.5, "weight_kg": 420.0}, "마감: 하차 합계 5.5m³ · 420kg")
+    ok(sm["unload_total"] == {"volume_m3": 10.0, "weight_kg": 800.0}, "마감: 하차 합계 10m³ · 800kg (PC 입력 5.5 + 휴대폰 기록 4.5)")
     ok(any(x["status"] == "AMOUNT_PENDING" for x in sm["payments"]), "마감: 금액 확인 대기 수납 건 표시")
     sm2 = S.day_summary(con, day2)
     ok([x["receipt_no"] for x in sm2["no_result"]] == [g1["receipt_no"]], f"마감 {day2}: 재배정했으나 결과 미회수 건 표시")
@@ -302,6 +315,66 @@ def main():
     ok(a and a[0]["action"] == "CANCEL", "변경 이력에 작업자(kim) 기록")
     ok(not any("가상오" in (x["detail"] or "") or "01000005555" in (x["detail"] or "") for x in S.list_audit(con, limit=1000)), "변경 이력 내용에 이름·연락처 없음")
 
+    # 운영 수수료표 개정 (확인 필요 행 확정 → 다른 담당자 승인 → 시행일부터 적용)
+    marble = fee["식탁|6인용 이상(대리석)"]
+    S.ACTOR.set("admin")
+    before = S.create_request(con, {**base, "name": "가상대리석", "phone": "01000007777", "address": "가상시 동구 대리석로 1", "items": [{"fee_rate_id": marble, "qty": 1}]})
+    raises(lambda: S.save_fee_draft(con, {"effective_from": S.today_kst(), "confirmed_by": "가상 확인자", "overrides": {marble: {"price": 0, "reason": "x"}}}), "0원보다", "확정 단가 0원 거부")
+    raises(lambda: S.save_fee_draft(con, {"effective_from": S.today_kst(), "confirmed_by": "가상 확인자", "overrides": {marble: {"price": 15000, "reason": ""}}}), "근거", "확정 근거 없으면 거부")
+    raises(lambda: S.save_fee_draft(con, {"effective_from": "", "confirmed_by": "가상 확인자"}), "시행일", "시행일 필수")
+    dr = S.save_fee_draft(con, {"effective_from": S.today_kst(), "confirmed_by": "가상 확인자(청소행정과)", "overrides": {marble: {"price": 15000, "reason": "6인용은 '이상'으로 적용 (가상 회신)"}}})
+    raises(lambda: S.approve_fee_revision(con, dr), "작성한 사람", "작성자 본인 승인 거부 (2인 대조)")
+    ok(S.fee_rows(con)[marble]["status"] == "REVIEW", "승인 전에는 적용 안 됨")
+    S.ACTOR.set("kim")
+    S.approve_fee_revision(con, dr)
+    stt = S.fee_state(con)
+    ok(stt["version_id"].endswith("-r1") and stt["confirmed_by"].startswith("가상 확인자") and stt["approved_by"] == "kim", f"다른 담당자 승인 → 적용 버전 {stt['version_id']}")
+    after = S.create_request(con, {**base, "name": "가상대리석2", "phone": "01000007778", "address": "가상시 동구 대리석로 2", "items": [{"fee_rate_id": marble, "qty": 1}]})
+    it_b, it_a = S.get_request(con, before["id"])["items"][0], S.get_request(con, after["id"])["items"][0]
+    ok(it_b["price_status"] == "PENDING" and it_a["price_status"] == "CONFIRMED" and it_a["amount"] == 15000 and it_a["fee_version_id"] == stt["version_id"],
+       "개정 뒤 새 접수만 확정 단가·새 버전, 이전 접수 원본은 그대로")
+    ph = S.fee_table_for_phone(con)
+    comp = P.compact_daylist({"work_date": day, "crew": "x", "assign_ver": 1, "fee_table": ph, "stops": [
+        {"seq": 1, "request_id": after["id"], "receipt_no": "R", "req_ver": 1, "name": "n", "phone": "010", "address": "a", "items": [{**it_a, "line_kind": "RECEIVED"}]}]}, S.FEE_ROWS)
+    exp = P.expand_daylist(comp, S.FEE_ROWS)
+    ok(comp["fo"] == {marble: 15000} and exp["stops"][0]["items"][0]["price_status"] == "CONFIRMED" and exp["fee_table"]["overrides"] == {marble: 15000},
+       "휴대폰 목록에 개정 버전·확정 단가 전달 (내장 원문 표 위에 덧씌움)")
+    S.ACTOR.set("admin")
+    future = (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=10)).isoformat()
+    dr2 = S.save_fee_draft(con, {"effective_from": future, "confirmed_by": "가상 확인자", "overrides": {fee["물탱크, 정화조(FRP)|용적 1.0 ㎡ 당"]: {"price": 5000, "reason": "가상 근거"}}})
+    S.ACTOR.set("kim"); S.approve_fee_revision(con, dr2)
+    ok(S.fee_state(con)["rev_no"] == 1 and S.fee_state(con, future)["rev_no"] == 2 and marble in S.fee_state(con, future)["overrides"], "시행일 전 개정은 그날부터 적용, 이전 확정값은 이어받음")
+    S.ACTOR.set("admin")
+
+    # 로컬 주소 → 좌표 (위치정보요약DB 형식 가상 파일: 파이프 구분·CP949·머리글 없음·UTM-K)
+    from dgpc import geo
+    def line(sg, road, main, sub, lat, lon, under="0"):
+        x, y = geo.wgs84_to_utmk(lat, lon)
+        return "|".join(["29110", "1", "2911010100", "가상광역시", sg, "가상동", "291104000001", road, under, str(main), str(sub), "", "61400", "주택", "0", "가상동", f"{x:.6f}", f"{y:.6f}"])
+    lines = [line("동구", "시험로", 1, 0, 35.1470, 126.9240), line("동구", "시험로", 2, 0, 35.1475, 126.9245), line("동구", "시험로12번길", 5, 3, 35.1480, 126.9250),
+             line("서구", "공통로", 10, 0, 35.1500, 126.8900), line("남구", "공통로", 10, 0, 35.1300, 126.9000), line("동구", "예시로", 77, 0, 35.1481, 126.9261)]
+    lines += [line("동구", f"가상{i}길", i, 0, 35.14 + i * 1e-4, 126.92) for i in range(1, 40)]
+    raw = "\n".join(lines).encode("cp949")
+    pv = S.import_addr_points(con, raw, preview=True)
+    ok(pv["columns"]["road"] == 7 and pv["columns"]["main"] == 9 and pv["columns"]["sub"] == 10 and pv["columns"]["x"] == 16 and pv["columns"]["y"] == 17 and pv["columns"].get("sigungu") == 4,
+       f"머리글 없는 파일의 열 자동 인식 (도로명 7·본번 9·부번 10·X 16·Y 17·시군구 4)")
+    ok(abs(pv["sample"][0]["lat"] - 35.147) < 1e-6 and abs(pv["sample"][0]["lon"] - 126.924) < 1e-6, "UTM-K → 위도·경도 변환 (오차 1e-6도 미만)")
+    imp = S.import_addr_points(con, raw)
+    ok(imp["count"] == 45 and S.addr_stats(con)["count"] == 45, "주소 좌표 45건 가져오기 (암호화 DB 안)")
+    g = S.geocode(con, "가상광역시 동구 시험로 2, 3층")
+    ok(g and abs(g["lat"] - 35.1475) < 1e-6 and g["exact"], "주소 '시험로 2' → 좌표")
+    g2 = S.geocode(con, "가상시 동구 시험로12번길 5-9")
+    ok(g2 and not g2["exact"] and abs(g2["lat"] - 35.1480) < 1e-6, "부번이 없으면 본번으로 찾고 '본번 기준' 표시")
+    ok(S.geocode(con, "공통로 10")["ambiguous"] and abs(S.geocode(con, "가상광역시 서구 공통로 10")["lon"] - 126.89) < 1e-6, "여러 구에 같은 도로명 → 구 이름으로 구분, 없으면 모호 표시")
+    ok(S.geocode(con, "없는로 1") is None, "자료에 없는 주소는 찾지 못함으로 표시")
+    hdr = ("시군구명,도로명,건물본번,건물부번,위도,경도\n동구,헤더로,3,0,35.15,126.93\n").encode("utf-8")
+    ok(S.import_addr_points(con, hdr, preview=True)["sample"][0]["road"] == "헤더로", "머리글 있는 파일(위도·경도)도 가져오기")
+    rq = S.create_request(con, {**base, "planned_date": "2026-11-07", "name": "가상위치", "phone": "01000008888", "address": "가상시 동구 예시로 77",
+                                "lat": None, "lon": None, "items": [{"fee_rate_id": fee["장롱|120cm 이상 1쪽당"], "qty": 1}]})
+    gm = S.geocode_missing(con, "2026-11-07")
+    r7 = S.get_request(con, rq["id"])
+    ok(gm["found"] >= 1 and abs(r7["lat"] - 35.1481) < 1e-6 and r7["geo_source"] == "ADDR", "위치 없는 접수 일괄 찾기 → 출처 '주소 자료'로 기록")
+
     # 초성 검색 + 반입지 경유
     names = {r["name"] for r in S.list_requests(con, "ㄱㅅㅇ")}
     ok({"가상오", "가상육"} <= names and not any(n.startswith("가상하") for n in names), f"접수 초성 검색 'ㄱㅅㅇ' → 가상오·가상육 ({len(names)}건)")
@@ -315,6 +388,10 @@ def main():
     ok(len(no_u["routes"][0]["stops"]) == 1 and len(rt["stops"]) == 4 and rt["unloads"] == 3 and all(s["load_m3"] <= 6 for s in rt["stops"]),
        f"반입지 경유: 6m³ 차량으로 4m³×4건 → 하차 3회 끼워 4곳 모두 방문 (경유 없으면 1곳)")
     raises(lambda: S.save_settings(con, {"unload_site": {"lat": 10, "lon": 10}}), "국내", "반입지 좌표 범위 검사")
+    far_end = {"lat": 35.20, "lon": 127.00, "label": "가상 종료지"}
+    e1 = routing.plan(many[:2], one_crew, dep, time_limit_s=1, volume_overrides={"X": 1})
+    e2 = routing.plan(many[:2], one_crew, dep, time_limit_s=1, volume_overrides={"X": 1}, end_site=far_end)
+    ok(e2["end_site"] and e2["routes"][0]["end"] > e1["routes"][0]["end"] and len(e2["routes"][0]["stops"]) == 2, f"종료지를 따로 두면 그곳까지 계산 (종료 {e1['routes'][0]['end']} → {e2['routes'][0]['end']})")
 
     # 사진 보관 기간 정리
     S.ACTOR.set("admin")

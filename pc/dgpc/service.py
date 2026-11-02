@@ -167,11 +167,12 @@ def settings(con) -> dict:
         "service_min_per_item": get_setting(con, "service_min_per_item", 3),
         "photo_retention_days": get_setting(con, "photo_retention_days", 90),
         "unload_site": get_setting(con, "unload_site", None),
+        "end_site": get_setting(con, "end_site", None),
         "unload_min": get_setting(con, "unload_min", 20),
         "max_unloads": get_setting(con, "max_unloads", 2),
         "backup_dir": get_setting(con, "backup_dir", ""),
-        "fee_version": FEE_TABLE["version_id"], "fee_label": FEE_TABLE["label"],
-        "fee_checked_on": FEE_TABLE["source_checked_on"], "fee_effective_from": FEE_TABLE["effective_from"],
+        "fee_version": fee_state(con)["version_id"], "fee_label": FEE_TABLE["label"],
+        "fee_checked_on": FEE_TABLE["source_checked_on"], "fee_effective_from": fee_state(con)["effective_from"],
     }
 
 
@@ -188,15 +189,17 @@ def save_settings(con, data: dict):
         for k in ("service_min_base", "service_min_per_item"):
             if k in data:
                 set_setting(con, k, max(0, int(data[k])))
-        if "unload_site" in data:
-            u = data["unload_site"] or {}
+        for key, default_label, what in (("unload_site", "반입지", "반입지"), ("end_site", "종료지", "종료지")):
+            if key not in data:
+                continue
+            u = data[key] or {}
             if u.get("lat") in (None, "") or u.get("lon") in (None, ""):
-                set_setting(con, "unload_site", None)
+                set_setting(con, key, None)
             else:
                 lat, lon = float(u["lat"]), float(u["lon"])
                 if not (33 <= lat <= 39 and 124 <= lon <= 132):
-                    raise UserError("반입지 좌표가 국내 범위를 벗어났습니다.")
-                set_setting(con, "unload_site", {"lat": lat, "lon": lon, "label": str(u.get("label") or "반입지")[:40]})
+                    raise UserError(f"{what} 좌표가 국내 범위를 벗어났습니다.")
+                set_setting(con, key, {"lat": lat, "lon": lon, "label": str(u.get("label") or default_label)[:40]})
         for k, lo, hi in (("unload_min", 0, 180), ("max_unloads", 0, 5)):
             if k in data:
                 set_setting(con, k, min(hi, max(lo, int(data[k]))))
@@ -221,8 +224,10 @@ def norm_addr(a: str) -> str:
     return re.sub(r"\s+", "", a or "")
 
 
-def build_items(items: list[dict]) -> list[dict]:
+def build_items(items: list[dict], con=None) -> list[dict]:
     """화면에서 받은 품목을 공식 수수료표 기준으로 다시 계산한다(화면 값의 단가를 믿지 않음)."""
+    rows_now = fee_rows(con) if con is not None else FEE_ROWS
+    ver = fee_state(con)["version_id"] if con is not None else FEE_TABLE["version_id"]
     out = []
     for it in items:
         qty = int(it.get("qty") or 0)
@@ -231,11 +236,11 @@ def build_items(items: list[dict]) -> list[dict]:
         rid = it.get("fee_rate_id")
         line_id = it.get("line_id") or str(uuid.uuid4())
         if rid:
-            r = FEE_ROWS.get(rid)
+            r = rows_now.get(rid)
             if not r:
                 raise UserError("수수료표에 없는 품목입니다. 다시 골라 주세요.")
             confirmed = r["status"] == "CONFIRMED"
-            out.append({"line_id": line_id, "fee_rate_id": rid, "fee_version_id": FEE_TABLE["version_id"], "name": r["name"],
+            out.append({"line_id": line_id, "fee_rate_id": rid, "fee_version_id": ver, "name": r["name"],
                         "spec": r["spec"], "unit": r["unit"], "unit_label": r["unit_label"], "qty": qty, "unit_price": r["price"],
                         "amount": r["price"] * qty if confirmed else None, "price_status": "CONFIRMED" if confirmed else "PENDING"})
         else:
@@ -285,7 +290,7 @@ def find_duplicates(con, phone: str, address: str, exclude_id: str | None = None
 
 def create_request(con, data: dict) -> dict:
     d = validate(data)
-    items = build_items(data["items"])
+    items = build_items(data["items"], con)
     rid, ts = str(uuid.uuid4()), now()
     day = today_kst().replace("-", "")
     with tx(con):
@@ -295,7 +300,7 @@ def create_request(con, data: dict) -> dict:
             planned_date, appt_start, appt_end, must_today, urgent, priority, status, received_at, updated_at)
             VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RECEIVED',?,?)""",
                     (rid, receipt, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
-                     "MANUAL" if d["lat"] is not None else None, d["planned_date"] or None, d["appt_start"] or None,
+                     (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None else None, d["planned_date"] or None, d["appt_start"] or None,
                      d["appt_end"] or None, d["must_today"], d["urgent"], d["priority"], ts, ts))
         for it in items:
             _insert_item(con, rid, it)
@@ -333,7 +338,7 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
     if not (reason or "").strip():
         raise UserError("수정 사유를 적어 주세요.")
     d = validate(data)
-    items = build_items(data["items"])
+    items = build_items(data["items"], con)
     locked = locked_lines(con, rid)
     old_items = {i["line_id"]: i for i in rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))}
     new_ids = {i["line_id"] for i in items}
@@ -346,7 +351,7 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
         con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note=?, memo=?, lat=?, lon=?,
             geo_source=COALESCE(?, geo_source), planned_date=?, appt_start=?, appt_end=?, must_today=?, urgent=?, priority=?, updated_at=? WHERE id=?""",
                     (d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
-                     "MANUAL" if d["lat"] is not None and (d["lat"], d["lon"]) != (cur["lat"], cur["lon"]) else None,
+                     (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None and (d["lat"], d["lon"]) != (cur["lat"], cur["lon"]) else None,
                      d["planned_date"] or None, d["appt_start"] or None, d["appt_end"] or None, d["must_today"], d["urgent"],
                      d["priority"], now(), rid))
         for lid in old_items:
@@ -535,8 +540,16 @@ def confirm_plan(con, work_date: str, plan: dict[str, list[dict]]) -> list[dict]
             prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
             con.execute("UPDATE assignment_batch SET status='SUPERSEDED' WHERE crew_id=? AND work_date=? AND status='ACTIVE'", (cid, work_date))
             bid = str(uuid.uuid4())
+            clean = []
+            for x in stops:
+                u = x.get("unload_after")
+                item = {"request_id": x["request_id"], "eta": x.get("eta") or ""}
+                if isinstance(u, dict) and u.get("label"):
+                    item["unload_after"] = {"eta": str(u.get("eta") or "")[:5], "label": str(u["label"])[:40],
+                                            "minutes": int(u.get("minutes") or 0), "volume_m3": float(u.get("volume_m3") or 0)}
+                clean.append(item)
             con.execute("INSERT INTO assignment_batch VALUES (?,?,?,?,'ACTIVE',?,?)",
-                        (bid, cid, work_date, prev + 1, json.dumps(stops, ensure_ascii=False), now()))
+                        (bid, cid, work_date, prev + 1, json.dumps(clean, ensure_ascii=False), now()))
             for i, s in enumerate(stops, 1):
                 con.execute("INSERT INTO assignment_stop VALUES (?,?,?,?)", (bid, s["request_id"], i, s.get("eta")))
                 con.execute("INSERT INTO active_assignment VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET batch_id=excluded.batch_id",
@@ -573,9 +586,13 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
     if b["status"] != "ACTIVE":
         raise UserError("새 배정 버전이 있습니다. 최신 배정으로 전송하세요.")
     stops = []
+    # 배정 확정 때 저장한 반입지 경유(하차) 위치: 그 지점을 마친 뒤 반입지에 들른다
+    unload_by = {x["request_id"]: x["unload_after"] for x in json.loads(b["route_json"] or "[]") if isinstance(x, dict) and x.get("unload_after")}
     for s in rows(con, "SELECT request_id, seq, eta FROM assignment_stop WHERE batch_id=? ORDER BY seq", (batch_id,)):
         r = one(con, "SELECT * FROM request WHERE id=?", (s["request_id"],))
         if r["status"] == "CANCELLED":
+            if unload_by.get(r["id"]) and stops:  # 취소된 지점 뒤의 하차는 앞 지점 뒤로 옮긴다
+                stops[-1]["unload_after"] = unload_by[r["id"]]
             continue
         st = derive(con, r)
         revisit = st["has_field_records"]
@@ -589,13 +606,17 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
                           "unit_price": l["price"] if l["price"] is not None else None,
                           "amount": l["amount_received"] if l["kind"] == "RECEIVED" else 0,
                           "price_status": "CONFIRMED" if l["price"] is not None else "PENDING"})
-        stops.append({"seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"],
+        if unload_by.get(r["id"]):
+            extra_u = {"unload_after": unload_by[r["id"]]}
+        else:
+            extra_u = {}
+        stops.append({**extra_u, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"],
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],
                       "lat": r["lat"], "lon": r["lon"], "eta": s["eta"] or (r["appt_start"] or ""),
                       "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None,
                       "revisit": revisit, "assign_ver": b["assign_ver"], "items": items})
     payload = {"schema": "dg.daylist/1", "work_date": b["work_date"], "crew": b["crew_name"], "assign_ver": b["assign_ver"],
-               "fee_table": {"version_id": FEE_TABLE["version_id"], "label": FEE_TABLE["label"]}, "stops": stops}
+               "fee_table": fee_table_for_phone(con), "stops": stops}
     return payload, b
 
 
@@ -676,6 +697,21 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
         for ev in payload.get("events", []):
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (ev["event_id"],)):
                 counts["skipped_duplicate"] += 1
+                continue
+            if ev["kind"] == "UNLOAD":  # 휴대폰에서 기록한 하차 (접수와 무관, 팀 단위)
+                b = ev.get("body", {})
+                ok_ = bool(crew) and (b.get("volume_m3") or b.get("weight_kg"))
+                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (ev["event_id"], imp, dev_id, ev["seq"], "", ev.get("assign_ver") or 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
+                             "APPLIED" if ok_ else "REJECTED", None if ok_ else "팀에 연결되지 않은 휴대폰이거나 부피·중량 없음", ev.get("device_ts")))
+                if ok_:
+                    con.execute("""INSERT OR IGNORE INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at)
+                        VALUES (?,?,?,?,?,?,?,?,?)""", (ev["event_id"], crew["id"], b.get("work_date") or payload.get("work_date") or today_kst(),
+                                                         (b.get("at_time") or "")[:5], (b.get("place") or "반입지")[:60],
+                                                         float(b["volume_m3"]) if b.get("volume_m3") else None, float(b["weight_kg"]) if b.get("weight_kg") else None,
+                                                         ("휴대폰 기록 " + (b.get("note") or "")).strip()[:200], now()))
+                    counts["unloads"] = counts.get("unloads", 0) + 1
                 continue
             req = one(con, "SELECT status, req_ver FROM request WHERE id=?", (ev["request_id"],))
             reason = None
@@ -1170,3 +1206,169 @@ def verify_backup(con, name: str, passphrase: str) -> dict:
         raise UserError(str(e))
     bcon.close()
     return {"ok": True, "requests": n}
+
+
+# ------------------------------------------------------------------ 운영 수수료표 (원문 표 + 승인된 개정)
+# 원문 변환본(data/fee_table.json)은 고치지 않는다. 담당자가 확정한 단가·시행일·확인자는 개정(fee_revision)으로 쌓고,
+# 다른 담당자가 승인한 뒤 시행일부터 적용한다. 이미 접수된 품목의 단가·버전은 바꾸지 않는다(원본 보존).
+def _active_revision(con, today: str | None = None):
+    t = today or today_kst()
+    return one(con, """SELECT * FROM fee_revision WHERE status='APPROVED' AND base_version=? AND (effective_from IS NULL OR effective_from<=?)
+        ORDER BY rev_no DESC LIMIT 1""", (FEE_TABLE["version_id"], t))
+
+
+def fee_state(con, today: str | None = None) -> dict:
+    rev = _active_revision(con, today) if con is not None else None
+    if not rev:
+        return {"version_id": FEE_TABLE["version_id"], "base_version": FEE_TABLE["version_id"], "rev_no": 0, "effective_from": FEE_TABLE["effective_from"],
+                "confirmed_by": None, "approved_by": None, "overrides": {}}
+    return {"version_id": f'{FEE_TABLE["version_id"]}-r{rev["rev_no"]}', "base_version": FEE_TABLE["version_id"], "rev_no": rev["rev_no"],
+            "effective_from": rev["effective_from"], "confirmed_by": rev["confirmed_by"], "approved_by": rev["approved_by"],
+            "overrides": json.loads(rev["overrides_json"])}
+
+
+def fee_rows(con, today: str | None = None) -> dict:
+    ov = fee_state(con, today)["overrides"]
+    if not ov:
+        return FEE_ROWS
+    out = dict(FEE_ROWS)
+    for rid, o in ov.items():
+        if rid in out:
+            out[rid] = {**out[rid], "price": int(o["price"]), "status": "CONFIRMED", "note": o.get("reason", ""), "overridden": True}
+    return out
+
+
+def fee_table_for_phone(con) -> dict:
+    stt = fee_state(con)
+    return {"version_id": stt["version_id"], "base_version": stt["base_version"], "label": FEE_TABLE["label"],
+            "effective_from": stt["effective_from"], "overrides": {k: int(v["price"]) for k, v in stt["overrides"].items()}}
+
+
+def list_fee_revisions(con) -> list[dict]:
+    out = rows(con, "SELECT * FROM fee_revision ORDER BY rev_no DESC")
+    act = _active_revision(con)
+    for r in out:
+        r["overrides"] = json.loads(r.pop("overrides_json"))
+        r["active"] = bool(act and act["id"] == r["id"])
+        r["version_id"] = f'{r["base_version"]}-r{r["rev_no"]}'
+    return out
+
+
+def review_rows() -> list[dict]:
+    return [r for r in FEE_TABLE["rows"] if r["status"] != "CONFIRMED"]
+
+
+def save_fee_draft(con, data: dict) -> str:
+    """개정안 작성: 시행일·확인자·행별 확정 단가(사유 필수). 같은 사람이 승인할 수 없다."""
+    eff = (data.get("effective_from") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d", eff):
+        raise UserError("시행일(적용 시작일)을 날짜로 적어 주세요.")
+    who = (data.get("confirmed_by") or "").strip()
+    if not who:
+        raise UserError("원문을 대조한 확인자 이름을 적어 주세요.")
+    ov = {}
+    for rid, o in (data.get("overrides") or {}).items():
+        if rid not in FEE_ROWS:
+            raise UserError("수수료표에 없는 행입니다.")
+        try:
+            price = int(str(o.get("price")).replace(",", ""))
+        except (TypeError, ValueError):
+            raise UserError(f"{FEE_ROWS[rid]['name']} {FEE_ROWS[rid]['spec']}: 단가를 숫자로 적어 주세요.")
+        if price <= 0:
+            raise UserError("단가는 0원보다 커야 합니다. 모르는 단가는 확정하지 말고 확인 대기로 두세요.")
+        reason = (o.get("reason") or "").strip()
+        if not reason:
+            raise UserError(f"{FEE_ROWS[rid]['name']} {FEE_ROWS[rid]['spec']}: 확정 근거(사유)를 적어 주세요.")
+        ov[rid] = {"price": price, "reason": reason[:200]}
+    # 이전 승인본의 확정값은 이어받는다(명시적으로 빼지 않는 한)
+    prev = one(con, "SELECT overrides_json FROM fee_revision WHERE status='APPROVED' AND base_version=? ORDER BY rev_no DESC LIMIT 1", (FEE_TABLE["version_id"],))
+    merged = {**(json.loads(prev["overrides_json"]) if prev else {}), **ov}
+    for rid in data.get("remove") or []:
+        merged.pop(rid, None)
+    with tx(con):
+        con.execute("DELETE FROM fee_revision WHERE status='DRAFT'")  # 작성 중인 안은 하나만
+        n = (one(con, "SELECT MAX(rev_no) AS n FROM fee_revision")["n"] or 0) + 1
+        rid_ = str(uuid.uuid4())
+        con.execute("""INSERT INTO fee_revision (id, rev_no, base_version, status, effective_from, confirmed_by, note, overrides_json, created_by, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""", (rid_, n, FEE_TABLE["version_id"], "DRAFT", eff, who, (data.get("note") or "")[:500],
+                                              json.dumps(merged, ensure_ascii=False), ACTOR.get(), now()))
+        audit(con, "fee", rid_, "DRAFT", {"rev_no": n, "effective_from": eff, "rows": len(merged)})
+    return rid_
+
+
+def approve_fee_revision(con, rev_id: str, approve: bool = True, reason: str = ""):
+    r = one(con, "SELECT * FROM fee_revision WHERE id=?", (rev_id,))
+    if not r or r["status"] != "DRAFT":
+        raise UserError("승인할 개정안이 없습니다.")
+    if r["created_by"] == ACTOR.get():
+        raise UserError("작성한 사람은 승인할 수 없습니다. 다른 담당자가 원문과 대조해 승인해 주세요.")
+    if not approve and not reason.strip():
+        raise UserError("반려 사유를 적어 주세요.")
+    with tx(con):
+        if approve:
+            con.execute("UPDATE fee_revision SET status='APPROVED', approved_by=?, approved_at=? WHERE id=?", (ACTOR.get(), now(), rev_id))
+        else:
+            con.execute("UPDATE fee_revision SET status='REJECTED', approved_by=?, approved_at=?, reject_reason=? WHERE id=?", (ACTOR.get(), now(), reason.strip()[:200], rev_id))
+        audit(con, "fee", rev_id, "APPROVE" if approve else "REJECT", {"rev_no": r["rev_no"]})
+
+
+# ------------------------------------------------------------------ 로컬 주소 → 좌표
+def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None = None, preview: bool = False) -> dict:
+    from dgpc import geo
+    try:
+        res = geo.read_points(raw, columns, region)
+    except ValueError as e:
+        raise UserError(str(e))
+    pts = res["points"]
+    if not pts:
+        raise UserError("가져올 주소 좌표가 없습니다. 지역 이름(시군구) 거르기나 파일 형식을 확인하세요.")
+    info = {"columns": {k: v for k, v in res["columns"].items()}, "delimiter": res["delimiter"], "count": len(pts),
+            "sample": [{"sigungu": p[0], "road": p[1], "main": p[2], "sub": p[3], "lat": p[4], "lon": p[5]} for p in pts[:5]]}
+    if preview:
+        return info
+    with tx(con):
+        con.executemany("INSERT OR IGNORE INTO addr_point (sigungu, road, main, sub, lat, lon) VALUES (?,?,?,?,?,?)", pts)
+        audit(con, "address", "import", "IMPORT", {"count": len(pts), "region": region})
+    info["total"] = one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
+    return info
+
+
+def addr_stats(con) -> dict:
+    return {"count": one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"],
+            "sigungu": [r["sigungu"] for r in rows(con, "SELECT DISTINCT sigungu FROM addr_point ORDER BY sigungu LIMIT 20")]}
+
+
+def geocode(con, address: str) -> dict | None:
+    """주소 문자열 → 건물 출입구 좌표. 외부로 아무것도 보내지 않는다."""
+    from dgpc import geo
+    pa = geo.parse_address(address)
+    if not pa:
+        return None
+    cands = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? AND sub=?", (pa["road"], pa["main"], pa["sub"]))
+    exact = True
+    if not cands and pa["sub"]:
+        cands, exact = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? ORDER BY sub", (pa["road"], pa["main"])), False
+    if not cands:
+        return None
+    if len(cands) > 1 and pa["sigungu_hint"]:
+        narrowed = [c for c in cands if pa["sigungu_hint"] in (c["sigungu"] or "")]
+        cands = narrowed or cands
+    if len({c["sigungu"] for c in cands}) > 1:
+        return {"ambiguous": True, "options": [c["sigungu"] for c in cands]}
+    c = cands[0]
+    label = f'{c["road"]} {c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
+    return {"lat": c["lat"], "lon": c["lon"], "label": label, "exact": exact, "sigungu": c["sigungu"]}
+
+
+def geocode_missing(con, date: str = "") -> dict:
+    """위치 없는 접수를 주소 자료로 한꺼번에 찾는다(찾은 것은 출처 '주소 자료'로 표시, 지도에서 확인 필요)."""
+    sql = "SELECT id, address FROM request WHERE lat IS NULL AND status NOT IN ('DONE','CANCELLED')" + (" AND planned_date=?" if date else "")
+    found, missing = 0, 0
+    for r in rows(con, sql, (date,) if date else ()):
+        g = geocode(con, r["address"])
+        if g and not g.get("ambiguous"):
+            set_location(con, r["id"], g["lat"], g["lon"], source="ADDR")
+            found += 1
+        else:
+            missing += 1
+    return {"found": found, "missing": missing}

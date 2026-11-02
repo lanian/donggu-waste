@@ -328,6 +328,9 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
             c["t"] = s["appt"]
         if s.get("revisit"):
             c["rv"] = 1
+        if s.get("unload_after"):
+            u = s["unload_after"]
+            c["u"] = [u.get("eta", ""), u.get("label", "반입지"), u.get("minutes", 0), u.get("volume_m3", 0)]
         items = []
         for it in s["items"]:
             row = fee_rows.get(it.get("fee_rate_id") or "")
@@ -349,8 +352,15 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
             items.append(entry)
         c["it"] = items
         stops.append(c)
-    return {"schema": "dg.daylist/2", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
-            "fee": p["fee_table"]["version_id"], "s": stops}
+    out = {"schema": "dg.daylist/2", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
+           "fee": p["fee_table"]["version_id"], "s": stops}
+    ft = p["fee_table"]
+    if ft.get("base_version") and ft["base_version"] != ft["version_id"]:
+        out["fb"] = ft["base_version"]          # 휴대폰 내장 표(원문) 버전
+        out["fo"] = ft.get("overrides") or {}   # 승인된 확정 단가 (현장 추가 계산에 사용)
+        if ft.get("effective_from"):
+            out["fe"] = ft["effective_from"]
+    return out
 
 
 def expand_daylist(p: dict, fee_rows: dict) -> dict:
@@ -375,6 +385,10 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
         y = c.get("y")
         stops.append({"seq": c["q"], "request_id": _uid(c["i"]), "receipt_no": c["r"], "req_ver": c["v"], "name": c["n"], "phone": c["p"],
                       "address": c["a"], "spot_note": c.get("o", ""), "memo": c.get("m", ""), "lat": y[0] if y else None, "lon": y[1] if y else None,
-                      "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items})
+                      "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items,
+                      **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3]}} if c.get("u") else {})})
+    ft = {"version_id": p["fee"]}
+    if p.get("fb"):
+        ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))
     return {"schema": "dg.daylist/1", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
-            "fee_table": {"version_id": p["fee"]}, "stops": stops}
+            "fee_table": ft, "stops": stops}

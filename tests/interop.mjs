@@ -129,4 +129,11 @@ const png = PNG.sync.read(readFileSync(pngPath));
 const qr = jsQR(new Uint8ClampedArray(png.data), png.width, png.height);
 ok(qr && qr.data === frames[0], `QR 이미지 인식 결과가 원래 조각과 일치 (${frames[0].length}자)`);
 
+// 개정 수수료표 전달: PC가 승인한 확정 단가가 휴대폰 목록에 실려 온다
+const marble = BUILTIN_FEES.rows.find((r) => r.status === 'REVIEW');
+const ex = P.expandDaylist({ schema: 'dg.daylist/2', work_date: '2026-11-03', crew: 'x', assign_ver: 1, fee: BUILTIN_FEES.version_id + '-r1', fb: BUILTIN_FEES.version_id,
+  fo: { [marble.id]: 15000 }, fe: '2026-11-02', s: [{ q: 1, i: 'AAAAAAAAAAAAAAAAAAAAAA', r: 'R', v: 1, n: 'n', p: '010', a: 'a', it: [['AAAAAAAAAAAAAAAAAAAAAA', marble.id, 1, { ps: 'C', pp: 15000 }]] }] }, BUILTIN_FEES);
+ok(ex.fee_table.base_version === BUILTIN_FEES.version_id && ex.fee_table.overrides[marble.id] === 15000 && ex.stops[0].items[0].price_status === 'CONFIRMED' && ex.stops[0].items[0].amount === 15000,
+  '개정 버전 목록: 내장 원문 표 + 확정 단가로 확장');
+
 console.log(`\n통과 ${passed}개`);

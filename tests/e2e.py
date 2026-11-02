@@ -255,6 +255,14 @@ def main():
         expect(page.get_by_text("저장됨: 일부 수거")).to_be_visible(timeout=20000)
         ok(page.locator(".line.field").count() == 2, "재시작 후 현장 기록 유지")
 
+        # 하차 기록 (반입지에서 비운 양) → 결과 파일에 함께
+        page.goto(url + "#/unload")
+        page.locator("label", has_text="부피").locator("input").fill("3.5")
+        page.locator("label", has_text="반입지").locator("input").fill("가상 반입지")
+        page.get_by_role("button", name="하차 저장").click()
+        expect(page.get_by_role("button", name="하차 기록 (1회)")).to_be_visible()
+        ok(True, "휴대폰 하차 기록 저장 → 목록 화면에 횟수 표시")
+
         # 5) 결과 보내기 → PC 가져오기 → 확인 코드 ---------------------------------
         page.goto(url + "#/export")
         page.get_by_role("button", name="PC 화면 카메라로 보내기 (QR)").click()
@@ -272,6 +280,7 @@ def main():
         imp = py("import-result", str(f))
         release = re.search(r"보관 종료 확인 코드: (\w+)", imp).group(1)
         ok('"applied"' in imp, "결과 파일 PC 가져오기 성공 " + imp.splitlines()[0])
+        ok('"unloads": 1' in imp, "휴대폰 하차 기록이 PC 하차 기록으로 반영")
         blob = f.read_bytes()
         ok(name.encode() not in blob and phone.replace("-", "").encode() not in blob, "결과 파일에 이름·전화번호 평문 없음")
         page.get_by_placeholder("확인 코드 8자리", exact=True).fill(release)

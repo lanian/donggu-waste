@@ -8,7 +8,7 @@ import * as B from './backup.js';
 import * as M from './map.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.6.0';
+export const APP_VERSION = '0.7.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -31,6 +31,7 @@ function h(tag, attrs = {}, ...kids) {
     if (k === 'class') el.className = v;
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'text') el.textContent = v;
+    else if (k === 'style') el.style.cssText = v; // CSP(style-src 'self')는 style 속성을 막지만 CSSOM 지정은 허용
     else el.setAttribute(k, v === true ? '' : v);
   }
   for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
@@ -74,11 +75,23 @@ const isSolo = () => st.mode === 'SOLO';
 const allStops = () => (isSolo() ? st.requests : (st.daylist ? st.daylist.stops : []));
 const findStop = (id) => allStops().find((s) => s.request_id === id);
 // 수수료표: 앱에 내장된 표를 쓰고, PC 목록은 버전만 알려 준다. 버전이 다르면 계산하지 않는다.
+// PC가 승인한 개정(확인 필요 행의 확정 단가 등)이 있으면 내장 표에 덧씌운다.
+let feeMemo = null;
+const withOverrides = (ft) => {
+  const key = ft.version_id + JSON.stringify(ft.overrides || {});
+  if (feeMemo && feeMemo.key === key) return feeMemo.table;
+  const ov = ft.overrides || {};
+  const table = { ...BUILTIN_FEES, version_id: ft.version_id, effective_from: ft.effective_from || BUILTIN_FEES.effective_from,
+    rows: BUILTIN_FEES.rows.map((r) => (ov[r.id] != null ? { ...r, price: ov[r.id], status: 'CONFIRMED', overridden: true } : r)) };
+  feeMemo = { key, table };
+  return table;
+};
 const feeTable = () => {
   if (isSolo()) return BUILTIN_FEES;
   const ft = st.daylist && st.daylist.fee_table;
   if (!ft) return null;
   if (ft.version_id === BUILTIN_FEES.version_id) return BUILTIN_FEES;
+  if (ft.base_version === BUILTIN_FEES.version_id) return withOverrides(ft);
   return ft.rows ? ft : null;
 };
 const todayKST = (offsetDays = 0) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date(Date.now() + offsetDays * 864e5));
@@ -96,6 +109,12 @@ async function addEvent(stop, kind, body) {
     event_id: crypto.randomUUID(), seq: st.seq, request_id: stop.request_id,
     assign_ver: stop.assign_ver ?? (st.daylist ? st.daylist.assign_ver : 1), base_req_ver: stop.req_ver, kind, body, ts: new Date().toISOString(),
   });
+  await commit();
+}
+// 접수와 무관한 팀 기록(하차 등)
+async function addCrewEvent(kind, body) {
+  st.seq += 1;
+  st.events.push({ event_id: crypto.randomUUID(), seq: st.seq, request_id: '', assign_ver: st.daylist ? st.daylist.assign_ver : 0, base_req_ver: null, kind, body, ts: new Date().toISOString() });
   await commit();
 }
 const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
@@ -204,10 +223,40 @@ async function screenHome() {
             h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
             h('em', { class: 'chip p-' + d.progress }, s.removed ? '목록에서 제외됨' : LABEL.progress[d.progress]),
             d.fee.pendingCount ? h('em', { class: 'chip warn' }, '단가 확인 대기') : null)),
-        h('span', { class: 'eta' }, s.eta || ''))))));
+        h('span', { class: 'eta' }, s.eta || '')),
+      s.unload_after && !ui.stopQ ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
+        h('span', {}, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`))) : null))));
+    const myUnloads = st.events.filter((e) => e.kind === 'UNLOAD');
+    out.push(btn(myUnloads.length ? `하차 기록 (${myUnloads.length}회)` : '하차 기록', () => go('#/unload'), 'big'));
   }
   out.push(h('footer', { class: 'foot' }, h('a', { href: '#/settings' }, '설정·정보')));
   return h('main', {}, ...out);
+}
+
+// ------------------------------------------------------------ 하차 기록 (반입지에서 비운 양)
+function screenUnload() {
+  const list = st.events.filter((e) => e.kind === 'UNLOAD');
+  const plannedLabel = st.daylist && (st.daylist.stops.find((x) => x.unload_after) || {}).unload_after;
+  const now = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+  const place = h('input', { type: 'text', class: 'search', value: (list.length ? list[list.length - 1].body.place : (plannedLabel && plannedLabel.label)) || '' , placeholder: '반입지 이름' });
+  const time = h('input', { type: 'time', value: now });
+  const vol = h('input', { type: 'number', inputmode: 'decimal', step: '0.1', min: 0, placeholder: '예: 5.5' });
+  const kg = h('input', { type: 'number', inputmode: 'decimal', step: '1', min: 0, placeholder: '계근표 중량' });
+  const note = h('input', { type: 'text', placeholder: '메모 (선택, 개인정보 적지 않기)' });
+  const msg = h('p', { class: 'msg' });
+  const fld = (t, el) => h('label', { class: 'fld' }, h('span', {}, t), el);
+  return h('main', { class: 'with-dock' },
+    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('strong', {}, '하차 기록')),
+    h('section', { class: 'card' }, fld('반입지', place), h('div', { class: 'grid2' }, fld('시각', time), fld('부피 (m³, 추정)', vol)), fld('중량 (kg)', kg), fld('메모', note),
+      h('p', { class: 'small' }, '결과 보내기 때 PC로 함께 갑니다. 부피나 중량 중 하나는 적어 주세요.'), msg),
+    list.length ? h('section', { class: 'card' }, h('h2', {}, `오늘 하차 ${list.length}회`),
+      h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq > st.releasedSeq ? '(미전송)' : ''}`)))) : null,
+    h('nav', { class: 'dock' }, h('span', {}), h('span', {}), btn('하차 저장', async () => {
+      if (!vol.value && !kg.value) return (msg.textContent = '부피나 중량 중 하나는 적어 주세요.');
+      if (!place.value.trim()) return (msg.textContent = '반입지 이름을 적어 주세요.');
+      await addCrewEvent('UNLOAD', { place: place.value.trim(), at_time: time.value, volume_m3: vol.value ? +vol.value : null, weight_kg: kg.value ? +kg.value : null, note: note.value.trim(), work_date: st.daylist ? st.daylist.work_date : todayKST() });
+      toast('하차를 기록했습니다'); go('#/home');
+    }, 'primary dock-next')));
 }
 
 // ------------------------------------------------------------ 카메라 + QR
@@ -318,7 +367,7 @@ async function screenScan() {
       }
       const pl = P.expandDaylist(opened.payload, BUILTIN_FEES);
       if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
-      if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
+      if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.base_version === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
       const hash = P.toHex(await P.sha256(envBytes));
       const old = st.daylist;
       if (hash === st.lastBundleHash) { msg.textContent = '이미 받은 목록입니다. 바뀐 내용이 없습니다.'; }
@@ -1150,11 +1199,11 @@ async function render() {
   else {
     let [, route, arg] = (location.hash || '#/home').split('/');
     if (!st.mode && route !== 'mode') route = 'mode';
-    if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
+    if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr', 'unload'].includes(route)) route = 'home';
     if (!isSolo() && ['intake', 'backup'].includes(route)) route = 'home';
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
-      'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
+      'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings, unload: screenUnload,
       mode: screenMode, intake: () => screenIntake(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }

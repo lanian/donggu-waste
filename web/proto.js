@@ -220,6 +220,7 @@ export function expandDaylist(p, feeTable) {
     seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a,
     spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
     appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
+    unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3] } : null,
     items: c.it.map(([sid, rid, qty, x = {}]) => {
       const row = rows[rid || ''];
       const status = x.ps === 'C' ? 'CONFIRMED' : x.ps === 'P' ? 'PENDING' : row && row.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING';
@@ -232,5 +233,7 @@ export function expandDaylist(p, feeTable) {
       };
     }),
   }));
-  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table: { version_id: p.fee }, stops };
+  const fee_table = { version_id: p.fee };
+  if (p.fb) Object.assign(fee_table, { base_version: p.fb, overrides: p.fo || {}, effective_from: p.fe || null });
+  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops };
 }

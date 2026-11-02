@@ -13,6 +13,7 @@
   python pc_tool.py import-result <파일.dgr>
   python pc_tool.py import-photos <파일.dgp>
   python pc_tool.py backup | restore <파일.dgbak> | reset-admin | purge-photos
+  python pc_tool.py import-addr <위치정보요약DB 파일·폴더> --region 동구 [--preview]
 
 자료는 SQLCipher로 암호화된 pc/state/pc.db 에 있고, PC 개인키도 그 안에 있다.
 DB 키는 운영체제 키 저장소(또는 DG_DB_KEY, 또는 시작할 때 입력)에서 가져온다.
@@ -169,7 +170,7 @@ def cmd_import_result(a):
     if r.get("duplicate_file"):
         print("이미 가져온 파일입니다. 변경 없음.")
         return
-    print("가져오기 결과:", json.dumps({k: r[k] for k in ("applied", "skipped_duplicate", "conflict")}, ensure_ascii=False))
+    print("가져오기 결과:", json.dumps({k: r[k] for k in ("applied", "skipped_duplicate", "conflict", "unloads") if k in r}, ensure_ascii=False))
     print("사진 해시 목록:", r["photos_expected"], "건 (사진 파일은 보안 매체로 별도 회수)")
     print("보관 종료 확인 코드:", r["release_code"], "← 휴대폰 [결과 보내기] 화면에 입력하면 반영됨으로 표시됩니다")
 
@@ -258,6 +259,28 @@ def cmd_purge_photos(_):
     print(f"사진 {r['count']}장 정리 ({r['bytes']:,}B)")
 
 
+def cmd_import_addr(a):
+    """행안부 도로명주소 위치정보요약DB → 이 PC의 암호화 DB (외부 전송 없음)"""
+    from pathlib import Path
+    from dgpc import geo
+    c = con()
+    S.ACTOR.set("cli")
+    cols = geo.parse_columns_arg(a.columns) if a.columns else None
+    files = sorted(Path(a.path).glob("*.txt")) if Path(a.path).is_dir() else [Path(a.path)]
+    total = 0
+    for f in files:
+        try:
+            info = S.import_addr_points(c, f.read_bytes(), a.region, cols, preview=a.preview)
+        except S.UserError as e:
+            print(f"{f.name}: {e}")
+            continue
+        print(f"{f.name}: 열 배치 {info['columns']} · 구분자 '{info['delimiter']}' · {info['count']:,}건")
+        for x in info["sample"][:3]:
+            print(f"   예) {x['sigungu']} {x['road']} {x['main']}{'-' + str(x['sub']) if x['sub'] else ''} → {x['lat']:.6f}, {x['lon']:.6f}")
+        total += info["count"]
+    print(("미리보기 " if a.preview else "가져오기 ") + f"합계 {total:,}건" + ("" if a.preview else f" · DB 전체 {S.addr_stats(c)['count']:,}건"))
+
+
 def cmd_serve(a):
     from dgpc import server
     server.serve(a.port)
@@ -285,6 +308,9 @@ def main(argv=None):
     rs = s.add_parser("restore"); rs.add_argument("file"); rs.add_argument("--yes", action="store_true"); rs.set_defaults(fn=cmd_restore)
     ra = s.add_parser("reset-admin"); ra.add_argument("--username", default="admin"); ra.set_defaults(fn=cmd_reset_admin)
     s.add_parser("purge-photos").set_defaults(fn=cmd_purge_photos)
+    ia = s.add_parser("import-addr"); ia.add_argument("path"); ia.add_argument("--region", default="", help="시군구명 거르기 (예: 동구)")
+    ia.add_argument("--columns", help="열 번호 직접 지정 (예: road=7,main=9,sub=10,x=16,y=17,sigungu=4)")
+    ia.add_argument("--preview", action="store_true"); ia.set_defaults(fn=cmd_import_addr)
     a = p.parse_args(argv)
     a.fn(a)
 

@@ -50,9 +50,11 @@ PORT = 8765
 #  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감
 #  FIELD(수거팀): 조회, 결과·사진 가져오기, 하차 기록, QR 실측
 PERM = {
-    "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me"},
-               "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password"}},
-    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me"},
+    "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
+                       "fee-table", "geocode"},
+               "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
+                        "fee-revisions", "geocode"}},
+    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
               "POST": {"import", "unloads", "qrtest", "password"}},
 }
 
@@ -62,6 +64,8 @@ def allowed(role: str, method: str, p: str) -> bool:
         return True
     head = p.split("/")[0]
     if role == "FIELD" and method == "POST" and head == "requests":
+        return False
+    if role == "INTAKE" and method == "POST" and p == "fee-revisions":  # 개정안 작성은 관리자, 승인은 다른 담당자도 가능
         return False
     return head in PERM.get(role, {}).get(method, set())
 
@@ -238,7 +242,14 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if p == "bootstrap":
                 return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
-                                       "today": S.today_kst(), "me": self.me()})
+                                       "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c)})
+            if p == "geocode":
+                return self.send_json(S.geocode(c, qs.get("address", "")) or {"none": True})
+            if p == "addr-stats":
+                return self.send_json(S.addr_stats(c))
+            if p == "fee-table":
+                return self.send_json({"state": S.fee_state(c), "review_rows": S.review_rows(), "revisions": S.list_fee_revisions(c),
+                                       "source": {"label": S.FEE_TABLE["label"], "checked_on": S.FEE_TABLE["source_checked_on"], "rows": len(S.FEE_ROWS)}})
             if p == "me":
                 return self.send_json(self.me())
             if p == "users":
@@ -355,6 +366,19 @@ class Handler(BaseHTTPRequestHandler):
                 for k in [k for k, v in SESSIONS.items() if v["user_id"] == parts[1]]:
                     SESSIONS.pop(k, None)
                 return self.send_json({"ok": True})
+            if p == "geocode/missing":
+                return self.send_json(S.geocode_missing(c, self.json_body().get("date", "")))
+            if p == "addr-import":
+                cols = None
+                if qs.get("columns"):
+                    from dgpc import geo
+                    cols = geo.parse_columns_arg(qs["columns"])
+                return self.send_json(S.import_addr_points(c, self.body(), qs.get("region", ""), cols, preview=qs.get("preview") == "1"))
+            if p == "fee-revisions":
+                return self.send_json({"id": S.save_fee_draft(c, self.json_body())})
+            if parts[0] == "fee-revisions" and len(parts) == 3 and parts[2] in ("approve", "reject"):
+                S.approve_fee_revision(c, parts[1], parts[2] == "approve", self.json_body().get("reason", ""))
+                return self.send_json({"ok": True})
             if p == "backup":
                 r = S.make_backup(c, self.json_body().get("passphrase", ""))
                 return self.send_json({k: r[k] for k in ("name", "bytes", "sha256")})
@@ -390,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
                            volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
-                           max_unloads=st["max_unloads"])
+                           max_unloads=st["max_unloads"], end_site=st["end_site"])
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"]} for r in reqs}

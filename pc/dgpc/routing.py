@@ -70,7 +70,7 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
 
 def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str = "", service_base: int = 5,
          service_per_item: int = 3, time_limit_s: int = 5, today: str = "", volume_overrides: dict | None = None,
-         unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2) -> dict:
+         unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
     crews: id, name, capacity_m3, shift_start, shift_end"""
     unassigned = [{"request_id": r["id"], "reason": "배출 위치 좌표가 없음 (위치 지정 필요)"} for r in requests if r.get("lat") is None]
@@ -105,12 +105,16 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     unload_nodes = list(range(1 + n_groups, 1 + n_groups + (len(crews) * max_unloads if use_unload else 0)))
     if use_unload:
         points += [(float(unload_site["lat"]), float(unload_site["lon"]))] * len(unload_nodes)
+    use_end = bool(end_site and end_site.get("lat") is not None and end_site.get("lon") is not None)
+    end_node = len(points) if use_end else 0
+    if use_end:  # 일을 마치고 돌아갈 곳이 출발지와 다를 때 (예: 반입지에서 마감 후 차고지 아닌 곳)
+        points.append((float(end_site["lat"]), float(end_site["lon"])))
     tmat, source = matrix(points, osrm_url)
-    service = [0] + [g["service"] for g in groups] + [int(unload_min)] * len(unload_nodes)
-    demand = [0] + [int(round(g["volume"] * scale)) for g in groups] + [-max(caps)] * len(unload_nodes)
+    service = [0] + [g["service"] for g in groups] + [int(unload_min)] * len(unload_nodes) + ([0] if use_end else [])
+    demand = [0] + [int(round(g["volume"] * scale)) for g in groups] + [-max(caps)] * len(unload_nodes) + ([0] if use_end else [])
 
     n, v = len(points), len(crews)
-    mgr = pywrapcp.RoutingIndexManager(n, v, 0)
+    mgr = pywrapcp.RoutingIndexManager(n, v, [0] * v, [end_node] * v)
     model = pywrapcp.RoutingModel(mgr)
 
     def transit(i, j):
@@ -187,5 +191,5 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                       else "근무시간·방문 약속 시간 안에 들어가지 않음 (우선순위가 낮아 제외)")
             unassigned.append({"request_id": r["id"], "reason": reason})
     return {"routes": routes, "unassigned": unassigned, "matrix_source": source,
-            "unload_site": unload_site if use_unload else None,
+            "unload_site": unload_site if use_unload else None, "end_site": end_site if use_end else None,
             "matrix_note": "실제 도로 이동시간(로컬 OSRM)" if source == "OSRM" else "직선거리 추정(도로 아님) — 로컬 OSRM을 연결하면 실제 도로 시간으로 계산"}

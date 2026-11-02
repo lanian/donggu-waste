@@ -1,6 +1,17 @@
 // 동구 대형폐기물 PC 업무 화면 (이 PC의 127.0.0.1 서버만 사용)
 import { searchFees, won } from '/web/fees.js';
 import { BUILTIN_FEES } from '/web/fees-data.js';
+// 운영 수수료표 = 내장 원문 표 + PC에서 승인된 확정 단가
+let feeMemo = null;
+function FEES() {
+  const ov = (boot && boot.fee && boot.fee.overrides) || {};
+  const key = JSON.stringify(ov);
+  if (feeMemo && feeMemo.key === key) return feeMemo.t;
+  const t = { ...BUILTIN_FEES, version_id: (boot && boot.fee && boot.fee.version_id) || BUILTIN_FEES.version_id,
+    rows: BUILTIN_FEES.rows.map((r) => (ov[r.id] != null ? { ...r, price: ov[r.id], status: 'CONFIRMED', overridden: true } : r)) };
+  feeMemo = { key, t };
+  return t;
+}
 import * as M from '/web/map.js';
 import { Collector } from '/web/proto.js';
 
@@ -20,6 +31,7 @@ function h(tag, attrs = {}, ...kids) {
     if (k === 'class') el.className = v;
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'value') el.value = v;
+    else if (k === 'style') el.style.cssText = v; // CSP(style-src 'self')는 style 속성을 막지만 CSSOM 지정은 허용
     else if (k === 'checked') el.checked = !!v;
     else el.setAttribute(k, v === true ? '' : v);
   }
@@ -146,7 +158,7 @@ function itemPicker(onAdd) {
   api('fee-usage').then((u) => { usage = u; draw(); }).catch(() => {});
   const draw = () => {
     const quick = !st.q;
-    const rows = quick ? usage.map((id) => BUILTIN_FEES.rows.find((r) => r.id === id)).filter(Boolean) : searchFees(BUILTIN_FEES, st.q).slice(0, 40);
+    const rows = quick ? usage.map((id) => FEES().rows.find((r) => r.id === id)).filter(Boolean) : searchFees(FEES(), st.q).slice(0, 40);
     list.replaceChildren(...rows.map((r) => btn(h('span', {}, `${r.name} ${r.spec}`, h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
       r.status === 'REVIEW' ? h('span', { class: 'w' }, '규격 확인 필요 → 금액 확인 대기') : null), () => { st.sel = r.id; draw(); }, st.sel === r.id ? 'on' : '')));
     list.style.display = rows.length ? '' : 'none';
@@ -154,7 +166,7 @@ function itemPicker(onAdd) {
     add.disabled = !st.sel;
   };
   q.addEventListener('input', () => { st.q = q.value; st.sel = null; draw(); }); // 검색어가 바뀌면 선택 해제
-  add.addEventListener('click', () => { const r = BUILTIN_FEES.rows.find((x) => x.id === st.sel); if (!r) return; onAdd({ fee_rate_id: r.id, qty: Math.max(1, +qty.value || 1), _row: r }); st.sel = null; q.value = ''; st.q = ''; qty.value = 1; draw(); });
+  add.addEventListener('click', () => { const r = FEES().rows.find((x) => x.id === st.sel); if (!r) return; onAdd({ fee_rate_id: r.id, qty: Math.max(1, +qty.value || 1), _row: r }); st.sel = null; q.value = ''; st.q = ''; qty.value = 1; draw(); });
   const fname = h('input', { placeholder: '목록에 없는 품목 이름' });
   const funit = h('select', {}, ...[['EA', '개'], ['PIECE', '쪽'], ['SET', '세트'], ['L20', '20ℓ당']].map(([v, t]) => h('option', { value: v }, t)));
   const fqty = h('input', { type: 'number', min: 1, value: 1, style: 'width:80px' });
@@ -162,7 +174,7 @@ function itemPicker(onAdd) {
   draw();
   return h('div', {}, h('div', { class: 'row' }, q, qty, add), list,
     h('div', { class: 'row' }, fname, funit, fqty, fadd),
-    h('p', { class: 'muted' }, `수수료표: ${BUILTIN_FEES.label} · 표에 없는 품목은 0원이 아니라 금액 확인 대기로 남습니다. 유사 품목 적용은 담당자가 확인해 정합니다.`));
+    h('p', { class: 'muted' }, `수수료표: ${BUILTIN_FEES.label} (${FEES().version_id}) · 표에 없는 품목은 0원이 아니라 금액 확인 대기로 남습니다. 유사 품목 적용은 담당자가 확인해 정합니다.`));
 }
 
 // ------------------------------------------------------------ 지도 도우미
@@ -282,17 +294,27 @@ async function screenRequest(id) {
   });
   F.phone.addEventListener('change', checkDup); F.address.addEventListener('change', checkDup);
 
-  // 위치 (지도를 눌러 지정. 주소로 검색하지 않음)
+  // 위치: 이 PC의 주소 자료로 찾거나 지도를 눌러 지정 (주소를 외부로 보내지 않음)
   const mapBox = h('div', { class: 'mapbox' });
+  let geoSource = r.geo_source || null, setPin = null;
+  const geoMsg = h('span', { class: 'muted' }, r.geo_source === 'ADDR' ? '주소 자료로 찾은 위치 (건물 출입구 기준)' : '');
+  const findAddr = wrap(async () => {
+    const g = await api('geocode?address=' + encodeURIComponent(F.address.value));
+    if (!g || g.none) { geoMsg.textContent = '주소 자료에서 찾지 못했습니다. 도로명과 건물번호를 확인하거나 지도를 눌러 지정하세요.'; return; }
+    if (g.ambiguous) { geoMsg.textContent = `같은 도로명·번호가 여러 지역에 있습니다(${g.options.join(', ')}). 주소에 구 이름을 넣어 주세요.`; return; }
+    F.lat.value = g.lat; F.lon.value = g.lon; geoSource = 'ADDR';
+    geoMsg.textContent = `${g.sigungu || ''} ${g.label}${g.exact ? '' : ' (부번 없이 본번으로 찾음)'} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.`;
+    if (setPin) setPin(g.lat, g.lon, true);
+  }, geoMsg);
   setTimeout(async () => {
     try {
       const { map, ml } = await mapIn(mapBox, { center: r.lat != null ? [r.lon, r.lat] : [boot.settings.depot.lon, boot.settings.depot.lat], zoom: r.lat != null ? 17 : 14 });
       let marker = r.lat != null ? M.pin(ml, map, { lng: r.lon, lat: r.lat, label: '●', cls: 'me' }) : null;
+      setPin = (lat, lon, fly) => { if (marker) marker.remove(); marker = M.pin(ml, map, { lng: lon, lat, label: '●', cls: 'me' }); if (fly) map.jumpTo({ center: [lon, lat], zoom: 17 }); };
       map.on('click', (e) => {
         const lat = Math.round(e.lngLat.lat * 1e6) / 1e6, lon = Math.round(e.lngLat.lng * 1e6) / 1e6;
-        F.lat.value = lat; F.lon.value = lon;
-        if (marker) marker.remove();
-        marker = M.pin(ml, map, { lng: lon, lat, label: '●', cls: 'me' });
+        F.lat.value = lat; F.lon.value = lon; geoSource = 'MANUAL'; geoMsg.textContent = '지도에서 지정한 위치';
+        setPin(lat, lon, false);
       });
     } catch { mapBox.replaceChildren(h('p', { class: 'pad muted' }, '지도를 불러오지 못했습니다(인터넷 연결 확인). 위치는 나중에 지정해도 됩니다.')); }
   }, 0);
@@ -301,7 +323,7 @@ async function screenRequest(id) {
   const msg = h('p', { class: 'msg' });
   const data = () => ({ name: F.name.value, phone: F.phone.value, address: F.address.value, spot_note: F.spot_note.value, memo: F.memo.value,
     planned_date: F.planned_date.value, appt_start: F.appt_start.value, appt_end: F.appt_end.value, must_today: F.must_today.checked, urgent: F.urgent.checked,
-    priority: +F.priority.value, lat: F.lat.value || null, lon: F.lon.value || null,
+    priority: +F.priority.value, lat: F.lat.value || null, lon: F.lon.value || null, geo_source: geoSource,
     items: items.map((i) => ({ line_id: i.line_id, fee_rate_id: i.fee_rate_id || null, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty })) });
   let dupAck = false;
   const save = wrap(async () => {
@@ -351,7 +373,8 @@ async function screenRequest(id) {
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.'))),
       h('div', {},
         h('div', { class: 'card' }, h('h2', {}, '버릴 물건'), itemsBox, total, editable ? picker : null),
-        h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, '지도를 눌러 실제 배출 위치를 지정합니다. 주소를 외부로 보내지 않기 위해 주소 검색은 쓰지 않습니다.'),
+        h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
+          h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'), geoMsg),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
     field,
     !isNew ? paymentCard(r) : null,
@@ -423,18 +446,21 @@ async function screenDispatch() {
         h('select', { class: 'small', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기'))),
         x.unload_after ? h('div', { class: 'stopline unload' }, h('span', { class: 's' }, '⇩'), h('span', { class: 't' }, `${x.unload_after.label} 하차`, h('br'),
           h('span', { class: 'muted' }, `도착 ${x.unload_after.eta} · 약 ${x.unload_after.volume_m3}m³ 비움 · ${x.unload_after.minutes}분`))) : null])));
-    const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`), ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
+    const noLoc = p.unassigned.filter((u) => R[u.request_id] && R[u.request_id].lat == null).length;
+    const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`),
+      noLoc ? h('div', { class: 'row' }, btn(`위치 없는 ${noLoc}건 주소 자료로 찾기`, wrap(async () => { const g = await post('geocode/missing', { date: s.date }); toast(`찾음 ${g.found}건 · 못 찾음 ${g.missing}건. 노선을 다시 계산합니다.`); calc(); }, msg), 'small'),
+        h('span', { class: 'muted' }, '찾은 위치는 건물 출입구 기준입니다.')) : null, ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
       h('span', { class: 't' }, R[u.request_id] ? `${R[u.request_id].name} · ${R[u.request_id].address}` : u.request_id, h('br'), h('span', { class: 'muted' }, u.reason)),
       R[u.request_id] && R[u.request_id].lat == null ? btn('위치 지정', () => go(`#/request/${u.request_id}`), 'small') : null,
       h('select', { class: 'small', onchange: (e) => { if (e.target.value === '') return; const [x] = p.unassigned.splice(i, 1); p.routes[+e.target.value].stops.push({ request_id: x.request_id, eta: '' }); draw(); } },
         h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi }, o.crew_name))))));
     const mapBox = h('div', { class: 'mapbox', style: 'height:460px' });
     const confirmBtn = btn('배정 확정', wrap(async () => {
-      const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '' })); });
+      const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
       const res = await post('assign', { date: s.date, plan });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
     }, msg), 'primary');
-    out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${p.res.matrix_note || '-'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
+    out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${p.res.matrix_note || '-'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       h('div', { class: 'grid2' }, h('div', {}, h('div', { class: 'cols' }, ...cols), un), h('div', {}, h('div', { class: 'card' }, h('h2', {}, '지도'), mapBox,
         h('p', { class: 'muted' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.')), h('div', { class: 'card row' }, confirmBtn, msg))));
     setTimeout(async () => {
@@ -586,9 +612,14 @@ async function screenClose() {
   const s = (screenClose.s ||= { date: boot.today });
   const date = h('input', { type: 'date', value: s.date });
   const body = h('div');
-  const load = wrap(async () => {
-    s.date = date.value;
+  let lastWant = null, seq = 0;
+  const load = wrap(async (force) => {
+    const want = date.value;
+    if (force !== true && want === lastWant) return;  // 같은 날짜로 두 번 불러와 입력 중인 칸을 덮지 않게
+    lastWant = want; const my = ++seq;
+    s.date = want;
     const d = await api('close?date=' + s.date);
+    if (my !== seq) return;
     const note = h('input', { placeholder: '마감 메모', style: 'flex:1' });
     const list = (title, arr, fmt) => h('div', { class: 'card' }, h('h2', {}, `${title} ${arr.length}건`), arr.length ? h('ul', {}, ...arr.map((x) => h('li', {}, fmt(x)))) : h('p', { class: 'muted' }, '없음'));
     body.replaceChildren(
@@ -601,7 +632,7 @@ async function screenClose() {
         list('금액 확인 대기', d.pending_fee, (x) => `${x.receipt_no} ${x.name} · ${x.count}건`),
         list('수납 확인 필요 (미납·부족·과납·금액 미확정)', d.payments, (x) => `${x.receipt_no} ${x.name} · ${PAY[x.status]} · 계산 ${x.calculated == null ? '미확정' : won(x.calculated)} / 납부 ${won(x.paid)}`)),
       unloadCard(d),
-      h('div', { class: 'card row' }, note, btn(d.closed ? '마감 다시 기록' : '마감 기록', wrap(async () => { await post('close', { date: s.date, note: note.value }); toast('마감을 기록했습니다'); load(); }), 'primary'),
+      h('div', { class: 'card row' }, note, btn(d.closed ? '마감 다시 기록' : '마감 기록', wrap(async () => { await post('close', { date: s.date, note: note.value }); toast('마감을 기록했습니다'); load(true); }), 'primary'),
         h('span', { class: 'muted' }, '미처리 건이 있어도 마감할 수 있으며, 그 목록이 함께 기록되어 다음 날로 이월됩니다.')));
   });
   date.addEventListener('change', load); load();
@@ -698,7 +729,8 @@ async function screenSettings() {
   const dlat = h('input', { value: st.depot.lat, style: 'width:120px' }), dlon = h('input', { value: st.depot.lon, style: 'width:120px' }), dlabel = h('input', { value: st.depot.label });
   const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (비우면 직선거리 추정)', style: 'width:320px' });
   const sb = h('input', { type: 'number', value: st.service_min_base, style: 'width:70px' }), sp = h('input', { type: 'number', value: st.service_min_per_item, style: 'width:70px' });
-  const us = st.unload_site || {};
+  const us = st.unload_site || {}, es = st.end_site || {};
+  const elat = h('input', { value: es.lat ?? '', placeholder: '위도', style: 'width:120px' }), elon = h('input', { value: es.lon ?? '', placeholder: '경도', style: 'width:120px' }), elabel = h('input', { value: es.label || '', placeholder: '종료지 이름' });
   const ulat = h('input', { value: us.lat ?? '', placeholder: '위도', style: 'width:120px' }), ulon = h('input', { value: us.lon ?? '', placeholder: '경도', style: 'width:120px' }), ulabel = h('input', { value: us.label || '', placeholder: '반입지 이름' });
   const umin = h('input', { type: 'number', value: st.unload_min, style: 'width:70px' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, style: 'width:60px' });
   return h('div', {}, h('h1', {}, '설정'),
@@ -710,14 +742,112 @@ async function screenSettings() {
     h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'row' }, '차고지 위도', dlat, '경도', dlon, dlabel), h('div', { class: 'row' }, '로컬 OSRM', osrm),
       h('div', { class: 'row' }, '지점당 기본 작업', sb, '분 + 품목당', sp, '분 (추정치)'),
       h('div', { class: 'row' }, '반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'),
+      h('div', { class: 'row' }, '종료지', elat, elon, elabel, h('span', { class: 'muted' }, '비우면 차고지로 돌아옴')),
       h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
       btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
-        unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
+        unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
     volumeCard(),
+    addrCard(),
     backupCard(),
     h('div', { class: 'card' }, h('h2', {}, '수수료표'), h('dl', { class: 'kv' }, h('dt', {}, '적용 표'), h('dd', {}, st.fee_label), h('dt', {}, '버전'), h('dd', {}, st.fee_version),
-      h('dt', {}, '자료 확인일'), h('dd', {}, st.fee_checked_on), h('dt', {}, '시행일'), h('dd', {}, st.fee_effective_from || '미확인 (담당자 확인 필요)'))),
+      h('dt', {}, '자료 확인일'), h('dd', {}, st.fee_checked_on), h('dt', {}, '시행일'), h('dd', {}, st.fee_effective_from || '미확인 (담당자 확인 필요)')),
+      h('a', { href: '#/fees' }, '수수료표 관리 화면에서 시행일·확인자·확인 필요 행 정하기')),
     msg);
+}
+
+// ------------------------------------------------------------ 수수료표 관리
+async function screenFees() {
+  const d = await api('fee-table');
+  const me = boot.me, isAdmin = me.role === 'ADMIN';
+  const stt = d.state;
+  const msg = h('p', { class: 'msg' });
+  const draft = d.revisions.find((r) => r.status === 'DRAFT');
+  const approved = d.revisions.find((r) => r.active);
+  const cur = stt.overrides || {};
+  // 확인 필요 행 확정 입력
+  const inputs = {};
+  const reviewTable = h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '규격', '단위', '원문 단가', '확인 필요 사유', '현재', isAdmin ? '확정 단가 · 근거' : ''].map((t) => h('th', {}, t)))),
+    h('tbody', {}, ...d.review_rows.map((r) => {
+      const o = cur[r.id];
+      const price = h('input', { type: 'number', min: 1, placeholder: '원', style: 'width:100px', value: o ? o.price : '' });
+      const reason = h('input', { placeholder: '근거 (예: 원문 각주 2, 담당 부서 회신 11/3)', style: 'width:280px', value: o ? o.reason : '' });
+      inputs[r.id] = { price, reason, had: !!o };
+      return h('tr', {}, h('td', {}, r.name), h('td', {}, r.spec), h('td', {}, r.unit_label), h('td', {}, r.price != null ? won(r.price) : '—'),
+        h('td', { class: 'muted' }, r.review_note || r.note || '원문 규격 겹침·단위 불명확'),
+        h('td', {}, o ? chip(`확정 ${won(o.price)}`, 'ok') : chip('금액 확인 대기', 'warn')),
+        h('td', {}, isAdmin ? h('div', { class: 'row' }, price, reason) : null));
+    })));
+  const eff = h('input', { type: 'date', value: (draft && draft.effective_from) || stt.effective_from || '' });
+  const who = h('input', { placeholder: '원문 대조 확인자 (이름·부서)', value: (draft && draft.confirmed_by) || stt.confirmed_by || '' });
+  const note = h('input', { placeholder: '메모 (선택)', style: 'width:320px' });
+  const saveDraft = wrap(async () => {
+    const overrides = {}, remove = [];
+    for (const [rid, f] of Object.entries(inputs)) {
+      if (f.price.value) overrides[rid] = { price: f.price.value, reason: f.reason.value };
+      else if (f.had) remove.push(rid);
+    }
+    await post('fee-revisions', { effective_from: eff.value, confirmed_by: who.value, note: note.value, overrides, remove });
+    toast('개정안을 저장했습니다. 다른 담당자가 승인해야 적용됩니다.'); render();
+  }, msg);
+  const reason = h('input', { placeholder: '반려 사유', style: 'width:220px' });
+  const draftCard = draft ? h('div', { class: 'card notice' }, h('h2', {}, `승인 대기: 개정 ${draft.rev_no}번 (${draft.version_id})`),
+    h('dl', { class: 'kv' }, h('dt', {}, '시행일'), h('dd', {}, draft.effective_from), h('dt', {}, '확인자'), h('dd', {}, draft.confirmed_by), h('dt', {}, '작성'), h('dd', {}, `${draft.created_by} · ${kst(draft.created_at)}`),
+      h('dt', {}, '확정 행'), h('dd', {}, Object.entries(draft.overrides).map(([rid, o]) => { const r = BUILTIN_FEES.rows.find((x) => x.id === rid); return `${r ? r.name + ' ' + r.spec : rid} ${won(o.price)} (${o.reason})`; }).join(' / ') || '없음')),
+    draft.created_by === me.username ? h('p', { class: 'muted' }, '작성한 사람은 승인할 수 없습니다. 다른 담당자가 원문과 대조해 승인해야 적용됩니다.')
+      : h('div', { class: 'row' }, btn('원문과 대조했고 승인', wrap(async () => { await post(`fee-revisions/${draft.id}/approve`, {}); toast('승인했습니다. 시행일부터 새 접수에 적용됩니다.'); boot = null; render(); }, msg), 'primary'),
+        reason, btn('반려', wrap(async () => { await post(`fee-revisions/${draft.id}/reject`, { reason: reason.value }); toast('반려했습니다'); render(); }, msg)))) : null;
+  // 전체 표 조회
+  const q = h('input', { type: 'search', placeholder: '품목·규격·초성 찾기', style: 'width:320px' });
+  const allBody = h('tbody');
+  const drawAll = () => {
+    const rows = q.value ? searchFees(FEES(), q.value) : FEES().rows;
+    allBody.replaceChildren(...rows.slice(0, 200).map((r) => h('tr', {}, h('td', {}, r.category || ''), h('td', {}, r.name), h('td', {}, r.spec), h('td', {}, r.unit_label),
+      h('td', {}, r.status === 'CONFIRMED' ? won(r.price) : chip('금액 확인 대기', 'warn'), r.overridden ? chip('개정 확정', 'ok') : null))));
+  };
+  q.addEventListener('input', drawAll); drawAll();
+  return h('div', {}, h('h1', {}, '수수료표'),
+    h('div', { class: 'card' }, h('dl', { class: 'kv' },
+      h('dt', {}, '원문'), h('dd', {}, `${d.source.label} · ${d.source.rows}행 · 자료 확인일 ${d.source.checked_on}`),
+      h('dt', {}, '적용 버전'), h('dd', {}, stt.version_id),
+      h('dt', {}, '시행일'), h('dd', {}, stt.effective_from || chip('미확인', 'warn')),
+      h('dt', {}, '확인자 · 승인자'), h('dd', {}, stt.confirmed_by ? `${stt.confirmed_by} · ${stt.approved_by}` : '아직 없음')),
+      h('p', { class: 'muted' }, '원문 변환본은 고치지 않습니다. 확정 단가·시행일·확인자는 개정으로 쌓고, 작성자와 다른 담당자가 승인하면 시행일부터 새 접수와 휴대폰 목록에 적용됩니다. 이미 접수된 품목의 단가·버전은 바뀌지 않습니다.')),
+    draftCard,
+    h('div', { class: 'card' }, h('h2', {}, `확인 필요 행 ${d.review_rows.length}개`), h('div', { style: 'overflow:auto' }, reviewTable),
+      isAdmin ? h('div', {}, h('div', { class: 'row', style: 'margin-top:12px' }, '시행일', eff, '확인자', who, note), h('div', { class: 'row' }, btn('개정안 저장', saveDraft, 'primary'),
+        h('span', { class: 'muted' }, '비워 둔 행은 금액 확인 대기로 남습니다. 0원이나 최저가로 정하지 마세요.'))) : h('p', { class: 'muted' }, '개정안 작성은 운영 관리자가 합니다. 승인은 작성자가 아닌 담당자가 할 수 있습니다.'), msg),
+    h('div', { class: 'card' }, h('h2', {}, '개정 이력'), d.revisions.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['개정', '상태', '시행일', '확인자', '작성', '승인·반려', '확정 행'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...d.revisions.map((r) => h('tr', {}, h('td', {}, r.version_id), h('td', {}, r.active ? chip('적용 중', 'ok') : r.status === 'APPROVED' ? chip(r.effective_from > boot.today ? '시행 전' : '이전 승인') : r.status === 'DRAFT' ? chip('승인 대기', 'warn') : chip('반려', 'bad')),
+        h('td', {}, r.effective_from), h('td', {}, r.confirmed_by), h('td', {}, `${r.created_by} ${kst(r.created_at)}`), h('td', {}, r.approved_by ? `${r.approved_by} ${kst(r.approved_at)}${r.reject_reason ? ' · ' + r.reject_reason : ''}` : ''),
+        h('td', {}, Object.keys(r.overrides).length + '행'))))) : h('p', { class: 'empty' }, '아직 개정이 없습니다.')),
+    h('div', { class: 'card' }, h('h2', {}, '전체 표'), q, h('div', { style: 'overflow:auto;max-height:520px;margin-top:8px' }, h('table', {}, h('thead', {}, h('tr', {}, ...['분류', '품목', '규격', '단위', '단가'].map((t) => h('th', {}, t)))), allBody))));
+}
+
+// ------------------------------------------------------------ 주소 위치 자료 (운영 관리자)
+function addrCard() {
+  const msg = h('p', { class: 'msg' });
+  const stat = h('span', { class: 'muted' });
+  api('addr-stats').then((x) => { stat.textContent = x.count ? `${x.count.toLocaleString()}건 (${x.sigungu.join(', ')})` : '아직 없음'; }).catch(() => {});
+  const file = h('input', { type: 'file', accept: '.txt,.csv' });
+  const region = h('input', { placeholder: '시군구 거르기 (예: 동구)', value: '동구', style: 'width:180px' });
+  const cols = h('input', { placeholder: '열 번호 직접 지정 (비우면 자동)', style: 'width:260px' });
+  const out = h('div');
+  const send = async (preview) => {
+    const f = file.files[0]; if (!f) throw new Error('파일을 고르세요.');
+    const buf = new Uint8Array(await f.arrayBuffer());
+    return api(`addr-import?region=${encodeURIComponent(region.value)}&preview=${preview ? 1 : 0}&columns=${encodeURIComponent(cols.value)}`, { method: 'POST', raw: buf });
+  };
+  const prev = wrap(async () => {
+    const r = await send(true);
+    out.replaceChildren(h('div', { class: 'notice' }, h('p', {}, `찾은 열: ${Object.entries(r.columns).filter(([k]) => k !== 'header').map(([k, v]) => `${k}=${v}`).join(', ')} · ${r.count.toLocaleString()}건`),
+      h('ul', {}, ...r.sample.map((x) => h('li', {}, `${x.sigungu} ${x.road} ${x.main}${x.sub ? '-' + x.sub : ''} → ${x.lat.toFixed(6)}, ${x.lon.toFixed(6)}`))),
+      h('p', { class: 'small' }, '표본 주소가 지도에서 맞는 곳인지 확인한 뒤 가져오세요.'),
+      btn('이대로 가져오기', wrap(async () => { const x = await send(false); toast(`${x.count.toLocaleString()}건 가져옴 (전체 ${x.total.toLocaleString()}건)`); out.replaceChildren(); render(); }, msg), 'primary')));
+  }, msg);
+  return h('div', { class: 'card' }, h('h2', {}, '주소 위치 자료'),
+    h('p', { class: 'muted' }, '행정안전부 도로명주소 "위치정보요약DB" 파일을 이 PC에 넣으면 접수 화면에서 주소로 위치를 찾습니다. 모든 처리는 이 PC 안에서 하며 외부로 보내지 않습니다. 큰 파일은 명령으로 가져오세요: ', h('code', {}, 'python pc/pc_tool.py import-addr <파일·폴더> --region 동구')),
+    h('div', { class: 'row' }, '저장된 자료', stat),
+    h('div', { class: 'row' }, file, region, cols, btn('미리보기', prev, 'small')), out, msg);
 }
 
 // ------------------------------------------------------------ 백업·사진 보관 (운영 관리자)
@@ -777,10 +907,10 @@ async function render() {
     if (boot) {
       const [, route, arg] = (location.hash || '#/home').split('/');
       const role = boot.me.role;
-      const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, settings: screenSettings, users: screenUsers, me: screenMe };
+      const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, fees: screenFees, settings: screenSettings, users: screenUsers, me: screenMe };
       // 역할별 메뉴 (서버도 같은 기준으로 막는다)
       const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD'], ['requests', '접수', 'ADMIN INTAKE FIELD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
-        ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD'], ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['settings', '설정', 'ADMIN'], ['users', '사용자·이력', 'ADMIN']];
+        ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD'], ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD'], ['settings', '설정', 'ADMIN'], ['users', '사용자·이력', 'ADMIN']];
       const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
       let cur = route || 'home';
       if (boot.me.must_change) cur = 'me';

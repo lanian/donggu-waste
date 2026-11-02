@@ -103,6 +103,13 @@ CREATE INDEX IF NOT EXISTS ix_payment_req ON payment(request_id);
 CREATE TABLE IF NOT EXISTS unload_log (
   id TEXT PRIMARY KEY, crew_id TEXT NOT NULL REFERENCES crew(id), work_date TEXT NOT NULL, at_time TEXT, place TEXT NOT NULL,
   volume_m3 REAL, weight_kg REAL, note TEXT, recorded_at TEXT NOT NULL, void_reason TEXT);
+CREATE TABLE IF NOT EXISTS addr_point (
+  sigungu TEXT NOT NULL DEFAULT '', road TEXT NOT NULL, main INTEGER NOT NULL, sub INTEGER NOT NULL DEFAULT 0, lat REAL NOT NULL, lon REAL NOT NULL,
+  PRIMARY KEY (road, main, sub, sigungu));
+CREATE TABLE IF NOT EXISTS fee_revision (
+  id TEXT PRIMARY KEY, rev_no INTEGER NOT NULL, base_version TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('DRAFT','APPROVED','REJECTED')),
+  effective_from TEXT, confirmed_by TEXT, note TEXT, overrides_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL, approved_by TEXT, approved_at TEXT, reject_reason TEXT);
 CREATE TABLE IF NOT EXISTS app_user (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('ADMIN','INTAKE','FIELD')), pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL,
