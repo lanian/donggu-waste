@@ -7,7 +7,7 @@ import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
 import * as M from './map.js';
 
-export const APP_VERSION = '0.3.0';
+export const APP_VERSION = '0.3.1';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -56,6 +56,7 @@ const ERR = {
   UNSENT_PREVIOUS: '이전 날짜 결과를 먼저 보내고 확인 코드를 입력해 주세요.',
   STORAGE_LOW: '저장 공간이 부족합니다. 결과를 먼저 보내 주세요.',
   PHOTO_SAVE_FAIL: '사진이 저장되지 않았습니다. 다시 찍어 주세요.',
+  FEE_VERSION_MISSING: 'PC와 앱의 수수료표 버전이 다릅니다. 앱을 업데이트하거나 담당자에게 문의하세요.',
 };
 const errMsg = (e) => ERR[e && e.code] || (e && e.message) || '알 수 없는 오류';
 
@@ -71,7 +72,14 @@ async function loadState() {
 const isSolo = () => st.mode === 'SOLO';
 const allStops = () => (isSolo() ? st.requests : (st.daylist ? st.daylist.stops : []));
 const findStop = (id) => allStops().find((s) => s.request_id === id);
-const feeTable = () => (isSolo() ? BUILTIN_FEES : st.daylist && st.daylist.fee_table);
+// 수수료표: 앱에 내장된 표를 쓰고, PC 목록은 버전만 알려 준다. 버전이 다르면 계산하지 않는다.
+const feeTable = () => {
+  if (isSolo()) return BUILTIN_FEES;
+  const ft = st.daylist && st.daylist.fee_table;
+  if (!ft) return null;
+  if (ft.version_id === BUILTIN_FEES.version_id) return BUILTIN_FEES;
+  return ft.rows ? ft : null;
+};
 const todayKST = (offsetDays = 0) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date(Date.now() + offsetDays * 864e5));
 const ago = (iso) => { if (!iso) return '없음'; const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 60 ? `${m}분 전` : m < 1440 ? `${Math.round(m / 60)}시간 전` : `${Math.round(m / 1440)}일 전`; };
 function commit() {
@@ -276,6 +284,7 @@ async function screenScan() {
       const opened = await P.openEnvelope(envBytes, await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
       const pl = opened.payload;
       if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
+      if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
       const hash = P.toHex(await P.sha256(envBytes));
       const old = st.daylist;
       if (hash === st.lastBundleHash) { msg.textContent = '이미 받은 목록입니다. 바뀐 내용이 없습니다.'; }
@@ -472,7 +481,8 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
   const drawResults = () => {
     const rows = searchFees(table, state.q).slice(0, 30);
     results.replaceChildren(...(state.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
-      ...rows.map((r) => btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`)),
+      ...rows.map((r) => btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`),
+        h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`), r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 추가: ' + (r.note || '')) : null),
         () => { state.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (state.sel && state.sel.id === r.id ? ' on' : ''))));
     addBtn.disabled = !state.sel;
   };
@@ -510,9 +520,10 @@ function screenAdd(id) {
   if (!stop) { go('#/home'); return h('main'); }
   const a = ui.add && ui.add.stop === id ? ui.add : (ui.add = { stop: id, q: '', sel: null, qty: 1 });
   const table = feeTable();
+  if (!table) return h('main', {}, h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost')), h('p', { class: 'msg' }, ERR.FEE_VERSION_MISSING));
   const picker = itemPicker(table, a, {
     onPick: async (r, qty) => {
-      await addEvent(stop, 'FIELD_ITEM_ADD', { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label, unit_price: r.price, price_status: 'CONFIRMED', qty });
+      await addEvent(stop, 'FIELD_ITEM_ADD', { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label, unit_price: r.price, price_status: r.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING', qty });
       ui.add = null; go(`#/stop/${id}`);
     },
     onFree: async (name, unit, unit_label, qty) => {
@@ -676,7 +687,7 @@ const digits = (s) => (s || '').replace(/\D/g, '');
 const normAddr = (s) => (s || '').replace(/\s+/g, '');
 function lineFromRow(r, qty, table) {
   return { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label,
-    qty, unit_price: r.price, amount: r.price * qty, price_status: 'CONFIRMED' };
+    qty, unit_price: r.price, amount: r.status === 'CONFIRMED' ? r.price * qty : null, price_status: r.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING' };
 }
 function screenIntake(id) {
   const editing = id ? findStop(id) : null;
@@ -704,9 +715,9 @@ function screenIntake(id) {
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
       h('div', { class: 'lhead' }, h('strong', {}, `${it.name} ${it.spec}`), locked.has(it.line_id) ? h('em', { class: 'tag' }, '현장 기록 있음') :
         btn('삭제', () => { f.items.splice(i, 1); drawItems(); saveDraft(); }, 'ghost')),
-      h('div', { class: 'price' }, it.price_status === 'CONFIRMED' ? `${won(it.unit_price)} / ${it.unit_label}` : '단가 확인 대기'),
+      h('div', { class: 'price' }, it.price_status === 'CONFIRMED' ? `${won(it.unit_price)} / ${it.unit_label}` : it.unit_price != null ? `규격 확인 대기 (원문 ${won(it.unit_price)} / ${it.unit_label})` : '단가 확인 대기'),
       h('div', { class: 'row' }, h('span', {}, '수량'), locked.has(it.line_id) ? h('span', { class: 'val' }, it.qty) :
-        stepper(it.qty, (n) => { it.qty = n; it.amount = it.unit_price == null ? null : it.unit_price * n; drawItems(); saveDraft(); }, 1)))) :
+        stepper(it.qty, (n) => { it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1)))) :
       [h('p', { class: 'small' }, '아래에서 품목을 검색해 추가하세요.')]));
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.amount, 0);

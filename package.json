@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/interop.mjs",
+    "test": "node tests/fees.test.mjs && node tests/interop.mjs",
     "vendor": "cp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js && cp node_modules/maplibre-gl/dist/maplibre-gl.mjs node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl.css web/vendor/maplibre/"
   },
   "devDependencies": {

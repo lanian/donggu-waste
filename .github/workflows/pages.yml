@@ -3,7 +3,7 @@ name: Deploy PWA to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'pc/**', 'tests/**', 'package*.json', '.github/workflows/pages.yml']
+    paths: ['web/**', 'pc/**', 'tests/**', 'data/**', 'tools/**', 'package*.json', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -25,6 +25,7 @@ jobs:
       - run: npm ci
       - run: cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js   # 포함된 라이브러리가 고정 버전과 같은지
       - run: cmp node_modules/maplibre-gl/dist/maplibre-gl.mjs web/vendor/maplibre/maplibre-gl.mjs && cmp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs web/vendor/maplibre/maplibre-gl-worker.mjs
+      - run: python tools/build_fee_js.py && git diff --exit-code web/fees-data.js   # 앱 내장 수수료표가 원본 JSON과 같은지
       - run: npm test
   deploy:
     needs: test
