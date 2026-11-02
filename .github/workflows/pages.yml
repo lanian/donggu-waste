@@ -1,0 +1,40 @@
+# web/ 폴더(앱 코드만)를 GitHub Pages에 배포한다. 업무 데이터는 저장소와 Pages에 없다.
+name: Deploy PWA to GitHub Pages
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r pc/requirements.txt
+      - run: npm ci
+      - run: cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js   # 포함된 QR 라이브러리가 고정 버전과 같은지
+      - run: npm test
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: web }
+      - id: deployment
+        uses: actions/deploy-pages@v4

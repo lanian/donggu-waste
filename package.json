@@ -1,0 +1,13 @@
+{
+  "name": "donggu-bulky-waste-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/interop.mjs",
+    "vendor": "cp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js"
+  },
+  "devDependencies": {
+    "jsqr": "1.4.0",
+    "pngjs": "7.0.0"
+  }
+}

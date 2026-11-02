@@ -1,0 +1,87 @@
+// 품목 검색과 수수료·잔량 계산 (순수 함수, 화면과 분리해 테스트 가능)
+
+const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, '');
+
+// 검색: 단어별 AND, 동의어는 공식 명칭으로 바꿔서 비교. 검색어는 어디에도 전송·저장하지 않는다.
+export function searchFees(table, query) {
+  const q = (query || '').trim();
+  if (!q || !table) return [];
+  const aliases = table.aliases || {};
+  let tokens = [];
+  for (const t of q.split(/\s+/)) {
+    const alias = aliases[t] || aliases[norm(t)];
+    tokens = tokens.concat(alias ? alias.split(/\s+/) : [t]);
+  }
+  tokens = tokens.map(norm).filter(Boolean);
+  const out = [];
+  table.rows.forEach((r, order) => {
+    const name = norm(r.name), hay = norm(`${r.name} ${r.spec} ${r.category}`);
+    if (!tokens.every((t) => hay.includes(t))) return;
+    const rank = tokens.some((t) => t === name) ? 0 : tokens.some((t) => name.includes(t)) ? 1 : 2;
+    out.push({ row: r, rank, order });
+  });
+  return out.sort((a, b) => a.rank - b.rank || a.order - b.order).map((x) => x.row);
+}
+
+export const won = (n) => (n == null ? '미확정' : n.toLocaleString('ko-KR') + '원');
+
+// 한 접수 건의 현재 상태를 이벤트에서 계산한다 (이벤트는 추가만, 최신 값이 현재 값).
+export function deriveStop(stop, events) {
+  const mine = events.filter((e) => e.request_id === stop.request_id);
+  const lines = stop.items.map((it) => ({
+    line_id: it.line_id, kind: 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,
+    fee_rate_id: it.fee_rate_id, price: it.price_status === 'CONFIRMED' ? it.unit_price : null,
+    qty_received: it.qty, amount_received: it.price_status === 'CONFIRMED' ? it.amount : null,
+    qty_confirmed: it.qty, qty_collected: 0, reason: '',
+  }));
+  const byId = Object.fromEntries(lines.map((l) => [l.line_id, l]));
+  let contact = 'NOT_CONTACTED', outcome = null, photos = [];
+  for (const e of mine) {
+    const b = e.body || {};
+    if (e.kind === 'CONTACT') contact = b.result;
+    else if (e.kind === 'FIELD_ITEM_ADD') {
+      const l = { line_id: b.line_id, kind: 'FIELD', name: b.name, spec: b.spec || '', unit: b.unit, unit_label: b.unit_label,
+        fee_rate_id: b.fee_rate_id || null, price: b.price_status === 'CONFIRMED' ? b.unit_price : null,
+        qty_received: 0, amount_received: 0, qty_confirmed: b.qty, qty_collected: 0, reason: '' };
+      lines.push(l); byId[l.line_id] = l;
+    } else if (e.kind === 'ITEM_RESULT' && byId[b.line_id]) {
+      Object.assign(byId[b.line_id], { qty_confirmed: b.qty_confirmed, qty_collected: b.qty_collected, reason: b.reason || '' });
+    } else if (e.kind === 'ATTEMPT') outcome = b.outcome;
+    else if (e.kind === 'PHOTO_META') photos.push(b);
+  }
+  for (const l of lines) l.remaining = Math.max(0, l.qty_confirmed - l.qty_collected);
+  return { lines, contact, outcome, photos, fee: calcFee(lines), progress: progressOf(lines, mine.length) };
+}
+
+// 수수료: 산정 수량 = 현장 확인 수량. 실제 수거 수량은 금액에 쓰지 않는다. 단위가 다른 행은 합산하지 않는다.
+export function calcFee(lines) {
+  const received = lines.filter((l) => l.kind === 'RECEIVED').reduce((s, l) => s + (l.amount_received || 0), 0);
+  const pending = lines.filter((l) => l.price == null && l.qty_confirmed > 0);
+  const confirmedSubtotal = lines.filter((l) => l.price != null).reduce((s, l) => s + l.price * l.qty_confirmed, 0);
+  const fieldAdded = lines.filter((l) => l.kind === 'FIELD' && l.price != null).reduce((s, l) => s + l.price * l.qty_confirmed, 0);
+  const qtyByUnit = {};
+  for (const l of lines) qtyByUnit[l.unit_label] = (qtyByUnit[l.unit_label] || 0) + l.qty_confirmed;
+  return {
+    received, confirmedSubtotal, fieldAdded,
+    diff: confirmedSubtotal - received,
+    pendingCount: pending.length,
+    final: pending.length ? null : confirmedSubtotal,
+    qtyByUnit,
+  };
+}
+
+export function progressOf(lines, eventCount) {
+  if (!eventCount) return 'TODO';
+  const anyCollected = lines.some((l) => l.qty_collected > 0);
+  const allDone = lines.every((l) => l.remaining === 0);
+  if (allDone && anyCollected) return 'DONE';
+  if (anyCollected) return 'PARTIAL';
+  return 'STARTED';
+}
+
+export const LABEL = {
+  contact: { NOT_CONTACTED: '연락 전', REACHED: '통화 완료', NO_ANSWER: '부재', CALLBACK: '재연락 예정', WRONG_NUMBER: '번호 오류' },
+  progress: { TODO: '방문 전', STARTED: '처리 중', PARTIAL: '일부 수거', DONE: '수거 완료' },
+  outcome: { DONE: '완료', PARTIAL: '일부 수거', NOT_COLLECTED: '미수거', ON_HOLD: '확인 대기' },
+  reason: { '': '사유 선택', NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기', OTHER: '기타' },
+};

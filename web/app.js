@@ -1,0 +1,617 @@
+// 동구 대형폐기물 수거 시제품 - 휴대폰 앱 (서버 없는 PWA)
+// 업무 데이터는 이 기기 안에서만 암호화해 보관한다. 외부로 보내는 통신 코드는 없다.
+import * as P from './proto.js';
+import * as S from './store.js';
+import { searchFees, deriveStop, won, LABEL } from './fees.js';
+
+export const APP_VERSION = '0.1.0';
+const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
+const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
+const COLLECT_TTL_MS = 24 * 3600 * 1000; // 받다 만 QR 조각 보관 시간
+
+const $app = document.getElementById('app');
+let st = null;               // 복호화된 업무 상태 (잠금 해제 동안만)
+let ui = { filter: 'ALL' };  // 화면 상태
+let saving = Promise.resolve();
+let lastActive = Date.now(), hiddenAt = 0;
+let camera = null;
+let photoUrls = [];
+
+// ------------------------------------------------------------ 작은 DOM 도우미 (문자열은 항상 textContent)
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'text') el.textContent = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+const btn = (label, onclick, cls = '', extra = {}) => h('button', { class: 'btn ' + cls, onclick, type: 'button', ...extra }, label);
+const fmtPhone = (p) => p.length === 11 ? `${p.slice(0, 3)}-${p.slice(3, 7)}-${p.slice(7)}` : p;
+const go = (hash) => { location.hash = hash; };
+const toast = (msg, kind = '') => {
+  const t = h('div', { class: 'toast ' + kind, role: 'status' }, msg);
+  document.body.append(t); setTimeout(() => t.remove(), 3500);
+};
+
+const ERR = {
+  QR_INCOMPLETE: '목록을 아직 다 받지 못했습니다.',
+  QR_NOT_OURS: '업무용 QR이 아닙니다.',
+  QR_CORRUPT: 'QR을 잘못 읽었습니다. 계속 비춰 주세요.',
+  QR_BAD_ENCODING: 'QR을 잘못 읽었습니다. 계속 비춰 주세요.',
+  AUTH_FAIL: '목록 확인에 실패했습니다. 담당자에게 다시 요청하세요.',
+  WRONG_DEVICE: '이 휴대폰용 목록이 아닙니다.',
+  QR_STALE_VERSION: '이미 받은 것보다 오래된 목록입니다.',
+  BAD_VERSION: '앱 업데이트가 필요합니다.',
+  QR_NOT_REGISTRATION: '기기 등록용 QR이 아닙니다.',
+  UNSENT_PREVIOUS: '이전 날짜 결과를 먼저 보내고 확인 코드를 입력해 주세요.',
+  STORAGE_LOW: '저장 공간이 부족합니다. 결과를 먼저 보내 주세요.',
+  PHOTO_SAVE_FAIL: '사진이 저장되지 않았습니다. 다시 찍어 주세요.',
+};
+const errMsg = (e) => ERR[e && e.code] || (e && e.message) || '알 수 없는 오류';
+
+// ------------------------------------------------------------ 상태 저장
+const emptyState = () => ({ daylist: null, events: [], seq: 0, releasedSeq: 0, exports: [], lastBundleHash: null });
+async function loadState() { st = (await S.getSecure('state')) || emptyState(); }
+function commit() {
+  const snapshot = JSON.parse(JSON.stringify(st));
+  saving = saving.then(() => S.putSecure('state', snapshot)).catch((e) => {
+    toast(e && e.name === 'QuotaExceededError' ? ERR.STORAGE_LOW : '저장 실패: ' + errMsg(e), 'bad');
+  });
+  return saving;
+}
+async function addEvent(stop, kind, body) {
+  st.seq += 1;
+  st.events.push({
+    event_id: crypto.randomUUID(), seq: st.seq, request_id: stop.request_id,
+    assign_ver: st.daylist.assign_ver, base_req_ver: stop.req_ver, kind, body, ts: new Date().toISOString(),
+  });
+  await commit();
+}
+const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
+
+// ------------------------------------------------------------ 잠금
+async function lockNow() { stopCamera(); S.lock(); st = null; await render(); }
+['pointerdown', 'keydown'].forEach((t) => addEventListener(t, () => { lastActive = Date.now(); }, { passive: true }));
+setInterval(() => { if (S.isUnlocked() && Date.now() - lastActive > AUTO_LOCK_MS) lockNow(); }, 15000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); stopCamera(); }
+  else if (S.isUnlocked() && hiddenAt && Date.now() - hiddenAt > HIDDEN_LOCK_MS) lockNow();
+  else if (location.hash.startsWith('#/scan') || location.hash.startsWith('#/register')) render();
+});
+
+function screenSetup() {
+  const p1 = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'new-password', placeholder: '숫자 6자리 이상', class: 'pin' });
+  const p2 = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'new-password', placeholder: '한 번 더', class: 'pin' });
+  const msg = h('p', { class: 'msg' });
+  const ok = btn('PIN 설정', async () => {
+    if (!/^\d{6,}$/.test(p1.value)) return (msg.textContent = '숫자 6자리 이상으로 정해 주세요.');
+    if (p1.value !== p2.value) return (msg.textContent = '두 번 입력한 PIN이 다릅니다.');
+    ok.disabled = true; msg.textContent = '설정 중…';
+    await S.setupPin(p1.value);
+    await S.persist();
+    await loadState(); go('#/home'); render();
+  }, 'primary big');
+  return h('main', { class: 'center' },
+    h('h1', {}, '동구 대형폐기물 수거'),
+    h('p', {}, '이 휴대폰에서 쓸 잠금 PIN을 정하세요. 업무 자료는 이 PIN으로 잠긴 채 휴대폰 안에만 저장됩니다.'),
+    p1, p2, ok, msg,
+    h('p', { class: 'small' }, '시제품입니다. 가상 자료로만 사용하세요.'));
+}
+
+function screenLock() {
+  const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'current-password', placeholder: 'PIN', class: 'pin' });
+  const msg = h('p', { class: 'msg' });
+  const ok = btn('잠금 해제', async () => {
+    ok.disabled = true; msg.textContent = '확인 중…';
+    try { await S.unlock(pin.value); await loadState(); if (!location.hash || location.hash === '#/') go('#/home'); render(); }
+    catch (e) {
+      ok.disabled = false; pin.value = '';
+      msg.textContent = e.until && e.until > Date.now() ? `여러 번 틀렸습니다. ${Math.ceil((e.until - Date.now()) / 1000)}초 뒤 다시 시도하세요.` : 'PIN이 맞지 않습니다.';
+    }
+  }, 'primary big');
+  pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
+  setTimeout(() => pin.focus(), 50);
+  return h('main', { class: 'center' }, h('h1', {}, '잠겨 있습니다'), pin, ok, msg);
+}
+
+// ------------------------------------------------------------ 홈
+async function screenHome() {
+  const registered = !!(await S.getRaw('pc')) && !!(await S.getRaw('device'));
+  const n = unsent().length;
+  const dl = st.daylist;
+  const top = h('header', { class: 'bar' }, h('strong', {}, '동구 수거'), h('span', { class: 'small' }, 'v' + APP_VERSION), btn('잠금', lockNow, 'ghost'));
+  const actions = h('section', { class: 'actions' },
+    btn('오늘 목록 받기', () => go('#/scan'), 'primary huge', { disabled: !registered }),
+    btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (n ? 'warn' : '')));
+  const out = [top];
+  if (!registered) out.push(h('section', { class: 'card notice' }, h('p', {}, '먼저 관리자와 함께 기기 등록을 해 주세요.'), btn('기기 등록', () => go('#/register'), 'primary')));
+  out.push(actions);
+  if (!dl) { out.push(h('p', { class: 'empty' }, '받은 목록이 없습니다.')); }
+  else {
+    const stops = dl.stops.map((s) => ({ s, d: deriveStop(s, st.events) }));
+    const remain = stops.filter((x) => x.d.progress !== 'DONE' && !x.s.removed);
+    const hold = stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
+    const list = { ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter];
+    out.push(h('p', { class: 'meta' }, `${dl.work_date} · ${dl.crew} · ${dl.stops.length}건 · 목록 갱신본 ${dl.assign_ver}`));
+    out.push(h('nav', { class: 'tabs' },
+      ...[['ALL', `전체 ${stops.length}`], ['REMAIN', `남음 ${remain.length}`], ['HOLD', `보류·재방문 ${hold.length}`]].map(([k, t]) =>
+        btn(t, () => { ui.filter = k; render(); }, ui.filter === k ? 'tab on' : 'tab'))));
+    out.push(h('ul', { class: 'stops' }, list.map(({ s, d }) => h('li', {},
+      h('a', { href: `#/stop/${s.request_id}`, class: 'stop' + (d.progress === 'DONE' ? ' done' : '') },
+        h('span', { class: 'seq' }, s.seq),
+        h('span', { class: 'body' },
+          h('strong', {}, s.name), h('span', { class: 'addr' }, s.address),
+          h('span', { class: 'items' }, s.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', ')),
+          h('span', { class: 'chips' },
+            h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
+            h('em', { class: 'chip p-' + d.progress }, s.removed ? '목록에서 제외됨' : LABEL.progress[d.progress]),
+            d.fee.pendingCount ? h('em', { class: 'chip warn' }, '단가 확인 대기') : null)),
+        h('span', { class: 'eta' }, s.eta || ''))))));
+  }
+  out.push(h('footer', { class: 'foot' }, h('a', { href: '#/settings' }, '설정·정보')));
+  return h('main', {}, ...out);
+}
+
+// ------------------------------------------------------------ 카메라 + QR
+function stopCamera() {
+  if (camera) { camera.stop = true; camera.stream && camera.stream.getTracks().forEach((t) => t.stop()); camera = null; }
+}
+async function startCamera(video, onText) {
+  stopCamera();
+  const cam = { stop: false };
+  camera = cam;
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+  } catch (e) { camera = null; throw Object.assign(new Error('카메라를 열 수 없습니다. 카메라 권한을 허용해 주세요.'), { code: 'CAMERA' }); }
+  if (cam.stop) { cam.stream.getTracks().forEach((t) => t.stop()); return; }
+  video.srcObject = cam.stream; await video.play().catch(() => {});
+  const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const loop = () => {
+    if (cam.stop) return;
+    if (video.readyState >= 2 && video.videoWidth) {
+      const scale = Math.min(1, 960 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) { try { onText(code.data); } catch (e) { console.warn(e.code || e.message); } }
+    }
+    setTimeout(loop, 90);
+  };
+  loop();
+}
+
+// ------------------------------------------------------------ 기기 등록
+async function screenRegister() {
+  const pc = await S.getRaw('pc');
+  let dev = await S.getRaw('device');
+  if (!dev) {
+    const keys = await P.generateDeviceKeys();
+    dev = { id: P.randomBytes(16), kex: keys.kex, sign: keys.sign };
+    await S.putRaw('device', dev);
+  }
+  const back = h('header', { class: 'bar' }, btn('← 처음', () => go('#/home'), 'ghost'), h('strong', {}, '기기 등록'));
+  if (!pc || ui.rescanPc) {
+    const video = h('video', { playsinline: true, muted: true, class: 'cam' });
+    const msg = h('p', { class: 'msg' }, '관리자 PC의 [기기 등록 QR]을 비추세요.');
+    setTimeout(() => startCamera(video, async (text) => {
+      try {
+        const reg = P.parseRegistration(text);
+        stopCamera();
+        await S.putRaw('pc', reg); ui.rescanPc = false; render();
+      } catch (e) { msg.textContent = errMsg(e); }
+    }).catch((e) => { msg.textContent = errMsg(e); }), 0);
+    return h('main', {}, back, video, msg);
+  }
+  const kexRaw = await P.exportRaw(dev.kex.publicKey), signRaw = await P.exportRaw(dev.sign.publicKey);
+  const code = await P.deviceCode(dev.id, kexRaw, signRaw);
+  const fp = await P.fingerprint(pc.pcSignPub, kexRaw, signRaw);
+  const ta = h('textarea', { readonly: true, rows: 4, class: 'code' }); ta.value = code;
+  return h('main', {}, back,
+    h('section', { class: 'card' },
+      h('p', {}, '1. 아래 기기 코드를 관리자에게 전달하면 PC에 등록합니다. (공개키만 들어 있습니다)'),
+      ta, btn('코드 복사', async () => { try { await navigator.clipboard.writeText(code); toast('복사했습니다'); } catch { ta.select(); } }),
+      h('p', {}, '2. PC 화면에 나온 지문 숫자가 아래와 같은지 확인하세요.'),
+      h('p', { class: 'fp' }, fp.slice(0, 3) + ' ' + fp.slice(3)),
+      h('p', { class: 'small' }, '기기 번호 ' + P.uuidStr(dev.id).slice(0, 8))),
+    btn('PC 등록 QR 다시 읽기', () => { ui.rescanPc = true; render(); }, 'ghost'),
+    btn('완료', () => go('#/home'), 'primary big'));
+}
+
+// ------------------------------------------------------------ 목록 받기
+async function loadCollector() {
+  const saved = (await S.getRaw('collect')) || {};
+  for (const [k, b] of Object.entries(saved)) if (Date.now() - b.firstSeen > COLLECT_TTL_MS) delete saved[k];
+  return new P.Collector(saved);
+}
+
+async function screenScan() {
+  const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
+  const col = await loadCollector();
+  let current = Object.keys(col.bundles).sort((a, b) => col.bundles[b].firstSeen - col.bundles[a].firstSeen)[0];
+  const video = h('video', { playsinline: true, muted: true, class: 'cam' });
+  const bar = h('div', { class: 'progress' }, h('div', { class: 'fill' }));
+  const count = h('p', { class: 'count' }, '목록 QR을 비추세요');
+  const miss = h('p', { class: 'small' });
+  const msg = h('p', { class: 'msg' });
+  const show = () => {
+    if (!current) return;
+    const b = col.bundles[current], got = Object.keys(b.parts).length;
+    bar.firstChild.style.width = `${(100 * got) / b.total}%`;
+    count.textContent = `조각 ${got} / ${b.total}`;
+    const m = col.missing(current);
+    miss.textContent = m.length && m.length <= 12 ? '남은 번호: ' + m.map((i) => i + 1).join(', ') : '';
+  };
+  show();
+  let finishing = false;
+  const finish = async () => {
+    finishing = true; stopCamera(); msg.textContent = '확인 중…';
+    try {
+      const envBytes = col.assemble(current);
+      const opened = await P.openEnvelope(envBytes, await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
+      const pl = opened.payload;
+      if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
+      const hash = P.toHex(await P.sha256(envBytes));
+      const old = st.daylist;
+      if (hash === st.lastBundleHash) { msg.textContent = '이미 받은 목록입니다. 바뀐 내용이 없습니다.'; }
+      else {
+        if (old && old.work_date === pl.work_date && pl.assign_ver < old.assign_ver) throw Object.assign(new Error(''), { code: 'QR_STALE_VERSION' });
+        if (old && old.work_date !== pl.work_date && unsent().length) throw Object.assign(new Error(''), { code: 'UNSENT_PREVIOUS' });
+        // 새 갱신본: 이름·주소·품목·순서만 바꾸고, 현장 기록(이벤트)은 그대로 둔다.
+        if (old && old.work_date === pl.work_date) {
+          const ids = new Set(pl.stops.map((s) => s.request_id));
+          const withEvents = new Set(st.events.map((e) => e.request_id));
+          for (const s of old.stops) if (!ids.has(s.request_id) && withEvents.has(s.request_id)) pl.stops.push({ ...s, removed: true });
+        }
+        st.daylist = pl; st.lastBundleHash = hash;
+        await commit();
+      }
+      col.drop(current); await S.putRaw('collect', col.bundles);
+      const rc = opened.receipt;
+      ui.receipt = { code: rc.slice(0, 4) + ' ' + rc.slice(4), count: pl.stops.length, ver: pl.assign_ver };
+      go('#/received');
+    } catch (e) {
+      msg.textContent = errMsg(e);
+      if (['AUTH_FAIL', 'WRONG_DEVICE', 'QR_STALE_VERSION', 'BAD_VERSION'].includes(e.code)) { col.drop(current); await S.putRaw('collect', col.bundles); current = null; }
+      finishing = false;
+    }
+  };
+  setTimeout(() => startCamera(video, async (text) => {
+    if (finishing) return;
+    let r;
+    try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') msg.textContent = errMsg(e); return; }
+    if (!current) current = r.key;
+    if (r.key !== current) { msg.textContent = '다른 목록의 QR이 섞였습니다. 지금 받던 목록을 계속 비춰 주세요.'; return; }
+    if (!r.dup) { msg.textContent = ''; S.putRaw('collect', col.bundles); if (navigator.vibrate) navigator.vibrate(20); }
+    show();
+    if (col.complete(current)) finish();
+  }).catch((e) => { msg.textContent = errMsg(e); }), 0);
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 처음', () => go('#/home'), 'ghost'), h('strong', {}, '오늘 목록 받기')),
+    video, bar, count, miss, msg,
+    h('p', { class: 'small' }, '다 받기 전에는 저장하지 않습니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.'),
+    current ? btn('받던 조각 버리고 처음부터', async () => { col.drop(current); await S.putRaw('collect', col.bundles); render(); }, 'ghost') : null);
+}
+
+function screenReceived() {
+  const r = ui.receipt;
+  if (!r) { go('#/home'); return h('main'); }
+  return h('main', { class: 'center' },
+    h('h1', {}, '목록을 받았습니다'),
+    h('p', {}, `${r.count}건 · 목록 갱신본 ${r.ver}`),
+    h('p', {}, 'PC 담당자에게 아래 수신 확인 코드를 알려 주세요.'),
+    h('p', { class: 'fp' }, r.code),
+    btn('오늘 순서 보기', () => { ui.receipt = null; go('#/home'); }, 'primary big'));
+}
+
+// ------------------------------------------------------------ 접수 상세
+function stepper(value, onChange, min = 0, max = 99) {
+  const v = h('span', { class: 'val' }, value);
+  return h('span', { class: 'stepper' },
+    btn('−', () => value > min && onChange(value - 1), 'step', { 'aria-label': '빼기', disabled: value <= min }),
+    v,
+    btn('+', () => value < max && onChange(value + 1), 'step', { 'aria-label': '더하기', disabled: value >= max }));
+}
+
+async function screenStop(id) {
+  const stop = st.daylist && st.daylist.stops.find((s) => s.request_id === id);
+  if (!stop) { go('#/home'); return h('main'); }
+  const d = deriveStop(stop, st.events);
+  const setLine = async (l, patch) => {
+    const v = { qty_confirmed: l.qty_confirmed, qty_collected: l.qty_collected, reason: l.reason, ...patch };
+    if (v.qty_collected > v.qty_confirmed) v.qty_collected = v.qty_confirmed;
+    await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, ...v });
+    render();
+  };
+
+  const info = h('section', { class: 'card who' },
+    h('p', { class: 'name' }, stop.name),
+    h('p', { class: 'phone' }, fmtPhone(stop.phone)),
+    h('p', { class: 'addr' }, stop.address),
+    stop.spot_note ? h('p', { class: 'spot' }, '배출 위치: ' + stop.spot_note) : null,
+    stop.memo ? h('p', { class: 'memo' }, '요청: ' + stop.memo) : null,
+    h('p', { class: 'small' }, `${stop.receipt_no} · 예정 ${stop.eta || '-'}`),
+    stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
+    btn('📞 전화하기', async () => {
+      await addEvent(stop, 'DIAL_INTENT', {});
+      ui.afterCall = stop.request_id;
+      location.href = 'tel:' + stop.phone;
+    }, 'primary big'));
+
+  const contact = h('section', { class: 'card' },
+    h('h2', {}, '연락 결과', ui.afterCall === id ? h('span', { class: 'hint' }, ' — 통화 결과를 골라 주세요') : null),
+    h('div', { class: 'grid2' }, ...['REACHED', 'NO_ANSWER', 'CALLBACK', 'WRONG_NUMBER'].map((k) =>
+      btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt'))));
+
+  const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
+    ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
+      h('div', { class: 'lhead' },
+        h('strong', {}, `${l.name} ${l.spec}`),
+        h('em', { class: 'tag' }, l.kind === 'FIELD' ? '현장 추가' : '원접수')),
+      h('div', { class: 'price' }, l.price == null ? '단가 확인 대기' : `${won(l.price)} / ${l.unit_label}`),
+      l.kind === 'RECEIVED' ? h('div', { class: 'row' }, h('span', {}, '접수 수량'), h('span', { class: 'val' }, l.qty_received)) : null,
+      h('div', { class: 'row' }, h('span', {}, '현장 확인'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }))),
+      h('div', { class: 'row' }, h('span', {}, '실제 수거'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }), 0, l.qty_confirmed)),
+      h('div', { class: 'row' + (l.remaining ? ' left' : '') }, h('span', {}, '남은 대상'), h('span', { class: 'val' }, `${l.remaining} ${l.unit_label}`)),
+      l.remaining ? (() => {
+        const sel = h('select', { class: 'reason' + (l.reason ? '' : ' need'), onchange: (e) => setLine(l, { reason: e.target.value }) },
+          ...Object.entries(LABEL.reason).map(([k, t]) => h('option', { value: k, selected: k === l.reason }, t)));
+        return sel;
+      })() : null)),
+    btn('+ 현장 품목 추가', () => { ui.add = { stop: id, q: '', sel: null, qty: 1, free: false }; go(`#/add/${id}`); }, 'big'));
+
+  const f = d.fee;
+  const units = Object.entries(f.qtyByUnit).map(([u, n]) => `${n}${u}`).join(' · ');
+  const fee = h('section', { class: 'card fee' }, h('h2', {}, '계산 내역'),
+    h('dl', {},
+      h('dt', {}, '접수 당시 금액'), h('dd', {}, won(f.received)),
+      h('dt', {}, '현장 추가분'), h('dd', {}, won(f.fieldAdded)),
+      h('dt', {}, '확인된 소계'), h('dd', {}, won(f.confirmedSubtotal)),
+      h('dt', {}, '접수 대비 증감'), h('dd', {}, (f.diff > 0 ? '+' : '') + won(f.diff)),
+      h('dt', {}, '단가 확인 대기'), h('dd', {}, f.pendingCount + '건'),
+      h('dt', { class: 'total' }, '최종 금액'), h('dd', { class: 'total' }, f.final == null ? '미확정 (확인 대기 있음)' : won(f.final))),
+    h('p', { class: 'small' }, `수량(단위별): ${units}. 금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다.`));
+
+  const photoIn = (phase) => {
+    const input = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden' });
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0]; if (!file) return;
+      try { await savePhoto(stop, phase, file); toast('사진을 저장했습니다'); render(); }
+      catch (e) { toast(e.name === 'QuotaExceededError' ? ERR.STORAGE_LOW : ERR.PHOTO_SAVE_FAIL, 'bad'); }
+    });
+    return h('label', { class: 'btn big' }, phase === 'BEFORE' ? '📷 수거 전' : '📷 수거 후', input);
+  };
+  const thumbs = h('div', { class: 'thumbs' });
+  for (const p of d.photos) {
+    const img = h('img', { alt: p.phase === 'BEFORE' ? '수거 전' : '수거 후' });
+    thumbs.append(h('figure', {}, img, h('figcaption', {}, p.phase === 'BEFORE' ? '전' : '후')));
+    S.getSecureBytes('ph:' + p.photo_id).then((b) => { if (b) { const u = URL.createObjectURL(new Blob([b], { type: 'image/jpeg' })); photoUrls.push(u); img.src = u; } });
+  }
+  const photos = h('section', { class: 'card' }, h('h2', {}, `사진 ${d.photos.length}장`), h('div', { class: 'grid2' }, photoIn('BEFORE'), photoIn('AFTER')), thumbs,
+    h('p', { class: 'small' }, '사진은 앱 안에만 암호화 저장되며 갤러리에 남지 않습니다.'));
+
+  const msg = h('p', { class: 'msg' });
+  const outcome = h('section', { class: 'card' }, h('h2', {}, '수거 결과', d.outcome ? h('span', { class: 'hint' }, ' — 저장됨: ' + LABEL.outcome[d.outcome]) : null),
+    btn('모두 수거함', async () => {
+      for (const l of d.lines) if (l.qty_collected !== l.qty_confirmed) await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: l.qty_confirmed, reason: '' });
+      render();
+    }, 'big'),
+    h('div', { class: 'grid2' }, ...['DONE', 'PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(LABEL.outcome[k], async () => {
+      const left = d.lines.filter((l) => l.remaining > 0);
+      if (k === 'DONE' && left.length) return (msg.textContent = '남은 대상이 있어 완료로 저장할 수 없습니다. 일부 수거로 저장하세요.');
+      if (k !== 'DONE' && k !== 'ON_HOLD' && left.some((l) => !l.reason)) return (msg.textContent = '남은 품목마다 미수거 사유를 골라 주세요.');
+      if (k === 'PARTIAL' && !d.lines.some((l) => l.qty_collected > 0)) return (msg.textContent = '수거한 품목이 없으면 미수거로 저장하세요.');
+      if (k === 'NOT_COLLECTED' && d.lines.some((l) => l.qty_collected > 0)) return (msg.textContent = '수거한 품목이 있으면 일부 수거로 저장하세요.');
+      await addEvent(stop, 'ATTEMPT', { outcome: k }); toast('저장했습니다'); render();
+    }, d.outcome === k ? 'opt on' : 'opt'))), msg);
+
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('strong', {}, `${stop.seq}번`)),
+    info, contact, lines, fee, photos, outcome);
+}
+
+async function savePhoto(stop, phase, file) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.8));
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const photo_id = crypto.randomUUID();
+  await S.putSecureBytes('ph:' + photo_id, bytes);
+  await addEvent(stop, 'PHOTO_META', { photo_id, phase, sha256: P.toHex(await P.sha256(bytes)), bytes: bytes.length, line_id: null });
+}
+
+// ------------------------------------------------------------ 현장 품목 추가
+function screenAdd(id) {
+  const stop = st.daylist && st.daylist.stops.find((s) => s.request_id === id);
+  if (!stop) { go('#/home'); return h('main'); }
+  const a = ui.add && ui.add.stop === id ? ui.add : (ui.add = { stop: id, q: '', sel: null, qty: 1, free: false });
+  const table = st.daylist.fee_table;
+  const results = h('div', { class: 'results' });
+  const qtyBox = h('div', { class: 'row' });
+  const addBtn = btn('추가', null, 'primary big');
+  const drawQty = () => { qtyBox.replaceChildren(h('span', {}, '수량'), stepper(a.qty, (n) => { a.qty = n; drawQty(); }, 1)); };
+  const drawResults = () => {
+    const rows = searchFees(table, a.q).slice(0, 30);
+    results.replaceChildren(...(a.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
+      ...rows.map((r) => btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`)),
+        () => { a.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (a.sel && a.sel.id === r.id ? ' on' : ''))));
+    addBtn.disabled = !a.sel;
+  };
+  const q = h('input', { type: 'search', placeholder: '품목명 또는 규격 (예: 회전 의자, 2인용 매트리스)', class: 'search', value: a.q, autocomplete: 'off' });
+  q.addEventListener('input', () => { a.q = q.value; a.sel = null; drawResults(); }); // 검색어가 바뀌면 선택 해제
+  addBtn.addEventListener('click', async () => {
+    const r = table.rows.find((x) => x.id === (a.sel && a.sel.id));
+    if (!r || r.price !== a.sel.price) { a.sel = null; drawResults(); return toast('선택이 바뀌었습니다. 다시 골라 주세요.', 'bad'); }
+    await addEvent(stop, 'FIELD_ITEM_ADD', { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label, unit_price: r.price, price_status: 'CONFIRMED', qty: a.qty });
+    ui.add = null; go(`#/stop/${id}`);
+  });
+  drawQty(); drawResults();
+
+  const freeName = h('input', { type: 'text', placeholder: '품목 이름 (예: 안마기)', class: 'search' });
+  const unitSel = h('select', {}, ...[['EA', '개'], ['PIECE', '쪽'], ['SET', '세트'], ['L20', '20ℓ당']].map(([v, t]) => h('option', { value: v }, t)));
+  let freeQty = 1;
+  const freeQtyBox = h('div', { class: 'row' });
+  const drawFreeQty = () => freeQtyBox.replaceChildren(h('span', {}, '수량'), stepper(freeQty, (n) => { freeQty = n; drawFreeQty(); }, 1));
+  drawFreeQty();
+  const free = h('section', { class: 'card' }, h('h2', {}, '목록에 없음'),
+    h('p', { class: 'small' }, '단가를 정하지 않고 "확인 대기"로 추가합니다. 0원으로 계산하지 않습니다.'),
+    freeName, h('div', { class: 'row' }, h('span', {}, '단위'), unitSel), freeQtyBox,
+    btn('확인 대기로 추가', async () => {
+      if (!freeName.value.trim()) return toast('품목 이름을 적어 주세요', 'bad');
+      const u = unitSel.value, ul = unitSel.selectedOptions[0].textContent;
+      await addEvent(stop, 'FIELD_ITEM_ADD', { line_id: crypto.randomUUID(), fee_rate_id: null, name: freeName.value.trim(), spec: '', unit: u, unit_label: ul, unit_price: null, price_status: 'PENDING', qty: freeQty });
+      ui.add = null; go(`#/stop/${id}`);
+    }, 'big'));
+  setTimeout(() => q.focus(), 50);
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 취소', () => { ui.add = null; go(`#/stop/${id}`); }, 'ghost'), h('strong', {}, '현장 품목 추가')),
+    h('section', { class: 'card' }, q, results, qtyBox, addBtn,
+      h('p', { class: 'small' }, `수수료표: ${table.label}`)),
+    free);
+}
+
+// ------------------------------------------------------------ 결과 보내기
+async function screenExport() {
+  const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
+  const pending = unsent();
+  const photoMetas = st.events.filter((e) => e.kind === 'PHOTO_META');
+  const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
+  ui.exportMsg = '';
+  const say = (t) => { ui.exportMsg = t; msg.textContent = t; };
+  const make = btn(pending.length ? `결과 파일 만들어 보내기 (${pending.length}건)` : '보낼 결과 없음', async () => {
+    make.disabled = true; msg.textContent = '암호화하는 중…';
+    try {
+      const from = pending[0].seq, to = pending[pending.length - 1].seq;
+      const payload = {
+        schema: 'dg.result/1', work_date: st.daylist ? st.daylist.work_date : null, app_version: APP_VERSION,
+        events: pending.map(({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, ts }) => ({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, device_ts: ts })),
+        photos: pending.filter((e) => e.kind === 'PHOTO_META').map((e) => ({ photo_id: e.body.photo_id, request_id: e.request_id, phase: e.body.phase, sha256: e.body.sha256, bytes: e.body.bytes })),
+      };
+      const signRaw = await P.exportRaw(dev.sign.publicKey);
+      const header = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: st.daylist ? st.daylist.assign_ver : 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
+      const sealed = await P.seal(payload, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
+      const name = `DG_R_${P.uuidStr(dev.id).slice(0, 8)}_${from}-${to}.dgr`;
+      st.exports.push({ from, to, code: sealed.receipt, name, at: new Date().toISOString(), confirmed: false });
+      await commit();
+      const file = new File([sealed.bytes], name, { type: 'application/octet-stream' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 확인 코드를 아래에 입력하세요.'); }
+        catch (e) { say(e.name === 'AbortError' ? '보내기를 취소했습니다. 확인 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.' : '공유 실패: ' + e.message); }
+      } else {
+        const u = URL.createObjectURL(file);
+        const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(u), 30000);
+        say('파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
+      }
+    } catch (e) { say('파일을 만들지 못했습니다: ' + errMsg(e)); }
+    make.disabled = false; render();
+  }, 'primary huge', { disabled: !pending.length });
+
+  const codeIn = h('input', { type: 'text', placeholder: '확인 코드 8자리', class: 'pin', autocapitalize: 'characters', autocomplete: 'off' });
+  const confirm = btn('확인 코드 입력', async () => {
+    const c = codeIn.value.replace(/\s/g, '').toUpperCase();
+    const ex = st.exports.find((x) => x.code === c);
+    if (!ex) return toast('맞는 확인 코드가 없습니다.', 'bad');
+    ex.confirmed = true; st.releasedSeq = Math.max(st.releasedSeq, ex.to);
+    await commit(); toast('PC 반영이 확인되었습니다'); render();
+  }, 'big');
+
+  const allConfirmed = !unsent().length && st.exports.every((x) => x.confirmed);
+  const photoChk = h('input', { type: 'checkbox', id: 'photoOk' });
+  const cleanup = btn('오늘 자료 정리', async () => {
+    if (!confirm2('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 계속할까요?')) return;
+    if (photoChk.checked) for (const p of photoMetas) await S.delSecureBytes('ph:' + p.body.photo_id);
+    const keepPhotos = !photoChk.checked && photoMetas.length;
+    st = { ...emptyState(), seq: st.seq, releasedSeq: st.seq, keptPhotos: keepPhotos ? photoMetas.map((p) => p.body) : [] };
+    await commit(); toast('정리했습니다'); go('#/home');
+  }, 'ghost', { disabled: !allConfirmed || !st.daylist });
+
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 처음', () => go('#/home'), 'ghost'), h('strong', {}, '결과 보내기')),
+    h('section', { class: 'card' },
+      h('p', {}, '결과 파일에는 이름·연락처·주소·메모가 들어가지 않으며, PC에서만 열 수 있게 암호화됩니다. 사진은 넣지 않습니다.'),
+      make, msg),
+    h('section', { class: 'card' }, h('h2', {}, 'PC 반영 확인'), codeIn, confirm,
+      h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.confirmed ? '반영 확인됨' : '확인 대기'}`)))),
+    h('section', { class: 'card' }, h('h2', {}, `사진 ${photoMetas.length}장 보관 중`),
+      h('p', { class: 'small' }, '사진은 보안 USB로 따로 회수합니다(시제품 미구현). 회수가 확인되기 전에는 지우지 마세요.'),
+      h('label', { class: 'check' }, photoChk, ' 관리자가 사진 회수를 확인함 (정리할 때 사진도 지움)'),
+      cleanup, allConfirmed ? null : h('p', { class: 'small' }, '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.')));
+}
+const confirm2 = (m) => window.confirm(m);
+
+// ------------------------------------------------------------ 설정
+async function screenSettings() {
+  const dev = await S.getRaw('device');
+  let persisted = '확인 불가';
+  try { persisted = navigator.storage && navigator.storage.persisted ? ((await navigator.storage.persisted()) ? '보존 요청됨' : '보존 요청 안 됨') : '지원 안 함'; } catch {}
+  let quota = '';
+  try { const e = await navigator.storage.estimate(); quota = `${(e.usage / 1048576).toFixed(1)}MB 사용`; } catch {}
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 처음', () => go('#/home'), 'ghost'), h('strong', {}, '설정·정보')),
+    h('section', { class: 'card' }, h('dl', {},
+      h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
+      h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
+      h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
+      h('dt', {}, '미전송 기록'), h('dd', {}, unsent().length + '건'))),
+    h('section', { class: 'card' },
+      btn('기기 등록 화면', () => go('#/register')),
+      h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 보내지 않은 기록이 사라지니 주의하세요.'),
+      btn('이 휴대폰의 모든 자료 지우기', async () => {
+        if (unsent().length && !confirm2(`보내지 않은 기록 ${unsent().length}건이 사라집니다. 정말 지울까요?`)) return;
+        if (!confirm2('PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다.')) return;
+        stopCamera(); await S.wipeAll(); st = null; location.hash = ''; location.reload();
+      }, 'danger')));
+}
+
+// ------------------------------------------------------------ 라우팅
+let renderSeq = 0;
+async function render() {
+  const my = ++renderSeq;
+  stopCamera();
+  photoUrls.forEach((u) => URL.revokeObjectURL(u)); photoUrls = [];
+  let view;
+  if (!(await S.hasPin())) view = screenSetup();
+  else if (!S.isUnlocked()) view = screenLock();
+  else {
+    const [, route, arg] = (location.hash || '#/home').split('/');
+    view = await ({
+      home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
+      stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
+    }[route] || screenHome)();
+  }
+  if (my !== renderSeq) return; // 그 사이 다른 화면으로 이동
+  const sameRoute = ui.lastRoute === location.hash, y = scrollY; // 같은 화면을 다시 그릴 때는 스크롤 유지
+  $app.replaceChildren(view);
+  scrollTo(0, sameRoute ? y : 0);
+  ui.lastRoute = location.hash;
+}
+addEventListener('hashchange', render);
+
+// ------------------------------------------------------------ 서비스 워커 (업데이트는 사용자가 눌러야 적용)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then((reg) => {
+    const offer = (w) => {
+      const bar = h('div', { class: 'update' }, '새 버전이 있습니다. ', btn('업데이트', () => w.postMessage('SKIP_WAITING'), 'primary'));
+      document.body.append(bar);
+    };
+    if (reg.waiting) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
+    });
+  }).catch(() => {});
+  // 첫 설치 때는 새로고침하지 않는다(입력 중인 화면 보호). 사용자가 [업데이트]를 눌렀을 때만 새로고침.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+}
+
+render();
