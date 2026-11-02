@@ -20,7 +20,8 @@
 - 서버에 업무 자료를 두지 않습니다. GitHub Pages에는 **앱 코드만** 올라갑니다.
 - 휴대폰 자료는 IndexedDB에 레코드별 AES-GCM으로 암호화하고, 데이터 키는 PIN(PBKDF2-SHA256 60만 회)으로 감쌉니다.
 - PC↔휴대폰은 네트워크로 직접 연결하지 않습니다. 목록은 화면 QR, 결과는 암호화 파일로만 오갑니다.
-- 앱 CSP가 외부 서버 통신과 외부 스크립트를 막습니다. 분석·오류 수집 코드가 없습니다.
+- 앱 CSP가 외부 통신을 **바탕 지도 서버(tiles.openfreemap.org) 하나**로 제한합니다. 외부 스크립트·분석·오류 수집 코드가 없습니다.
+- 지도에는 바탕 지도 조각만 요청합니다. 이름·연락처·주소·핀 좌표는 보내지 않고, 주소 검색·길찾기 API를 쓰지 않습니다. 조각은 줌 14(약 2km 단위)까지만 요청해 집 단위 위치가 지도 서버에 드러나지 않게 합니다. 설정에서 지도를 끌 수 있습니다.
 
 ## 구성
 
@@ -33,6 +34,8 @@
 | `web/proto.js` | 같은 전송 규격의 WebCrypto 구현 |
 | `web/store.js` | PIN 잠금과 암호화 저장소 |
 | `web/fees.js` | 품목 검색, 수수료·잔량 계산 |
+| `web/map.js` | 온라인 지도(MapLibre + OpenFreeMap), 허용 주소·줌 제한 |
+| `web/backup.js` | 단독 모드 암호화 백업·복원 |
 | `tests/interop.mjs` | Python↔WebCrypto 상호 운용 테스트 (CI에서 실행) |
 | `tests/e2e.py` | 헤드리스 Chrome 가짜 카메라로 QR 영상을 읽는 종단 테스트 |
 
@@ -85,7 +88,7 @@ python pc_tool.py import-result DG_R_xxxxxxxx_1-11.dgr
 
 ```bash
 npm ci && npm test            # 상호 운용 21개 (암호화·서명·조각·변조·중복·QR 인식)
-python3 tests/e2e.py          # 브라우저 종단 31개: PC 연결 17개 + 단독 14개 (Chrome + playwright 필요)
+python3 tests/e2e.py          # 브라우저 종단 41개: PC 연결·단독·지도, 모든 요청의 개인정보 반출 검사 (Chrome + playwright 필요)
 ```
 
 ## GitHub Pages 배포
@@ -97,7 +100,7 @@ python3 tests/e2e.py          # 브라우저 종단 31개: PC 연결 17개 + 단
 
 ## 시제품 범위 밖 (설계서 기준 이후 단계)
 
-- PC 업무 화면(접수 등록·배정·노선), OSRM·OR-Tools 노선 계산, 오프라인 지도
+- PC 업무 화면(접수 등록·배정·노선), OSRM·OR-Tools 노선 계산
 - 사진 원본의 보안 USB 회수 (지금은 휴대폰에 암호화 보관, 결과 파일에는 해시만)
 - 운영체제 키 저장소·SQLCipher 적용 (지금은 PC 키를 `pc/state/` PEM 파일로 보관)
 - 공식 수수료표 전체 (원문 입력·2인 대조 필요)
@@ -111,3 +114,5 @@ python3 tests/e2e.py          # 브라우저 종단 31개: PC 연결 17개 + 단
 ## 라이선스
 
 `web/vendor/jsQR.js` — [jsQR](https://github.com/cozmo/jsQR) 1.4.0, Apache-2.0.
+`web/vendor/maplibre/` — [MapLibre GL JS](https://github.com/maplibre/maplibre-gl-js) 6.16.0, BSD-3-Clause.
+바탕 지도 — [OpenFreeMap](https://openfreemap.org), © OpenMapTiles, © OpenStreetMap 기여자 (지도 화면에 출처 표시).

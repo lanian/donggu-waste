@@ -23,7 +23,8 @@ jobs:
         with: { python-version: '3.12' }
       - run: pip install -r pc/requirements.txt
       - run: npm ci
-      - run: cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js   # 포함된 QR 라이브러리가 고정 버전과 같은지
+      - run: cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js   # 포함된 라이브러리가 고정 버전과 같은지
+      - run: cmp node_modules/maplibre-gl/dist/maplibre-gl.mjs web/vendor/maplibre/maplibre-gl.mjs && cmp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs web/vendor/maplibre/maplibre-gl-worker.mjs
       - run: npm test
   deploy:
     needs: test

@@ -5,8 +5,9 @@ import * as S from './store.js';
 import { searchFees, deriveStop, won, LABEL } from './fees.js';
 import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
+import * as M from './map.js';
 
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -19,6 +20,7 @@ let saving = Promise.resolve();
 let lastActive = Date.now(), hiddenAt = 0;
 let camera = null;
 let photoUrls = [];
+let liveMap = null; // 화면을 바꿀 때 지도 자원을 정리한다
 
 // ------------------------------------------------------------ 작은 DOM 도우미 (문자열은 항상 textContent)
 function h(tag, attrs = {}, ...kids) {
@@ -59,7 +61,7 @@ const errMsg = (e) => ERR[e && e.code] || (e && e.message) || '알 수 없는 �
 
 // ------------------------------------------------------------ 상태 저장
 const emptyState = () => ({ mode: null, daylist: null, events: [], seq: 0, releasedSeq: 0, exports: [], lastBundleHash: null,
-  requests: [], receiptCounter: {}, lastBackupAt: null, intakeDraft: null });
+  requests: [], receiptCounter: {}, lastBackupAt: null, intakeDraft: null, mapEnabled: true });
 async function loadState() {
   st = { ...emptyState(), ...((await S.getSecure('state')) || {}) };
   if (!st.mode && st.daylist) st.mode = 'PC'; // 0.1.0에서 쓰던 자료는 PC 연결 방식
@@ -155,6 +157,7 @@ async function screenHome() {
     const hold = stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
     const list = { ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter];
     out.push(h('p', { class: 'meta' }, `${dl.work_date} · ${dl.crew} · ${dl.stops.length}건 · 목록 갱신본 ${dl.assign_ver}`));
+    if (st.mapEnabled) out.push(btn('🗺 지도로 보기', () => go('#/map'), 'big'));
     out.push(h('nav', { class: 'tabs' },
       ...[['ALL', `전체 ${stops.length}`], ['REMAIN', `남음 ${remain.length}`], ['HOLD', `보류·재방문 ${hold.length}`]].map(([k, t]) =>
         btn(t, () => { ui.filter = k; render(); }, ui.filter === k ? 'tab on' : 'tab'))));
@@ -355,6 +358,9 @@ async function screenStop(id) {
     h('p', { class: 'small' }, `${stop.receipt_no} · 예정 ${stop.eta || '-'}`),
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
     stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
+    st.mapEnabled ? h('div', { class: 'grid2' },
+      btn(d.loc ? '🗺 지도에서 보기' : '🗺 위치 미지정', () => go(`#/map/${id}`), 'opt', { disabled: !d.loc }),
+      btn(d.loc ? '📍 위치 고치기' : '📍 위치 지정', () => go(`#/pick/${id}`), 'opt')) : null,
     btn('📞 전화하기', async () => {
       await addEvent(stop, 'DIAL_INTENT', {});
       ui.afterCall = stop.request_id;
@@ -645,6 +651,7 @@ function screenHomeSolo() {
   ];
   if (!list.length) out.push(h('p', { class: 'empty' }, view === 'TODAY' ? '오늘 수거 예정 접수가 없습니다.' : '해당 접수가 없습니다.'));
   else {
+    if (st.mapEnabled && view !== 'CANCELLED') out.push(btn('🗺 지도로 보기', () => go('#/map'), 'big'));
     if (view === 'TODAY' || view === 'TOMORROW') out.push(btn(ui.reorder ? '순서 정하기 끝' : '방문 순서 바꾸기', () => { ui.reorder = !ui.reorder; render(); }, 'ghost'));
     out.push(h('ul', { class: 'stops' }, list.map(({ s, d }) => h('li', { class: 'srow' },
       h('a', { href: `#/stop/${s.request_id}`, class: 'stop' + (d.progress === 'DONE' || s.status === 'CANCELLED' ? ' done' : '') },
@@ -829,6 +836,84 @@ async function screenBackup() {
     h('section', { class: 'card' }, h('h2', {}, '복원 (새 휴대폰으로 옮길 때)'), fileIn, rpw, restore, rmsg));
 }
 
+// ------------------------------------------------------------ 지도 (온라인 바탕 지도, 개인정보는 보내지 않음)
+const mapNotice = () => h('p', { class: 'small' }, '바탕 지도 조각만 OpenFreeMap에서 받습니다. 이름·연락처·주소와 핀 위치는 휴대폰 밖으로 보내지 않습니다.');
+function mapStops() {
+  if (isSolo()) {
+    const view = ui.soloView || 'TODAY', today = todayKST(), tomorrow = todayKST(1);
+    return st.requests.filter((r) => r.status !== 'CANCELLED' && (view === 'TODAY' ? r.planned_date === today : view === 'TOMORROW' ? r.planned_date === tomorrow : true));
+  }
+  return st.daylist ? st.daylist.stops.filter((s) => !s.removed) : [];
+}
+
+async function screenMap(focusId) {
+  const back = h('header', { class: 'bar' }, btn(focusId ? '← 접수' : '← 목록', () => go(focusId ? `#/stop/${focusId}` : '#/home'), 'ghost'), h('strong', {}, '지도'));
+  if (!st.mapEnabled) return h('main', {}, back, h('p', { class: 'empty' }, '설정에서 지도 사용이 꺼져 있습니다.'));
+  const items = mapStops().map((s) => ({ s, d: deriveStop(s, st.events) }));
+  const placed = items.filter((x) => x.d.loc), missing = items.filter((x) => !x.d.loc);
+  const box = h('div', { class: 'mapbox', id: 'map' });
+  const msg = h('p', { class: 'msg' });
+  const view = h('main', {}, back, box,
+    h('div', { class: 'grid2' }, btn('📍 내 위치', async () => {
+      try { const p = await M.myPosition(); if (liveMap) { liveMap.flyTo({ center: p, zoom: 16 }); M.pin(ui.ml, liveMap, { lng: p[0], lat: p[1], label: '나', cls: 'me' }); } }
+      catch (e) { msg.textContent = e.message; }
+    }, 'opt'), btn('전체 보기', () => fitAll(), 'opt')),
+    msg, mapNotice(),
+    missing.length ? h('section', { class: 'card' }, h('h2', {}, `위치 미지정 ${missing.length}건`),
+      h('ul', { class: 'stops' }, missing.map(({ s }) => h('li', {}, h('a', { href: `#/pick/${s.request_id}`, class: 'stop' },
+        h('span', { class: 'seq' }, s.seq), h('span', { class: 'body' }, h('strong', {}, s.name), h('span', { class: 'addr' }, s.address)),
+        h('span', { class: 'eta' }, '위치 지정 →')))))) : null);
+  const fitAll = () => {
+    if (!liveMap || !placed.length) return;
+    if (placed.length === 1) return liveMap.flyTo({ center: [placed[0].d.loc.lon, placed[0].d.loc.lat], zoom: 16 });
+    const b = new ui.ml.LngLatBounds();
+    placed.forEach((x) => b.extend([x.d.loc.lon, x.d.loc.lat]));
+    liveMap.fitBounds(b, { padding: 48, maxZoom: 16, duration: 0 });
+  };
+  setTimeout(async () => {
+    try {
+      const focus = placed.find((x) => x.s.request_id === focusId);
+      const { map, ml } = await M.createMap(box, { center: focus ? [focus.d.loc.lon, focus.d.loc.lat] : placed[0] ? [placed[0].d.loc.lon, placed[0].d.loc.lat] : M.DEFAULT_CENTER, zoom: focus ? 17 : 14 });
+      liveMap = map; ui.ml = ml;
+      for (const { s, d } of placed) {
+        M.pin(ml, map, { lng: d.loc.lon, lat: d.loc.lat, label: String(s.seq), cls: 'p-' + d.progress + (s.request_id === focusId ? ' focus' : ''), onClick: () => go(`#/stop/${s.request_id}`) });
+      }
+      if (!focus) map.once('load', fitAll);
+    } catch (e) { msg.textContent = '지도를 불러오지 못했습니다. 인터넷 연결을 확인하세요.'; }
+  }, 0);
+  return view;
+}
+
+async function screenPick(id) {
+  const stop = findStop(id);
+  if (!stop) { go('#/home'); return h('main'); }
+  const d = deriveStop(stop, st.events);
+  const box = h('div', { class: 'mapbox pick', id: 'map' }, h('div', { class: 'crosshair', 'aria-hidden': 'true' }));
+  const msg = h('p', { class: 'msg' });
+  const save = btn('이 위치로 저장', async () => {
+    if (!liveMap) return;
+    const c = liveMap.getCenter();
+    const lat = Math.round(c.lat * 1e6) / 1e6, lon = Math.round(c.lng * 1e6) / 1e6;
+    if (isSolo()) { stop.lat = lat; stop.lon = lon; stop.geo_source = 'MANUAL'; stop.updated_at = new Date().toISOString(); await commit(); }
+    else await addEvent(stop, 'LOCATION_FIX', { lat, lon, source: 'MANUAL' }); // PC 방식: 결과 파일로 PC에 전달
+    toast('위치를 저장했습니다'); go(`#/stop/${id}`);
+  }, 'primary big', { disabled: true });
+  setTimeout(async () => {
+    try {
+      const { map, ml } = await M.createMap(box, { center: d.loc ? [d.loc.lon, d.loc.lat] : M.DEFAULT_CENTER, zoom: d.loc ? 18 : 15 });
+      liveMap = map; ui.ml = ml;
+      map.once('load', () => { save.disabled = false; });
+    } catch { msg.textContent = '지도를 불러오지 못했습니다. 인터넷 연결을 확인하세요.'; }
+  }, 0);
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost'), h('strong', {}, '배출 위치 지정')),
+    h('p', {}, `${stop.name} · ${stop.address}`),
+    h('p', { class: 'small' }, '지도를 움직여 가운데 표시를 실제 배출 위치에 맞추세요. 주소로 위치를 검색하지 않습니다(주소를 외부로 보내지 않기 위해).'),
+    box,
+    btn('📍 지금 내 위치로 이동', async () => { try { const p = await M.myPosition(); liveMap && liveMap.jumpTo({ center: p, zoom: 18 }); } catch (e) { msg.textContent = e.message; } }, 'big'),
+    save, msg, mapNotice());
+}
+
 // ------------------------------------------------------------ 설정
 async function screenSettings() {
   const dev = await S.getRaw('device');
@@ -844,6 +929,9 @@ async function screenSettings() {
       h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
       h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
       h('dt', {}, '미전송 기록'), h('dd', {}, unsent().length + '건'))),
+    h('section', { class: 'card' }, h('h2', {}, '지도'),
+      h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 보내지 않으며, 주소 검색·길찾기 서비스는 쓰지 않습니다.'),
+      btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', async () => { st.mapEnabled = !st.mapEnabled; await commit(); render(); })),
     h('section', { class: 'card' },
       isSolo() ? null : btn('기기 등록 화면', () => go('#/register')),
       btn('사용 방식 바꾸기', async () => {
@@ -864,6 +952,7 @@ async function render() {
   const my = ++renderSeq;
   stopCamera();
   photoUrls.forEach((u) => URL.revokeObjectURL(u)); photoUrls = [];
+  if (liveMap) { try { liveMap.remove(); } catch {} liveMap = null; }
   let view;
   if (!(await S.hasPin())) view = screenSetup();
   else if (!S.isUnlocked()) view = screenLock();
@@ -875,7 +964,7 @@ async function render() {
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
       stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
-      mode: screenMode, intake: () => screenIntake(arg), backup: screenBackup,
+      mode: screenMode, intake: () => screenIntake(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
   if (my !== renderSeq) return; // 그 사이 다른 화면으로 이동

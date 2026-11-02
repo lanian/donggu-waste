@@ -108,3 +108,11 @@ dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; } dd { margi
 .grid2 > * { min-width: 0; }
 .row > span:first-child { white-space: nowrap; }
 .row select { width: auto; flex: 1; }
+.mapbox { position: relative; width: 100%; height: 62vh; min-height: 320px; border-radius: var(--radius); overflow: hidden; background: var(--chip); margin: 8px 0; }
+.mapbox.pick { height: 52vh; }
+.crosshair { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -44px 0 0 -22px; z-index: 3; pointer-events: none;
+  background: no-repeat center / contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpath d='M22 43C22 43 6 27 6 17a16 16 0 0 1 32 0c0 10-16 26-16 26z' fill='%23b42318' stroke='white' stroke-width='3'/%3E%3Ccircle cx='22' cy='17' r='6' fill='white'/%3E%3C/svg%3E"); }
+.pin { min-width: 36px; height: 36px; padding: 0 6px; border-radius: 18px 18px 18px 4px; border: 2px solid #fff; background: #14532d; color: #fff;
+  font: 800 16px/32px system-ui, sans-serif; box-shadow: 0 1px 4px rgba(0,0,0,.4); cursor: pointer; }
+.pin.p-DONE { background: #6b7280; } .pin.p-PARTIAL, .pin.p-STARTED { background: #a14a00; }
+.pin.focus { transform: scale(1.25); background: #b42318; z-index: 2; } .pin.me { background: #1d4ed8; border-radius: 18px; }

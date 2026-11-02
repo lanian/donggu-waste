@@ -30,6 +30,8 @@ ENV = {**os.environ, "DG_STATE": str(WORK / "state"), "DG_OUT": str(WORK / "out"
 PIN = "246813"
 CHROME = os.environ.get("CHROME", "/usr/bin/google-chrome")
 passed = 0
+REQUESTS: list[tuple[str, str]] = []  # 브라우저가 보낸 모든 요청 (개인정보 반출 검사용)
+PROXY = os.environ.get("HTTPS_PROXY", "")
 
 
 def ok(cond, name):
@@ -85,9 +87,12 @@ def browser(pw, video: Path, profile: str = "profile"):
     ctx = pw.chromium.launch_persistent_context(
         str(WORK / profile), executable_path=CHROME, headless=True,
         viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
-        accept_downloads=True, permissions=["camera"],
+        accept_downloads=True, permissions=["camera", "geolocation"], geolocation={"latitude": 35.1462, "longitude": 126.9233},
+        ignore_https_errors=True,
         args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
-              f"--use-file-for-fake-video-capture={video}"])
+              f"--use-file-for-fake-video-capture={video}", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+              *([f"--proxy-server={PROXY}"] if PROXY else [])])
+    ctx.on("request", lambda r: REQUESTS.append((r.url, r.post_data or "")))
     return ctx, (ctx.pages[0] if ctx.pages else ctx.new_page())
 
 
@@ -200,6 +205,25 @@ def main():
         page.locator(".fee").scroll_into_view_if_needed()
         page.screenshot(path=SHOTS / "06_stop_fee.png")
 
+        # 3-1) 지도: 20개 핀, 핀을 누르면 상세로
+        page.goto(url + "#/map")
+        expect(page.locator(".pin")).to_have_count(20, timeout=30000)
+        page.wait_for_function("() => document.querySelector('.maplibregl-canvas') && document.querySelector('.maplibregl-canvas').width > 0", timeout=30000)
+        page.wait_for_timeout(4000)
+        page.screenshot(path=SHOTS / "08_map.png")
+        tiles = [u for u, _ in REQUESTS if u.startswith("https://tiles.openfreemap.org/")]
+        ok(len(tiles) > 0, f"온라인 바탕 지도 표시, 방문 지점 핀 20개 ({len(tiles)}개 지도 요청)")
+        page.locator(".pin", has_text=re.compile("^1$")).click()
+        expect(page.locator(".who .name")).to_have_text(name)
+        ok(True, "핀을 누르면 해당 접수 상세로 이동")
+        page.get_by_role("button", name="📍 위치 고치기").click()
+        save = page.get_by_role("button", name="이 위치로 저장")
+        expect(save).to_be_enabled(timeout=30000)
+        page.locator(".mapbox canvas").drag_to(page.locator(".mapbox canvas"), source_position={"x": 150, "y": 150}, target_position={"x": 190, "y": 180})
+        save.click()
+        expect(page.get_by_role("button", name="🗺 지도에서 보기")).to_be_visible()
+        ok(True, "현장에서 배출 위치 고치기 (결과 파일로 PC에 전달되는 기록)")
+
         # 4) 앱 재시작 후 기록 유지 ------------------------------------------------
         page.reload()
         unlock(page)
@@ -246,9 +270,32 @@ def main():
            f"휴대폰 저장소(IndexedDB {len(dump['keys'])}개 항목)에 이름·전화번호 평문 없음")
         ok(not errors, "페이지 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
         ctx.close()
+        check_requests("PC 연결", personal_from_bundle())
 
         solo(pw, url, WORK / "reg.y4m")
     print(f"\n통과 {passed}개, 화면 캡처: {SHOTS}")
+
+
+def personal_from_bundle() -> list[str]:
+    sys.path.insert(0, str(ROOT / "pc"))
+    from sample_data import make_daylist
+    out = []
+    for st in make_daylist(20, "2026-11-03", 1, seed=7)["stops"]:
+        out += [st["name"], st["phone"], st["address"], st["receipt_no"], f"{st['lat']}", f"{st['lon']}"]
+    return out
+
+
+def check_requests(label: str, secrets: list[str]):
+    """브라우저가 보낸 모든 요청: 외부로는 지도 서버만, 어떤 요청에도 개인정보·핀 좌표 없음."""
+    from urllib.parse import unquote
+    external = [(u, b) for u, b in REQUESTS if not u.startswith("http://127.0.0.1") and not u.startswith(("data:", "blob:"))]
+    hosts = sorted({u.split("/")[2] for u, _ in external})
+    ok(all(h == "tiles.openfreemap.org" for h in hosts), f"[{label}] 외부 요청은 지도 서버만 ({', '.join(hosts) or '없음'}, {len(external)}건)")
+    zs = [int(m.group(1)) for u, _ in external for m in [re.search(r"/(\d+)/\d+/\d+\.(?:pbf|png|mvt)", u)] if m]
+    ok(not zs or max(zs) <= 14, f"[{label}] 지도 서버에는 넓은 범위(최대 줌 {max(zs) if zs else '-'}, 약 2km 단위) 조각만 요청 — 집 단위 위치 노출 없음")
+    leaked = [x for x in secrets if any(x in unquote(u) or x in b for u, b in REQUESTS)]
+    ok(not leaked, f"[{label}] 모든 요청 주소·본문에 이름·연락처·주소·접수번호·핀 좌표 없음" + (f" (발견: {leaked[:3]})" if leaked else ""))
+    REQUESTS.clear()
 
 
 def solo(pw, url, video):
@@ -323,6 +370,21 @@ def solo(pw, url, video):
     ok(True, "단독 모드 현장 처리: 연락·수거·완료 저장")
     page.get_by_role("button", name="← 목록").click()
 
+    # 위치 지정 (지도 가운데 핀, 주소 검색 없음)
+    page.locator(".stop", has_text="가상일").click()
+    page.get_by_role("button", name="📍 위치 지정").click()
+    save = page.get_by_role("button", name="이 위치로 저장")
+    expect(save).to_be_enabled(timeout=30000)
+    page.get_by_role("button", name="📍 지금 내 위치로 이동").click()
+    page.wait_for_timeout(800)
+    page.screenshot(path=SHOTS / "14_solo_pick.png")
+    save.click()
+    page.get_by_role("button", name="🗺 지도에서 보기").click()
+    expect(page.locator(".pin.focus")).to_have_count(1, timeout=30000)
+    ok(True, "단독 모드: 지도에서 배출 위치 지정 → 지도에 핀 표시")
+    page.get_by_role("button", name="← 접수").click()
+    page.get_by_role("button", name="← 목록").click()
+
     # 취소 (사유 보존)
     page.locator(".stop", has_text="가상이").click()
     prompts["text"] = "주민이 직접 처리"
@@ -366,6 +428,7 @@ def solo(pw, url, video):
     page.screenshot(path=SHOTS / "13_solo_stop.png")
     ok(not errors, "단독 모드 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
     ctx.close()
+    check_requests("단독", ["가상일", "가상이", "01000007777", "0000-7777", "예시로 5", "시험길 9", "현관"])
 
 
 if __name__ == "__main__":
