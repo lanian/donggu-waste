@@ -17,7 +17,7 @@ export function loadLib() {
   if (!libPromise) {
     if (!document.querySelector('link[data-maplibre]')) {
       const link = document.createElement('link');
-      link.rel = 'stylesheet'; link.href = 'vendor/maplibre/maplibre-gl.css'; link.dataset.maplibre = '1';
+      link.rel = 'stylesheet'; link.href = new URL('./vendor/maplibre/maplibre-gl.css', import.meta.url).href; link.dataset.maplibre = '1';
       document.head.append(link);
     }
     libPromise = import('./vendor/maplibre/maplibre-gl.mjs');

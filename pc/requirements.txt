@@ -1,2 +1,6 @@
 cryptography>=42
 qrcode[pil]>=7.4
+sqlcipher3-binary>=0.6 ; platform_system == "Linux"
+sqlcipher3>=0.6 ; platform_system != "Linux"
+ortools>=9.10
+keyring>=25

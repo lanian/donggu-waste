@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORK = Path(os.environ.get("DG_TEST_DIR") or tempfile.mkdtemp(prefix="dg-e2e-"))
 SHOTS = WORK / "shots"
 SHOTS.mkdir(parents=True, exist_ok=True)
-ENV = {**os.environ, "DG_STATE": str(WORK / "state"), "DG_OUT": str(WORK / "out")}
+ENV = {**os.environ, "DG_STATE": str(WORK / "state"), "DG_OUT": str(WORK / "out"), "DG_DB_KEY": os.environ.get("DG_DB_KEY", "test-db-key-not-for-production")}
 PIN = "246813"
 CHROME = os.environ.get("CHROME", "/usr/bin/google-chrome")
 passed = 0
@@ -165,6 +165,9 @@ def main():
         ok(phone.startswith("010-"), f"상세 화면에 이름·연락처·주소 표시 ({name}, {phone})")
         page.get_by_role("button", name="통화 완료").click()
         expect(page.get_by_role("button", name="통화 완료")).to_have_class(re.compile("on"))
+        page.locator("label.btn", has_text="수거 후").locator("input[type=file]").set_input_files(str(ROOT / "web/icons/icon-512.png"))
+        expect(page.locator(".thumbs img")).to_have_count(1)
+        ok(True, "현장 사진 촬영(파일 입력) → 앱 안에 암호화 저장")
         received_total = page.locator(".fee dd").nth(0).inner_text()
 
         # 현장 추가: 회전 의자 2개
@@ -241,10 +244,21 @@ def main():
         ok('"applied"' in imp, "결과 파일 PC 가져오기 성공 " + imp.splitlines()[0])
         blob = f.read_bytes()
         ok(name.encode() not in blob and phone.replace("-", "").encode() not in blob, "결과 파일에 이름·전화번호 평문 없음")
-        page.get_by_placeholder("확인 코드 8자리").fill(release)
+        page.get_by_placeholder("확인 코드 8자리", exact=True).fill(release)
         page.get_by_role("button", name="확인 코드 입력").click()
         expect(page.get_by_text("반영 확인됨")).to_be_visible()
         ok(True, f"보관 종료 확인 코드 입력 → 반영 확인 ({release})")
+        with page.expect_download() as dlp:
+            page.get_by_role("button", name=re.compile("사진 파일 만들기")).click()
+        pf = WORK / dlp.value.suggested_filename
+        dlp.value.save_as(pf)
+        pimp = py("import-photos", str(pf))
+        pcode = re.search(r"사진 회수 확인 코드: (\w+)", pimp).group(1)
+        ok('"recovered": 1' in pimp, "사진 파일(.dgp) → PC 가져오기: 해시 대조 후 회수 1장")
+        page.get_by_placeholder("사진 회수 확인 코드 8자리").fill(pcode)
+        page.get_by_role("button", name="사진 회수 확인").click()
+        expect(page.get_by_text("미회수 0장")).to_be_visible()
+        ok(True, f"사진 회수 확인 코드 입력 → 미회수 0장 ({pcode})")
         page.screenshot(path=SHOTS / "07_export.png", full_page=True)
 
         # 6) 오프라인에서도 동작 (서비스 워커) -----------------------------------

@@ -14,7 +14,7 @@ const { PNG } = require('pngjs');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = process.env.DG_TEST_DIR || mkdtempSync(join(tmpdir(), 'dg-'));
-const env = { ...process.env, DG_STATE: join(WORK, 'state'), DG_OUT: join(WORK, 'out') };
+const env = { ...process.env, DG_STATE: join(WORK, 'state'), DG_OUT: join(WORK, 'out'), DG_DB_KEY: process.env.DG_DB_KEY || 'test-db-key-not-for-production' };
 const py = (...args) => execFileSync('python3', [join(ROOT, 'pc', 'pc_tool.py'), ...args], { env, encoding: 'utf8' });
 const pyExpectFail = (...args) => {
   try { py(...args); } catch (e) { return (e.stdout || '') + (e.stderr || ''); }

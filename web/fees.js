@@ -28,11 +28,13 @@ export const won = (n) => (n == null ? '미확정' : n.toLocaleString('ko-KR') +
 // 한 접수 건의 현재 상태를 이벤트에서 계산한다 (이벤트는 추가만, 최신 값이 현재 값).
 export function deriveStop(stop, events) {
   const mine = events.filter((e) => e.request_id === stop.request_id);
+  // 재방문 목록은 남은 품목만 오며, 이전 방문에서 이미 수거한 수량(prior_collected)에서 이어서 센다.
   const lines = stop.items.map((it) => ({
-    line_id: it.line_id, kind: 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,
+    line_id: it.line_id, kind: it.line_kind || 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,
     fee_rate_id: it.fee_rate_id, price: it.price_status === 'CONFIRMED' ? it.unit_price : null,
-    qty_received: it.qty, amount_received: it.price_status === 'CONFIRMED' ? it.amount : null,
-    qty_confirmed: it.qty, qty_collected: 0, reason: '',
+    qty_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' ? it.qty : 0,
+    amount_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' && it.price_status === 'CONFIRMED' ? it.amount : 0,
+    qty_confirmed: it.qty, qty_collected: it.prior_collected || 0, reason: '',
   }));
   const byId = Object.fromEntries(lines.map((l) => [l.line_id, l]));
   let contact = 'NOT_CONTACTED', outcome = null, photos = [], loc = null;

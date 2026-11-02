@@ -7,7 +7,7 @@ import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
 import * as M from './map.js';
 
-export const APP_VERSION = '0.3.1';
+export const APP_VERSION = '0.4.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -176,6 +176,7 @@ async function screenHome() {
           h('strong', {}, s.name), h('span', { class: 'addr' }, s.address),
           h('span', { class: 'items' }, s.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', ')),
           h('span', { class: 'chips' },
+            s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
             h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
             h('em', { class: 'chip p-' + d.progress }, s.removed ? '목록에서 제외됨' : LABEL.progress[d.progress]),
             d.fee.pendingCount ? h('em', { class: 'chip warn' }, '단가 확인 대기') : null)),
@@ -367,6 +368,8 @@ async function screenStop(id) {
     h('p', { class: 'small' }, `${stop.receipt_no} · 예정 ${stop.eta || '-'}`),
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
     stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
+    stop.revisit ? h('p', { class: 'notice' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
+    stop.appt ? h('p', { class: 'memo' }, `방문 약속: ${stop.appt[0] || ''}~${stop.appt[1] || ''}`) : null,
     st.mapEnabled ? h('div', { class: 'grid2' },
       btn(d.loc ? '🗺 지도에서 보기' : '🗺 위치 미지정', () => go(`#/map/${id}`), 'opt', { disabled: !d.loc }),
       btn(d.loc ? '📍 위치 고치기' : '📍 위치 지정', () => go(`#/pick/${id}`), 'opt')) : null,
@@ -583,13 +586,46 @@ async function screenExport() {
     await commit(); toast('PC 반영이 확인되었습니다'); render();
   }, 'big');
 
+  // 사진: 결과 파일과 따로, PC 공개키로 암호화한 사진 파일(.dgp)을 승인된 보안 매체로 옮긴다.
+  // PC가 해시를 대조하고 알려 주는 "사진 회수 확인 코드"를 넣은 사진만 이 휴대폰에서 지울 수 있다.
+  const recovered = new Set(st.recoveredPhotos || []);
+  const allPhotos = [...photoMetas.map((e) => ({ ...e.body, request_id: e.request_id })), ...(st.keptPhotos || [])];
+  const notRecovered = allPhotos.filter((p) => !recovered.has(p.photo_id));
+  const pmsg = h('p', { class: 'msg' });
+  const makePhotos = btn(`사진 파일 만들기 (${notRecovered.length}장)`, async () => {
+    makePhotos.disabled = true; pmsg.textContent = '암호화하는 중…';
+    try {
+      const photos = [];
+      for (const p of notRecovered) {
+        const b = await S.getSecureBytes('ph:' + p.photo_id);
+        if (b) photos.push({ photo_id: p.photo_id, request_id: p.request_id, phase: p.phase, sha256: p.sha256, data: B.b64(b) });
+      }
+      const signRaw = await P.exportRaw(dev.sign.publicKey);
+      const header = { btype: 4, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
+      const sealed = await P.seal({ schema: 'dg.photos/1', photos }, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
+      const name = `DG_P_${P.uuidStr(dev.id).slice(0, 8)}_${new Date().toISOString().slice(0, 16).replace(/\D/g, '')}.dgp`;
+      st.photoExports = [...(st.photoExports || []), { code: sealed.receipt, ids: photos.map((p) => p.photo_id), name, at: new Date().toISOString() }];
+      await commit();
+      const u = URL.createObjectURL(new File([sealed.bytes], name, { type: 'application/octet-stream' }));
+      const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
+      pmsg.textContent = `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 확인 코드를 받으세요.`;
+    } catch (e) { pmsg.textContent = '사진 파일을 만들지 못했습니다: ' + errMsg(e); }
+    makePhotos.disabled = false;
+  }, 'big', { disabled: !notRecovered.length });
+  const pcode = h('input', { type: 'text', placeholder: '사진 회수 확인 코드 8자리', class: 'pin', autocapitalize: 'characters', autocomplete: 'off' });
+  const pconfirm = btn('사진 회수 확인', async () => {
+    const c = pcode.value.replace(/\s/g, '').toUpperCase();
+    const ex = (st.photoExports || []).find((x) => x.code === c);
+    if (!ex) return toast('맞는 사진 회수 확인 코드가 없습니다.', 'bad');
+    st.recoveredPhotos = [...new Set([...(st.recoveredPhotos || []), ...ex.ids])];
+    await commit(); toast(`사진 ${ex.ids.length}장 회수가 확인되었습니다`); render();
+  }, 'big');
+
   const allConfirmed = !unsent().length && st.exports.every((x) => x.confirmed);
-  const photoChk = h('input', { type: 'checkbox', id: 'photoOk' });
   const cleanup = btn('오늘 자료 정리', async () => {
-    if (!confirm2('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 계속할까요?')) return;
-    if (photoChk.checked) for (const p of photoMetas) await S.delSecureBytes('ph:' + p.body.photo_id);
-    const keepPhotos = !photoChk.checked && photoMetas.length;
-    st = { ...emptyState(), seq: st.seq, releasedSeq: st.seq, keptPhotos: keepPhotos ? photoMetas.map((p) => p.body) : [] };
+    if (!confirm2('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다. 계속할까요?')) return;
+    for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
+    st = { ...emptyState(), mode: st.mode, mapEnabled: st.mapEnabled, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
 
@@ -600,10 +636,11 @@ async function screenExport() {
       make, msg),
     h('section', { class: 'card' }, h('h2', {}, 'PC 반영 확인'), codeIn, confirm,
       h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.confirmed ? '반영 확인됨' : '확인 대기'}`)))),
-    h('section', { class: 'card' }, h('h2', {}, `사진 ${photoMetas.length}장 보관 중`),
-      h('p', { class: 'small' }, '사진은 보안 USB로 따로 회수합니다(시제품 미구현). 회수가 확인되기 전에는 지우지 마세요.'),
-      h('label', { class: 'check' }, photoChk, ' 관리자가 사진 회수를 확인함 (정리할 때 사진도 지움)'),
-      cleanup, allConfirmed ? null : h('p', { class: 'small' }, '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.')));
+    h('section', { class: 'card' }, h('h2', {}, `사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`),
+      h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다.'),
+      makePhotos, pmsg, pcode, pconfirm),
+    h('section', { class: 'card' }, h('h2', {}, '정리'), cleanup,
+      allConfirmed ? null : h('p', { class: 'small' }, '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.')));
 }
 const confirm2 = (m) => window.confirm(m);
 
