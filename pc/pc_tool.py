@@ -94,7 +94,7 @@ def find_one(con, table: str, prefix: str) -> str:
     return rows[0][0]
 
 
-def qr_png_data_uri(text: str, ec: str = "M") -> str:
+def qr_png_data_uri(text: str, ec: str = "M") -> tuple[str, int]:
     level = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q}[ec]
     q = qrcode.QRCode(error_correction=level, box_size=8, border=4)
     q.add_data(qrcode.util.QRData(text, mode=qrcode.util.MODE_ALPHA_NUM))
