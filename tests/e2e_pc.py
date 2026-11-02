@@ -76,6 +76,28 @@ class Phone:
         return P.seal(payload, head, self.pc_kex, self.sign)[0]
 
 
+def write_y4m(path, frames, hold=4, loops=4, w=1280, h=720):
+    import io as _io
+    from PIL import Image
+    sys.path.insert(0, str(ROOT / "pc"))
+    import pc_tool
+    out = []
+    for f in frames:
+        uri, _ = pc_tool.qr_png_data_uri(f, "M")
+        im = Image.open(_io.BytesIO(base64.b64decode(uri.split(",")[1]))).convert("RGB")
+        canvas = Image.new("RGB", (w, h), "white")
+        side = h - 40
+        canvas.paste(im.resize((side, side), Image.NEAREST), ((w - side) // 2, 20))
+        y, cb, cr = canvas.convert("YCbCr").split()
+        out.append(y.tobytes() + cb.resize((w // 2, h // 2)).tobytes() + cr.resize((w // 2, h // 2)).tobytes())
+    with open(path, "wb") as fh:
+        fh.write(f"YUV4MPEG2 W{w} H{h} F10:1 Ip A1:1 C420jpeg\n".encode())
+        for _ in range(loops):
+            for fr in out:
+                for _ in range(hold):
+                    fh.write(b"FRAME\n" + fr)
+
+
 def raw_get(path, headers=None):
     req = urllib.request.Request(URL.rstrip("/") + path, headers=headers or {})
     try:
@@ -108,6 +130,7 @@ def main():
 
 
 def run():
+    expect.set_options(timeout=15000)
     # 서버 보안
     no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     urllib.request.install_opener(no_proxy)
@@ -136,11 +159,12 @@ def run():
 
         # 비밀번호 설정
         page.goto(URL)
-        page.get_by_placeholder("업무 비밀번호").fill(PW)
-        page.get_by_placeholder("한 번 더").fill(PW)
-        page.get_by_role("button", name="비밀번호 설정").click()
-        expect(page.get_by_role("heading", name="접수")).to_be_visible()
-        ok(True, "최초 업무 비밀번호 설정 후 로그인")
+        page.get_by_placeholder(re.compile("^이름")).fill("시험 관리자")
+        page.get_by_placeholder("비밀번호", exact=True).fill(PW)
+        page.get_by_placeholder("비밀번호 한 번 더").fill(PW)
+        page.get_by_role("button", name="관리자 계정 만들기").click()
+        expect(page.get_by_role("heading", name="오늘 현황")).to_be_visible()
+        ok(True, "최초 운영 관리자 계정(admin) 만들기 후 로그인 → 오늘 현황")
 
         # 휴대폰 등록·팀
         page.goto(URL + "#/settings")
@@ -305,8 +329,68 @@ def run():
         vrow.get_by_role("button", name="저장").click()
         expect(page.get_by_text("보정값을 저장했습니다")).to_be_visible()
         ok(abs(list(S.volume_overrides(store.connect()).values())[0] - 1.8) < 1e-9, "적재량 보정값 저장 (추정치와 별도)")
+        # 백업·사진 보관
+        page.get_by_placeholder(re.compile("^백업 비밀번호 \\(12자")).fill("backup-pass-e2e-0001")
+        page.get_by_placeholder("한 번 더").fill("backup-pass-e2e-0001")
+        page.get_by_role("button", name="지금 백업").click()
+        expect(page.get_by_text(re.compile("백업했습니다: donggu-backup-"))).to_be_visible()
+        brow = page.locator("tr", has_text="donggu-backup-").first
+        brow.get_by_placeholder("백업 비밀번호").fill("backup-pass-e2e-0001")
+        brow.get_by_role("button", name="열어 확인").click()
+        expect(page.get_by_text(re.compile("정상: 접수 \\d+건"))).to_be_visible()
+        ok(True, "설정: 암호화 백업 만들기 → 백업 비밀번호로 열어 확인")
+
+        # 오늘 현황
+        page.goto(URL + "#/home")
+        expect(page.locator(".kpi").first).to_be_visible()
+        page.screenshot(path=SHOTS / "pc_10_home.png", full_page=True)
+        ok(page.locator(".kpi", has_text="수거 완료").inner_text().find("1건") >= 0 and page.locator(".crew").count() == 1, "오늘 현황: 완료 1건, 팀별 진행 표시")
+
+        # 사용자 추가 (접수 담당자) + 변경 이력
+        page.goto(URL + "#/users")
+        page.get_by_placeholder("아이디 (영문)").fill("intake1")
+        page.get_by_placeholder("이름", exact=True).fill("접수 담당")
+        page.get_by_placeholder(re.compile("임시 비밀번호")).fill("temp-pass-e2e-01")
+        page.get_by_role("button", name="사용자 추가").click()
+        expect(page.get_by_role("cell", name="intake1", exact=True).first).to_be_visible()
+        expect(page.locator("table.audit td", has_text="admin").first).to_be_visible()
+        page.screenshot(path=SHOTS / "pc_11_users.png", full_page=True)
+        ok(page.locator("table.audit tr", has_text="등록").count() >= 1 and page.locator("table.audit tr", has_text="수정").count() >= 1,
+           "사용자·변경 이력: 접수 담당자 추가, 작업자(admin)별 등록·수정 이력 표시")
         ok(not errors, "화면 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
         b.close()
+
+        # 역방향 QR: 휴대폰 화면의 결과 QR → PC 웹캠 (가짜 카메라 영상)
+        s2 = payload["stops"][1]
+        ev2 = [phone.ev(s2, "CONTACT", {"result": "NO_ANSWER"}), phone.ev(s2, "ATTEMPT", {"outcome": "NOT_COLLECTED"})]
+        rq = phone.seal({"schema": "dg.result/1", "work_date": today, "events": ev2}, P.TYPE_RESULT)
+        frames2 = P.split_frames(rq, uuid.uuid4().bytes, 600)
+        write_y4m(WORK / "result.y4m", frames2)
+        b2 = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True,
+                                args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", f"--use-file-for-fake-video-capture={WORK / 'result.y4m'}"])
+        c2 = b2.new_context(viewport={"width": 1400, "height": 950}, permissions=["camera"])
+        p2 = c2.new_page()
+        p2.goto(URL)
+        p2.get_by_placeholder("아이디").fill("intake1")
+        p2.get_by_placeholder("비밀번호").fill("temp-pass-e2e-01")
+        p2.get_by_role("button", name="로그인").click()
+        expect(p2.get_by_role("heading", name="내 계정")).to_be_visible()
+        p2.locator("label", has_text="현재 비밀번호").locator("input").fill("temp-pass-e2e-01")
+        p2.locator("label", has_text="새 비밀번호 (10자").locator("input").fill("intake-pass-0002")
+        p2.locator("label", has_text="새 비밀번호 확인").locator("input").fill("intake-pass-0002")
+        p2.get_by_role("button", name="비밀번호 바꾸기").click()
+        expect(p2.get_by_role("heading", name="접수")).to_be_visible()
+        nav = p2.locator("nav.side").inner_text()
+        st403 = p2.evaluate("""async () => (await fetch('/api/settings', {method:'POST', headers:{'X-DG-CSRF':'1','Content-Type':'application/json'}, body:'{"osrm_url":""}'})).status""")
+        ok("설정" not in nav and "사용자" not in nav and st403 == 403, "접수 담당자: 임시 비밀번호 변경 강제, 설정·사용자 메뉴 없음, 설정 API 403")
+        p2.goto(URL + "#/results")
+        p2.get_by_role("button", name="웹캠으로 읽기").click()
+        expect(p2.get_by_text("보관 종료 확인 코드")).to_be_visible(timeout=60000)
+        code2 = p2.locator(".big").inner_text()
+        ok(len(code2) == 8 and S.get_request(store.connect(), s2["request_id"])["status"] == "NOT_COLLECTED",
+           f"역방향 QR {len(frames2)}장 웹캠 수신 → 결과 반영(미수거), 확인 코드 {code2}")
+        ok(S.rows(store.connect(), "SELECT channel FROM result_import ORDER BY imported_at DESC LIMIT 1")[0]["channel"] == "QR", "회수 경로가 'QR'로 기록됨")
+        b2.close()
 
     external = [u for u, _ in REQUESTS if not u.startswith(("http://127.0.0.1", "data:", "blob:"))]
     hosts = sorted({u.split("/")[2] for u in external})

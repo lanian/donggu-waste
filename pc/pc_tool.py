@@ -12,6 +12,7 @@
   python pc_tool.py confirm-receipt <묶음 앞8자> <코드>
   python pc_tool.py import-result <파일.dgr>
   python pc_tool.py import-photos <파일.dgp>
+  python pc_tool.py backup | restore <파일.dgbak> | reset-admin | purge-photos
 
 자료는 SQLCipher로 암호화된 pc/state/pc.db 에 있고, PC 개인키도 그 안에 있다.
 DB 키는 운영체제 키 저장소(또는 DG_DB_KEY, 또는 시작할 때 입력)에서 가져온다.
@@ -195,6 +196,68 @@ def cmd_status(_):
         print("  ", r["id"][:8], r["channel"], r["imported_at"], r["summary_json"])
 
 
+def _backup_pass(confirm: bool) -> str:
+    import getpass
+    v = os.environ.get("DG_BACKUP_PASS")
+    if v:
+        return v
+    a = getpass.getpass("백업 비밀번호: ")
+    if confirm and getpass.getpass("한 번 더: ") != a:
+        sys.exit("두 번 입력한 비밀번호가 다릅니다.")
+    return a
+
+
+def cmd_backup(_):
+    c = con()
+    S.ACTOR.set("cli")
+    try:
+        r = S.make_backup(c, _backup_pass(True))
+    except S.UserError as e:
+        sys.exit(str(e))
+    print(f"백업 완료: {r['file']}  ({r['bytes']:,}B, sha256 {r['sha256'][:16]}…)")
+
+
+def cmd_restore(a):
+    from dgpc import store
+    print("※ PC 업무 화면(serve)을 끈 상태에서 실행하세요. 기존 DB는 지우지 않고 옆에 보관합니다.")
+    if not a.yes and input("계속할까요? (yes 입력): ").strip() != "yes":
+        sys.exit("취소했습니다.")
+    try:
+        r = store.restore_from(a.file, _backup_pass(False))
+    except ValueError as e:
+        sys.exit(str(e))
+    c = store.connect()
+    S.ACTOR.set("cli")
+    with S.tx(c):
+        S.audit(c, "backup", os.path.basename(a.file), "RESTORE", {"file": os.path.basename(a.file), "requests": r["requests"]})
+    print(f"복원 완료: 접수 {r['requests']}건." + (f" 이전 DB 보관: {r['kept']}" if r["kept"] else ""))
+
+
+def cmd_reset_admin(a):
+    """관리자 비밀번호를 잊었을 때: DB 키를 아는 사람만 이 PC에서 실행할 수 있다."""
+    import getpass
+    c = con()
+    S.migrate_legacy_login(c)
+    u = S.one(c, "SELECT id FROM app_user WHERE username=? AND role='ADMIN'", (a.username,))
+    if not u:
+        sys.exit("해당 관리자 아이디가 없습니다.")
+    pw = os.environ.get("DG_NEW_PASS") or getpass.getpass("새 임시 비밀번호(10자 이상): ")
+    S.ACTOR.set("cli")
+    try:
+        S.set_password(c, u["id"], pw, must_change=True)
+        c.execute("UPDATE app_user SET active=1 WHERE id=?", (u["id"],))
+    except S.UserError as e:
+        sys.exit(str(e))
+    print("재설정했습니다. 다음 로그인 때 새 비밀번호로 바꾸게 됩니다.")
+
+
+def cmd_purge_photos(_):
+    c = con()
+    S.ACTOR.set("cli")
+    r = S.purge_photos(c)
+    print(f"사진 {r['count']}장 정리 ({r['bytes']:,}B)")
+
+
 def cmd_serve(a):
     from dgpc import server
     server.serve(a.port)
@@ -218,6 +281,10 @@ def main(argv=None):
     i.add_argument("--channel", choices=["MAIL", "QR", "USB"], default="MAIL"); i.set_defaults(fn=cmd_import_result)
     ip = s.add_parser("import-photos"); ip.add_argument("file"); ip.set_defaults(fn=cmd_import_photos)
     s.add_parser("status").set_defaults(fn=cmd_status)
+    s.add_parser("backup").set_defaults(fn=cmd_backup)
+    rs = s.add_parser("restore"); rs.add_argument("file"); rs.add_argument("--yes", action="store_true"); rs.set_defaults(fn=cmd_restore)
+    ra = s.add_parser("reset-admin"); ra.add_argument("--username", default="admin"); ra.set_defaults(fn=cmd_reset_admin)
+    s.add_parser("purge-photos").set_defaults(fn=cmd_purge_photos)
     a = p.parse_args(argv)
     a.fn(a)
 

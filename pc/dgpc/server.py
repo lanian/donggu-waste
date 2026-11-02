@@ -28,43 +28,42 @@ from . import routing, service as S, store
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
-WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
+WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
 UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://tiles.openfreemap.org; "
-       "connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; "
+       "connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; media-src 'self' blob: mediastream:; object-src 'none'; base-uri 'none'; "
        "form-action 'none'; frame-ancestors 'none'")
 IDLE_S = 30 * 60
 MAX_BODY = 40 * 1024 * 1024
 
 LOCK = threading.Lock()
 CON = None
-SESSIONS: dict[str, float] = {}
+SESSIONS: dict[str, dict] = {}
 FAILS = {"n": 0, "until": 0.0}
 PORT = 8765
 
 
-def _hash(pw: str, salt: bytes) -> str:
-    return hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1).hex()
+# 역할별 허용 API (운영 관리자는 전부)
+#  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감
+#  FIELD(수거팀): 조회, 결과·사진 가져오기, 하차 기록, QR 실측
+PERM = {
+    "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me"},
+               "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password"}},
+    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me"},
+              "POST": {"import", "unloads", "qrtest", "password"}},
+}
 
 
-def password_set() -> bool:
-    return bool(S.get_setting(CON, "login"))
-
-
-def set_password(pw: str):
-    if len(pw) < 10:
-        raise S.UserError("업무 비밀번호는 10자 이상으로 정해 주세요.")
-    salt = secrets.token_bytes(16)
-    with S.tx(CON):
-        S.set_setting(CON, "login", {"salt": salt.hex(), "hash": _hash(pw, salt)})
-
-
-def check_password(pw: str) -> bool:
-    rec = S.get_setting(CON, "login")
-    return bool(rec) and hmac.compare_digest(_hash(pw, bytes.fromhex(rec["salt"])), rec["hash"])
+def allowed(role: str, method: str, p: str) -> bool:
+    if role == "ADMIN":
+        return True
+    head = p.split("/")[0]
+    if role == "FIELD" and method == "POST" and head == "requests":
+        return False
+    return head in PERM.get(role, {}).get(method, set())
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -106,11 +105,11 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return None
         t = m.group(1)
-        exp = SESSIONS.get(t)
-        if not exp or exp < time.time():
+        sess = SESSIONS.get(t)
+        if not sess or sess["exp"] < time.time():
             SESSIONS.pop(t, None)
             return None
-        SESSIONS[t] = time.time() + IDLE_S
+        sess["exp"] = time.time() + IDLE_S
         return t
 
     def body(self) -> bytes:
@@ -120,8 +119,16 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n else b""
 
     def json_body(self) -> dict:
+        if getattr(self, "json_body_cache", None) is not None:
+            return self.json_body_cache
         b = self.body()
-        return json.loads(b.decode() or "{}") if b else {}
+        self.json_body_cache = json.loads(b.decode() or "{}") if b else {}
+        return self.json_body_cache
+
+    def me(self) -> dict:
+        u = self.user
+        return {"username": u["username"], "display_name": u["display_name"], "role": u["role"], "role_label": S.ROLES[u["role"]],
+                "must_change": bool(u.get("must_change"))}
 
     # ---------------------------------------------------------- 진입점
     def do_GET(self):
@@ -131,6 +138,9 @@ class Handler(BaseHTTPRequestHandler):
         self.route("POST")
 
     def route(self, method):
+        self.json_body_cache = None
+        self.user = None
+        S.ACTOR.set("system")
         if not self.host_ok():
             return self.send_json({"error": "허용되지 않은 주소입니다."}, 403)
         url = urllib.parse.urlsplit(self.path)
@@ -167,37 +177,59 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- API
     def api(self, method, p, qs):
         if p == "state" and method == "GET":
-            return self.send_json({"setup_needed": not password_set(), "logged_in": bool(self.session())})
-        if p == "setup" and method == "POST":
             with LOCK:
-                if password_set():
+                need = not S.users_exist(CON)
+            return self.send_json({"setup_needed": need, "logged_in": bool(self.session())})
+        if p == "setup" and method == "POST":
+            d = self.json_body()
+            with LOCK:
+                if S.users_exist(CON):
                     raise S.UserError("이미 설정되어 있습니다.")
-                set_password(self.json_body().get("password") or "")
-            return self.login_ok()
+                S.ACTOR.set(d.get("username") or "admin")
+                S.create_user(CON, d.get("username") or "", d.get("display_name") or "운영 관리자", "ADMIN", d.get("password") or "")
+                u = S.check_login(CON, d.get("username") or "", d.get("password") or "")
+            return self.login_ok(u)
         if p == "login" and method == "POST":
             if time.time() < FAILS["until"]:
                 raise S.UserError(f"여러 번 틀렸습니다. {int(FAILS['until'] - time.time())}초 뒤 다시 시도하세요.")
+            d = self.json_body()
             with LOCK:
-                good = check_password(self.json_body().get("password") or "")
+                good = S.check_login(CON, d.get("username") or "", d.get("password") or "")
+                if good:
+                    S.ACTOR.set(good["username"])
+                    with S.tx(CON):
+                        S.audit(CON, "user", good["id"], "LOGIN", None)
+                else:
+                    S.ACTOR.set((d.get("username") or "?")[:30])
+                    with S.tx(CON):
+                        S.audit(CON, "user", "-", "LOGIN_FAIL", None)
             if not good:
                 FAILS["n"] += 1
                 if FAILS["n"] >= 5:
                     FAILS["until"] = time.time() + min(30 * 2 ** (FAILS["n"] - 5), 1800)
-                raise S.UserError("비밀번호가 맞지 않습니다.")
+                raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
             FAILS.update(n=0, until=0)
-            return self.login_ok()
+            return self.login_ok(good)
         tok = self.session()
         if not tok:
             return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
         if p == "logout" and method == "POST":
             SESSIONS.pop(tok, None)
             return self.send_json({"ok": True}, extra={"Set-Cookie": "dg_s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"})
+        sess = SESSIONS[tok]
+        if not allowed(sess["role"], method, p):
+            return self.send_json({"error": "이 작업은 권한이 없습니다."}, 403)
+        if sess.get("must_change") and p not in ("me", "password", "bootstrap"):
+            return self.send_json({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
+        self.user = sess
         with LOCK:
+            S.ACTOR.set(sess["username"])
             return self.api_authed(method, p, qs)
 
-    def login_ok(self):
+    def login_ok(self, u):
         t = secrets.token_urlsafe(32)
-        SESSIONS[t] = time.time() + IDLE_S
+        SESSIONS[t] = {"exp": time.time() + IDLE_S, "user_id": u["id"], "username": u["username"], "role": u["role"],
+                       "display_name": u["display_name"], "must_change": u.get("must_change", False)}
         return self.send_json({"ok": True}, extra={"Set-Cookie": f"dg_s={t}; Path=/; HttpOnly; SameSite=Strict"})
 
     def api_authed(self, method, p, qs):
@@ -206,7 +238,18 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if p == "bootstrap":
                 return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
-                                       "today": S.today_kst()})
+                                       "today": S.today_kst(), "me": self.me()})
+            if p == "me":
+                return self.send_json(self.me())
+            if p == "users":
+                return self.send_json(S.list_users(c))
+            if p == "backups":
+                return self.send_json({"dir": str(S.backup_dir(c)), "files": S.list_backups(c)})
+            if p == "photo-purge":
+                cand = S.purge_candidates(c)
+                return self.send_json({"count": len(cand), "bytes": sum(x["bytes"] or 0 for x in cand), "days": S.settings(c)["photo_retention_days"]})
+            if p == "audit":
+                return self.send_json(S.list_audit(c, qs.get("entity", ""), qs.get("date", ""), qs.get("actor", "")))
             if p == "requests":
                 return self.send_json(S.list_requests(c, qs.get("q", ""), qs.get("date", ""), qs.get("status", "")))
             if parts[0] == "requests" and len(parts) == 2:
@@ -262,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                 S.confirm_receipt(c, parts[1], self.json_body().get("code", ""))
                 return self.send_json({"ok": True})
             if p == "import/result":
-                return self.send_json(S.import_result(c, self.body(), "MAIL"))
+                return self.send_json(S.import_result(c, self.body(), "QR" if qs.get("channel") == "QR" else "MAIL"))
             if p == "import/photos":
                 return self.send_json(S.import_photos(c, self.body()))
             if parts[0] == "conflicts" and len(parts) == 2:
@@ -297,6 +340,34 @@ class Handler(BaseHTTPRequestHandler):
             if parts[0] == "qrtest" and len(parts) == 3 and parts[2] == "result":
                 d = self.json_body()
                 return self.send_json(S.record_qr_test(c, parts[1], d.get("elapsed_s") or 0, d.get("reads") or 0, d.get("check", ""), d.get("note", "")))
+            if p == "users":
+                d = self.json_body()
+                return self.send_json({"id": S.create_user(c, d.get("username", ""), d.get("display_name", ""), d.get("role", ""),
+                                                           d.get("password", ""), must_change=True)})
+            if parts[0] == "users" and len(parts) == 3 and parts[2] == "active":
+                S.set_user_active(c, parts[1], bool(self.json_body().get("active")), self.user["user_id"])
+                if not self.json_body_cache.get("active"):
+                    for k in [k for k, v in SESSIONS.items() if v["user_id"] == parts[1]]:
+                        SESSIONS.pop(k, None)
+                return self.send_json({"ok": True})
+            if parts[0] == "users" and len(parts) == 3 and parts[2] == "password":
+                S.set_password(c, parts[1], self.json_body().get("password", ""), must_change=True)
+                for k in [k for k, v in SESSIONS.items() if v["user_id"] == parts[1]]:
+                    SESSIONS.pop(k, None)
+                return self.send_json({"ok": True})
+            if p == "backup":
+                r = S.make_backup(c, self.json_body().get("passphrase", ""))
+                return self.send_json({k: r[k] for k in ("name", "bytes", "sha256")})
+            if p == "backups/verify":
+                d = self.json_body()
+                return self.send_json(S.verify_backup(c, d.get("name", ""), d.get("passphrase", "")))
+            if p == "photo-purge":
+                return self.send_json(S.purge_photos(c))
+            if p == "password":  # 본인 비밀번호 변경
+                d = self.json_body()
+                S.set_password(c, self.user["user_id"], d.get("password", ""), old=d.get("old", ""))
+                self.user["must_change"] = False
+                return self.send_json({"ok": True})
             if p == "settings":
                 S.save_settings(c, self.json_body())
                 return self.send_json(S.settings(c))
@@ -318,7 +389,8 @@ class Handler(BaseHTTPRequestHandler):
         st = S.settings(c)
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
-                           volume_overrides=S.volume_overrides(c))
+                           volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
+                           max_unloads=st["max_unloads"])
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"]} for r in reqs}
@@ -371,6 +443,7 @@ def serve(port: int = 8765):
     PORT = port
     CON = store.connect()
     S.ensure_pc_keys(CON)
+    S.migrate_legacy_login(CON)
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"동구 대형폐기물 PC 업무 화면: http://127.0.0.1:{port}  (이 PC에서만 열립니다. 끝내려면 Ctrl+C)")
     try:

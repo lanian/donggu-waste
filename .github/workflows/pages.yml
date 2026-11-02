@@ -25,6 +25,7 @@ jobs:
       - run: npm ci
       - run: cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js   # 포함된 라이브러리가 고정 버전과 같은지
       - run: cmp node_modules/maplibre-gl/dist/maplibre-gl.mjs web/vendor/maplibre/maplibre-gl.mjs && cmp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs web/vendor/maplibre/maplibre-gl-worker.mjs
+      - run: cmp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs
       - run: python tools/build_fee_js.py && git diff --exit-code web/fees-data.js   # 앱 내장 수수료표가 원본 JSON과 같은지
       - run: npm test
       - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)

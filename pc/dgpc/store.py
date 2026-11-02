@@ -103,6 +103,10 @@ CREATE INDEX IF NOT EXISTS ix_payment_req ON payment(request_id);
 CREATE TABLE IF NOT EXISTS unload_log (
   id TEXT PRIMARY KEY, crew_id TEXT NOT NULL REFERENCES crew(id), work_date TEXT NOT NULL, at_time TEXT, place TEXT NOT NULL,
   volume_m3 REAL, weight_kg REAL, note TEXT, recorded_at TEXT NOT NULL, void_reason TEXT);
+CREATE TABLE IF NOT EXISTS app_user (
+  id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('ADMIN','INTAKE','FIELD')), pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login_at TEXT);
 CREATE TABLE IF NOT EXISTS day_close (work_date TEXT PRIMARY KEY, closed_at TEXT NOT NULL, summary_json TEXT NOT NULL, note TEXT);
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL,
@@ -169,6 +173,11 @@ def connect(create: bool = False):
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
     con.executescript(SCHEMA)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(audit_log)").fetchall()}
+    if "actor" not in cols:  # 이전 버전 DB에 작업자 열 추가
+        con.execute("ALTER TABLE audit_log ADD COLUMN actor TEXT")
+    if "purged_at" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:
+        con.execute("ALTER TABLE photo ADD COLUMN purged_at TEXT")
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -178,3 +187,96 @@ def connect(create: bool = False):
 
 def _quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
+
+
+# ------------------------------------------------------------------ 백업·복원
+BACKUP_MAGIC_TABLE = "dg_backup_info"
+
+
+def backup_to(con, dest: Path, passphrase: str) -> Path:
+    """현재 DB를 별도 백업 비밀번호로 암호화한 새 파일로 내보낸다(DB 키와 다른 비밀번호).
+
+    백업 파일은 SQLCipher 형식이라 백업 비밀번호 없이는 열리지 않는다.
+    """
+    if len(passphrase or "") < 12:
+        raise ValueError("백업 비밀번호는 12자 이상으로 정해 주세요.")
+    dest = Path(dest)
+    if dest.exists():
+        raise ValueError("같은 이름의 백업 파일이 이미 있습니다.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    con.execute("PRAGMA wal_checkpoint(FULL)")
+    if ENCRYPTED:
+        con.execute(f"ATTACH DATABASE {_quote(str(dest))} AS bk KEY {_quote(passphrase)}")
+        try:
+            con.execute("SELECT sqlcipher_export('bk')")
+        finally:
+            con.execute("DETACH DATABASE bk")
+    else:  # 개발용 평문 모드
+        out = dbapi.connect(str(dest))
+        con.backup(out)
+        out.close()
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
+    return dest
+
+
+def open_backup(src: Path, passphrase: str):
+    """백업 파일을 읽기용으로 열고 무결성을 확인한다."""
+    src = Path(src)
+    if not src.exists():
+        raise ValueError("백업 파일이 없습니다.")
+    bcon = dbapi.connect(str(src), check_same_thread=False, isolation_level=None)
+    if ENCRYPTED:
+        bcon.execute("PRAGMA key = " + _quote(passphrase))
+    try:
+        ok = bcon.execute("PRAGMA integrity_check").fetchone()[0]
+        n = bcon.execute("SELECT count(*) FROM request").fetchone()[0]
+    except Exception:
+        bcon.close()
+        raise ValueError("백업 파일을 열 수 없습니다. 백업 비밀번호를 확인하세요.")
+    if ok != "ok":
+        bcon.close()
+        raise ValueError("백업 파일이 손상되었습니다.")
+    return bcon, n
+
+
+def restore_from(src: Path, passphrase: str) -> dict:
+    """백업 파일을 현재 DB 키로 다시 암호화해 업무 DB로 되돌린다. 기존 DB는 지우지 않고 옆에 보관한다.
+
+    PC 업무 화면(serve)을 끈 상태에서만 실행한다.
+    """
+    import datetime as _dt
+    bcon, n = open_backup(src, passphrase)
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    cur = d / "pc.db"
+    tmp = d / "pc.db.restoring"
+    for f in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
+        if f.exists():
+            f.unlink()
+    key = db_key(create=not cur.exists()) if ENCRYPTED else None
+    if ENCRYPTED:
+        bcon.execute(f"ATTACH DATABASE {_quote(str(tmp))} AS cur KEY {_quote(key)}")
+        bcon.execute("SELECT sqlcipher_export('cur')")
+        bcon.execute("DETACH DATABASE cur")
+    else:
+        out = dbapi.connect(str(tmp))
+        bcon.backup(out)
+        out.close()
+    bcon.close()
+    kept = None
+    if cur.exists():
+        kept = d / f"pc.db.before-restore-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        cur.rename(kept)
+        for ext in ("-wal", "-shm"):
+            side = Path(str(cur) + ext)
+            if side.exists():
+                side.rename(Path(str(kept) + ext))
+    tmp.rename(cur)
+    try:
+        os.chmod(cur, 0o600)
+    except OSError:
+        pass
+    return {"requests": n, "kept": str(kept) if kept else None}

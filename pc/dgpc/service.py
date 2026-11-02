@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import contextvars
 import datetime as dt
 import hashlib
 import json
@@ -65,9 +66,12 @@ def one(con, sql, args=()):
     return r[0] if r else None
 
 
+ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("actor", default="system")
+
+
 def audit(con, entity, entity_id, action, detail=None):
-    con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at) VALUES (?,?,?,?,?)",
-                (entity, entity_id, action, json.dumps(detail, ensure_ascii=False) if detail is not None else None, now()))
+    con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor) VALUES (?,?,?,?,?,?)",
+                (entity, entity_id, action, json.dumps(detail, ensure_ascii=False) if detail is not None else None, now(), ACTOR.get()))
 
 
 # ------------------------------------------------------------------ PC 키 (암호화 DB 안에 보관)
@@ -161,6 +165,11 @@ def settings(con) -> dict:
         "osrm_url": get_setting(con, "osrm_url", ""),
         "service_min_base": get_setting(con, "service_min_base", 5),
         "service_min_per_item": get_setting(con, "service_min_per_item", 3),
+        "photo_retention_days": get_setting(con, "photo_retention_days", 90),
+        "unload_site": get_setting(con, "unload_site", None),
+        "unload_min": get_setting(con, "unload_min", 20),
+        "max_unloads": get_setting(con, "max_unloads", 2),
+        "backup_dir": get_setting(con, "backup_dir", ""),
         "fee_version": FEE_TABLE["version_id"], "fee_label": FEE_TABLE["label"],
         "fee_checked_on": FEE_TABLE["source_checked_on"], "fee_effective_from": FEE_TABLE["effective_from"],
     }
@@ -179,6 +188,28 @@ def save_settings(con, data: dict):
         for k in ("service_min_base", "service_min_per_item"):
             if k in data:
                 set_setting(con, k, max(0, int(data[k])))
+        if "unload_site" in data:
+            u = data["unload_site"] or {}
+            if u.get("lat") in (None, "") or u.get("lon") in (None, ""):
+                set_setting(con, "unload_site", None)
+            else:
+                lat, lon = float(u["lat"]), float(u["lon"])
+                if not (33 <= lat <= 39 and 124 <= lon <= 132):
+                    raise UserError("반입지 좌표가 국내 범위를 벗어났습니다.")
+                set_setting(con, "unload_site", {"lat": lat, "lon": lon, "label": str(u.get("label") or "반입지")[:40]})
+        for k, lo, hi in (("unload_min", 0, 180), ("max_unloads", 0, 5)):
+            if k in data:
+                set_setting(con, k, min(hi, max(lo, int(data[k]))))
+        if "photo_retention_days" in data:
+            n = int(data["photo_retention_days"])
+            if not 7 <= n <= 3650:
+                raise UserError("사진 보관 기간은 7일~3650일 사이로 정해 주세요.")
+            set_setting(con, "photo_retention_days", n)
+        if "backup_dir" in data:
+            b = (data["backup_dir"] or "").strip()
+            if b and not Path(b).is_absolute():
+                raise UserError("백업 폴더는 이 PC의 전체 경로로 적어 주세요 (예: D:\\동구백업).")
+            set_setting(con, "backup_dir", b)
 
 
 # ------------------------------------------------------------------ 접수
@@ -354,8 +385,21 @@ def set_location(con, rid: str, lat: float, lon: float, source: str = "MANUAL"):
         audit(con, "request", rid, "LOCATION", {"source": source})
 
 
+_CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+
+
+def chosung_of(s: str) -> str:
+    return "".join(_CHO[(ord(ch) - 0xAC00) // 588] if 0 <= ord(ch) - 0xAC00 < 11172 else ch for ch in (s or ""))
+
+
+def is_chosung(s: str) -> bool:
+    return any("ㄱ" <= ch <= "ㅎ" for ch in s or "") and all("ㄱ" <= ch <= "ㅎ" or ch.isascii() for ch in s)
+
+
 def list_requests(con, q: str = "", date: str = "", status: str = "") -> list[dict]:
     sql, args = "SELECT * FROM request WHERE 1=1", []
+    cho = [t for t in (q or "").split() if is_chosung(t)]
+    q = " ".join(t for t in (q or "").split() if not is_chosung(t))
     if date:
         sql += " AND planned_date=?"; args.append(date)
     if status == "OPEN":
@@ -366,7 +410,9 @@ def list_requests(con, q: str = "", date: str = "", status: str = "") -> list[di
         qp = norm_phone(q)
         sql += " AND (name LIKE ? OR address LIKE ? OR receipt_no LIKE ?" + (" OR phone LIKE ?" if qp else "") + ")"
         args += [f"%{q}%"] * 3 + ([f"%{qp}%"] if qp else [])
-    out = rows(con, sql + " ORDER BY COALESCE(planned_date,'9999'), received_at DESC LIMIT 500", args)
+    out = rows(con, sql + " ORDER BY COALESCE(planned_date,'9999'), received_at DESC" + ("" if cho else " LIMIT 500"), args)
+    if cho:  # 초성 검색: 이름·주소의 초성 (예: ㄱㅅㅎ → 가상하나)
+        out = [r for r in out if all(t in chosung_of(re.sub(r"\s+", "", (r["name"] or "") + "|" + (r["address"] or ""))) for t in cho)][:500]
     for r in out:
         r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
         r["state"] = derive(con, r)
@@ -385,7 +431,7 @@ def get_request(con, rid: str) -> dict:
     r["state"] = derive(con, r)
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event
         WHERE request_id=? ORDER BY device_ts""", (rid,))
-    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status FROM photo WHERE request_id=?", (rid,))
+    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at FROM photo WHERE request_id=?", (rid,))
     r["payment"] = payment_status(con, rid)
     return r
 
@@ -760,7 +806,7 @@ def import_photos(con, data: bytes) -> dict:
 
 
 def photo_bytes(con, photo_id: str) -> bytes | None:
-    r = one(con, "SELECT data FROM photo WHERE photo_id=? AND recovery_status='RECOVERED'", (photo_id,))
+    r = one(con, "SELECT data FROM photo WHERE photo_id=? AND recovery_status='RECOVERED' AND purged_at IS NULL", (photo_id,))
     return r["data"] if r else None
 
 
@@ -956,3 +1002,171 @@ def save_volume_override(con, fee_rate_id: str, m3: float | None):
     with tx(con):
         set_setting(con, "volume_overrides", v)
         audit(con, "volume", fee_rate_id, "OVERRIDE", {"m3": m3})
+
+
+# ------------------------------------------------------------------ 사용자·역할 (접수 담당자·수거팀·운영 관리자)
+import hashlib as _hl
+import hmac as _hmac
+import secrets as _secrets
+
+ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀"}
+
+
+def _pw_hash(pw: str, salt: bytes) -> str:
+    return _hl.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1).hex()
+
+
+def _check_pw_rules(pw: str):
+    if len(pw or "") < 10:
+        raise UserError("비밀번호는 10자 이상으로 정해 주세요.")
+
+
+def users_exist(con) -> bool:
+    return bool(one(con, "SELECT 1 AS x FROM app_user LIMIT 1"))
+
+
+def migrate_legacy_login(con):
+    """v0.4 이하의 단일 업무 비밀번호를 관리자 계정(admin)으로 옮긴다."""
+    old = get_setting(con, "login")
+    if old and not users_exist(con):
+        with tx(con):
+            con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (str(uuid.uuid4()), "admin", "관리자", "ADMIN", old["salt"], old["hash"], now()))
+            con.execute("DELETE FROM meta WHERE key='login'")
+
+
+def create_user(con, username: str, display_name: str, role: str, password: str, must_change: bool = False) -> str:
+    username = (username or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9._-]{3,30}", username):
+        raise UserError("아이디는 영문 소문자·숫자·.-_ 3~30자로 정해 주세요.")
+    if role not in ROLES:
+        raise UserError("역할을 골라 주세요.")
+    if not (display_name or "").strip():
+        raise UserError("이름을 적어 주세요.")
+    _check_pw_rules(password)
+    if one(con, "SELECT 1 AS x FROM app_user WHERE username=?", (username,)):
+        raise UserError("이미 있는 아이디입니다.")
+    salt = _secrets.token_bytes(16)
+    uid = str(uuid.uuid4())
+    with tx(con):
+        con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, must_change, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (uid, username, display_name.strip(), role, salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, now()))
+        audit(con, "user", uid, "CREATE", {"username": username, "role": role})
+    return uid
+
+
+def check_login(con, username: str, password: str) -> dict | None:
+    u = one(con, "SELECT * FROM app_user WHERE username=? AND active=1", ((username or "").strip().lower(),))
+    if not u:
+        _pw_hash(password or "", b"0" * 16)  # 아이디 유무에 따른 응답 시간 차이를 줄인다
+        return None
+    if not _hmac.compare_digest(_pw_hash(password or "", bytes.fromhex(u["pw_salt"])), u["pw_hash"]):
+        return None
+    con.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (now(), u["id"]))
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"])}
+
+
+def list_users(con) -> list[dict]:
+    return rows(con, "SELECT id, username, display_name, role, active, must_change, created_at, last_login_at FROM app_user ORDER BY created_at")
+
+
+def set_user_active(con, uid: str, active: bool, me: str):
+    if uid == me and not active:
+        raise UserError("자기 계정은 중지할 수 없습니다.")
+    u = one(con, "SELECT role FROM app_user WHERE id=?", (uid,))
+    if not u:
+        raise UserError("사용자를 찾을 수 없습니다.")
+    if not active and u["role"] == "ADMIN" and one(con, "SELECT COUNT(*) AS n FROM app_user WHERE role='ADMIN' AND active=1")["n"] <= 1:
+        raise UserError("마지막 운영 관리자는 중지할 수 없습니다.")
+    with tx(con):
+        con.execute("UPDATE app_user SET active=? WHERE id=?", (1 if active else 0, uid))
+        audit(con, "user", uid, "ACTIVE" if active else "DEACTIVATE", None)
+
+
+def set_password(con, uid: str, password: str, must_change: bool = False, old: str | None = None):
+    _check_pw_rules(password)
+    u = one(con, "SELECT * FROM app_user WHERE id=?", (uid,))
+    if not u:
+        raise UserError("사용자를 찾을 수 없습니다.")
+    if old is not None and not _hmac.compare_digest(_pw_hash(old, bytes.fromhex(u["pw_salt"])), u["pw_hash"]):
+        raise UserError("현재 비밀번호가 맞지 않습니다.")
+    salt = _secrets.token_bytes(16)
+    with tx(con):
+        con.execute("UPDATE app_user SET pw_salt=?, pw_hash=?, must_change=? WHERE id=?", (salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, uid))
+        audit(con, "user", uid, "PASSWORD", {"reset_by_admin": must_change})
+
+
+def list_audit(con, entity: str = "", date: str = "", actor: str = "", limit: int = 300) -> list[dict]:
+    sql, args = "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log WHERE 1=1", []
+    if entity:
+        sql += " AND entity=?"; args.append(entity)
+    if date:  # 한국시간 날짜 → UTC 범위
+        d0 = dt.datetime.fromisoformat(date).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+        sql += " AND at >= ? AND at < ?"; args += [d0.strftime("%Y-%m-%dT%H:%M:%SZ"), (d0 + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")]
+    if actor:
+        sql += " AND actor=?"; args.append(actor)
+    return rows(con, sql + " ORDER BY id DESC LIMIT ?", args + [limit])
+
+
+# ------------------------------------------------------------------ 사진 보관 기간 정리
+def purge_candidates(con, today: str | None = None) -> list[dict]:
+    """보관 기간이 지난 사진: 회수 완료 + 접수가 끝남(수거 완료·취소) 또는 그날 마감됨 + 회수일로부터 기간 경과."""
+    days = settings(con)["photo_retention_days"]
+    t = dt.date.fromisoformat(today or today_kst())
+    cutoff = (dt.datetime.combine(t - dt.timedelta(days=days), dt.time()).replace(tzinfo=KST)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rows(con, """SELECT p.photo_id, p.request_id, p.bytes, p.recovered_at, r.receipt_no, r.status FROM photo p JOIN request r ON r.id=p.request_id
+        WHERE p.recovery_status='RECOVERED' AND p.purged_at IS NULL AND p.data IS NOT NULL AND p.recovered_at < ?
+          AND (r.status IN ('DONE','CANCELLED') OR EXISTS (SELECT 1 FROM day_close d WHERE d.work_date=r.planned_date))
+        ORDER BY p.recovered_at""", (cutoff,))
+
+
+def purge_photos(con, today: str | None = None) -> dict:
+    c = purge_candidates(con, today)
+    if not c:
+        return {"count": 0, "bytes": 0}
+    with tx(con):
+        t = now()
+        for p in c:
+            con.execute("UPDATE photo SET data=NULL, purged_at=? WHERE photo_id=?", (t, p["photo_id"]))
+        audit(con, "photo", "retention", "PURGE", {"count": len(c), "bytes": sum(p["bytes"] or 0 for p in c), "retention_days": settings(con)["photo_retention_days"]})
+    return {"count": len(c), "bytes": sum(p["bytes"] or 0 for p in c)}
+
+
+# ------------------------------------------------------------------ 백업
+def backup_dir(con) -> Path:
+    from dgpc import store as _store
+    b = settings(con)["backup_dir"]
+    return Path(b) if b else _store.state_dir() / "backups"
+
+
+def make_backup(con, passphrase: str) -> dict:
+    from dgpc import store as _store
+    dest = backup_dir(con) / f"donggu-backup-{dt.datetime.now(KST).strftime('%Y%m%d-%H%M%S')}.dgbak"
+    try:
+        _store.backup_to(con, dest, passphrase)
+    except ValueError as e:
+        raise UserError(str(e))
+    h = hashlib.sha256(dest.read_bytes()).hexdigest()
+    with tx(con):
+        audit(con, "backup", dest.name, "BACKUP", {"file": dest.name, "bytes": dest.stat().st_size, "sha256": h[:16]})
+    return {"file": str(dest), "name": dest.name, "bytes": dest.stat().st_size, "sha256": h}
+
+
+def list_backups(con) -> list[dict]:
+    d = backup_dir(con)
+    if not d.exists():
+        return []
+    return [{"name": f.name, "bytes": f.stat().st_size, "at": dt.datetime.fromtimestamp(f.stat().st_mtime, KST).strftime("%Y-%m-%d %H:%M")}
+            for f in sorted(d.glob("*.dgbak"), reverse=True)]
+
+
+def verify_backup(con, name: str, passphrase: str) -> dict:
+    from dgpc import store as _store
+    if "/" in name or "\\" in name or not name.endswith(".dgbak"):
+        raise UserError("백업 파일 이름이 올바르지 않습니다.")
+    try:
+        bcon, n = _store.open_backup(backup_dir(con) / name, passphrase)
+    except ValueError as e:
+        raise UserError(str(e))
+    bcon.close()
+    return {"ok": True, "requests": n}

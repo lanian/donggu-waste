@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 import os
 import sys
@@ -268,6 +269,85 @@ def main():
     ok([x["receipt_no"] for x in sm2["no_result"]] == [g1["receipt_no"]], f"마감 {day2}: 재배정했으나 결과 미회수 건 표시")
     S.close_day(con, day, "시험 마감")
     ok(S.day_summary(con, day)["closed"], "일일 마감 기록")
+
+    # 사용자·역할·변경 이력
+    sys.path.insert(0, str(ROOT / "pc" / "dgpc"))
+    from dgpc import server as SV
+    S.set_setting(con, "login", {"salt": "00" * 16, "hash": S._pw_hash("legacy-pass-123", b"\x00" * 16)})
+    con.commit()
+    S.migrate_legacy_login(con)
+    ok(S.check_login(con, "admin", "legacy-pass-123") and not S.get_setting(con, "login"), "이전 단일 업무 비밀번호 → 관리자 계정(admin)으로 이전")
+    raises(lambda: S.create_user(con, "kim", "김접수", "INTAKE", "short"), "10자", "비밀번호 10자 미만 거부")
+    raises(lambda: S.create_user(con, "Kim Lee", "김접수", "INTAKE", "long-enough-pw"), "아이디", "아이디 형식 검사")
+    S.ACTOR.set("admin")
+    uid = S.create_user(con, "kim", "김접수", "INTAKE", "temp-pass-0001", must_change=True)
+    raises(lambda: S.create_user(con, "kim", "김접수2", "INTAKE", "temp-pass-0001"), "이미", "같은 아이디 중복 거부")
+    u = S.check_login(con, "kim", "temp-pass-0001")
+    ok(u and u["role"] == "INTAKE" and u["must_change"], "접수 담당자 로그인, 임시 비밀번호 변경 요구")
+    ok(S.check_login(con, "kim", "wrong-password") is None and S.check_login(con, "nobody", "x") is None, "틀린 비밀번호·없는 아이디 거부")
+    raises(lambda: S.set_password(con, uid, "new-pass-0002", old="bad-old-pass"), "현재 비밀번호", "본인 변경 시 현재 비밀번호 확인")
+    S.set_password(con, uid, "new-pass-0002", old="temp-pass-0001")
+    ok(not S.check_login(con, "kim", "new-pass-0002")["must_change"], "비밀번호 변경 후 변경 요구 해제")
+    admin_id = S.one(con, "SELECT id FROM app_user WHERE username='admin'")["id"]
+    raises(lambda: S.set_user_active(con, admin_id, False, uid), "마지막 운영 관리자", "마지막 관리자 중지 거부")
+    S.set_user_active(con, uid, False, admin_id)
+    ok(S.check_login(con, "kim", "new-pass-0002") is None, "중지된 계정 로그인 거부")
+    ok(SV.allowed("INTAKE", "POST", "requests") and not SV.allowed("INTAKE", "POST", "users") and not SV.allowed("INTAKE", "POST", "settings")
+       and not SV.allowed("INTAKE", "GET", "audit") and not SV.allowed("INTAKE", "POST", "devices/register"), "접수 담당자: 접수 가능, 사용자·설정·기기·이력 불가")
+    ok(SV.allowed("FIELD", "POST", "import/result") and SV.allowed("FIELD", "POST", "unloads") and not SV.allowed("FIELD", "POST", "requests/x/cancel")
+       and not SV.allowed("FIELD", "POST", "assign") and not SV.allowed("FIELD", "GET", "duplicates"), "수거팀: 결과·하차 가능, 접수 수정·배정 불가")
+    S.ACTOR.set("kim")
+    S.cancel_request(con, sp[0]["id"], "주민 취소 요청(시험)")
+    a = S.list_audit(con, entity="request", actor="kim")
+    ok(a and a[0]["action"] == "CANCEL", "변경 이력에 작업자(kim) 기록")
+    ok(not any("가상오" in (x["detail"] or "") or "01000005555" in (x["detail"] or "") for x in S.list_audit(con, limit=1000)), "변경 이력 내용에 이름·연락처 없음")
+
+    # 초성 검색 + 반입지 경유
+    names = {r["name"] for r in S.list_requests(con, "ㄱㅅㅇ")}
+    ok({"가상오", "가상육"} <= names and not any(n.startswith("가상하") for n in names), f"접수 초성 검색 'ㄱㅅㅇ' → 가상오·가상육 ({len(names)}건)")
+    ok(all("예시로" in r["address"] for r in S.list_requests(con, "ㅇㅅㄹ 77")), "초성+일반 낱말 섞어 검색")
+    many = [{"id": f"u{i}", "lat": 35.14 + 0.004 * i, "lon": 126.92 + 0.003 * i, "items": [{"name": "장롱", "spec": "", "qty": 1, "fee_rate_id": "X"}]} for i in range(4)]
+    one_crew = [{"id": "c", "name": "1팀", "capacity_m3": 6, "shift_start": "09:00", "shift_end": "17:00"}]
+    dep = {"lat": 35.1462, "lon": 126.9233}
+    no_u = routing.plan(many, one_crew, dep, time_limit_s=1, volume_overrides={"X": 4})
+    with_u = routing.plan(many, one_crew, dep, time_limit_s=2, volume_overrides={"X": 4}, unload_site={"lat": 35.16, "lon": 126.95, "label": "가상 반입지"}, max_unloads=3)
+    rt = with_u["routes"][0]
+    ok(len(no_u["routes"][0]["stops"]) == 1 and len(rt["stops"]) == 4 and rt["unloads"] == 3 and all(s["load_m3"] <= 6 for s in rt["stops"]),
+       f"반입지 경유: 6m³ 차량으로 4m³×4건 → 하차 3회 끼워 4곳 모두 방문 (경유 없으면 1곳)")
+    raises(lambda: S.save_settings(con, {"unload_site": {"lat": 10, "lon": 10}}), "국내", "반입지 좌표 범위 검사")
+
+    # 사진 보관 기간 정리
+    S.ACTOR.set("admin")
+    raises(lambda: S.save_settings(con, {"photo_retention_days": 3}), "7일", "사진 보관 기간 범위 검사")
+    S.save_settings(con, {"photo_retention_days": 30})
+    rec = S.rows(con, "SELECT photo_id, request_id FROM photo WHERE recovery_status='RECOVERED'")
+    ok(rec and not S.purge_candidates(con), "회수 직후 사진은 정리 대상 아님")
+    ok(not S.purge_candidates(con, (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=40)).isoformat()), "처리 중(배정 상태)인 접수의 사진은 기간이 지나도 정리하지 않음")
+    S.close_day(con, day2, "시험 마감 2")
+    far = (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=40)).isoformat()
+    cand = S.purge_candidates(con, far)
+    ok(len(cand) >= 1, f"40일 뒤 기준 처리 끝난 접수 사진 {len(cand)}장 정리 대상")
+    pr = S.purge_photos(con, far)
+    ok(pr["count"] == len(cand) and S.photo_bytes(con, cand[0]["photo_id"]) is None
+       and S.one(con, "SELECT sha256, purged_at FROM photo WHERE photo_id=?", (cand[0]["photo_id"],))["purged_at"], "사진 원본 삭제, 해시·정리 시각은 남김")
+    ok(S.list_audit(con, entity="photo")[0]["action"] == "PURGE", "사진 정리 이력 기록")
+
+    # 암호화 백업·복원
+    raises(lambda: S.make_backup(con, "short"), "12자", "백업 비밀번호 12자 미만 거부")
+    b = S.make_backup(con, "backup-pass-for-test-01")
+    raw = Path(b["file"]).read_bytes()
+    ok(b"SQLite format 3" not in raw[:100] and "가상".encode() not in raw, "백업 파일은 암호화됨 (평문 머리·한글 자료 없음)")
+    raises(lambda: S.verify_backup(con, b["name"], "wrong-backup-pass-00"), "열 수 없습니다", "다른 백업 비밀번호로 열기 거부")
+    n_before = S.one(con, "SELECT COUNT(*) AS n FROM request")["n"]
+    ok(S.verify_backup(con, b["name"], "backup-pass-for-test-01")["requests"] == n_before, f"백업 열어 확인: 접수 {n_before}건")
+    raises(lambda: S.verify_backup(con, "../pc.db", "x" * 12), "이름", "백업 이름에 경로 넣기 거부")
+    con.execute("INSERT INTO meta (key, value) VALUES ('after_backup', '1')")
+    con.close()
+    rr = store.restore_from(Path(b["file"]), "backup-pass-for-test-01")
+    con = store.connect()
+    ok(rr["kept"] and Path(rr["kept"]).exists() and S.get_setting(con, "after_backup") is None and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n_before,
+       "복원: 백업 시점으로 되돌리고 기존 DB는 옆에 보관")
+    ok(S.check_login(con, "admin", "legacy-pass-123") is not None, "복원 뒤 현재 DB 키로 열리고 계정 유지")
     print(f"\n통과 {passed}개")
 
 

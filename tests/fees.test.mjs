@@ -1,5 +1,5 @@
 // 공식 수수료표([별표 1]) 검색·계산 규칙 테스트
-import { searchFees, deriveStop } from '../web/fees.js';
+import { searchFees, deriveStop, chosungOf, matchText } from '../web/fees.js';
 import { BUILTIN_FEES as T } from '../web/fees-data.js';
 
 let n = 0;
@@ -29,4 +29,9 @@ const d = deriveStop(stop, ev);
 ok(d.fee.received === 36000 && d.fee.confirmedSubtotal === 36000, '장롱 2쪽 30,000 + 의자 3개 6,000 = 36,000원');
 ok(d.fee.final === null && d.fee.pendingCount === 1, '규격 확인 필요 행 추가 → 최종 금액 미확정 (최저가 자동 선택 없음)');
 ok(d.fee.qtyByUnit['쪽'] === 2 && d.fee.qtyByUnit['개'] === 4, '쪽과 개를 하나의 개수로 합산하지 않음');
+// 초성 검색
+ok(first('ㅈㄹ').name === '장롱', "초성 'ㅈㄹ' → 장롱");
+ok(first('ㅅㅍㄱ').name === '선풍기' && searchFees(T, '3ㅇㅇ ㅅㅍ').some((r) => r.spec === '3인용 소파'), "초성 'ㅅㅍㄱ' → 선풍기, '3ㅇㅇ ㅅㅍ' → 3인용 소파");
+ok(searchFees(T, 'ㅁㅌㄹㅅ 2인').length >= 1, "초성과 일반 낱말 섞어 검색 'ㅁㅌㄹㅅ 2인'");
+ok(chosungOf('가상하나 동구') === 'ㄱㅅㅎㄴ ㄷㄱ' && matchText('가상하나 동구 시험로', 'ㄱㅅㅎ 시험'), '초성 변환·혼합 일치');
 console.log(`\n통과 ${n}개`);

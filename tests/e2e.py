@@ -156,6 +156,14 @@ def main():
         expect(page.locator(".stop")).to_have_count(20)
         ok(page.locator(".stop").count() == 20, "오늘 순서 20건 표시")
         page.screenshot(path=SHOTS / "04_list.png")
+        nm0 = page.locator(".stop").first.locator("strong").inner_text()
+        cho = "".join("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"[(ord(c) - 0xAC00) // 588] for c in nm0)
+        page.get_by_label("목록에서 찾기").fill(cho)
+        page.wait_for_timeout(700)
+        ok(1 <= page.locator(".stop").count() < 20 and nm0 in page.locator(".stop").first.inner_text(), f"목록 초성 찾기 '{cho}' → {page.locator('.stop').count()}곳")
+        page.get_by_label("목록에서 찾기").fill("")
+        page.wait_for_timeout(700)
+        expect(page.locator(".stop")).to_have_count(20)
 
         # 3) 상세: 이름·연락처·주소, 연락, 현장 확인, 추가, 결과 ---------------------
         first = page.locator(".stop").first
@@ -249,6 +257,14 @@ def main():
 
         # 5) 결과 보내기 → PC 가져오기 → 확인 코드 ---------------------------------
         page.goto(url + "#/export")
+        page.get_by_role("button", name="PC 화면 카메라로 보내기 (QR)").click()
+        expect(page.locator("canvas.qrcanvas")).to_be_visible()
+        page.wait_for_timeout(600)
+        decoded = page.evaluate("""() => { const c = document.querySelector('canvas.qrcanvas'); const x = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+          const q = window.jsQR(x.data, x.width, x.height); return q ? q.data : null; }""")
+        ok(decoded and re.fullmatch(r"[0-9A-Z $%*+\-./:]+", decoded) and len(decoded) > 100, f"결과 QR 화면: 분할 QR 표시, 읽으면 Base45 조각 ({len(decoded or '')}자)")
+        page.screenshot(path=SHOTS / "09_result_qr.png")
+        page.get_by_role("button", name="← 결과 보내기").click()
         with page.expect_download() as dl:
             page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click()
         f = WORK / dl.value.suggested_filename

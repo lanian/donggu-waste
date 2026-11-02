@@ -2,12 +2,13 @@
 // 업무 데이터는 이 기기 안에서만 암호화해 보관한다. 외부로 보내는 통신 코드는 없다.
 import * as P from './proto.js';
 import * as S from './store.js';
-import { searchFees, deriveStop, won, LABEL } from './fees.js';
+import { searchFees, deriveStop, won, LABEL, matchText } from './fees.js';
 import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
 import * as M from './map.js';
+import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.6.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -145,6 +146,26 @@ function screenLock() {
 }
 
 // ------------------------------------------------------------ 홈
+// 오늘 진행 요약 띠: 완료/전체와 진행 막대
+function daySummary(items) {
+  const n = items.length, done = items.filter((x) => x.d.progress === 'DONE').length;
+  const hold = items.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome)).length;
+  const pend = items.filter((x) => x.d.fee.pendingCount).length;
+  return h('section', { class: 'summary', 'aria-label': '오늘 진행' },
+    h('div', { class: 'sum-main' }, h('b', {}, done), h('span', {}, ` / ${n}곳 완료`)),
+    h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done }, h('div', { class: 'fill', style: `width:${n ? (done / n) * 100 : 0}%` })),
+    h('div', { class: 'sum-sub' }, hold ? h('span', { class: 'chip warn' }, `재방문·보류 ${hold}`) : null, pend ? h('span', { class: 'chip warn' }, `단가 확인 대기 ${pend}`) : null));
+}
+// 목록 찾기: 이름·주소·품목, 초성도 됨 (예: ㄱㅅ)
+function stopSearch(total) {
+  if (total < 6) return null;
+  const q = h('input', { type: 'search', class: 'search', placeholder: '이름·주소·품목 찾기 (초성 가능)', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
+  q.addEventListener('input', () => { ui.stopQ = q.value; clearTimeout(stopSearch.t); stopSearch.t = setTimeout(() => { render().then(() => { const el = document.querySelector('input[aria-label="목록에서 찾기"]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 250); });
+  return q;
+}
+const stopHay = (s) => `${s.name} ${s.address} ${s.spot_note || ''} ${s.receipt_no || ''} ${s.items.map((i) => i.name + ' ' + (i.spec || '')).join(' ')}`;
+const filterQ = (list) => (ui.stopQ ? list.filter((x) => matchText(stopHay(x.s), ui.stopQ)) : list);
+
 async function screenHome() {
   if (!st.mode) return screenMode();
   if (isSolo()) return screenHomeSolo();
@@ -163,14 +184,17 @@ async function screenHome() {
     const stops = dl.stops.map((s) => ({ s, d: deriveStop(s, st.events) }));
     const remain = stops.filter((x) => x.d.progress !== 'DONE' && !x.s.removed);
     const hold = stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
-    const list = { ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter];
-    out.push(h('p', { class: 'meta' }, `${dl.work_date} · ${dl.crew} · ${dl.stops.length}건 · 목록 갱신본 ${dl.assign_ver}`));
+    const list = filterQ({ ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter]);
+    out.push(h('p', { class: 'meta' }, `${dl.work_date} ${dl.crew} · 목록 갱신본 ${dl.assign_ver}`));
+    out.push(daySummary(stops.filter((x) => !x.s.removed)));
     if (st.mapEnabled) out.push(btn('🗺 지도로 보기', () => go('#/map'), 'big'));
     out.push(h('nav', { class: 'tabs' },
       ...[['ALL', `전체 ${stops.length}`], ['REMAIN', `남음 ${remain.length}`], ['HOLD', `보류·재방문 ${hold.length}`]].map(([k, t]) =>
         btn(t, () => { ui.filter = k; render(); }, ui.filter === k ? 'tab on' : 'tab'))));
-    out.push(h('ul', { class: 'stops' }, list.map(({ s, d }) => h('li', {},
-      h('a', { href: `#/stop/${s.request_id}`, class: 'stop' + (d.progress === 'DONE' ? ' done' : '') },
+    out.push(stopSearch(stops.length));
+    if (!list.length) out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 곳이 없습니다.` : '해당하는 곳이 없습니다.'));
+    out.push(h('ul', { class: 'stops route' }, list.map(({ s, d }) => h('li', {},
+      h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${d.outcome || d.progress}` + (d.progress === 'DONE' ? ' done' : '') },
         h('span', { class: 'seq' }, s.seq),
         h('span', { class: 'body' },
           h('strong', {}, s.name), h('span', { class: 'addr' }, s.address),
@@ -484,9 +508,16 @@ async function screenStop(id) {
         await commit(); toast('취소로 기록했습니다'); render();
       }, 'opt', { disabled: stop.status === 'CANCELLED' })),
     (stop.versions || []).length ? h('ul', { class: 'small list' }, ...stop.versions.slice().reverse().map((v) => h('li', {}, `${v.at.slice(0, 16).replace('T', ' ')} · ${v.reason}`))) : null) : null;
-  return h('main', {},
+  // 아래 고정 영역: 장갑 낀 손으로도 누르기 쉬운 전화·다음 지점
+  const seqList = (isSolo() ? st.requests.filter((r) => r.planned_date === stop.planned_date && r.status !== 'CANCELLED').sort((a, b) => a.seq - b.seq) : (st.daylist ? st.daylist.stops.filter((x) => !x.removed) : []));
+  const next = seqList.slice(seqList.indexOf(stop) + 1).find((x) => deriveStop(x, st.events).progress !== 'DONE');
+  const dock = h('nav', { class: 'dock', 'aria-label': '빠른 동작' },
+    h('span', { class: `dock-state p-${d.outcome || d.progress}` }, d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress]),
+    btn('📞 전화', async () => { await addEvent(stop, 'DIAL_INTENT', {}); ui.afterCall = stop.request_id; location.href = 'tel:' + stop.phone; }, 'dock-call'),
+    btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : '#/home'), 'primary dock-next'));
+  return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('strong', {}, `${stop.seq}번`)),
-    info, contact, lines, fee, photos, outcome, manage);
+    info, contact, lines, fee, photos, outcome, manage, dock);
 }
 
 // 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다
@@ -556,7 +587,7 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
         btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' }))));
     addBtn.disabled = !state.sel;
   };
-  const q = h('input', { type: 'search', placeholder: '품목명 또는 규격 (예: 회전 의자, 2인용 매트리스)', class: 'search', value: state.q, autocomplete: 'off' });
+  const q = h('input', { type: 'search', placeholder: '품목명·규격·초성 (예: 2인용 매트리스, ㅈㄹ)', class: 'search', value: state.q, autocomplete: 'off' });
   q.addEventListener('input', () => { state.q = q.value; state.sel = null; drawResults(); });
   addBtn.addEventListener('click', async () => {
     const r = table.rows.find((x) => x.id === (state.sel && state.sel.id));
@@ -616,21 +647,34 @@ async function screenExport() {
   const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
   ui.exportMsg = '';
   const say = (t) => { ui.exportMsg = t; msg.textContent = t; };
+  // 결과 파일: 이름·연락처·주소·메모 없이 이벤트만, PC 공개키로 암호화 + 기기 서명
+  const buildResult = async () => {
+    const from = pending[0].seq, to = pending[pending.length - 1].seq;
+    const payload = {
+      schema: 'dg.result/1', work_date: st.daylist ? st.daylist.work_date : null, app_version: APP_VERSION,
+      events: pending.map(({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, ts }) => ({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, device_ts: ts })),
+      photos: pending.filter((e) => e.kind === 'PHOTO_META').map((e) => ({ photo_id: e.body.photo_id, request_id: e.request_id, phase: e.body.phase, sha256: e.body.sha256, bytes: e.body.bytes })),
+    };
+    const signRaw = await P.exportRaw(dev.sign.publicKey);
+    const header = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: st.daylist ? st.daylist.assign_ver : 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
+    const sealed = await P.seal(payload, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
+    const name = `DG_R_${P.uuidStr(dev.id).slice(0, 8)}_${from}-${to}.dgr`;
+    st.exports.push({ from, to, code: sealed.receipt, name, at: new Date().toISOString(), confirmed: false });
+    await commit();
+    return { sealed, name, bundleId: header.bundleId };
+  };
+  const showQr = btn('PC 화면 카메라로 보내기 (QR)', async () => {
+    showQr.disabled = true;
+    try {
+      const { sealed, name, bundleId } = await buildResult();
+      ui.resultQr = { frames: P.splitFrames(sealed.bytes, bundleId, 600), name };
+      go('#/resultqr');
+    } catch (e) { say('QR을 만들지 못했습니다: ' + errMsg(e)); showQr.disabled = false; }
+  }, 'big', { disabled: !pending.length });
   const make = btn(pending.length ? `결과 파일 만들어 보내기 (${pending.length}건)` : '보낼 결과 없음', async () => {
     make.disabled = true; msg.textContent = '암호화하는 중…';
     try {
-      const from = pending[0].seq, to = pending[pending.length - 1].seq;
-      const payload = {
-        schema: 'dg.result/1', work_date: st.daylist ? st.daylist.work_date : null, app_version: APP_VERSION,
-        events: pending.map(({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, ts }) => ({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, device_ts: ts })),
-        photos: pending.filter((e) => e.kind === 'PHOTO_META').map((e) => ({ photo_id: e.body.photo_id, request_id: e.request_id, phase: e.body.phase, sha256: e.body.sha256, bytes: e.body.bytes })),
-      };
-      const signRaw = await P.exportRaw(dev.sign.publicKey);
-      const header = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: st.daylist ? st.daylist.assign_ver : 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
-      const sealed = await P.seal(payload, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
-      const name = `DG_R_${P.uuidStr(dev.id).slice(0, 8)}_${from}-${to}.dgr`;
-      st.exports.push({ from, to, code: sealed.receipt, name, at: new Date().toISOString(), confirmed: false });
-      await commit();
+      const { sealed, name } = await buildResult();
       const file = new File([sealed.bytes], name, { type: 'application/octet-stream' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 확인 코드를 아래에 입력하세요.'); }
@@ -701,7 +745,7 @@ async function screenExport() {
     h('header', { class: 'bar' }, btn('← 처음', () => go('#/home'), 'ghost'), h('strong', {}, '결과 보내기')),
     h('section', { class: 'card' },
       h('p', {}, '결과 파일에는 이름·연락처·주소·메모가 들어가지 않으며, PC에서만 열 수 있게 암호화됩니다. 사진은 넣지 않습니다.'),
-      make, msg),
+      make, showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg),
     h('section', { class: 'card' }, h('h2', {}, 'PC 반영 확인'), codeIn, confirm,
       h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.confirmed ? '반영 확인됨' : '확인 대기'}`)))),
     h('section', { class: 'card' }, h('h2', {}, `사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`),
@@ -745,7 +789,7 @@ function screenHomeSolo() {
     OPEN: open,
     CANCELLED: all.filter((x) => x.s.status === 'CANCELLED'),
   };
-  const list = lists[view].slice().sort((a, b) => (a.s.planned_date || '').localeCompare(b.s.planned_date || '') || a.s.seq - b.s.seq);
+  const list = filterQ(lists[view].slice().sort((a, b) => (a.s.planned_date || '').localeCompare(b.s.planned_date || '') || a.s.seq - b.s.seq));
   const needBackup = st.requests.length && (!st.lastBackupAt || Date.now() - Date.parse(st.lastBackupAt) > BACKUP_WARN_MS);
   const move = async (item, dir) => {
     const same = lists[view].map((x) => x.s).filter((r) => r.planned_date === item.planned_date).sort((a, b) => a.seq - b.seq);
@@ -765,12 +809,14 @@ function screenHomeSolo() {
     h('nav', { class: 'tabs' }, ...[['TODAY', `오늘 ${lists.TODAY.length}`], ['TOMORROW', `내일 ${lists.TOMORROW.length}`], ['OPEN', `미처리 ${open.length}`], ['CANCELLED', `취소 ${lists.CANCELLED.length}`]]
       .map(([k, t]) => btn(t, () => { ui.soloView = k; ui.reorder = false; render(); }, view === k ? 'tab on' : 'tab'))),
   ];
-  if (!list.length) out.push(h('p', { class: 'empty' }, view === 'TODAY' ? '오늘 수거 예정 접수가 없습니다.' : '해당 접수가 없습니다.'));
+  if (view === 'TODAY' && lists.TODAY.length) out.splice(2, 0, daySummary(lists.TODAY));
+  out.push(stopSearch(lists[view].length));
+  if (!list.length) out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 접수가 없습니다.` : view === 'TODAY' ? '오늘 수거 예정 접수가 없습니다. [+ 전화 접수 등록]으로 시작하세요.' : '해당 접수가 없습니다.'));
   else {
     if (st.mapEnabled && view !== 'CANCELLED') out.push(btn('🗺 지도로 보기', () => go('#/map'), 'big'));
     if (view === 'TODAY' || view === 'TOMORROW') out.push(btn(ui.reorder ? '순서 정하기 끝' : '방문 순서 바꾸기', () => { ui.reorder = !ui.reorder; render(); }, 'ghost'));
-    out.push(h('ul', { class: 'stops' }, list.map(({ s, d }) => h('li', { class: 'srow' },
-      h('a', { href: `#/stop/${s.request_id}`, class: 'stop' + (d.progress === 'DONE' || s.status === 'CANCELLED' ? ' done' : '') },
+    out.push(h('ul', { class: 'stops' + (view === 'TODAY' || view === 'TOMORROW' ? ' route' : '') }, list.map(({ s, d }) => h('li', { class: 'srow' },
+      h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${s.status === 'CANCELLED' ? 'CANCELLED' : d.outcome || d.progress}` + (d.progress === 'DONE' || s.status === 'CANCELLED' ? ' done' : '') },
         h('span', { class: 'seq' }, s.seq),
         h('span', { class: 'body' },
           h('strong', {}, s.name), h('span', { class: 'addr' }, s.address),
@@ -1030,6 +1076,35 @@ async function screenPick(id) {
     save, msg, mapNotice());
 }
 
+// ------------------------------------------------------------ 결과 QR 표시 (역방향: 휴대폰 → PC 웹캠)
+function drawQr(canvas, text) {
+  const q = qrcode(0, 'M');
+  q.addData(text, 'Alphanumeric');
+  q.make();
+  const n = q.getModuleCount(), quiet = 4, size = Math.min(canvas.parentElement ? canvas.parentElement.clientWidth : 360, 520);
+  const cell = Math.floor(size / (n + quiet * 2));
+  canvas.width = canvas.height = cell * (n + quiet * 2);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) ctx.fillRect((c + quiet) * cell, (r + quiet) * cell, cell, cell);
+}
+function screenResultQr() {
+  const r = ui.resultQr;
+  if (!r) { go('#/export'); return h('main'); }
+  const canvas = h('canvas', { class: 'qrcanvas', 'aria-label': '결과 QR' });
+  const count = h('p', { class: 'count' });
+  let i = 0, fps = 3, timer = null;
+  const show = () => { if (!canvas.isConnected) return clearTimeout(timer); drawQr(canvas, r.frames[i]); count.textContent = `${i + 1} / ${r.frames.length}`; i = (i + 1) % r.frames.length; timer = setTimeout(show, 1000 / fps); };
+  setTimeout(show, 0);
+  return h('main', { class: 'center' },
+    h('header', { class: 'bar' }, btn('← 결과 보내기', () => { clearTimeout(timer); ui.resultQr = null; go('#/export'); }, 'ghost'), h('strong', {}, '결과 QR')),
+    h('div', { class: 'qrbox' }, canvas), count,
+    h('div', { class: 'grid2' }, btn('느리게', () => { fps = Math.max(1, fps - 1); }, 'opt'), btn('빠르게', () => { fps = Math.min(8, fps + 1); }, 'opt')),
+    h('p', {}, 'PC [결과 가져오기] → [웹캠으로 읽기]를 누르고 이 화면을 웹캠에 비추세요. 화면 밝기를 최대로 하면 잘 읽힙니다.'),
+    h('p', { class: 'small' }, `${r.name} · 이름·연락처·주소는 들어 있지 않습니다. PC가 알려 주는 확인 코드를 [결과 보내기]에 입력하세요.`));
+}
+
 // ------------------------------------------------------------ 설정
 async function screenSettings() {
   const dev = await S.getRaw('device');
@@ -1075,11 +1150,11 @@ async function render() {
   else {
     let [, route, arg] = (location.hash || '#/home').split('/');
     if (!st.mode && route !== 'mode') route = 'mode';
-    if (isSolo() && ['scan', 'register', 'export', 'received'].includes(route)) route = 'home';
+    if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
     if (!isSolo() && ['intake', 'backup'].includes(route)) route = 'home';
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
-      'qrtest-result': screenQrTestResult, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
+      'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
       mode: screenMode, intake: () => screenIntake(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }

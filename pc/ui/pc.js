@@ -2,6 +2,7 @@
 import { searchFees, won } from '/web/fees.js';
 import { BUILTIN_FEES } from '/web/fees-data.js';
 import * as M from '/web/map.js';
+import { Collector } from '/web/proto.js';
 
 const $app = document.getElementById('app');
 let boot = null;       // 설정·팀·기기
@@ -26,7 +27,11 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 const btn = (label, onclick, cls = '', extra = {}) => h('button', { type: 'button', class: cls, onclick, ...extra }, label);
-const toast = (m, bad) => { const t = h('div', { class: 'toast' + (bad ? ' bad' : '') }, m); document.body.append(t); setTimeout(() => t.remove(), 4000); };
+const toast = (m, bad) => {
+  let box = document.querySelector('.toasts');
+  if (!box) { box = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' }); document.body.append(box); }
+  const t = h('div', { class: 'toast' + (bad ? ' bad' : '') }, m); box.append(t); setTimeout(() => t.remove(), 4000);
+};
 const fmtPhone = (p) => (p && p.length === 11 ? `${p.slice(0, 3)}-${p.slice(3, 7)}-${p.slice(7)}` : p || '');
 const go = (hash) => { location.hash = hash; };
 const chip = (text, cls = '') => h('span', { class: 'chip ' + cls }, text);
@@ -49,22 +54,85 @@ const wrap = (fn, msgEl) => async (...a) => { try { if (msgEl) msgEl.textContent
 // ------------------------------------------------------------ 로그인
 async function screenLogin() {
   const st = await api('state');
-  const pw = h('input', { type: 'password', placeholder: '업무 비밀번호', autocomplete: st.setup_needed ? 'new-password' : 'current-password' });
-  const pw2 = st.setup_needed ? h('input', { type: 'password', placeholder: '한 번 더', autocomplete: 'new-password' }) : null;
+  const user = h('input', { placeholder: '아이디', autocomplete: 'username', value: st.setup_needed ? 'admin' : '' });
+  const dname = st.setup_needed ? h('input', { placeholder: '이름 (예: 홍길동 주무관)' }) : null;
+  const pw = h('input', { type: 'password', placeholder: '비밀번호', autocomplete: st.setup_needed ? 'new-password' : 'current-password' });
+  const pw2 = st.setup_needed ? h('input', { type: 'password', placeholder: '비밀번호 한 번 더', autocomplete: 'new-password' }) : null;
   const msg = h('p', { class: 'msg' });
   const go1 = wrap(async () => {
     if (st.setup_needed) {
       if (pw.value !== pw2.value) throw new Error('두 번 입력한 비밀번호가 다릅니다.');
-      await post('setup', { password: pw.value });
-    } else await post('login', { password: pw.value });
+      await post('setup', { username: user.value, display_name: dname.value, password: pw.value });
+    } else await post('login', { username: user.value, password: pw.value });
     boot = null; render();
   }, msg);
   (pw2 || pw).addEventListener('keydown', (e) => { if (e.key === 'Enter') go1(); });
-  setTimeout(() => pw.focus(), 30);
-  return h('div', { class: 'login card' }, h('h1', {}, '동구 대형폐기물 PC 업무'),
-    h('p', { class: 'muted' }, st.setup_needed ? '처음 사용합니다. 업무 비밀번호(10자 이상)를 정하세요.' : '업무 비밀번호를 입력하세요.'),
-    pw, pw2, btn(st.setup_needed ? '비밀번호 설정' : '로그인', go1, 'primary'), msg,
-    h('p', { class: 'muted' }, '이 화면은 이 PC 안에서만 열립니다. 자료는 암호화된 DB에 저장됩니다.'));
+  setTimeout(() => (st.setup_needed ? dname : user).focus(), 30);
+  return h('div', { class: 'login-wrap' }, h('div', { class: 'login card' },
+    h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물'), h('small', {}, 'PC 업무 화면'))),
+    h('p', { class: 'muted' }, st.setup_needed ? '처음 사용합니다. 운영 관리자 계정을 만드세요. 비밀번호는 10자 이상입니다.' : '아이디와 비밀번호를 입력하세요.'),
+    h('label', { class: 'f' }, '아이디', user), dname && h('label', { class: 'f' }, '이름', dname), h('label', { class: 'f' }, '비밀번호', pw), pw2 && h('label', { class: 'f' }, '비밀번호 확인', pw2),
+    btn(st.setup_needed ? '관리자 계정 만들기' : '로그인', go1, 'primary block'), msg,
+    h('p', { class: 'muted small' }, '이 화면은 이 PC 안에서만 열립니다. 자료는 암호화된 DB에 저장되고, 모든 변경은 작업자와 함께 기록됩니다.')));
+}
+
+// ------------------------------------------------------------ 내 계정 (비밀번호 변경)
+function screenMe() {
+  const me = boot.me;
+  const old = h('input', { type: 'password', autocomplete: 'current-password' }), pw = h('input', { type: 'password', autocomplete: 'new-password' }), pw2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const msg = h('p', { class: 'msg' });
+  return h('div', {}, h('h1', {}, '내 계정'),
+    me.must_change ? h('div', { class: 'card notice warn' }, '관리자가 정한 임시 비밀번호입니다. 업무를 시작하기 전에 새 비밀번호로 바꿔 주세요.') : null,
+    h('div', { class: 'card', style: 'max-width:460px' }, h('dl', { class: 'kv' }, h('dt', {}, '아이디'), h('dd', {}, me.username), h('dt', {}, '이름'), h('dd', {}, me.display_name), h('dt', {}, '역할'), h('dd', {}, me.role_label)),
+      h('label', { class: 'f' }, '현재 비밀번호', old), h('label', { class: 'f' }, '새 비밀번호 (10자 이상)', pw), h('label', { class: 'f' }, '새 비밀번호 확인', pw2),
+      btn('비밀번호 바꾸기', wrap(async () => {
+        if (pw.value !== pw2.value) throw new Error('두 번 입력한 비밀번호가 다릅니다.');
+        await post('password', { old: old.value, password: pw.value }); toast('바꿨습니다'); boot = null; go('#/requests'); render();
+      }, msg), 'primary'), msg));
+}
+
+// ------------------------------------------------------------ 사용자·변경 이력 (운영 관리자)
+const ROLE = { ADMIN: '운영 관리자', INTAKE: '접수 담당자', FIELD: '수거팀' };
+const ACTION = { CREATE: '등록', UPDATE: '수정', CANCEL: '취소', LOCATION: '위치 지정', ASSIGN: '배정', LOGIN: '로그인', LOGIN_FAIL: '로그인 실패', PASSWORD: '비밀번호 변경',
+  ACTIVE: '사용', DEACTIVATE: '중지', IMPORT: '가져오기', RESOLVE: '충돌 처리', VOID: '정정', CLOSE: '마감', RECEIPT: '수신 확인', BACKUP: '백업', RESTORE: '복원', PURGE: '사진 정리' };
+async function screenUsers() {
+  const msg = h('p', { class: 'msg' });
+  const users = await api('users');
+  const F = { username: h('input', { placeholder: '아이디 (영문)' }), display_name: h('input', { placeholder: '이름' }),
+    role: h('select', {}, ...Object.entries(ROLE).map(([k, t]) => h('option', { value: k, selected: k === 'INTAKE' }, t))), password: h('input', { type: 'password', placeholder: '임시 비밀번호 (10자 이상)', autocomplete: 'new-password' }) };
+  const utable = h('table', {}, h('thead', {}, h('tr', {}, ...['아이디', '이름', '역할', '상태', '마지막 로그인', ''].map((t) => h('th', {}, t)))),
+    h('tbody', {}, ...users.map((u) => h('tr', {}, h('td', {}, u.username), h('td', {}, u.display_name), h('td', {}, ROLE[u.role]),
+      h('td', {}, u.active ? (u.must_change ? chip('임시 비밀번호', 'warn') : chip('사용', 'ok')) : chip('중지', 'bad')),
+      h('td', {}, u.last_login_at ? u.last_login_at.replace('T', ' ').slice(0, 16) : '—'),
+      h('td', {}, btn(u.active ? '중지' : '다시 사용', wrap(async () => { await post(`users/${u.id}/active`, { active: !u.active }); render(); }, msg), 'small'), ' ',
+        btn('비밀번호 재설정', wrap(async () => { const np = prompt(`${u.username}의 임시 비밀번호(10자 이상). 다음 로그인 때 바꾸게 됩니다.`); if (!np) return; await post(`users/${u.id}/password`, { password: np }); toast('재설정했습니다'); render(); }, msg), 'small'))))));
+  // 변경 이력
+  const fEntity = h('select', {}, h('option', { value: '' }, '전체'), ...[['request', '접수'], ['payment', '수납'], ['assignment', '배정'], ['bundle', '전송'], ['result', '결과'], ['photo', '사진'], ['conflict', '충돌'], ['day', '마감'], ['device', '기기'], ['crew', '수거팀'], ['user', '사용자'], ['backup', '백업']].map(([v, t]) => h('option', { value: v }, t)));
+  const fDate = h('input', { type: 'date', value: boot.today }), fActor = h('select', {}, h('option', { value: '' }, '전체 작업자'), h('option', { value: 'system' }, 'system'), ...users.map((u) => h('option', { value: u.username }, u.username)));
+  const tbody = h('tbody');
+  const load = wrap(async () => {
+    const list = await api(`audit?entity=${fEntity.value}&date=${fDate.value}&actor=${encodeURIComponent(fActor.value)}`);
+    tbody.replaceChildren(...(list.length ? list.map((a) => h('tr', {}, h('td', { class: 'nowrap' }, kst(a.at)), h('td', {}, a.actor || '—'), h('td', {}, a.entity), h('td', {}, ACTION[a.action] || a.action),
+      h('td', { class: 'mono' }, a.entity_id ? a.entity_id.slice(0, 8) : ''), h('td', { class: 'detail' }, summarizeDetail(a.detail)))) : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '기록이 없습니다.'))]));
+  });
+  [fEntity, fDate, fActor].forEach((x) => x.addEventListener('change', load));
+  load();
+  return h('div', {}, h('h1', {}, '사용자·변경 이력'),
+    h('div', { class: 'card' }, h('h2', {}, '사용자'), utable,
+      h('div', { class: 'row', style: 'margin-top:12px' }, F.username, F.display_name, F.role, F.password,
+        btn('사용자 추가', wrap(async () => { await post('users', { username: F.username.value, display_name: F.display_name.value, role: F.role.value, password: F.password.value }); toast('추가했습니다. 첫 로그인 때 비밀번호를 바꾸게 됩니다.'); render(); }, msg), 'primary')),
+      h('p', { class: 'muted' }, '접수 담당자: 접수·배정·전송·결과·수납·마감. 수거팀: 조회, 결과·사진 가져오기, 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg),
+    h('div', { class: 'card' }, h('h2', {}, '변경 이력'), h('div', { class: 'row' }, '날짜', fDate, '대상', fEntity, fActor, btn('새로 고침', load, 'small')),
+      h('div', { style: 'overflow:auto;max-height:520px' }, h('table', { class: 'audit' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', 'ID', '내용'].map((t) => h('th', {}, t)))), tbody)),
+      h('p', { class: 'muted' }, '이력은 지우거나 고칠 수 없습니다. 내용에는 이름·연락처·주소를 넣지 않습니다(사유·건수·코드만).')));
+}
+const kst = (iso) => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
+function summarizeDetail(raw) {
+  if (!raw) return '';
+  let d; try { d = JSON.parse(raw); } catch { return String(raw).slice(0, 120); }
+  if (typeof d !== 'object' || d == null) return String(d);
+  return Object.entries(d).filter(([k]) => !['name', 'phone', 'address', 'memo', 'location_note'].includes(k)).slice(0, 6)
+    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : String(v).slice(0, 60)}`).join(' · ');
 }
 
 // ------------------------------------------------------------ 품목 고르기
@@ -105,6 +173,50 @@ async function mapIn(box, opts) {
 }
 
 // ------------------------------------------------------------ 접수 목록
+// ------------------------------------------------------------ 오늘 현황 (대시보드)
+async function screenHome() {
+  const s = (screenHome.s ||= { date: boot.today });
+  const date = h('input', { type: 'date', value: s.date, onchange: (e) => { s.date = e.target.value; render(); } });
+  const [sum, batches] = await Promise.all([api('close?date=' + s.date), api('batches?date=' + s.date)]);
+  const bs = sum.by_status || {};
+  const done = bs.DONE || 0, open = (bs.RECEIVED || 0) + (bs.ASSIGNED || 0) + (bs.IN_PROGRESS || 0), revisit = (bs.PARTIAL || 0) + (bs.NOT_COLLECTED || 0) + (bs.ON_HOLD || 0);
+  const active = sum.total - (bs.CANCELLED || 0);
+  const pct = active ? Math.round((done / active) * 100) : 0;
+  const role = boot.me.role;
+  const kpi = (label, value, sub, cls = '', href) => h(href ? 'a' : 'div', { class: 'kpi ' + cls, href }, h('span', { class: 'k' }, label), h('b', { class: 'v' }, value), sub ? h('span', { class: 's' }, sub) : null);
+  // 해야 할 일: 담당자가 바로 눌러 처리할 수 있게
+  const todo = [
+    [sum.unconfirmed_bundles, `수신 미확인 전송 ${sum.unconfirmed_bundles}건`, '#/send', 'warn', 'ADMIN INTAKE'],
+    [sum.no_result.length, `결과 미회수 ${sum.no_result.length}건`, '#/results', 'warn', 'ADMIN INTAKE FIELD'],
+    [sum.conflicts, `충돌 검토 ${sum.conflicts}건`, '#/results', 'bad', 'ADMIN INTAKE'],
+    [sum.pending_fee.length, `금액 확인 대기 ${sum.pending_fee.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
+    [sum.payments.length, `수납 확인 필요 ${sum.payments.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
+    [sum.photos_missing, `사진 미회수 ${sum.photos_missing}장`, '#/results', '', 'ADMIN INTAKE FIELD'],
+    [revisit, `재방문 후보 ${revisit}건`, '#/close', '', 'ADMIN INTAKE'],
+  ].filter(([n, , , , r]) => n && r.split(' ').includes(role));
+  return h('div', {}, h('div', { class: 'row', style: 'justify-content:space-between' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, date, sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
+    h('div', { class: 'kpis' },
+      kpi('수거 예정', `${active}건`, (bs.CANCELLED ? `취소 ${bs.CANCELLED}건 제외` : ' '), '', '#/requests'),
+      kpi('수거 완료', `${done}건`, h('span', { class: 'bar' }, h('i', { style: `width:${pct}%` })), 'ok'),
+      kpi('진행·대기', `${open}건`, bs.IN_PROGRESS ? `처리 중 ${bs.IN_PROGRESS}` : ' ', ''),
+      kpi('재방문·보류', `${revisit}건`, bs.NOT_COLLECTED ? `미수거 ${bs.NOT_COLLECTED}` : ' ', revisit ? 'warn' : ''),
+      kpi('하차 기록', `${sum.unload_total.volume_m3}m³`, sum.unloads.length ? `${sum.unloads.length}회 · ${sum.unload_total.weight_kg}kg` : '기록 없음', '')),
+    h('div', { class: 'grid2' },
+      h('div', { class: 'card' }, h('h2', {}, '처리할 일'),
+        todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
+          : h('p', { class: 'empty' }, sum.total ? '지금 처리할 일이 없습니다.' : '이 날짜의 접수가 없습니다.')),
+      h('div', { class: 'card' }, h('h2', {}, '팀별 진행'),
+        batches.filter((b) => b.status === 'ACTIVE').length ? h('div', { class: 'crews' }, ...batches.filter((b) => b.status === 'ACTIVE').map((b) => {
+          const n = b.stops.length, d = b.stops.filter((x) => x.status === 'DONE').length, w = b.stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.status)).length;
+          const last = b.bundles[0];
+          return h('div', { class: 'crew' }, h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', {}, b.crew_name), h('span', { class: 'muted' }, `갱신본 ${b.assign_ver}`)),
+            h('div', { class: 'seg' }, h('i', { class: 'ok', style: `flex:${d}` }), h('i', { class: 'warn', style: `flex:${w}` }), h('i', { class: 'rest', style: `flex:${Math.max(0, n - d - w)}` })),
+            h('div', { class: 'row small' }, `${n}곳 중 완료 ${d} · 재방문 ${w}`, h('span', { class: 'grow' }),
+              !last ? chip('미전송', 'warn') : last.receipt_confirmed_at ? chip('수신 확인', 'ok') : chip('수신 미확인', 'warn'), b.resend_needed ? chip('재전송 필요', 'bad') : null));
+        })) : h('p', { class: 'empty' }, '확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null))),
+    h('p', { class: 'muted small' }, '현황은 이 PC에 가져온 결과 기준입니다. 휴대폰에서 아직 보내지 않은 결과는 반영되지 않습니다.'));
+}
+
 async function screenRequests() {
   const f = (screenRequests.f ||= { q: '', date: '', status: 'OPEN' });
   const q = h('input', { type: 'search', placeholder: '이름·연락처·주소·접수번호', value: f.q });
@@ -224,7 +336,7 @@ async function screenRequest(id) {
       h('dt', {}, '접수 대비 증감'), h('dd', {}, (st.fee.diff > 0 ? '+' : '') + won(st.fee.diff)), h('dt', {}, '금액 확인 대기'), h('dd', {}, st.fee.pending_count + '건'),
       h('dt', {}, '최종 금액'), h('dd', {}, st.fee.final == null ? '미확정' : won(st.fee.final))),
     h('p', { class: 'muted' }, '금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다. 일부 수거로 금액을 자동 감액하지 않습니다.'),
-    r.photos && r.photos.length ? h('div', { class: 'thumbs' }, ...r.photos.map((p) => p.recovery_status === 'RECOVERED' ? photoImg(p.photo_id) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null;
+    r.photos && r.photos.length ? h('div', { class: 'thumbs' }, ...r.photos.map((p) => p.purged_at ? chip(`보관 기간 만료로 정리됨 (${p.purged_at.slice(0, 10)})`) : p.recovery_status === 'RECOVERED' ? photoImg(p.photo_id) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null;
 
   return h('div', {},
     h('div', { class: 'row', style: 'justify-content:space-between' }, h('h1', {}, isNew ? '전화 접수 등록' : `접수 ${r.receipt_no}`), btn('← 목록', () => go('#/requests'))),
@@ -290,7 +402,7 @@ async function screenDispatch() {
   const calc = wrap(async () => {
     s.date = date.value; msg.textContent = '계산 중… (최대 5초)';
     const res = await post('route', { date: s.date, crew_ids: [...s.crews] });
-    s.plan = { res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x })), end: r.end })),
+    s.plan = { res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads })),
       unassigned: res.unassigned.map((u) => ({ ...u })) };
     msg.textContent = ''; draw();
   }, msg);
@@ -299,14 +411,18 @@ async function screenDispatch() {
     const p = s.plan;
     if (!p) { out.replaceChildren(h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.')); return; }
     const R = p.res.requests;
-    const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; draw(); };
-    const toCrew = (ri, i, target) => { const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
-    const cols = p.routes.map((rt, ri) => h('div', { class: 'card' }, h('h2', {}, `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null),
-      ...rt.stops.map((x, i) => h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
+    const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
+    const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); draw(); };
+    const toCrew = (ri, i, target) => { clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
+    const cols = p.routes.map((rt, ri) => h('div', { class: 'card' }, h('h2', {}, `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null),
+      rt.unloadStale ? h('div', { class: 'notice warn small' }, '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
+      ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
         h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${x.load_m3 != null ? ` · 누적 적재(추정) ${x.load_m3}m³` : ''}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
           R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null),
         btn('▲', () => move(ri, i, -1), 'small'), btn('▼', () => move(ri, i, 1), 'small'),
-        h('select', { class: 'small', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기'))))));
+        h('select', { class: 'small', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기'))),
+        x.unload_after ? h('div', { class: 'stopline unload' }, h('span', { class: 's' }, '⇩'), h('span', { class: 't' }, `${x.unload_after.label} 하차`, h('br'),
+          h('span', { class: 'muted' }, `도착 ${x.unload_after.eta} · 약 ${x.unload_after.volume_m3}m³ 비움 · ${x.unload_after.minutes}분`))) : null])));
     const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`), ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
       h('span', { class: 't' }, R[u.request_id] ? `${R[u.request_id].name} · ${R[u.request_id].address}` : u.request_id, h('br'), h('span', { class: 'muted' }, u.reason)),
       R[u.request_id] && R[u.request_id].lat == null ? btn('위치 지정', () => go(`#/request/${u.request_id}`), 'small') : null,
@@ -318,7 +434,7 @@ async function screenDispatch() {
       const res = await post('assign', { date: s.date, plan });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
     }, msg), 'primary');
-    out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${p.res.matrix_note || '-'}`, p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
+    out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${p.res.matrix_note || '-'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       h('div', { class: 'grid2' }, h('div', {}, h('div', { class: 'cols' }, ...cols), un), h('div', {}, h('div', { class: 'card' }, h('h2', {}, '지도'), mapBox,
         h('p', { class: 'muted' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.')), h('div', { class: 'card row' }, confirmBtn, msg))));
     setTimeout(async () => {
@@ -410,9 +526,59 @@ async function screenResults() {
       }))) : h('p', { class: 'muted' }, '확인할 충돌이 없습니다.'));
   });
   loadConf();
+  const showReport = (r, isPhoto) => rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),
+    h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
+    r.release_code ? h('div', { class: 'notice' }, isPhoto ? '사진 회수 확인 코드' : '보관 종료 확인 코드', ' — 휴대폰에 입력하게 알려 주세요: ', h('span', { class: 'big' }, r.release_code)) : null));
   return h('div', {}, h('h1', {}, '결과 가져오기'),
     h('div', { class: 'grid2' }, fileIn('결과 파일 (.dgr) — 업무 메일 첨부', 'import/result', '.dgr'), fileIn('사진 파일 (.dgp) — 승인된 보안 매체', 'import/photos', '.dgp')),
+    webcamCard((r) => { showReport(r, false); loadConf(); }),
     rep, conf, h('p', { class: 'muted' }, '같은 결과를 여러 번 가져와도 한 번만 반영됩니다. 오래된 배정·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.'));
+}
+
+// 역방향 QR: 휴대폰 화면의 결과 QR을 이 PC 웹캠으로 읽는다 (카메라 사용이 허용된 PC에서만)
+let jsqrReady = null;
+function loadJsQR() {
+  return (jsqrReady ||= new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = '/web/vendor/jsQR.js'; sc.onload = res; sc.onerror = rej; document.head.append(sc); }));
+}
+function webcamCard(onDone) {
+  const video = h('video', { playsinline: true, muted: true, style: 'width:100%;max-width:520px;border-radius:10px;background:#000;display:none' });
+  const status = h('p', { class: 'muted' }, '휴대폰 [결과 보내기] → [PC 화면 카메라로 보내기]를 누른 뒤 이 PC 웹캠에 비추세요.');
+  const msg = h('p', { class: 'msg' });
+  let stream = null, stop = false;
+  const end = () => { stop = true; if (stream) stream.getTracks().forEach((t) => t.stop()); video.style.display = 'none'; startBtn.disabled = false; };
+  const startBtn = btn('웹캠으로 읽기', wrap(async () => {
+    await loadJsQR();
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    stop = false; startBtn.disabled = true; video.style.display = ''; video.srcObject = stream; await video.play();
+    const col = new Collector(); let current = null;
+    const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const loop = async () => {
+      if (stop || !video.isConnected) return end();
+      if (video.videoWidth) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+        if (code && code.data) {
+          try {
+            const r = col.add(code.data);
+            current ||= r.key;
+            if (r.key === current) {
+              status.textContent = `조각 ${r.got} / ${r.total} 받음` + (col.missing(current).length <= 10 ? ` · 남은 번호 ${col.missing(current).map((x) => x + 1).join(', ')}` : '');
+              if (col.complete(current)) {
+                end();
+                const res = await api('import/result?channel=QR', { method: 'POST', raw: col.assemble(current) });
+                status.textContent = '결과를 받았습니다.'; onDone(res); return;
+              }
+            }
+          } catch (e) { if (e.message && !e.code) { msg.textContent = e.message; msg.className = 'err'; return end(); } }
+        }
+      }
+      setTimeout(loop, 80);
+    };
+    loop();
+  }, msg), 'primary');
+  return h('div', { class: 'card' }, h('h2', {}, '휴대폰 화면 QR로 받기 (웹캠)'), status, h('div', { class: 'row' }, startBtn, btn('멈추기', end)), video, msg,
+    h('p', { class: 'muted' }, 'QR 조각을 모두 받고 서명·암호 검증이 끝나야 반영됩니다. 카메라 영상은 저장하지 않습니다.'));
 }
 
 // ------------------------------------------------------------ 마감
@@ -532,6 +698,9 @@ async function screenSettings() {
   const dlat = h('input', { value: st.depot.lat, style: 'width:120px' }), dlon = h('input', { value: st.depot.lon, style: 'width:120px' }), dlabel = h('input', { value: st.depot.label });
   const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (비우면 직선거리 추정)', style: 'width:320px' });
   const sb = h('input', { type: 'number', value: st.service_min_base, style: 'width:70px' }), sp = h('input', { type: 'number', value: st.service_min_per_item, style: 'width:70px' });
+  const us = st.unload_site || {};
+  const ulat = h('input', { value: us.lat ?? '', placeholder: '위도', style: 'width:120px' }), ulon = h('input', { value: us.lon ?? '', placeholder: '경도', style: 'width:120px' }), ulabel = h('input', { value: us.label || '', placeholder: '반입지 이름' });
+  const umin = h('input', { type: 'number', value: st.unload_min, style: 'width:70px' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, style: 'width:60px' });
   return h('div', {}, h('h1', {}, '설정'),
     h('div', { class: 'grid2' },
       h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'), h('p', { class: 'muted' }, '1) 휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음). 2) 휴대폰의 기기 코드를 붙여 넣습니다. 3) 양쪽 6자리 지문이 같은지 확인합니다.'),
@@ -540,11 +709,57 @@ async function screenSettings() {
     h('div', { class: 'card' }, h('h2', {}, '수거팀·차량'), h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '연결 휴대폰', '적재(m³)', '근무 시작', '근무 끝', '사용', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...crewRows))),
     h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'row' }, '차고지 위도', dlat, '경도', dlon, dlabel), h('div', { class: 'row' }, '로컬 OSRM', osrm),
       h('div', { class: 'row' }, '지점당 기본 작업', sb, '분 + 품목당', sp, '분 (추정치)'),
-      btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
+      h('div', { class: 'row' }, '반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'),
+      h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
+      btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
+        unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
     volumeCard(),
+    backupCard(),
     h('div', { class: 'card' }, h('h2', {}, '수수료표'), h('dl', { class: 'kv' }, h('dt', {}, '적용 표'), h('dd', {}, st.fee_label), h('dt', {}, '버전'), h('dd', {}, st.fee_version),
       h('dt', {}, '자료 확인일'), h('dd', {}, st.fee_checked_on), h('dt', {}, '시행일'), h('dd', {}, st.fee_effective_from || '미확인 (담당자 확인 필요)'))),
     msg);
+}
+
+// ------------------------------------------------------------ 백업·사진 보관 (운영 관리자)
+function backupCard() {
+  const st = boot.settings;
+  const msg = h('p', { class: 'msg' });
+  const list = h('tbody'), dirEl = h('code');
+  const pass = h('input', { type: 'password', placeholder: '백업 비밀번호 (12자 이상, DB 키와 다르게)', autocomplete: 'new-password', style: 'width:300px' });
+  const pass2 = h('input', { type: 'password', placeholder: '한 번 더', autocomplete: 'new-password', style: 'width:160px' });
+  const days = h('input', { type: 'number', value: st.photo_retention_days, min: 7, max: 3650, style: 'width:90px' });
+  const bdir = h('input', { value: st.backup_dir, placeholder: '비우면 프로그램 폴더 state/backups', style: 'width:320px' });
+  const purgeInfo = h('span', { class: 'muted' });
+  const load = wrap(async () => {
+    const b = await api('backups');
+    dirEl.textContent = b.dir;
+    list.replaceChildren(...(b.files.length ? b.files.slice(0, 10).map((f) => {
+      const vp = h('input', { type: 'password', placeholder: '백업 비밀번호', style: 'width:150px' });
+      return h('tr', {}, h('td', { class: 'mono' }, f.name), h('td', {}, f.at), h('td', {}, `${(f.bytes / 1024 / 1024).toFixed(1)}MB`),
+        h('td', {}, vp, ' ', btn('열어 확인', wrap(async () => { const r = await post('backups/verify', { name: f.name, passphrase: vp.value }); toast(`정상: 접수 ${r.requests}건이 들어 있습니다`); }, msg), 'small')));
+    }) : [h('tr', {}, h('td', { colspan: 4, class: 'muted' }, '아직 백업이 없습니다.'))]));
+    const pc = await api('photo-purge');
+    purgeInfo.textContent = pc.count ? `정리 대상 ${pc.count}장 (${(pc.bytes / 1024 / 1024).toFixed(1)}MB)` : '정리 대상 없음';
+  }, msg);
+  load();
+  return h('div', { class: 'card' }, h('h2', {}, '백업·사진 보관'),
+    h('p', { class: 'muted' }, '백업 파일은 별도 백업 비밀번호로 암호화됩니다. 비밀번호를 잃으면 열 수 없으니 책임자가 따로 보관하세요. 백업 파일은 승인된 보안 매체로만 옮깁니다.'),
+    h('div', { class: 'row' }, pass, pass2, btn('지금 백업', wrap(async () => {
+      if (pass.value !== pass2.value) throw new Error('두 번 입력한 백업 비밀번호가 다릅니다.');
+      const r = await post('backup', { passphrase: pass.value }); pass.value = pass2.value = '';
+      toast(`백업했습니다: ${r.name}`); load();
+    }, msg), 'primary')),
+    h('p', { class: 'small muted' }, '백업 폴더: ', dirEl),
+    h('table', {}, h('thead', {}, h('tr', {}, ...['파일', '만든 시각', '크기', '확인'].map((t) => h('th', {}, t)))), list),
+    h('p', { class: 'small muted' }, '복원은 PC 업무 화면을 끄고 명령으로 실행합니다: ', h('code', {}, 'python pc/pc_tool.py restore <백업 파일>'), ' (기존 DB는 지우지 않고 옆에 보관)'),
+    h('hr'),
+    h('div', { class: 'row' }, '회수한 사진 보관', days, '일', h('span', { class: 'grow' })),
+    h('div', { class: 'row' }, '백업 폴더', bdir, btn('저장', wrap(async () => { await post('settings', { photo_retention_days: days.value, backup_dir: bdir.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'small')),
+    h('div', { class: 'row' }, purgeInfo, btn('기간 지난 사진 정리', wrap(async () => {
+      if (!confirm(`회수일로부터 ${st.photo_retention_days}일이 지나고 처리가 끝난 접수의 사진을 지웁니다. 기록(해시·시각)은 남습니다. 계속할까요?`)) return;
+      const r = await post('photo-purge'); toast(`사진 ${r.count}장을 정리했습니다`); load();
+    }, msg), 'small')),
+    h('p', { class: 'small muted' }, '처리가 끝난 접수(수거 완료·취소 또는 그날 마감)의 사진만 정리합니다. 사진 원본은 지워지고 해시·회수 시각·정리 시각은 이력으로 남습니다.'), msg);
 }
 
 // ------------------------------------------------------------ 틀·라우팅
@@ -560,13 +775,24 @@ async function render() {
       else boot = await api('bootstrap');
     }
     if (boot) {
-      const [, route, arg] = (location.hash || '#/requests').split('/');
-      const screens = { requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, settings: screenSettings };
-      const content = await (screens[route] || screenRequests)();
-      const nav = [['requests', '접수'], ['dispatch', '배정·노선'], ['send', '목록 전송'], ['results', '결과 가져오기'], ['close', '일일 마감'], ['qrtest', 'QR 실측'], ['settings', '설정']];
-      view = h('div', { class: 'shell' }, h('nav', { class: 'side' }, h('strong', {}, '동구 대형폐기물'),
-        ...nav.map(([k, t]) => h('a', { href: '#/' + k, class: (route || 'requests') === k || (k === 'requests' && route === 'request') ? 'on' : '' }, t)),
-        h('span', { class: 'grow' }), h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; render(); } }, '로그아웃')),
+      const [, route, arg] = (location.hash || '#/home').split('/');
+      const role = boot.me.role;
+      const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, settings: screenSettings, users: screenUsers, me: screenMe };
+      // 역할별 메뉴 (서버도 같은 기준으로 막는다)
+      const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD'], ['requests', '접수', 'ADMIN INTAKE FIELD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
+        ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD'], ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['settings', '설정', 'ADMIN'], ['users', '사용자·이력', 'ADMIN']];
+      const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
+      let cur = route || 'home';
+      if (boot.me.must_change) cur = 'me';
+      if (!['request', 'me'].includes(cur) && !nav.some(([k]) => k === cur)) cur = 'home';
+      const content = await (screens[cur] || screenHome)();
+      const active = cur === 'request' ? 'requests' : cur;
+      view = h('div', { class: 'shell' }, h('nav', { class: 'side' },
+        h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물'), h('small', {}, '접수·수거 관리'))),
+        ...nav.map(([k, t]) => h('a', { href: '#/' + k, class: active === k ? 'on' : '' }, t)),
+        h('span', { class: 'grow' }),
+        h('a', { href: '#/me', class: 'who' + (active === 'me' ? ' on' : '') }, h('b', {}, boot.me.display_name), h('small', {}, boot.me.role_label)),
+        h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; render(); } }, '로그아웃')),
       h('main', {}, content));
     }
   } catch (e) { view = h('p', { class: 'pad err' }, e.message); }

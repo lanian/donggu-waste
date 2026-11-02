@@ -3,6 +3,23 @@
 const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, '');
 
 // 검색: 단어별 AND, 동의어는 공식 명칭으로 바꿔서 비교. 검색어는 어디에도 전송·저장하지 않는다.
+// 초성 검색: "ㅈㄹ" → 장롱, "ㅅㅍ" → 소파. 초성만으로 된 낱말은 대상의 초성 문자열과 비교한다.
+const CHO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ';
+export const isChosung = (t) => /[ㄱ-ㅎ]/.test(t) && /^[ㄱ-ㅎ0-9a-z.]+$/i.test(t);
+export function chosungOf(s) {
+  let out = '';
+  for (const ch of s || '') {
+    const c = ch.charCodeAt(0) - 0xac00;
+    out += c >= 0 && c < 11172 ? CHO[Math.floor(c / 588)] : ch;
+  }
+  return out;
+}
+export function matchText(hay, query) {
+  // 띄어쓰기로 나눈 낱말이 모두 들어 있어야 한다. 초성 낱말은 초성끼리 비교.
+  const h = norm(hay), hc = chosungOf(h);
+  return (query || '').trim().split(/\s+/).filter(Boolean).every((t) => { const n = norm(t); return isChosung(n) ? hc.includes(n) : h.includes(n); });
+}
+
 export function searchFees(table, query) {
   const q = (query || '').trim();
   if (!q || !table) return [];
@@ -15,9 +32,9 @@ export function searchFees(table, query) {
   tokens = tokens.map(norm).filter(Boolean);
   const out = [];
   table.rows.forEach((r, order) => {
-    const name = norm(r.name), hay = norm(`${r.name} ${r.spec} ${r.category}`);
-    if (!tokens.every((t) => hay.includes(t))) return;
-    const rank = tokens.some((t) => t === name) ? 0 : tokens.some((t) => name.includes(t)) ? 1 : 2;
+    const name = norm(r.name), hay = norm(`${r.name} ${r.spec} ${r.category}`), hayC = chosungOf(hay), nameC = chosungOf(name);
+    if (!tokens.every((t) => (isChosung(t) ? hayC.includes(t) : hay.includes(t)))) return;
+    const rank = tokens.some((t) => t === name || t === nameC) ? 0 : tokens.some((t) => (isChosung(t) ? nameC.startsWith(t) : name.includes(t))) ? 1 : 2;
     out.push({ row: r, rank, order });
   });
   return out.sort((a, b) => a.rank - b.rank || a.order - b.order).map((x) => x.row);
