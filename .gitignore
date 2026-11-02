@@ -4,3 +4,4 @@ pc/out/
 __pycache__/
 *.dgr
 *.y4m
+*.whl
