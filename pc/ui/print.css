@@ -1,0 +1,19 @@
+/* 인쇄용 배차표: A4 가로, 흑백 인쇄에서도 읽히게 */
+@page { size: A4 landscape; margin: 12mm; }
+* { box-sizing: border-box; }
+body { font: 12px/1.45 "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #000; margin: 16px; font-variant-numeric: tabular-nums; }
+header { display: flex; align-items: baseline; gap: 16px; border-bottom: 2px solid #000; padding-bottom: 6px; }
+h1 { font-size: 18px; margin: 0; } header p { margin: 0; flex: 1; }
+button { font: inherit; padding: 6px 14px; }
+.warn { border: 1px solid #000; padding: 6px 8px; margin: 8px 0; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid #555; padding: 5px 6px; vertical-align: top; text-align: left; }
+th { background: #eee; font-size: 11px; }
+td.n { font-size: 16px; font-weight: 800; text-align: center; width: 36px; }
+td.r { text-align: right; white-space: nowrap; }
+td.chk { width: 52px; }
+tr { break-inside: avoid; }
+tr.u td { background: #f4f4f4; font-weight: 600; }
+small { color: #333; }
+footer { margin-top: 8px; font-size: 10px; }
+@media print { button { display: none; } body { margin: 0; } }

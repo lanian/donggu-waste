@@ -281,6 +281,23 @@ def cmd_import_addr(a):
     print(("미리보기 " if a.preview else "가져오기 ") + f"합계 {total:,}건" + ("" if a.preview else f" · DB 전체 {S.addr_stats(c)['count']:,}건"))
 
 
+def cmd_import_solo(a):
+    """휴대폰 단독 방식 백업(.dgb) → PC 원본"""
+    import getpass
+    pw = os.environ.get("DG_SOLO_PASS") or getpass.getpass("휴대폰 백업 비밀번호: ")
+    c = con()
+    S.ACTOR.set("cli")
+    crew = None
+    if a.crew:
+        row = S.one(c, "SELECT id FROM crew WHERE name=? OR id=?", (a.crew, a.crew))
+        crew = row["id"] if row else sys.exit("없는 수거팀입니다.")
+    try:
+        r = S.import_solo(c, Path(a.file).read_bytes(), pw, crew, preview=a.preview)
+    except S.UserError as e:
+        sys.exit(str(e))
+    print(("미리보기: " if a.preview else "옮김: ") + json.dumps(r, ensure_ascii=False))
+
+
 def cmd_serve(a):
     from dgpc import server
     server.serve(a.port)
@@ -311,6 +328,7 @@ def main(argv=None):
     ia = s.add_parser("import-addr"); ia.add_argument("path"); ia.add_argument("--region", default="", help="시군구명 거르기 (예: 동구)")
     ia.add_argument("--columns", help="열 번호 직접 지정 (예: road=7,main=9,sub=10,x=16,y=17,sigungu=4)")
     ia.add_argument("--preview", action="store_true"); ia.set_defaults(fn=cmd_import_addr)
+    so = s.add_parser("import-solo"); so.add_argument("file"); so.add_argument("--crew"); so.add_argument("--preview", action="store_true"); so.set_defaults(fn=cmd_import_solo)
     a = p.parse_args(argv)
     a.fn(a)
 

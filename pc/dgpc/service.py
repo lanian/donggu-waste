@@ -1372,3 +1372,229 @@ def geocode_missing(con, date: str = "") -> dict:
         else:
             missing += 1
     return {"found": found, "missing": missing}
+
+
+# ------------------------------------------------------------------ 통계·보고서 (개인정보 없이 집계)
+def _kst_date(iso: str | None) -> str | None:
+    if not iso:
+        return None
+    try:
+        return dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(KST).date().isoformat()
+    except ValueError:
+        return iso[:10]
+
+
+def stats(con, start: str, end: str) -> dict:
+    """기간(수거 예정일 기준) 집계. 이름·연락처·주소는 쓰지 않는다."""
+    for d in (start, end):
+        if not re.fullmatch(r"\d{4}-\d\d-\d\d", d or ""):
+            raise UserError("기간을 날짜로 골라 주세요.")
+    if start > end:
+        raise UserError("시작일이 끝일보다 늦습니다.")
+    reqs = rows(con, "SELECT * FROM request WHERE planned_date BETWEEN ? AND ?", (start, end))
+    received = rows(con, "SELECT received_at FROM request")
+    by_day: dict[str, dict] = {}
+    def day(d):
+        return by_day.setdefault(d, {"date": d, "received": 0, "planned": 0, "done": 0, "partial": 0, "not_collected": 0, "cancelled": 0,
+                                     "calculated": 0, "paid": 0, "unload_m3": 0.0, "unload_kg": 0.0})
+    for r in received:
+        d = _kst_date(r["received_at"])
+        if d and start <= d <= end:
+            day(d)["received"] += 1
+    totals = {"requests": len(reqs), "by_status": {}, "calculated": 0, "paid": 0, "amount_pending": 0, "unpaid": 0,
+              "field_added_lines": 0, "lead_days_avg": None}
+    items: dict[str, dict] = {}
+    leads = []
+    crews: dict[str, dict] = {}
+    for r in reqs:
+        dd = day(r["planned_date"])
+        dd["planned"] += 1
+        totals["by_status"][r["status"]] = totals["by_status"].get(r["status"], 0) + 1
+        key = {"DONE": "done", "PARTIAL": "partial", "NOT_COLLECTED": "not_collected", "CANCELLED": "cancelled"}.get(r["status"])
+        if key:
+            dd[key] += 1
+        if r["status"] == "CANCELLED":
+            continue
+        st = derive(con, r)
+        if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
+            ps = payment_status(con, r["id"])
+            if ps["calculated"] is None:
+                totals["amount_pending"] += 1
+            else:
+                totals["calculated"] += ps["calculated"]; dd["calculated"] += ps["calculated"]
+            totals["paid"] += ps["paid"]; dd["paid"] += ps["paid"]
+            if ps["status"] in ("UNPAID", "UNDERPAID"):
+                totals["unpaid"] += 1
+        for l in st["lines"]:
+            if l["kind"] == "FIELD":
+                totals["field_added_lines"] += 1
+            k = f'{l["name"]}|{l["spec"]}'
+            it = items.setdefault(k, {"name": l["name"], "spec": l["spec"], "unit_label": l["unit_label"], "requested": 0, "collected": 0})
+            it["requested"] += l["qty_confirmed"]; it["collected"] += l["qty_collected"]
+        rd = _kst_date(r["received_at"])
+        if rd and r["status"] == "DONE":
+            leads.append((dt.date.fromisoformat(r["planned_date"]) - dt.date.fromisoformat(rd)).days)
+        a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
+            WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
+        if a:
+            c = crews.setdefault(a["name"], {"crew": a["name"], "assigned": 0, "done": 0, "partial_or_not": 0})
+            c["assigned"] += 1
+            c["done"] += r["status"] == "DONE"
+            c["partial_or_not"] += r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD")
+    for u in rows(con, "SELECT * FROM unload_log WHERE work_date BETWEEN ? AND ? AND void_reason IS NULL", (start, end)):
+        dd = day(u["work_date"])
+        dd["unload_m3"] = round(dd["unload_m3"] + (u["volume_m3"] or 0), 2)
+        dd["unload_kg"] = round(dd["unload_kg"] + (u["weight_kg"] or 0), 1)
+    if leads:
+        totals["lead_days_avg"] = round(sum(leads) / len(leads), 1)
+    days = [by_day[k] for k in sorted(by_day)]
+    totals["unload_m3"] = round(sum(d["unload_m3"] for d in days), 2)
+    totals["unload_kg"] = round(sum(d["unload_kg"] for d in days), 1)
+    totals["received"] = sum(d["received"] for d in days)
+    top = sorted(items.values(), key=lambda x: -x["requested"])[:15]
+    return {"start": start, "end": end, "totals": totals, "days": days, "items": top, "crews": sorted(crews.values(), key=lambda c: c["crew"])}
+
+
+def stats_csv(con, start: str, end: str, kind: str = "requests") -> bytes:
+    """엑셀에서 열리는 CSV(UTF-8 BOM). 이름·연락처·주소·메모는 넣지 않는다."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if kind == "days":
+        s = stats(con, start, end)
+        w.writerow(["날짜", "접수", "수거 예정", "수거 완료", "일부 수거", "미수거", "취소", "계산 금액(원)", "납부 기록(원)", "하차 부피(m3)", "하차 중량(kg)"])
+        for d in s["days"]:
+            w.writerow([d["date"], d["received"], d["planned"], d["done"], d["partial"], d["not_collected"], d["cancelled"], d["calculated"], d["paid"], d["unload_m3"], d["unload_kg"]])
+    else:
+        stats(con, start, end)  # 기간 검사
+        w.writerow(["접수번호", "접수일", "수거 예정일", "상태", "품목(현장 확인 수량)", "수거 수량 합계", "남은 수량 합계", "계산 금액(원)", "납부 기록(원)", "수납 상태", "수수료표 버전", "수거팀"])
+        for r in rows(con, "SELECT * FROM request WHERE planned_date BETWEEN ? AND ? ORDER BY planned_date, receipt_no", (start, end)):
+            st = derive(con, r)
+            ps = payment_status(con, r["id"])
+            ver = one(con, "SELECT fee_version_id FROM request_item WHERE request_id=? AND fee_version_id IS NOT NULL LIMIT 1", (r["id"],))
+            a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
+                WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
+            w.writerow([r["receipt_no"], _kst_date(r["received_at"]), r["planned_date"], r["status"],
+                        "; ".join(f'{l["name"]} {l["spec"]} {l["qty_confirmed"]}{l["unit_label"]}' for l in st["lines"]),
+                        sum(l["qty_collected"] for l in st["lines"]), sum(l["remaining"] for l in st["lines"]),
+                        "" if ps["calculated"] is None else ps["calculated"], ps["paid"], ps["status"], ver["fee_version_id"] if ver else "", a["name"] if a else ""])
+    audit(con, "report", kind, "EXPORT", {"start": start, "end": end})
+    return ("﻿" + buf.getvalue()).encode("utf-8")
+
+
+def dispatch_sheet(con, batch_id: str) -> dict:
+    """인쇄용 일일 배차표(종이 예비본). 이름·연락처·주소가 들어가므로 업무 후 파쇄."""
+    payload, b = build_daylist(con, batch_id)
+    with tx(con):
+        audit(con, "batch", batch_id, "PRINT", {"stops": len(payload["stops"])})
+    for st in payload["stops"]:
+        st["status"] = one(con, "SELECT status FROM request WHERE id=?", (st["request_id"],))["status"]
+    return {"work_date": payload["work_date"], "crew": payload["crew"], "assign_ver": payload["assign_ver"], "fee_version": payload["fee_table"]["version_id"],
+            "stops": payload["stops"], "printed_at": dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M")}
+
+
+# ------------------------------------------------------------------ 휴대폰 단독 방식 자료 → PC로 옮기기
+def open_solo_backup(raw: bytes, password: str) -> dict:
+    """휴대폰 단독 방식 백업(.dgb: 'DGB1'|salt16|iv12|AES-GCM, PBKDF2-SHA256 60만 회, deflate-raw JSON)을 연다."""
+    import zlib
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if len(raw) < 48 or raw[:4] != b"DGB1":
+        raise UserError("휴대폰 백업 파일(.dgb)이 아닙니다.")
+    key = hashlib.pbkdf2_hmac("sha256", (password or "").encode(), raw[4:20], 600000, 32)
+    try:
+        plain = AESGCM(key).decrypt(raw[20:32], raw[32:], b"DGB1")
+    except Exception:
+        raise UserError("백업 비밀번호가 틀렸거나 파일이 손상되었습니다.")
+    obj = json.loads(zlib.decompress(plain, -15).decode())
+    if obj.get("format") != "dg.backup/1":
+        raise UserError("지원하지 않는 백업 형식입니다.")
+    return obj
+
+
+def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, preview: bool = False) -> dict:
+    """단독 방식 휴대폰의 접수·현장 기록·사진을 PC 원본으로 옮긴다. 같은 접수(같은 ID)는 다시 들어오지 않는다."""
+    obj = open_solo_backup(raw, password)
+    state = obj.get("state") or {}
+    if state.get("mode") != "SOLO":
+        raise UserError("휴대폰 단독 방식의 백업이 아닙니다.")
+    reqs = state.get("requests") or []
+    events = state.get("events") or []
+    photos = obj.get("photos") or {}
+    new = [r for r in reqs if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (r["request_id"],))]
+    info = {"requests": len(reqs), "new": len(new), "already": len(reqs) - len(new), "events": len(events),
+            "photos": len(photos), "unloads": sum(1 for e in events if e.get("kind") == "UNLOAD"), "created_at": obj.get("created_at")}
+    if preview:
+        return info
+    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
+        raise UserError("없는 수거팀입니다.")
+    sha = hashlib.sha256(raw).hexdigest()
+    if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):
+        return {**info, "duplicate_file": True}
+    imp = str(uuid.uuid4())
+    newids = {r["request_id"] for r in new}
+    counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0}
+    with tx(con):
+        con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,NULL)", (imp, "USB", "SOLO", sha, now()))
+        for r in new:
+            d = validate({**r, "items": r.get("items") or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
+            rec = r["receipt_no"]
+            if one(con, "SELECT 1 AS x FROM request WHERE receipt_no=?", (rec,)):
+                rec = re.sub(r"-(\d+)$", r"-S\1", rec)  # PC 접수번호와 겹치면 단독 표시(S)
+            con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
+                planned_date, appt_start, appt_end, must_today, urgent, priority, status, cancel_reason, received_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?)""",
+                        (r["request_id"], rec, int(r.get("req_ver") or 1), d["name"], d["phone"], d["address"], d["spot_note"], d["memo"],
+                         r.get("lat"), r.get("lon"), "MANUAL" if r.get("lat") is not None else None, d["planned_date"] or None, None, None,
+                         "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", r.get("cancel_reason"),
+                         r.get("received_at") or now(), r.get("updated_at") or now()))
+            for it in r.get("items") or []:
+                con.execute("""INSERT INTO request_item (line_id, request_id, fee_rate_id, fee_version_id, name, spec, unit, unit_label, qty,
+                    unit_price, amount, price_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (it["line_id"], r["request_id"], it.get("fee_rate_id"), it.get("fee_version_id") or (FEE_TABLE["version_id"] if it.get("fee_rate_id") else None),
+                             it["name"], it.get("spec") or "", it.get("unit") or "EA", it.get("unit_label") or "개", int(it["qty"]),
+                             it.get("unit_price"), it.get("amount"), it.get("price_status") or "PENDING"))
+            for v in r.get("versions") or []:
+                con.execute("INSERT OR IGNORE INTO request_version VALUES (?,?,?,?,?)",
+                            (r["request_id"], int(v.get("req_ver") or 1), json.dumps(v.get("snapshot") or {}, ensure_ascii=False), v.get("reason") or "휴대폰 단독 수정", v.get("at") or now()))
+            counts["requests"] += 1
+        for e in events:
+            if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (e["event_id"],)):
+                counts["skipped"] += 1
+                continue
+            if e.get("kind") == "UNLOAD":
+                b = e.get("body") or {}
+                ok_ = bool(crew_id) and (b.get("volume_m3") or b.get("weight_kg"))
+                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (e["event_id"], imp, "SOLO", e.get("seq") or 0, "", 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
+                             "APPLIED" if ok_ else "REJECTED", None if ok_ else "수거팀을 고르지 않아 하차 기록을 붙일 곳이 없음", e.get("ts")))
+                if ok_:
+                    con.execute("""INSERT OR IGNORE INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at)
+                        VALUES (?,?,?,?,?,?,?,?,?)""", (e["event_id"], crew_id, b.get("work_date") or today_kst(), (b.get("at_time") or "")[:5], (b.get("place") or "반입지")[:60],
+                                                         b.get("volume_m3"), b.get("weight_kg"), "휴대폰 단독 기록", now()))
+                    counts["unloads_applied"] += 1
+                continue
+            if e.get("request_id") not in newids:  # 이미 PC에 있던 접수의 기록은 덮어쓰지 않음
+                counts["skipped"] += 1
+                continue
+            con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (e["event_id"], imp, "SOLO", e.get("seq") or 0, e["request_id"], 0, e.get("base_req_ver"), e["kind"],
+                         json.dumps(e.get("body") or {}, ensure_ascii=False), "APPLIED", None, e.get("ts")))
+            counts["events"] += 1
+            if e["kind"] == "PHOTO_META":
+                b = e.get("body") or {}
+                data = base64.b64decode(photos[b["photo_id"]]) if b.get("photo_id") in photos else None
+                good = data is not None and hashlib.sha256(data).hexdigest() == b.get("sha256")
+                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, data, recovery_status, recovered_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (b.get("photo_id"), e["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), "SOLO", data if good else None,
+                             "RECOVERED" if good else "EXPECTED", now() if good else None))
+                counts["photos_recovered"] += good
+            elif e["kind"] == "REVISIT_APPT":
+                _apply_revisit(con, e["request_id"], e.get("body") or {})
+        for rid in newids:
+            _refresh_status(con, rid)
+        con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts}), imp))
+        audit(con, "import", imp, "SOLO", counts)
+    return {**info, **counts}

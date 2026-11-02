@@ -8,7 +8,7 @@ import * as B from './backup.js';
 import * as M from './map.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.7.0';
+export const APP_VERSION = '0.8.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -67,6 +67,7 @@ const emptyState = () => ({ mode: null, daylist: null, events: [], seq: 0, relea
   requests: [], receiptCounter: {}, lastBackupAt: null, intakeDraft: null, mapEnabled: true });
 async function loadState() {
   st = { ...emptyState(), ...((await S.getSecure('state')) || {}) };
+  applyTextSize();
   if (!st.mode && st.daylist) st.mode = 'PC'; // 0.1.0에서 쓰던 자료는 PC 연결 방식
 }
 
@@ -87,7 +88,12 @@ const withOverrides = (ft) => {
   return table;
 };
 const feeTable = () => {
-  if (isSolo()) return BUILTIN_FEES;
+  if (isSolo()) {
+    // 단독 방식: 담당자가 이 휴대폰에서 확정한 단가(근거 기록)를 내장 표에 덧씌운다
+    const ov = st.feeOverrides || {};
+    if (!Object.keys(ov).length) return BUILTIN_FEES;
+    return withOverrides({ version_id: `${BUILTIN_FEES.version_id}-s${st.feeRev || 1}`, base_version: BUILTIN_FEES.version_id, overrides: Object.fromEntries(Object.entries(ov).map(([k, v]) => [k, v.price])) });
+  }
   const ft = st.daylist && st.daylist.fee_table;
   if (!ft) return null;
   if (ft.version_id === BUILTIN_FEES.version_id) return BUILTIN_FEES;
@@ -248,7 +254,7 @@ function screenUnload() {
   return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('strong', {}, '하차 기록')),
     h('section', { class: 'card' }, fld('반입지', place), h('div', { class: 'grid2' }, fld('시각', time), fld('부피 (m³, 추정)', vol)), fld('중량 (kg)', kg), fld('메모', note),
-      h('p', { class: 'small' }, '결과 보내기 때 PC로 함께 갑니다. 부피나 중량 중 하나는 적어 주세요.'), msg),
+      h('p', { class: 'small' }, isSolo() ? '이 휴대폰에 저장되고 백업 파일에 함께 들어갑니다. 부피나 중량 중 하나는 적어 주세요.' : '결과 보내기 때 PC로 함께 갑니다. 부피나 중량 중 하나는 적어 주세요.'), msg),
     list.length ? h('section', { class: 'card' }, h('h2', {}, `오늘 하차 ${list.length}회`),
       h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq > st.releasedSeq ? '(미전송)' : ''}`)))) : null,
     h('nav', { class: 'dock' }, h('span', {}), h('span', {}), btn('하차 저장', async () => {
@@ -564,9 +570,18 @@ async function screenStop(id) {
     h('span', { class: `dock-state p-${d.outcome || d.progress}` }, d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress]),
     btn('📞 전화', async () => { await addEvent(stop, 'DIAL_INTENT', {}); ui.afterCall = stop.request_id; location.href = 'tel:' + stop.phone; }, 'dock-call'),
     btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : '#/home'), 'primary dock-next'));
+  // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
+  contact.id = 'st-contact'; lines.id = 'st-items'; photos.id = 'st-photos'; outcome.id = 'st-result';
+  const itemsDone = d.lines.length > 0 && st.events.some((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT');
+  const steps = [['st-contact', '연락', d.contact !== 'NOT_CONTACTED'], ['st-items', '품목', itemsDone], ['st-photos', '사진', d.photos.length > 0], ['st-result', '결과', !!d.outcome]];
+  const nextStep = steps.find(([, , done]) => !done);
+  const stepNav = h('nav', { class: 'steps', 'aria-label': '처리 단계' }, ...steps.map(([id, label, done], i) =>
+    h('a', { href: '#', class: 'step' + (done ? ' done' : '') + (nextStep && nextStep[0] === id ? ' next' : ''), 'aria-current': nextStep && nextStep[0] === id ? 'step' : null,
+      onclick: (e) => { e.preventDefault(); document.getElementById(id).scrollIntoView({ behavior: 'smooth', block: 'start' }); } },
+      h('span', { class: 'n' }, done ? '✓' : String(i + 1)), h('span', {}, label))));
   return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('strong', {}, `${stop.seq}번`)),
-    info, contact, lines, fee, photos, outcome, manage, dock);
+    stepNav, info, contact, lines, fee, photos, outcome, manage, dock);
 }
 
 // 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다
@@ -786,7 +801,7 @@ async function screenExport() {
   const cleanup = btn('오늘 자료 정리', async () => {
     if (!confirm2('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다. 계속할까요?')) return;
     for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
-    st = { ...emptyState(), mode: st.mode, mapEnabled: st.mapEnabled, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
+    st = { ...emptyState(), mode: st.mode, mapEnabled: st.mapEnabled, textSize: st.textSize, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
 
@@ -854,7 +869,7 @@ function screenHomeSolo() {
       btn('지금 백업', () => go('#/backup'), 'primary')) : null,
     h('section', { class: 'actions' },
       btn('+ 전화 접수 등록', () => { ui.form = null; go('#/intake'); }, 'primary huge'),
-      btn('백업·복원', () => go('#/backup'), 'huge')),
+      h('div', { class: 'grid2' }, btn('백업·복원', () => go('#/backup'), 'big'), btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
     h('nav', { class: 'tabs' }, ...[['TODAY', `오늘 ${lists.TODAY.length}`], ['TOMORROW', `내일 ${lists.TOMORROW.length}`], ['OPEN', `미처리 ${open.length}`], ['CANCELLED', `취소 ${lists.CANCELLED.length}`]]
       .map(([k, t]) => btn(t, () => { ui.soloView = k; ui.reorder = false; render(); }, view === k ? 'tab on' : 'tab'))),
   ];
@@ -1044,6 +1059,7 @@ async function screenBackup() {
       h('p', { class: 'small' }, `마지막 백업: ${ago(st.lastBackupAt)} · 접수 ${st.requests.length}건 · 사진 ${photoIds.length}장`),
       h('p', { class: 'small' }, '백업 파일은 백업 비밀번호로 암호화됩니다. 비밀번호를 잊으면 복원할 수 없으니 기관 기준에 따라 따로 보관하세요. 개인 메일·메신저·공개 클라우드에는 올리지 마세요.'),
       pw1, pw2, h('label', { class: 'check' }, withPhotos, ' 사진 포함'), make, msg),
+    h('section', { class: 'card' }, h('h2', {}, 'PC로 옮기기'), h('p', { class: 'small' }, '나중에 PC 프로그램을 쓰게 되면, 이 백업 파일을 승인된 보안 매체로 PC에 옮긴 뒤 PC [결과 가져오기 → 휴대폰 단독 방식 자료 옮기기]에서 백업 비밀번호로 열면 접수·현장 기록·사진·하차 기록이 PC 원본으로 들어갑니다. 이미 PC에 있는 접수는 덮어쓰지 않습니다.')),
     h('section', { class: 'card' }, h('h2', {}, '복원 (새 휴대폰으로 옮길 때)'), fileIn, rpw, restore, rmsg));
 }
 
@@ -1169,6 +1185,9 @@ async function screenSettings() {
       h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
       h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
       h('dt', {}, '미전송 기록'), h('dd', {}, unsent().length + '건'))),
+    h('section', { class: 'card' }, h('h2', {}, '글씨 크기'),
+      h('div', { class: 'grid2' }, ...[['', '보통'], ['big', '크게']].map(([k, t]) => btn(t, async () => { st.textSize = k; applyTextSize(); await commit(); render(); }, (st.textSize || '') === k ? 'opt on' : 'opt')))),
+    isSolo() ? soloFeeCard() : null,
     h('section', { class: 'card' }, h('h2', {}, '지도'),
       h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 보내지 않으며, 주소 검색·길찾기 서비스는 쓰지 않습니다.'),
       btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', async () => { st.mapEnabled = !st.mapEnabled; await commit(); render(); })),
@@ -1186,6 +1205,35 @@ async function screenSettings() {
       }, 'danger')));
 }
 
+// 단독 방식: 확인 필요 품목의 단가 정하기 (근거 필수, 바꾼 이력 보존)
+function soloFeeCard() {
+  const ov = st.feeOverrides || {};
+  const review = BUILTIN_FEES.rows.filter((r) => r.status !== 'CONFIRMED');
+  const msg = h('p', { class: 'msg' });
+  return h('section', { class: 'card' }, h('h2', {}, `확인 필요 품목 단가 (${review.length})`),
+    h('p', { class: 'small' }, '원문 규격이 겹치거나 단위가 불명확한 품목입니다. 담당 부서 기준을 확인한 것만 정하세요. 정한 단가는 그 뒤 새로 접수·추가하는 품목에만 쓰입니다.'),
+    ...review.map((r) => {
+      const price = h('input', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '원', value: ov[r.id] ? ov[r.id].price : '' });
+      const why = h('input', { type: 'text', placeholder: '근거 (예: 청소과 확인 11/3)', value: ov[r.id] ? ov[r.id].reason : '' });
+      return h('div', { class: 'line' }, h('div', { class: 'lhead' }, h('strong', {}, `${r.name} ${r.spec}`), h('em', { class: 'tag' }, ov[r.id] ? `확정 ${won(ov[r.id].price)}` : '확인 대기')),
+        h('p', { class: 'small' }, r.note || ''), h('div', { class: 'grid2' }, price, why),
+        h('div', { class: 'grid2' },
+          btn('저장', async () => {
+            const n = parseInt(price.value, 10);
+            if (!(n > 0)) return (msg.textContent = '단가는 0원보다 커야 합니다. 모르면 확인 대기로 두세요.');
+            if (!why.value.trim()) return (msg.textContent = '근거를 적어 주세요.');
+            st.feeOverrides = { ...ov, [r.id]: { price: n, reason: why.value.trim(), at: new Date().toISOString() } };
+            st.feeRev = (st.feeRev || 0) + 1; (st.feeLog ||= []).push({ id: r.id, price: n, reason: why.value.trim(), at: new Date().toISOString() });
+            await commit(); toast('저장했습니다'); render();
+          }, 'opt'),
+          ov[r.id] ? btn('확인 대기로 되돌리기', async () => {
+            const { [r.id]: _, ...rest } = ov; st.feeOverrides = rest; st.feeRev = (st.feeRev || 0) + 1;
+            (st.feeLog ||= []).push({ id: r.id, price: null, reason: '되돌림', at: new Date().toISOString() }); await commit(); render();
+          }, 'opt') : h('span')));
+    }), msg);
+}
+function applyTextSize() { document.documentElement.classList.toggle('text-big', !!(st && st.textSize === 'big')); }
+
 // ------------------------------------------------------------ 라우팅
 let renderSeq = 0;
 async function render() {
@@ -1199,7 +1247,7 @@ async function render() {
   else {
     let [, route, arg] = (location.hash || '#/home').split('/');
     if (!st.mode && route !== 'mode') route = 'mode';
-    if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr', 'unload'].includes(route)) route = 'home';
+    if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
     if (!isSolo() && ['intake', 'backup'].includes(route)) route = 'home';
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,

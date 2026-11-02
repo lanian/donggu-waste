@@ -470,6 +470,33 @@ def solo(pw, url, video):
     expect(page.locator(".stop")).to_have_count(1)
     ok(page.locator(".stop").count() == 1, "취소 건은 지우지 않고 취소 목록에 보존")
 
+    # 단독 방식 보강: 하차 기록, 확인 필요 품목 단가 정하기(근거 필수), 큰 글씨
+    page.goto(url + "#/home")
+    page.get_by_role("button", name=re.compile("^하차 기록")).click()
+    page.locator("label", has_text="부피").locator("input").fill("2.5")
+    page.locator("label", has_text="반입지").locator("input").fill("가상 반입지")
+    page.get_by_role("button", name="하차 저장").click()
+    expect(page.get_by_role("button", name="하차 기록 (1회)")).to_be_visible()
+    page.goto(url + "#/settings")
+    mline = page.locator(".line", has_text="6인용 이상(대리석)")
+    mline.get_by_placeholder("원", exact=True).fill("15000")
+    mline.get_by_role("button", name="저장").click()
+    expect(page.get_by_text("근거를 적어 주세요")).to_be_visible()
+    mline = page.locator(".line", has_text="6인용 이상(대리석)")
+    mline.get_by_placeholder("원", exact=True).fill("15000")
+    mline.get_by_placeholder(re.compile("^근거")).fill("가상 확인 11/3")
+    mline.get_by_role("button", name="저장").click()
+    expect(page.locator(".line", has_text="6인용 이상(대리석)").get_by_text("확정 15,000원")).to_be_visible()
+    page.get_by_role("button", name="크게").click()
+    big = page.evaluate("document.documentElement.classList.contains('text-big')")
+    page.get_by_role("button", name="보통").click()
+    page.goto(url + "#/intake")
+    page.get_by_placeholder(re.compile("품목명")).fill("대리석")
+    expect(page.locator(".btn.result", has_text="6인용 이상").first).to_be_visible()
+    ok("15,000" in page.locator(".btn.result", has_text="6인용 이상").first.inner_text() and big,
+       "단독: 하차 기록, 확인 필요 단가는 근거와 함께 정한 뒤 새 접수에 적용, 큰 글씨 설정")
+    page.goto(url + "#/home")
+
     # 백업 → 전체 삭제 → 복원
     ok(page.get_by_text("마지막 백업: 없음").count() == 1, "백업 전 경고 표시")
     page.get_by_role("button", name="지금 백업").click()
@@ -481,6 +508,14 @@ def solo(pw, url, video):
     dl.value.save_as(bfile)
     blob = bfile.read_bytes()
     ok(blob[:4] == b"DGB1" and "가상일".encode() not in blob and b"01000007777" not in blob, f"백업 파일 암호화 확인 ({len(blob):,}B, 이름·연락처 평문 없음)")
+    moved = subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "import-solo", str(bfile)], env={**ENV, "DG_SOLO_PASS": "backup-pass-1"},
+                           capture_output=True, text=True, check=True).stdout
+    mv = json.loads(moved.split(": ", 1)[1])
+    ok(mv["requests"] == 2 and mv["events"] >= 3 and mv["unloads"] == 1 and mv["unloads_applied"] == 0,
+       f"단독 백업 → PC로 옮기기 (휴대폰 암호화 형식 그대로 PC가 열기): 접수 {mv['requests']}건·기록 {mv['events']}건")
+    again = subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "import-solo", str(bfile)], env={**ENV, "DG_SOLO_PASS": "backup-pass-1"},
+                           capture_output=True, text=True, check=True).stdout
+    ok("duplicate_file" in again, "같은 백업을 다시 옮기면 중복 반영 안 함")
     page.goto(url + "#/settings")
     page.get_by_role("button", name="이 휴대폰의 모든 자료 지우기").click()
     page.wait_for_load_state()

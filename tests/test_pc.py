@@ -283,6 +283,52 @@ def main():
     S.close_day(con, day, "시험 마감")
     ok(S.day_summary(con, day)["closed"], "일일 마감 기록")
 
+    # 통계·보고서
+    st_ = S.stats(con, day, day2)
+    ok(st_["totals"]["by_status"].get("DONE", 0) >= 1 and any(d["date"] == day and d["done"] >= 1 for d in st_["days"]) and st_["items"], f"기간 통계: 상태·날짜별·품목 집계 ({st_['totals']['requests']}건)")
+    ok(st_["totals"]["unload_m3"] == 10.0, "통계: 하차 합계 반영")
+    raises(lambda: S.stats(con, day2, day), "늦습니다", "기간 거꾸로 입력 거부")
+    csv_b = S.stats_csv(con, day, day2).decode("utf-8-sig")
+    names = [r["name"] for r in S.rows(con, "SELECT name, phone, address FROM request")]
+    phones = [r["phone"] for r in S.rows(con, "SELECT phone FROM request")]
+    ok(csv_b.startswith("접수번호,") and not any(n in csv_b for n in names) and not any(p_ in csv_b for p_ in phones) and "시험로" not in csv_b,
+       "접수별 CSV: 이름·연락처·주소 없이 내보내기 (엑셀용 BOM)")
+    ok(S.stats_csv(con, day, day2, "days").decode("utf-8-sig").splitlines()[0].startswith("날짜,접수"), "날짜별 CSV")
+    sheet = S.dispatch_sheet(con, out2[0]["batch_id"])
+    ok(sheet["stops"] and sheet["stops"][0]["name"] and S.list_audit(con, entity="batch")[0]["action"] == "PRINT", "인쇄용 배차표 자료 + 출력 이력 기록")
+
+    # 휴대폰 단독 방식 백업(.dgb) → PC로 옮기기
+    import json as _j, os as _os, zlib as _z
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    def make_dgb(obj, pw):
+        salt, iv = _os.urandom(16), _os.urandom(12)
+        co = _z.compressobj(9, _z.DEFLATED, -15); plain = co.compress(_j.dumps(obj).encode()) + co.flush()
+        key = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 600000, 32)
+        return b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1")
+    sid, sid2, lid, pid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    pic = b"\xff\xd8solo-photo"
+    solo_req = {"request_id": sid, "receipt_no": "DG-20261103-0001", "req_ver": 2, "name": "단독가상", "phone": "01000009191", "address": "가상시 동구 단독로 3",
+                "spot_note": "", "memo": "", "planned_date": day, "items": [{"line_id": lid, "fee_rate_id": fee["장롱|120cm 이상 1쪽당"], "name": "장롱", "spec": "120cm 이상 1쪽당",
+                "unit": "PIECE", "unit_label": "쪽", "qty": 1, "unit_price": 15000, "amount": 15000, "price_status": "CONFIRMED"}], "status": "ACTIVE",
+                "received_at": "2026-11-02T23:00:00Z", "updated_at": "2026-11-02T23:10:00Z", "versions": [{"req_ver": 1, "at": "2026-11-02T23:05:00Z", "reason": "주민 요청", "snapshot": {"name": "단독가상"}}]}
+    solo_c = {**solo_req, "request_id": sid2, "receipt_no": "DG-20261103-0002", "phone": "01000009292", "items": [], "status": "CANCELLED", "cancel_reason": "주민 취소", "versions": []}
+    sev = [{"event_id": str(uuid.uuid4()), "seq": i + 1, "request_id": sid, "assign_ver": 1, "base_req_ver": 2, "kind": k, "body": b, "ts": "2026-11-03T01:00:00Z"} for i, (k, b) in enumerate([
+        ("CONTACT", {"result": "REACHED"}), ("ITEM_RESULT", {"line_id": lid, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+        ("PHOTO_META", {"photo_id": pid, "phase": "AFTER", "sha256": hashlib.sha256(pic).hexdigest(), "bytes": len(pic)}), ("ATTEMPT", {"outcome": "DONE"})])]
+    sev.append({"event_id": str(uuid.uuid4()), "seq": 9, "request_id": "", "assign_ver": 0, "base_req_ver": None, "kind": "UNLOAD",
+                "body": {"place": "가상 반입지", "at_time": "12:00", "volume_m3": 1.5, "work_date": day}, "ts": "2026-11-03T03:00:00Z"})
+    dgb = make_dgb({"format": "dg.backup/1", "created_at": "2026-11-03T04:00:00Z", "state": {"mode": "SOLO", "requests": [solo_req, solo_c], "events": sev},
+                    "photos": {pid: base64.b64encode(pic).decode()}}, "solo-pass-1")
+    raises(lambda: S.import_solo(con, dgb, "wrong-pass"), "비밀번호", "단독 백업: 틀린 비밀번호 거부")
+    pv = S.import_solo(con, dgb, "solo-pass-1", preview=True)
+    ok(pv["new"] == 2 and pv["unloads"] == 1 and pv["photos"] == 1, "단독 백업 미리보기: 새 접수 2건·하차 1회·사진 1장")
+    mv = S.import_solo(con, dgb, "solo-pass-1", c1)
+    g = S.get_request(con, sid)
+    ok(mv["requests"] == 2 and g["status"] == "DONE" and g["receipt_no"].endswith("S0001") and g["versions"] and S.photo_bytes(con, pid) == pic
+       and S.get_request(con, sid2)["status"] == "CANCELLED" and mv["unloads_applied"] == 1,
+       "단독 → PC: 접수·수정 이력·현장 결과(완료)·사진·취소·하차가 PC 원본으로, 겹치는 접수번호는 S 표시")
+    ok(S.import_solo(con, dgb, "solo-pass-1", c1).get("duplicate_file"), "같은 단독 백업 재가져오기 → 중복 없음")
+
     # 사용자·역할·변경 이력
     sys.path.insert(0, str(ROOT / "pc" / "dgpc"))
     from dgpc import server as SV
@@ -399,7 +445,8 @@ def main():
     S.save_settings(con, {"photo_retention_days": 30})
     rec = S.rows(con, "SELECT photo_id, request_id FROM photo WHERE recovery_status='RECOVERED'")
     ok(rec and not S.purge_candidates(con), "회수 직후 사진은 정리 대상 아님")
-    ok(not S.purge_candidates(con, (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=40)).isoformat()), "처리 중(배정 상태)인 접수의 사진은 기간이 지나도 정리하지 않음")
+    ok(not [c for c in S.purge_candidates(con, (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=40)).isoformat()) if c["status"] not in ("DONE", "CANCELLED")],
+       "처리 중(배정 상태)인 접수의 사진은 기간이 지나도 정리하지 않음")
     S.close_day(con, day2, "시험 마감 2")
     far = (dt.date.fromisoformat(S.today_kst()) + dt.timedelta(days=40)).isoformat()
     cand = S.purge_candidates(con, far)

@@ -30,7 +30,7 @@ UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
 WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
-UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css"}
+UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css", "/print.css": "print.css", "/print.js": "print.js"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://tiles.openfreemap.org; "
@@ -51,7 +51,7 @@ PORT = 8765
 #  FIELD(수거팀): 조회, 결과·사진 가져오기, 하차 기록, QR 실측
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
-                       "fee-table", "geocode"},
+                       "fee-table", "geocode", "stats", "stats.csv"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
                         "fee-revisions", "geocode"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
@@ -167,6 +167,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.session():
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 return self.bundle_page(path[8:])
+            if method == "GET" and path.startswith("/print/batch/"):
+                sess = SESSIONS.get(self.session() or "")
+                if not sess:
+                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
+                S.ACTOR.set(sess["username"])
+                with LOCK:
+                    return self.print_page(path[13:])
             if method == "GET" and path.startswith("/qrtest/"):
                 if not self.session():
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
@@ -243,6 +250,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "bootstrap":
                 return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
                                        "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c)})
+            if p == "stats":
+                return self.send_json(S.stats(c, qs.get("start", ""), qs.get("end", "")))
+            if p == "stats.csv":
+                kind = "days" if qs.get("kind") == "days" else "requests"
+                body = S.stats_csv(c, qs.get("start", ""), qs.get("end", ""), kind)
+                fn = f'donggu-{"daily" if kind == "days" else "requests"}-{qs.get("start")}_{qs.get("end")}.csv'
+                return self.send_bytes(body, "text/csv; charset=utf-8", extra={"Content-Disposition": f'attachment; filename="{fn}"'})
             if p == "geocode":
                 return self.send_json(S.geocode(c, qs.get("address", "")) or {"none": True})
             if p == "addr-stats":
@@ -317,6 +331,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if p == "import/result":
                 return self.send_json(S.import_result(c, self.body(), "QR" if qs.get("channel") == "QR" else "MAIL"))
+            if p == "import/solo":
+                import base64 as _b64
+                pw = _b64.b64decode(self.headers.get("X-DG-Pass") or "").decode("utf-8", "replace")
+                return self.send_json(S.import_solo(c, self.body(), pw, qs.get("crew") or None, preview=qs.get("preview") == "1"))
             if p == "import/photos":
                 return self.send_json(S.import_photos(c, self.body()))
             if parts[0] == "conflicts" and len(parts) == 2:
@@ -441,6 +459,37 @@ class Handler(BaseHTTPRequestHandler):
         imgs = [qr_png_data_uri(f, pr["ec"])[0] for f in json.loads(t["frames_json"])]
         label = f"QR 실측 · 가상 {pr['count']}건 · 주소 {pr['addr']} · 조각 {pr['chunk']}B · 오류복원 {pr['ec']}"
         self.raw_page(display_html(imgs, t["id"][:8], "실측", 0, pr["count"], pr["fps"], label).encode())
+
+    def print_page(self, batch_short: str):
+        import html as _h
+        b = S.one(CON, "SELECT id FROM assignment_batch WHERE id LIKE ?", (batch_short + "%",))
+        if not b or len(batch_short) < 8:
+            return self.send_json({"error": "없음"}, 404)
+        d = S.dispatch_sheet(CON, b["id"])
+        e = _h.escape
+        rows_html = []
+        for s in d["stops"]:
+            done_note = {"DONE": "수거 완료", "PARTIAL": "일부 수거 (남은 품목)", "NOT_COLLECTED": "미수거 (재방문)", "ON_HOLD": "보류"}.get(s.get("status"), "")
+            items = (f"<b>{e(done_note)}</b><br>" if done_note else "") + "<br>".join(e(f'{i["name"]} {i["spec"]} {i["qty"]}{i["unit_label"]}' + (" (재방문 남은 수량)" if s.get("revisit") else "")) for i in s["items"])
+            amt = sum((i.get("amount") or 0) for i in s["items"])
+            pend = any(i.get("price_status") != "CONFIRMED" for i in s["items"])
+            appt = f'{s["appt"][0] or ""}~{s["appt"][1] or ""}' if s.get("appt") else ""
+            rows_html.append(f'<tr><td class="n">{s["seq"]}</td><td>{e(s.get("eta") or "")}<br><small>{e(appt)}</small></td>'
+                             f'<td><b>{e(s["name"])}</b><br>{e(s["phone"][:3] + "-" + s["phone"][3:-4] + "-" + s["phone"][-4:] if len(s["phone"]) >= 9 else s["phone"])}</td>'
+                             f'<td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
+                             f'<td class="r">{amt:,}원{"<br><small>확인 대기 있음</small>" if pend else ""}</td><td class="chk"></td><td class="chk"></td></tr>')
+            if s.get("unload_after"):
+                u = s["unload_after"]
+                rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="6">{e(u["label"])} 하차 · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
+        page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>배차표 {e(d['work_date'])} {e(d['crew'])}</title>
+<link rel="stylesheet" href="/print.css"><script src="/print.js" defer></script></head><body>
+<header><h1>대형폐기물 수거 배차표</h1><p>{e(d['work_date'])} · {e(d['crew'])} · 갱신본 {d['assign_ver']} · 수수료표 {e(d['fee_version'])}</p>
+<button type="button" id="print">인쇄</button></header>
+<p class="warn">개인정보(이름·연락처·주소)가 들어 있습니다. 휴대폰 고장 대비 예비본으로만 쓰고, 업무가 끝나면 파쇄하세요. 결과는 휴대폰 앱에 기록합니다.</p>
+<table><thead><tr><th>순서</th><th>도착·약속</th><th>신청인</th><th>배출 위치</th><th>품목</th><th>금액</th><th>연락</th><th>수거</th></tr></thead>
+<tbody>{''.join(rows_html)}</tbody></table>
+<footer>출력 {e(d['printed_at'])} · 출력 기록은 변경 이력에 남습니다.</footer></body></html>"""
+        return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 
     def bundle_page(self, bundle_short: str):
         from pc_tool import display_html, qr_png_data_uri

@@ -187,6 +187,7 @@ def run():
         # 접수 3건
         def intake(name, phone_no, addr, query, qty=1, click_map=None, appt=None):
             page.goto(URL + "#/request/new")
+            expect(page.get_by_role("heading", name="전화 접수 등록")).to_be_visible()
             page.get_by_label("이름").fill(name)
             page.get_by_label("연락처").fill(phone_no)
             page.get_by_label("배출 주소").fill(addr)
@@ -376,6 +377,25 @@ def run():
         expect(page.locator(".kpi").first).to_be_visible()
         page.screenshot(path=SHOTS / "pc_10_home.png", full_page=True)
         ok(page.locator(".kpi", has_text="수거 완료").inner_text().find("1건") >= 0 and page.locator(".crew").count() == 1, "오늘 현황: 완료 1건, 팀별 진행 표시")
+
+        # 통계·보고서 + 배차표 인쇄
+        page.goto(URL + "#/stats")
+        expect(page.locator("svg.chart g.bar").first).to_be_visible()
+        page.locator("svg.chart g.bar").first.hover()
+        expect(page.locator(".tip")).to_contain_text("예정")
+        with page.expect_download() as dlc:
+            page.get_by_role("button", name="접수별 CSV").click()
+        csv_txt = Path(dlc.value.path()).read_text(encoding="utf-8-sig")
+        ok(csv_txt.startswith("접수번호") and "가상하나" not in csv_txt and "010" not in csv_txt, "통계 화면: 날짜별 막대·툴팁, 접수별 CSV(이름·연락처 없음) 내려받기")
+        page.screenshot(path=SHOTS / "pc_13_stats.png", full_page=True)
+        page.goto(URL + "#/send")
+        with ctx.expect_page() as pp:
+            page.get_by_role("button", name="배차표 인쇄").first.click()
+        pr = pp.value
+        pr.wait_for_load_state()
+        ok(pr.locator("tbody tr").count() >= 2 and "파쇄" in pr.locator(".warn").inner_text() and pr.locator("#print").is_visible(), "인쇄용 배차표: 순서·신청인·품목, 파쇄 안내")
+        pr.screenshot(path=SHOTS / "pc_14_print.png", full_page=True)
+        pr.close()
 
         # 사용자 추가 (접수 담당자) + 변경 이력
         page.goto(URL + "#/users")
