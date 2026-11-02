@@ -70,7 +70,7 @@ p { margin: 8px 0; } .small { font-size: 15px; color: var(--muted); } .hidden { 
 .val { font-size: 22px; font-weight: 700; min-width: 2.5ch; text-align: center; display: inline-block; }
 .stepper { display: inline-flex; align-items: center; gap: 6px; }
 .btn.step { width: var(--tap); padding: 0; font-size: 28px; line-height: 1; }
-select, input[type=text], input[type=search], input[type=password], textarea {
+:where(select, textarea, input:not([type=checkbox]):not([type=radio]):not([type=file])) {
   width: 100%; min-height: var(--tap); font: inherit; padding: 10px 12px; border-radius: 12px; border: 2px solid var(--line); background: var(--card); color: var(--ink); }
 .reason.need { border-color: var(--warn); }
 .pin { max-width: 360px; margin: 8px auto; display: block; text-align: center; font-size: 24px; letter-spacing: 4px; }
@@ -102,3 +102,9 @@ dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; } dd { margi
   padding: 12px 18px; border-radius: 12px; font-weight: 650; z-index: 20; max-width: 90vw; }
 .toast.bad { background: var(--bad); color: #fff; }
 .update { position: fixed; top: 0; left: 0; right: 0; z-index: 30; display: flex; gap: 12px; align-items: center; justify-content: center; padding: calc(8px + env(safe-area-inset-top)) 12px 8px; background: var(--warn-bg); border-bottom: 2px solid var(--warn); }
+.fld { display: block; margin: 0 0 12px; } .fld > span { display: block; font-size: 15px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
+.srow { display: flex; align-items: center; gap: 8px; } .srow .stop { flex: 1; }
+.mv { display: flex; flex-direction: column; gap: 6px; }
+.grid2 > * { min-width: 0; }
+.row > span:first-child { white-space: nowrap; }
+.row select { width: auto; flex: 1; }

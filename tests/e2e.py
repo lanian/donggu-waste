@@ -81,9 +81,9 @@ def serve(directory: Path) -> int:
     return srv.server_address[1]
 
 
-def browser(pw, video: Path):
+def browser(pw, video: Path, profile: str = "profile"):
     ctx = pw.chromium.launch_persistent_context(
-        str(WORK / "profile"), executable_path=CHROME, headless=True,
+        str(WORK / profile), executable_path=CHROME, headless=True,
         viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
         accept_downloads=True, permissions=["camera"],
         args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
@@ -115,6 +115,7 @@ def main():
         page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
         page.get_by_placeholder("한 번 더").fill(PIN)
         page.get_by_role("button", name="PIN 설정").click()
+        page.get_by_role("button", name="PC와 연결해서 사용").click()
         expect(page.get_by_text("먼저 관리자와 함께 기기 등록")).to_be_visible(timeout=20000)
         page.screenshot(path=SHOTS / "01_home_unregistered.png")
         page.get_by_role("button", name="기기 등록").click()
@@ -146,6 +147,7 @@ def main():
         py("confirm-receipt", short, receipt)
         ok("수신 확인" in py("status"), f"분할 QR {len(frames)}장 카메라 수신 → 수신 확인 코드 PC 대조 ({receipt})")
         page.get_by_role("button", name="오늘 순서 보기").click()
+        expect(page.locator(".stop")).to_have_count(20)
         ok(page.locator(".stop").count() == 20, "오늘 순서 20건 표시")
         page.screenshot(path=SHOTS / "04_list.png")
 
@@ -244,7 +246,126 @@ def main():
            f"휴대폰 저장소(IndexedDB {len(dump['keys'])}개 항목)에 이름·전화번호 평문 없음")
         ok(not errors, "페이지 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
         ctx.close()
+
+        solo(pw, url, WORK / "reg.y4m")
     print(f"\n통과 {passed}개, 화면 캡처: {SHOTS}")
+
+
+def solo(pw, url, video):
+    """휴대폰 단독 운영: 접수 등록 → 중복 경고 → 수정 이력 → 현장 처리 → 취소 → 백업 → 전체 삭제 → 복원."""
+    print("[단독 모드]")
+    ctx, page = browser(pw, video, "profile-solo")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    prompts = {"text": ""}
+    page.on("dialog", lambda d: d.accept(prompts["text"]) if d.type == "prompt" else d.accept())
+    page.goto(url)
+    page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
+    page.get_by_placeholder("한 번 더").fill(PIN)
+    page.get_by_role("button", name="PIN 설정").click()
+    page.get_by_role("button", name="이 휴대폰만으로 사용").click()
+    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
+
+    def intake(name, phone, addr, items, free=None):
+        page.get_by_role("button", name="+ 전화 접수 등록").click()
+        page.get_by_label("이름").fill(name)
+        page.get_by_label("연락처").fill(phone)
+        page.get_by_label("배출 주소").fill(addr)
+        page.get_by_label("상세 배출 위치").fill("1층 현관 앞")
+        for q, n in items:
+            page.get_by_placeholder(re.compile("품목명")).fill(q)
+            page.locator(".btn.result").first.click()
+            for _ in range(n - 1):
+                page.locator(".card", has=page.get_by_placeholder(re.compile("품목명"))).locator(".stepper .btn.step").last.click()
+            page.get_by_role("button", name="품목 추가", exact=True).click()
+        if free:
+            page.get_by_placeholder("품목 이름 (예: 안마기)").fill(free)
+            page.get_by_role("button", name="확인 대기로 추가").click()
+
+    intake("가상일", "010-0000-7777", "가상시 동구 예시로 5", [("고정 의자", 3), ("2인용 매트리스", 1)])
+    ok("44,000원" not in page.locator("main").inner_text() and "17,000원" in page.locator("main").inner_text(), "접수 금액 = 고정식 의자 3개 6,000 + 2인용 매트리스 11,000 = 17,000원")
+    page.screenshot(path=SHOTS / "11_solo_intake.png", full_page=True)
+    page.get_by_role("button", name="접수 등록").click()
+    expect(page.get_by_role("button", name=re.compile("내일 1"))).to_be_visible()
+    intake("가상이", "01000007777", "가상시 동구 시험길 9", [("회전", 1)], free="안마기")
+    page.get_by_role("button", name="접수 등록").click()
+    ok(page.get_by_text("비슷한 접수가 1건").is_visible(), "같은 연락처 접수 → 중복 후보 경고 (자동 병합 없음)")
+    page.get_by_role("button", name="접수 등록").click()
+    page.get_by_role("button", name=re.compile("내일 2")).click()
+    expect(page.locator(".stop")).to_have_count(2)
+    ok(page.locator(".stop").count() == 2, "별개 접수로 확인 후 2건 등록, 내일 목록 표시")
+    page.screenshot(path=SHOTS / "12_solo_home.png")
+
+    # 순서 바꾸기
+    page.get_by_role("button", name="방문 순서 바꾸기").click()
+    page.locator(".srow").nth(1).get_by_role("button", name="위로").click()
+    expect(page.locator(".stop strong").first).to_have_text("가상이")
+    ok(page.locator(".stop strong").first.inner_text() == "가상이", "방문 순서 수동 조정")
+    page.get_by_role("button", name="순서 정하기 끝").click()
+
+    # 수정 이력
+    page.locator(".stop", has_text="가상일").click()
+    ok(page.locator(".who .phone").inner_text() == "010-0000-7777", "연락처 앞자리 0 보존 표시")
+    page.get_by_role("button", name="접수 수정").click()
+    page.get_by_label("배출 주소").fill("가상시 동구 예시로 5, 101동 202호")
+    page.get_by_role("button", name="수정 저장").click()
+    ok("수정 사유" in page.locator(".msg").last.inner_text(), "수정 사유 없이는 저장 안 됨")
+    page.get_by_label("수정 사유 (필수)").fill("주민 요청: 동·호수 추가")
+    page.get_by_role("button", name="수정 저장").click()
+    expect(page.get_by_text("주민 요청: 동·호수 추가")).to_be_visible()
+    ok(page.get_by_text("원본 2번째 버전").is_visible(), "수정 시 이전 원본을 버전 이력으로 보존")
+
+    # 현장 처리
+    page.get_by_role("button", name="통화 완료").click()
+    page.get_by_role("button", name="모두 수거함").click()
+    page.get_by_role("button", name="완료", exact=True).click()
+    expect(page.get_by_text("저장됨: 완료")).to_be_visible()
+    ok(True, "단독 모드 현장 처리: 연락·수거·완료 저장")
+    page.get_by_role("button", name="← 목록").click()
+
+    # 취소 (사유 보존)
+    page.locator(".stop", has_text="가상이").click()
+    prompts["text"] = "주민이 직접 처리"
+    page.get_by_role("button", name="접수 취소").click()
+    expect(page.get_by_text("취소된 접수입니다. 사유: 주민이 직접 처리")).to_be_visible()
+    page.get_by_role("button", name="← 목록").click()
+    page.get_by_role("button", name=re.compile("취소 1")).click()
+    expect(page.locator(".stop")).to_have_count(1)
+    ok(page.locator(".stop").count() == 1, "취소 건은 지우지 않고 취소 목록에 보존")
+
+    # 백업 → 전체 삭제 → 복원
+    ok(page.get_by_text("마지막 백업: 없음").count() == 1, "백업 전 경고 표시")
+    page.get_by_role("button", name="지금 백업").click()
+    page.get_by_placeholder("백업 비밀번호 (8자 이상)").fill("backup-pass-1")
+    page.get_by_placeholder("한 번 더").fill("backup-pass-1")
+    with page.expect_download() as dl:
+        page.get_by_role("button", name="암호화 백업 파일 만들기").click()
+    bfile = WORK / dl.value.suggested_filename
+    dl.value.save_as(bfile)
+    blob = bfile.read_bytes()
+    ok(blob[:4] == b"DGB1" and "가상일".encode() not in blob and b"01000007777" not in blob, f"백업 파일 암호화 확인 ({len(blob):,}B, 이름·연락처 평문 없음)")
+    page.goto(url + "#/settings")
+    page.get_by_role("button", name="이 휴대폰의 모든 자료 지우기").click()
+    page.wait_for_load_state()
+    page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
+    page.get_by_placeholder("한 번 더").fill(PIN)
+    page.get_by_role("button", name="PIN 설정").click()
+    page.get_by_role("button", name="이 휴대폰만으로 사용").click()
+    page.get_by_role("button", name="백업·복원").click()
+    page.locator("input[type=file]").set_input_files(str(bfile))
+    page.get_by_placeholder("백업 비밀번호", exact=True).fill("wrong-password")
+    page.get_by_role("button", name="백업에서 복원").click()
+    expect(page.get_by_text("비밀번호가 틀렸거나")).to_be_visible()
+    ok(True, "틀린 백업 비밀번호 거부")
+    page.get_by_placeholder("백업 비밀번호", exact=True).fill("backup-pass-1")
+    page.get_by_role("button", name="백업에서 복원").click()
+    page.get_by_role("button", name=re.compile("내일")).click()
+    expect(page.locator(".stop")).to_have_count(1, timeout=15000)
+    page.locator(".stop", has_text="가상일").click()
+    ok(page.get_by_text("저장됨: 완료").is_visible() and page.get_by_text("주민 요청: 동·호수 추가").is_visible(), "새 휴대폰 가정: 백업 복원 후 접수·수정 이력·현장 기록 유지")
+    page.screenshot(path=SHOTS / "13_solo_stop.png")
+    ok(not errors, "단독 모드 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
+    ctx.close()
 
 
 if __name__ == "__main__":
