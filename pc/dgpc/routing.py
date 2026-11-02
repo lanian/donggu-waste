@@ -21,10 +21,17 @@ VOLUME_HINTS = [("장롱", 1.2), ("침대", 1.5), ("응접세트", 1.2), ("냉�
 DEFAULT_VOLUME = 0.3
 
 
-def volume_of(item: dict) -> float:
+def volume_of(item: dict, overrides: dict | None = None) -> float:
+    """품목 적재 부피(m³). 담당자가 입력한 보정값이 있으면 그것을, 없으면 이름 기준 추정치를 쓴다."""
+    o = (overrides or {}).get(item.get("fee_rate_id") or "")
+    if o:
+        return o * int(item.get("qty") or 1)
     text = f"{item.get('name', '')} {item.get('spec', '')}"
     v = next((vol for key, vol in VOLUME_HINTS if key in text), DEFAULT_VOLUME)
     return v * int(item.get("qty") or 1)
+
+
+SAME_PLACE_KM = 0.025  # 25m 안의 접수는 한 번에 방문(접수·수수료·완료는 건별 유지)
 
 
 def hhmm(m: int) -> str:
@@ -61,7 +68,7 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
 
 
 def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str = "", service_base: int = 5,
-         service_per_item: int = 3, time_limit_s: int = 5, today: str = "") -> dict:
+         service_per_item: int = 3, time_limit_s: int = 5, today: str = "", volume_overrides: dict | None = None) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
     crews: id, name, capacity_m3, shift_start, shift_end"""
     unassigned = [{"request_id": r["id"], "reason": "배출 위치 좌표가 없음 (위치 지정 필요)"} for r in requests if r.get("lat") is None]
@@ -72,13 +79,27 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     if not reqs:
         return {"routes": [{"crew_id": c["id"], "crew_name": c["name"], "stops": [], "end": None} for c in crews],
                 "unassigned": unassigned, "matrix_source": None}
-    points = [(depot["lat"], depot["lon"])] + [(r["lat"], r["lon"]) for r in reqs]
-    tmat, source = matrix(points, osrm_url)
-    service = [0] + [service_base + service_per_item * sum(int(i.get("qty") or 1) for i in r.get("items", [])) for r in reqs]
-    scale = 100  # 부피를 정수로 (0.01m³ 단위)
-    demand = [0] + [int(round(sum(volume_of(i) for i in r.get("items", [])) * scale)) for r in reqs]
     starts = [to_min(c.get("shift_start"), 540) for c in crews]
     ends = [to_min(c.get("shift_end"), 1020) for c in crews]
+    # 같은 장소(25m 이내)이고 방문 시간창이 겹치는 접수는 한 지점으로 묶어 연속 방문한다
+    groups: list[dict] = []
+    for r in reqs:
+        lo, hi = to_min(r.get("appt_start"), min(starts)), to_min(r.get("appt_end"), max(ends))
+        svc = service_base + service_per_item * sum(int(i.get("qty") or 1) for i in r.get("items", []))
+        vol = sum(volume_of(i, volume_overrides) for i in r.get("items", []))
+        g = next((g for g in groups if haversine_km((g["lat"], g["lon"]), (r["lat"], r["lon"])) <= SAME_PLACE_KM
+                  and max(g["lo"], lo) < min(g["hi"], hi)), None)
+        if g:
+            g["members"].append((r, svc)); g["lo"], g["hi"] = max(g["lo"], lo), min(g["hi"], hi)
+            g["service"] += svc; g["volume"] += vol; g["must"] = g["must"] or bool(r.get("must_today"))
+        else:
+            groups.append({"lat": r["lat"], "lon": r["lon"], "members": [(r, svc)], "lo": lo, "hi": hi, "service": svc, "volume": vol,
+                           "must": bool(r.get("must_today"))})
+    points = [(depot["lat"], depot["lon"])] + [(g["lat"], g["lon"]) for g in groups]
+    tmat, source = matrix(points, osrm_url)
+    service = [0] + [g["service"] for g in groups]
+    scale = 100  # 부피를 정수로 (0.01m³ 단위)
+    demand = [0] + [int(round(g["volume"] * scale)) for g in groups]
 
     n, v = len(points), len(crews)
     mgr = pywrapcp.RoutingIndexManager(n, v, 0)
@@ -94,15 +115,14 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     for k in range(v):
         tdim.CumulVar(model.Start(k)).SetRange(starts[k], ends[k])
         tdim.CumulVar(model.End(k)).SetRange(starts[k], ends[k])
-    for node, r in enumerate(reqs, start=1):
-        lo = to_min(r.get("appt_start"), min(starts))
-        hi = to_min(r.get("appt_end"), max(ends))
-        tdim.CumulVar(mgr.NodeToIndex(node)).SetRange(lo, max(lo, hi - service[node]))
+    for node, g in enumerate(groups, start=1):
+        tdim.CumulVar(mgr.NodeToIndex(node)).SetRange(g["lo"], max(g["lo"], g["hi"] - service[node]))
     dcb = model.RegisterUnaryTransitCallback(lambda i: demand[mgr.IndexToNode(i)])
     model.AddDimensionWithVehicleCapacity(dcb, 0, [int(c.get("capacity_m3", 8) * scale) for c in crews], True, "Load")
-    for node, r in enumerate(reqs, start=1):
-        if not r.get("must_today"):
-            penalty = 10_000 + 3_000 * int(r.get("priority") or 0) + 300 * int(r.get("waiting_days") or 0) + (20_000 if r.get("urgent") else 0)
+    for node, g in enumerate(groups, start=1):
+        if not g["must"]:
+            penalty = sum(10_000 + 3_000 * int(r.get("priority") or 0) + 300 * int(r.get("waiting_days") or 0) + (20_000 if r.get("urgent") else 0)
+                          for r, _ in g["members"])
             model.AddDisjunction([mgr.NodeToIndex(node)], penalty)
     for k in range(v):
         model.AddVariableMinimizedByFinalizer(tdim.CumulVar(model.End(k)))
@@ -123,17 +143,20 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         while not model.IsEnd(idx):
             node = mgr.IndexToNode(idx)
             if node:
-                r = reqs[node - 1]
+                g = groups[node - 1]
                 load += demand[node]
-                stops.append({"request_id": r["id"], "eta": hhmm(sol.Min(tdim.CumulVar(idx))), "service_min": service[node],
-                              "load_m3": round(load / scale, 2)})
-                visited.add(r["id"])
+                t = sol.Min(tdim.CumulVar(idx))
+                for r, svc in g["members"]:
+                    stops.append({"request_id": r["id"], "eta": hhmm(t), "service_min": svc, "load_m3": round(load / scale, 2),
+                                  "same_place": len(g["members"])})
+                    visited.add(r["id"])
+                    t += svc
             idx = sol.Value(model.NextVar(idx))
         routes.append({"crew_id": c["id"], "crew_name": c["name"], "stops": stops, "end": hhmm(sol.Min(tdim.CumulVar(idx))),
                        "capacity_m3": c.get("capacity_m3", 8)})
     for r in reqs:
         if r["id"] not in visited:
-            vol = sum(volume_of(i) for i in r.get("items", []))
+            vol = sum(volume_of(i, volume_overrides) for i in r.get("items", []))
             reason = ("적재 추정치(%.1fm³)가 남은 차량 용량을 넘음" % vol if vol > min(c.get("capacity_m3", 8) for c in crews) / 2
                       else "근무시간·방문 약속 시간 안에 들어가지 않음 (우선순위가 낮아 제외)")
             unassigned.append({"request_id": r["id"], "reason": reason})

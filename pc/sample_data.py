@@ -19,9 +19,12 @@ _GIVEN = ["가상", "예시", "시험", "샘플", "모의", "연습", "보기", 
 _ROADS = ["예시로", "가상대로", "시험길", "샘플로", "모의로"]
 
 
-def _addr(rng: random.Random, i: int) -> str:
+ADDR_STYLES = {"mixed": None, "short": 0, "medium": 1, "long": 2}
+
+
+def _addr(rng: random.Random, i: int, style: str = "mixed") -> str:
     base = f"가상시 동구 {rng.choice(_ROADS)} {rng.randint(1, 300)}"
-    kind = i % 3
+    kind = i % 3 if ADDR_STYLES.get(style) is None else ADDR_STYLES[style]
     if kind == 0:
         return base
     if kind == 1:
@@ -29,7 +32,7 @@ def _addr(rng: random.Random, i: int) -> str:
     return f"{base} 가상아파트 {rng.randint(101, 115)}동 {rng.randint(1, 25)}{rng.randint(1, 4):02d}호 (후문 쪽 경비실 옆 출입구)"
 
 
-def make_daylist(count: int, work_date: str, assign_ver: int = 1, seed: int = 7) -> dict:
+def make_daylist(count: int, work_date: str, assign_ver: int = 1, seed: int = 7, addr_style: str = "mixed") -> dict:
     rng = random.Random(seed)
     rows = [r for r in FEE_TABLE["rows"] if r["unit"] == "EA" and r["status"] == "CONFIRMED"]
     stops = []
@@ -50,7 +53,7 @@ def make_daylist(count: int, work_date: str, assign_ver: int = 1, seed: int = 7)
             "req_ver": 1,
             "name": rng.choice(_SURNAMES) + rng.choice(_GIVEN),
             "phone": f"0100000{rng.randint(0, 9999):04d}",
-            "address": _addr(rng, i),
+            "address": _addr(rng, i, addr_style),
             "spot_note": rng.choice(["", "분리수거장 옆", "1층 현관 앞", "주차장 입구 왼쪽"]),
             "lat": round(35.146 + rng.uniform(-0.01, 0.01), 5),
             "lon": round(126.923 + rng.uniform(-0.01, 0.01), 5),

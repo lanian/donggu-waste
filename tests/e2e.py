@@ -97,6 +97,7 @@ def browser(pw, video: Path, profile: str = "profile"):
 
 
 def unlock(page):
+    page.wait_for_selector("input[placeholder='PIN'], section.actions, header.bar", timeout=20000)
     if page.get_by_placeholder("PIN").count():
         page.get_by_placeholder("PIN").fill(PIN)
         page.get_by_role("button", name="잠금 해제").click()
@@ -168,6 +169,13 @@ def main():
         page.locator("label.btn", has_text="수거 후").locator("input[type=file]").set_input_files(str(ROOT / "web/icons/icon-512.png"))
         expect(page.locator(".thumbs img")).to_have_count(1)
         ok(True, "현장 사진 촬영(파일 입력) → 앱 안에 암호화 저장")
+        page.get_by_text("재방문 약속 기록").click()
+        page.locator("details.revisit input[type=date]").fill("2026-11-05")
+        page.locator("details.revisit input[type=time]").nth(0).fill("14:00")
+        page.locator("details.revisit input[type=time]").nth(1).fill("16:00")
+        page.get_by_role("button", name="약속 저장").click()
+        expect(page.get_by_text("재방문 약속: 2026-11-05 14:00~16:00")).to_be_visible()
+        ok(True, "통화 후 재방문 약속(날짜·시간) 기록")
         received_total = page.locator(".fee dd").nth(0).inner_text()
 
         # 현장 추가: 회전 의자 2개
@@ -183,9 +191,15 @@ def main():
         page.locator(".btn.result").first.click()
         page.get_by_role("button", name="추가", exact=True).click()
         page.get_by_role("button", name="+ 현장 품목 추가").click()
+        ok(page.get_by_text("즐겨찾기·자주 쓴 품목").is_visible() and "회전식 의자" in page.locator(".results").inner_text(), "검색 전 자주 쓴 품목 바로 표시")
+        page.get_by_role("button", name="즐겨찾기").first.click()
+        expect(page.get_by_role("button", name="즐겨찾기 해제")).to_have_count(1)
         page.get_by_placeholder("품목 이름 (예: 안마기)").fill("안마기")
         page.get_by_role("button", name="확인 대기로 추가").click()
-        expect(page.locator(".line.field")).to_have_count(2)
+        try:
+            expect(page.locator(".line.field")).to_have_count(2)
+        except AssertionError:
+            page.screenshot(path=SHOTS / "debug_field.png", full_page=True); print("ERRORS", errors); print(page.url); raise
         fee_text = page.locator(".fee").inner_text()
         ok("미확정" in fee_text and "1건" in fee_text, "목록에 없는 품목은 0원이 아니라 확인 대기, 최종 금액 미확정")
         ok("6,000원" in page.locator(".fee dd").nth(1).inner_text(), "회전식 의자 2개 = 현장 추가분 6,000원")
@@ -285,6 +299,28 @@ def main():
         ok(not errors, "페이지 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
         ctx.close()
         check_requests("PC 연결", personal_from_bundle())
+
+        # 7-1) QR 실측 모드: 가상 50건, 저장하지 않고 시간·장수·확인 코드만
+        qt = json.loads(subprocess.run([sys.executable, "-c", (
+            "import json,sys; sys.path.insert(0,'.'); from dgpc import store, service as S; c=store.connect(); "
+            f"d=[x for x in S.list_devices(c) if x['id'].startswith('{dev_short}')][0]['id']; "
+            "t=S.make_qr_test(c, d, 50, 'long', 800, 'M', 3); "
+            "r=S.one(c,'SELECT frames_json, check_code FROM qr_test WHERE id=?',(t['test_id'],)); "
+            "print(json.dumps({'id':t['test_id'],'bytes':t['bytes'],'frames':json.loads(r['frames_json']),'check':r['check_code']}))")],
+            cwd=ROOT / "pc", env=ENV, capture_output=True, text=True, check=True).stdout)
+        write_y4m(WORK / "qrtest.y4m", [qr_png(f) for f in qt["frames"]], hold=4, loops=4)
+        ctx, page = browser(pw, WORK / "qrtest.y4m")
+        page.goto(url)
+        unlock(page)
+        page.get_by_role("button", name="오늘 목록 받기").click()
+        expect(page.get_by_text("QR 실측 결과")).to_be_visible(timeout=90000)
+        shown = page.locator(".fp").nth(1).inner_text()
+        secs = page.locator(".fp").nth(0).inner_text()
+        ok(shown == qt["check"], f"QR 실측: 가상 50건(긴 주소) {qt['bytes']:,}B · {len(qt['frames'])}장 → {secs}, 확인 코드 일치 ({shown})")
+        page.get_by_role("button", name="처음으로").click()
+        expect(page.locator(".stop")).to_have_count(20)
+        ok(True, "실측 자료는 저장하지 않음 (업무 목록 20건 그대로)")
+        ctx.close()
 
         solo(pw, url, WORK / "reg.y4m")
     print(f"\n통과 {passed}개, 화면 캡처: {SHOTS}")

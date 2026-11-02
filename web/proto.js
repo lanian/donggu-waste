@@ -207,3 +207,30 @@ export class Collector {
   }
   drop(key) { delete this.bundles[key]; }
 }
+
+// ------------------------------------------------------------ 목록 압축 형식 v2 풀기 (pc/dgproto.py expand_daylist 와 같은 규칙)
+const fromSid = (s) => {
+  const b = Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '=='), (c) => c.charCodeAt(0));
+  return uuidStr(b);
+};
+export function expandDaylist(p, feeTable) {
+  if (!p || p.schema !== 'dg.daylist/2') return p;
+  const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
+  const stops = p.s.map((c) => ({
+    seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a,
+    spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
+    appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
+    items: c.it.map(([sid, rid, qty, x = {}]) => {
+      const row = rows[rid || ''];
+      const status = x.ps === 'C' ? 'CONFIRMED' : x.ps === 'P' ? 'PENDING' : row && row.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING';
+      const price = x.pp ?? (row ? row.price : null);
+      const kind = x.k === 'F' ? 'FIELD' : 'RECEIVED';
+      return {
+        line_id: fromSid(sid), line_kind: kind, fee_rate_id: rid, name: x.n ?? (row ? row.name : ''), spec: x.s ?? (row ? row.spec : ''),
+        unit: x.u ?? (row ? row.unit : 'EA'), unit_label: x.ul ?? (row ? row.unit_label : '개'), qty, prior_collected: x.c || 0, unit_price: price,
+        amount: kind === 'FIELD' ? 0 : status === 'CONFIRMED' && price != null ? price * qty : null, price_status: status,
+      };
+    }),
+  }));
+  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table: { version_id: p.fee }, stops };
+}

@@ -298,3 +298,83 @@ def parse_device_code(code: str) -> tuple[bytes, bytes, bytes]:
     dev, kex, sig = data[:16], data[16:81], data[81:146]
     pub_from_raw(kex), pub_from_raw(sig)  # 곡선 위 점인지 확인
     return dev, kex, sig
+
+
+# ---------------------------------------------------------------- 목록 압축 형식 v2
+# 같은 수수료표 버전을 PC와 휴대폰이 함께 갖고 있으므로, 품목은 [행ID, 품목ID, 수량]만 보내고 이름·규격·단가는
+# 휴대폰이 표에서 채운다. UUID는 22자 base64url, 빈 값·기본값은 생략한다. 휴대폰은 v1·v2를 모두 받는다.
+import base64 as _b64
+import uuid as _uuid
+
+
+def _sid(u: str) -> str:
+    return _b64.urlsafe_b64encode(_uuid.UUID(u).bytes).decode().rstrip("=")
+
+
+def _uid(s: str) -> str:
+    return str(_uuid.UUID(bytes=_b64.urlsafe_b64decode(s + "==")))
+
+
+def compact_daylist(p: dict, fee_rows: dict) -> dict:
+    stops = []
+    for s in p["stops"]:
+        c = {"q": s["seq"], "i": _sid(s["request_id"]), "r": s["receipt_no"], "v": s["req_ver"], "n": s["name"], "p": s["phone"], "a": s["address"]}
+        for k, short in (("spot_note", "o"), ("memo", "m"), ("eta", "e")):
+            if s.get(k):
+                c[short] = s[k]
+        if s.get("lat") is not None:
+            c["y"] = [round(s["lat"], 6), round(s["lon"], 6)]
+        if s.get("appt"):
+            c["t"] = s["appt"]
+        if s.get("revisit"):
+            c["rv"] = 1
+        items = []
+        for it in s["items"]:
+            row = fee_rows.get(it.get("fee_rate_id") or "")
+            entry = [_sid(it["line_id"]), it.get("fee_rate_id"), it["qty"]]
+            extra = {}
+            if (it.get("line_kind") or "RECEIVED") != "RECEIVED":
+                extra["k"] = "F"
+            if it.get("prior_collected"):
+                extra["c"] = it["prior_collected"]
+            row_status = "CONFIRMED" if row and row["status"] == "CONFIRMED" else "PENDING"
+            if not row:
+                extra.update(n=it["name"], s=it.get("spec", ""), u=it["unit"], ul=it["unit_label"])
+            if row and it.get("unit_price") is not None and it["unit_price"] != row["price"]:
+                extra["pp"] = it["unit_price"]  # 접수 당시 단가가 현재 표와 다르면 그대로 보냄
+            if it.get("price_status", "PENDING") != row_status:
+                extra["ps"] = it.get("price_status", "PENDING")[0]
+            if extra:
+                entry.append(extra)
+            items.append(entry)
+        c["it"] = items
+        stops.append(c)
+    return {"schema": "dg.daylist/2", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
+            "fee": p["fee_table"]["version_id"], "s": stops}
+
+
+def expand_daylist(p: dict, fee_rows: dict) -> dict:
+    if p.get("schema") != "dg.daylist/2":
+        return p
+    stops = []
+    for c in p["s"]:
+        items = []
+        for entry in c["it"]:
+            sid, rid, qty = entry[:3]
+            x = entry[3] if len(entry) > 3 else {}
+            row = fee_rows.get(rid or "")
+            status = {"C": "CONFIRMED", "P": "PENDING"}.get(x.get("ps"), "CONFIRMED" if row and row["status"] == "CONFIRMED" else "PENDING")
+            price = x.get("pp", row["price"] if row else None)
+            kind = "FIELD" if x.get("k") == "F" else "RECEIVED"
+            items.append({"line_id": _uid(sid), "line_kind": kind, "fee_rate_id": rid,
+                          "name": x.get("n", row["name"] if row else ""), "spec": x.get("s", row["spec"] if row else ""),
+                          "unit": x.get("u", row["unit"] if row else "EA"), "unit_label": x.get("ul", row["unit_label"] if row else "개"),
+                          "qty": qty, "prior_collected": x.get("c", 0), "unit_price": price,
+                          "amount": price * qty if status == "CONFIRMED" and price is not None and kind == "RECEIVED" else (0 if kind == "FIELD" else None),
+                          "price_status": status})
+        y = c.get("y")
+        stops.append({"seq": c["q"], "request_id": _uid(c["i"]), "receipt_no": c["r"], "req_ver": c["v"], "name": c["n"], "phone": c["p"],
+                      "address": c["a"], "spot_note": c.get("o", ""), "memo": c.get("m", ""), "lat": y[0] if y else None, "lon": y[1] if y else None,
+                      "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items})
+    return {"schema": "dg.daylist/1", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
+            "fee_table": {"version_id": p["fee"]}, "stops": stops}

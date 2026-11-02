@@ -386,6 +386,7 @@ def get_request(con, rid: str) -> dict:
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event
         WHERE request_id=? ORDER BY device_ts""", (rid,))
     r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status FROM photo WHERE request_id=?", (rid,))
+    r["payment"] = payment_status(con, rid)
     return r
 
 
@@ -559,6 +560,8 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
         device_id = b["device_id"]
         if not device_id:
             raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정에서 기기를 연결하세요.")
+    if payload.get("schema") == "dg.daylist/1":
+        payload = P.compact_daylist(payload, FEE_ROWS)  # QR 장수를 줄이는 압축 형식
     dev = one(con, "SELECT * FROM device WHERE id=?", (device_id,))
     if not dev or dev["status"] != "ACTIVE":
         raise UserError("휴대폰이 등록되어 있지 않거나 사용 중지 상태입니다.")
@@ -573,7 +576,7 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
                     (bid, device_id, batch_id, payload["work_date"], payload["assign_ver"], len(frames),
                      hashlib.sha256(env).hexdigest(), code, json.dumps(frames), now()))
         audit(con, "bundle", bid, "DISPLAY", {"batch": batch_id, "frames": len(frames)})
-    return {"bundle_id": bid, "frames": frames, "bytes": len(env), "count": len(payload["stops"]),
+    return {"bundle_id": bid, "frames": frames, "bytes": len(env), "count": len(payload.get("s") or payload.get("stops") or []),
             "work_date": payload["work_date"], "assign_ver": payload["assign_ver"]}
 
 
@@ -659,11 +662,35 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                 counts["photos_expected"] += 1
             if not reason:
                 touched.add(ev["request_id"])
+                if ev["kind"] == "REVISIT_APPT":
+                    _apply_revisit(con, ev["request_id"], ev.get("body", {}))
         for rid in touched:
             _refresh_status(con, rid)
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
+
+
+def _apply_revisit(con, rid: str, b: dict):
+    """현장에서 통화로 약속한 재방문 날짜·시간을 접수 일정에 반영한다(이전 일정은 버전으로 보존)."""
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    date = b.get("date") or ""
+    if not r or r["status"] == "CANCELLED" or not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
+        return
+    start = b.get("start") if re.fullmatch(r"\d\d:\d\d", b.get("start") or "") else None
+    end = b.get("end") if re.fullmatch(r"\d\d:\d\d", b.get("end") or "") else None
+    if (r["planned_date"], r["appt_start"], r["appt_end"]) == (date, start, end):
+        return
+    con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
+                (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), "현장 통화로 재방문 약속(휴대폰 기록)", now()))
+    con.execute("UPDATE request SET req_ver=req_ver+1, planned_date=?, appt_start=?, appt_end=?, updated_at=? WHERE id=?", (date, start, end, now(), rid))
+    audit(con, "request", rid, "REVISIT_APPT", {"date": date, "start": start, "end": end})
+
+
+def fee_usage(con, limit: int = 10) -> list[str]:
+    """접수에 많이 쓰인 품목(PC 화면의 자주 쓰는 품목)."""
+    return [r["fee_rate_id"] for r in rows(con, """SELECT fee_rate_id, COUNT(*) AS n FROM request_item WHERE fee_rate_id IS NOT NULL AND removed=0
+        GROUP BY fee_rate_id ORDER BY n DESC LIMIT ?""", (limit,))]
 
 
 def list_conflicts(con, include_resolved=False):
@@ -687,6 +714,8 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
+            if e["kind"] == "REVISIT_APPT":
+                _apply_revisit(con, e["request_id"], json.loads(e["body_json"]))
             if e["kind"] == "PHOTO_META":
                 b = json.loads(e["body_json"])
                 con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id) VALUES (?,?,?,?,?,?)",
@@ -748,7 +777,8 @@ def day_summary(con, work_date: str) -> dict:
         if st["fee"]["pending_count"] and r["status"] != "CANCELLED":
             pending_fee.append({"receipt_no": r["receipt_no"], "name": r["name"], "count": st["fee"]["pending_count"]})
         if r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
-            revisit.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "remaining": st["remaining_total"]})
+            revisit.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "remaining": st["remaining_total"],
+                            "next_date": r["planned_date"] if r["planned_date"] != work_date else None, "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None})
         if r["id"] in assigned_ids and r["status"] == "ASSIGNED":
             no_result.append({"receipt_no": r["receipt_no"], "name": r["name"]})
     photos = rows(con, """SELECT p.photo_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
@@ -756,8 +786,17 @@ def day_summary(con, work_date: str) -> dict:
     conflicts = [c for c in list_conflicts(con) if one(con, "SELECT 1 AS x FROM request WHERE id=? AND planned_date=?", (c["request_id"], work_date))]
     unconfirmed = rows(con, "SELECT id, work_date, assign_ver FROM transfer_bundle WHERE work_date=? AND receipt_confirmed_at IS NULL", (work_date,))
     closed = one(con, "SELECT * FROM day_close WHERE work_date=?", (work_date,))
+    unpaid = []
+    for r in reqs:
+        if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
+            ps = payment_status(con, r["id"])
+            if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING"):
+                unpaid.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"], "paid": ps["paid"]})
+    unloads = list_unloads(con, work_date)
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
+            "payments": unpaid, "unloads": unloads,
+            "unload_total": {"volume_m3": round(sum(u["volume_m3"] or 0 for u in unloads), 2), "weight_kg": round(sum(u["weight_kg"] or 0 for u in unloads), 1)},
             "closed": closed}
 
 
@@ -769,3 +808,151 @@ def close_day(con, work_date: str, note: str = "") -> dict:
                     (work_date, now(), json.dumps(s, ensure_ascii=False), note))
         audit(con, "day", work_date, "CLOSE", {"open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"]})
     return s
+
+
+# ------------------------------------------------------------------ QR 실측 (가상 자료, 업무 자료와 분리)
+def make_qr_test(con, device_id: str, count: int, addr_style: str = "mixed", chunk: int = 700, ec: str = "M", fps: int = 3) -> dict:
+    """기관 휴대폰으로 QR 인식률·전송 시간을 재기 위한 가상 목록. 휴대폰은 실측 모드로 받고 저장하지 않는다."""
+    from sample_data import make_daylist
+    if count not in (20, 50, 100) or addr_style not in ("mixed", "short", "medium", "long") or chunk not in (400, 600, 800, 1200) or ec not in ("L", "M", "Q"):
+        raise UserError("실측 조건 값이 올바르지 않습니다.")
+    dev = one(con, "SELECT * FROM device WHERE id=? AND status='ACTIVE'", (device_id,))
+    if not dev:
+        raise UserError("사용 중인 휴대폰을 골라 주세요.")
+    sample = make_daylist(count, today_kst(), 1, seed=count * 7 + chunk, addr_style=addr_style)
+    for st in sample["stops"]:
+        st["receipt_no"] = "TEST-" + st["receipt_no"][3:]
+    payload = P.compact_daylist(sample, FEE_ROWS)
+    payload["schema"] = "dg.qrtest/1"
+    payload["params"] = {"count": count, "addr": addr_style, "chunk": chunk, "ec": ec, "fps": fps}
+    tid = uuid.uuid4().bytes
+    sign = pc_key(con, "sign")
+    head = P.Header(P.TYPE_DAYLIST, tid, uuid.UUID(device_id).bytes, 0, 1, P.key_id(P.pub_raw(sign)))
+    env, code = P.seal(payload, head, P.pub_from_raw(dev["kex_pub"]), sign)
+    frames = P.split_frames(env, tid, chunk)
+    test_id = str(uuid.UUID(bytes=tid))
+    with tx(con):
+        con.execute("INSERT INTO qr_test (id, device_id, params_json, frames_json, bytes, check_code, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (test_id, device_id, json.dumps(payload["params"]), json.dumps(frames), len(env), code[:4], now()))
+    return {"test_id": test_id, "frames": len(frames), "bytes": len(env), "params": payload["params"]}
+
+
+def record_qr_test(con, test_id: str, elapsed_s: float, reads: int, check: str, note: str = "") -> dict:
+    t = one(con, "SELECT * FROM qr_test WHERE id=?", (test_id,))
+    if not t:
+        raise UserError("실측 기록을 찾을 수 없습니다.")
+    verified = 1 if re.sub(r"\s", "", check or "").upper() == t["check_code"] else 0
+    with tx(con):
+        con.execute("UPDATE qr_test SET elapsed_s=?, reads=?, verified=?, note=?, recorded_at=? WHERE id=?",
+                    (float(elapsed_s), int(reads), verified, note, now(), test_id))
+    return {"verified": bool(verified)}
+
+
+def list_qr_tests(con) -> list[dict]:
+    out = rows(con, "SELECT id, device_id, params_json, bytes, created_at, elapsed_s, reads, verified, note, json_array_length(frames_json) AS frames FROM qr_test ORDER BY created_at DESC LIMIT 200")
+    for r in out:
+        r["params"] = json.loads(r.pop("params_json"))
+    return out
+
+
+# ------------------------------------------------------------------ 수납 (담당자 확인 기록) — 계산 금액·납부 금액·상태를 분리
+PAY_METHODS = ("현장 납부", "무통장 입금", "기타")
+
+
+def payment_status(con, rid: str) -> dict:
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    final = derive(con, r)["fee"]["final"]
+    recs = rows(con, "SELECT * FROM payment WHERE request_id=? ORDER BY recorded_at", (rid,))
+    live = [x for x in recs if not x["void_reason"]]
+    paid = sum(x["amount"] for x in live if x["kind"] == "PAY") - sum(x["amount"] for x in live if x["kind"] == "REFUND")
+    if r["status"] == "CANCELLED" and paid == 0:
+        status = "NONE"
+    elif final is None:
+        status = "AMOUNT_PENDING" if paid == 0 else "PAID_AMOUNT_PENDING"
+    elif paid == 0:
+        status = "UNPAID"
+    elif paid < final:
+        status = "UNDERPAID"
+    elif paid == final:
+        status = "PAID"
+    else:
+        status = "OVERPAID_REVIEW"
+    return {"calculated": final, "paid": paid, "status": status, "records": recs}
+
+
+def add_payment(con, rid: str, data: dict) -> dict:
+    if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (rid,)):
+        raise UserError("접수를 찾을 수 없습니다.")
+    kind = data.get("kind", "PAY")
+    amount = int(data.get("amount") or 0)
+    method = data.get("method") or ""
+    paid_on = data.get("paid_on") or today_kst()
+    if kind not in ("PAY", "REFUND") or amount <= 0:
+        raise UserError("금액을 1원 이상으로 적어 주세요.")
+    if method not in PAY_METHODS:
+        raise UserError("납부 방법을 골라 주세요.")
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d", paid_on):
+        raise UserError("날짜 형식이 올바르지 않습니다.")
+    pid = str(uuid.uuid4())
+    with tx(con):
+        con.execute("INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (pid, rid, kind, amount, method, paid_on, (data.get("note") or "").strip(), now()))
+        audit(con, "payment", pid, kind, {"request": rid, "amount": amount, "method": method})
+    return payment_status(con, rid)
+
+
+def void_payment(con, pid: str, reason: str) -> dict:
+    p = one(con, "SELECT * FROM payment WHERE id=?", (pid,))
+    if not p or p["void_reason"]:
+        raise UserError("정정할 수납 기록이 없습니다.")
+    if not (reason or "").strip():
+        raise UserError("정정 사유를 적어 주세요.")
+    with tx(con):
+        con.execute("UPDATE payment SET void_reason=?, voided_at=? WHERE id=?", (reason.strip(), now(), pid))
+        audit(con, "payment", pid, "VOID", {"reason": reason.strip()})
+    return payment_status(con, p["request_id"])
+
+
+# ------------------------------------------------------------------ 하차 기록·적재량 보정
+def add_unload(con, data: dict) -> str:
+    if not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (data.get("crew_id"),)):
+        raise UserError("팀을 골라 주세요.")
+    place = (data.get("place") or "").strip()
+    if not place:
+        raise UserError("하차 장소(반입지)를 적어 주세요.")
+    vol = float(data["volume_m3"]) if data.get("volume_m3") not in (None, "") else None
+    kg = float(data["weight_kg"]) if data.get("weight_kg") not in (None, "") else None
+    if vol is None and kg is None:
+        raise UserError("부피나 중량 중 하나는 적어 주세요.")
+    uid = str(uuid.uuid4())
+    with tx(con):
+        con.execute("INSERT INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (uid, data["crew_id"], data.get("work_date") or today_kst(), data.get("at_time") or None, place, vol, kg,
+                     (data.get("note") or "").strip(), now()))
+        audit(con, "unload", uid, "ADD", {"crew": data["crew_id"]})
+    return uid
+
+
+def list_unloads(con, work_date: str) -> list[dict]:
+    return rows(con, """SELECT u.*, c.name AS crew_name FROM unload_log u JOIN crew c ON c.id=u.crew_id
+        WHERE u.work_date=? AND u.void_reason IS NULL ORDER BY u.at_time""", (work_date,))
+
+
+def volume_overrides(con) -> dict:
+    return get_setting(con, "volume_overrides", {})
+
+
+def save_volume_override(con, fee_rate_id: str, m3: float | None):
+    if fee_rate_id not in FEE_ROWS:
+        raise UserError("수수료표에 없는 품목입니다.")
+    v = volume_overrides(con)
+    if m3 in (None, ""):
+        v.pop(fee_rate_id, None)
+    else:
+        m = float(m3)
+        if not 0 < m <= 20:
+            raise UserError("부피는 0보다 크고 20m³ 이하로 적어 주세요.")
+        v[fee_rate_id] = m
+    with tx(con):
+        set_setting(con, "volume_overrides", v)
+        audit(con, "volume", fee_rate_id, "OVERRIDE", {"m3": m3})

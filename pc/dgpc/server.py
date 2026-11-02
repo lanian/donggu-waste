@@ -153,6 +153,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.session():
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 return self.bundle_page(path[8:])
+            if method == "GET" and path.startswith("/qrtest/"):
+                if not self.session():
+                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
+                return self.qrtest_page(path[8:])
             return self.send_json({"error": "없음"}, 404)
         except S.UserError as e:
             return self.send_json({"error": str(e)}, 400)
@@ -218,6 +222,18 @@ class Handler(BaseHTTPRequestHandler):
             if p == "registration-qr":
                 from pc_tool import qr_png_data_uri
                 return self.send_json({"image": qr_png_data_uri(S.registration_text(c), "M")[0]})
+            if p == "unloads":
+                return self.send_json(S.list_unloads(c, qs["date"]))
+            if p == "volumes":
+                ov = S.volume_overrides(c)
+                ids = list(dict.fromkeys(S.fee_usage(c, 20) + list(ov)))
+                return self.send_json([{"fee_rate_id": i, "name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "unit_label": S.FEE_ROWS[i]["unit_label"],
+                                        "estimate": routing.volume_of({"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}),
+                                        "override": ov.get(i)} for i in ids if i in S.FEE_ROWS])
+            if p == "fee-usage":
+                return self.send_json(S.fee_usage(c))
+            if p == "qrtests":
+                return self.send_json(S.list_qr_tests(c))
             if parts[0] == "photo" and len(parts) == 2:
                 b = S.photo_bytes(c, parts[1])
                 return self.send_bytes(b, "image/jpeg") if b else self.send_json({"error": "없음"}, 404)
@@ -264,6 +280,23 @@ class Handler(BaseHTTPRequestHandler):
             if parts[0] == "devices" and len(parts) == 3 and parts[2] == "status":
                 S.set_device_status(c, parts[1], self.json_body().get("status", ""))
                 return self.send_json({"ok": True})
+            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "payments":
+                return self.send_json(S.add_payment(c, parts[1], self.json_body()))
+            if parts[0] == "payments" and len(parts) == 3 and parts[2] == "void":
+                return self.send_json(S.void_payment(c, parts[1], self.json_body().get("reason", "")))
+            if p == "unloads":
+                return self.send_json({"id": S.add_unload(c, self.json_body())})
+            if p == "volumes":
+                d = self.json_body()
+                S.save_volume_override(c, d.get("fee_rate_id", ""), d.get("m3"))
+                return self.send_json({"ok": True})
+            if p == "qrtest":
+                d = self.json_body()
+                return self.send_json(S.make_qr_test(c, d.get("device_id", ""), int(d.get("count", 20)), d.get("addr", "mixed"),
+                                                     int(d.get("chunk", 700)), d.get("ec", "M"), int(d.get("fps", 3))))
+            if parts[0] == "qrtest" and len(parts) == 3 and parts[2] == "result":
+                d = self.json_body()
+                return self.send_json(S.record_qr_test(c, parts[1], d.get("elapsed_s") or 0, d.get("reads") or 0, d.get("check", ""), d.get("note", "")))
             if p == "settings":
                 S.save_settings(c, self.json_body())
                 return self.send_json(S.settings(c))
@@ -280,15 +313,38 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             r["waiting_days"] = max(0, (time.time() - time.mktime(time.strptime(r["received_at"][:10], "%Y-%m-%d"))) // 86400)
             if r["state"]["has_field_records"]:  # 재방문: 남은 품목만 적재·작업시간에 반영
-                r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"]} for l in r["state"]["lines"] if l["remaining"]]
+                r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"], "fee_rate_id": l["fee_rate_id"]} for l in r["state"]["lines"] if l["remaining"]]
             reqs.append(r)
         st = S.settings(c)
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
-                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)))
+                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
+                           volume_overrides=S.volume_overrides(c))
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"]} for r in reqs}
         return res
+
+    def raw_page(self, page: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(page)
+
+    def qrtest_page(self, short: str):
+        from pc_tool import display_html, qr_png_data_uri
+        with LOCK:
+            r = S.rows(CON, "SELECT * FROM qr_test WHERE id LIKE ?", (short + "%",))
+        if len(r) != 1:
+            return self.send_json({"error": "없음"}, 404)
+        t = r[0]
+        pr = json.loads(t["params_json"])
+        imgs = [qr_png_data_uri(f, pr["ec"])[0] for f in json.loads(t["frames_json"])]
+        label = f"QR 실측 · 가상 {pr['count']}건 · 주소 {pr['addr']} · 조각 {pr['chunk']}B · 오류복원 {pr['ec']}"
+        self.raw_page(display_html(imgs, t["id"][:8], "실측", 0, pr["count"], pr["fps"], label).encode())
 
     def bundle_page(self, bundle_short: str):
         from pc_tool import display_html, qr_png_data_uri

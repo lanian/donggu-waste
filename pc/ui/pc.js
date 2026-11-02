@@ -8,6 +8,7 @@ let boot = null;       // 설정·팀·기기
 let liveMaps = [];
 const STATUS = { RECEIVED: '접수', ASSIGNED: '배정', IN_PROGRESS: '처리 중', PARTIAL: '일부 수거', DONE: '수거 완료', NOT_COLLECTED: '미수거', ON_HOLD: '보류', CANCELLED: '취소' };
 const CONTACT = { NOT_CONTACTED: '연락 전', REACHED: '통화 완료', NO_ANSWER: '부재', CALLBACK: '재연락 예정', WRONG_NUMBER: '번호 오류' };
+const PAY = { NONE: '해당 없음', AMOUNT_PENDING: '금액 확인 대기', PAID_AMOUNT_PENDING: '납부 기록 있음 · 금액 미확정', UNPAID: '미납', UNDERPAID: '부족', PAID: '납부 확인', OVERPAID_REVIEW: '과납 확인 필요' };
 const REASON = { NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기', OTHER: '기타' };
 
 // ------------------------------------------------------------ 도우미
@@ -73,11 +74,15 @@ function itemPicker(onAdd) {
   const list = h('div', { class: 'results' });
   const qty = h('input', { type: 'number', min: 1, value: 1, style: 'width:80px' });
   const add = btn('품목 추가', null, 'primary', { disabled: true });
+  let usage = [];
+  api('fee-usage').then((u) => { usage = u; draw(); }).catch(() => {});
   const draw = () => {
-    const rows = searchFees(BUILTIN_FEES, st.q).slice(0, 40);
+    const quick = !st.q;
+    const rows = quick ? usage.map((id) => BUILTIN_FEES.rows.find((r) => r.id === id)).filter(Boolean) : searchFees(BUILTIN_FEES, st.q).slice(0, 40);
     list.replaceChildren(...rows.map((r) => btn(h('span', {}, `${r.name} ${r.spec}`, h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
       r.status === 'REVIEW' ? h('span', { class: 'w' }, '규격 확인 필요 → 금액 확인 대기') : null), () => { st.sel = r.id; draw(); }, st.sel === r.id ? 'on' : '')));
-    list.style.display = st.q ? '' : 'none';
+    list.style.display = rows.length ? '' : 'none';
+    if (quick && rows.length) list.prepend(h('p', { class: 'muted', style: 'margin:4px 8px' }, '자주 쓰는 품목'));
     add.disabled = !st.sel;
   };
   q.addEventListener('input', () => { st.q = q.value; st.sel = null; draw(); }); // 검색어가 바뀌면 선택 해제
@@ -237,8 +242,33 @@ async function screenRequest(id) {
         h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, '지도를 눌러 실제 배출 위치를 지정합니다. 주소를 외부로 보내지 않기 위해 주소 검색은 쓰지 않습니다.'),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
     field,
+    !isNew ? paymentCard(r) : null,
     editable ? h('div', { class: 'card row' }, isNew ? null : reason, btn(isNew ? '접수 등록' : '수정 저장', save, 'primary'), isNew ? null : btn('접수 취소', cancel, 'danger'), msg) : null,
     !isNew && r.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...r.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${v.at.replace('T', ' ').slice(0, 16)} UTC · ${v.reason}`)))) : null);
+}
+
+// 수납: 담당자가 확인한 납부 기록. 계산 금액·납부 금액·상태를 따로 보여 주고, 정정은 지우지 않고 사유를 남긴다
+function paymentCard(r) {
+  const p = r.payment;
+  const msg = h('span', { class: 'msg' });
+  const kind = h('select', {}, h('option', { value: 'PAY' }, '납부'), h('option', { value: 'REFUND' }, '환불'));
+  const remain = p.calculated != null ? Math.max(0, p.calculated - p.paid) : '';
+  const amount = h('input', { type: 'number', min: 1, value: remain || '', placeholder: '금액(원)', style: 'width:120px' });
+  const method = h('select', {}, ...['현장 납부', '무통장 입금', '기타'].map((m) => h('option', { value: m }, m)));
+  const paidOn = h('input', { type: 'date', value: boot.today });
+  const note = h('input', { placeholder: '메모(입금자명 등)', style: 'flex:1' });
+  const cls = { PAID: 'ok', UNPAID: 'bad', UNDERPAID: 'warn', OVERPAID_REVIEW: 'warn', AMOUNT_PENDING: 'warn', PAID_AMOUNT_PENDING: 'warn' }[p.status] || '';
+  return h('div', { class: 'card' }, h('h2', {}, '수납 기록 ', chip(PAY[p.status], cls)),
+    h('dl', { class: 'kv' }, h('dt', {}, '계산 금액'), h('dd', {}, p.calculated == null ? '미확정 (금액 확인 대기 품목 있음)' : won(p.calculated)),
+      h('dt', {}, '납부 확인 금액'), h('dd', {}, won(p.paid))),
+    p.records.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['날짜', '구분', '금액', '방법', '메모', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...p.records.map((x) => h('tr', { class: x.void_reason ? 'muted' : '' }, h('td', {}, x.paid_on), h('td', {}, x.kind === 'PAY' ? '납부' : '환불'),
+        h('td', {}, x.void_reason ? h('s', {}, won(x.amount)) : won(x.amount)), h('td', {}, x.method), h('td', {}, x.note || '', x.void_reason ? chip('정정: ' + x.void_reason) : null),
+        h('td', {}, x.void_reason ? '' : btn('정정', wrap(async () => { const why = prompt('정정 사유 (기록은 지워지지 않습니다)'); if (!why) return; await post(`payments/${x.id}/void`, { reason: why }); render(); }, msg), 'small')))))) : null,
+    h('div', { class: 'row' }, kind, amount, method, paidOn, note, btn('수납 기록', wrap(async () => {
+      await post(`requests/${r.id}/payments`, { kind: kind.value, amount: amount.value, method: method.value, paid_on: paidOn.value, note: note.value }); toast('수납을 기록했습니다'); render();
+    }, msg), 'primary'), msg),
+    h('p', { class: 'muted' }, '계산 금액은 현장 확인 수량 기준입니다. 일부 수거로 금액을 자동으로 줄이거나 환불을 확정하지 않습니다. 과납·부족은 담당자가 확인해 기록합니다.'));
 }
 
 function photoImg(pid) {
@@ -274,7 +304,7 @@ async function screenDispatch() {
     const cols = p.routes.map((rt, ri) => h('div', { class: 'card' }, h('h2', {}, `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null),
       ...rt.stops.map((x, i) => h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
         h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${x.load_m3 != null ? ` · 누적 적재(추정) ${x.load_m3}m³` : ''}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
-          R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null),
+          R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null),
         btn('▲', () => move(ri, i, -1), 'small'), btn('▼', () => move(ri, i, 1), 'small'),
         h('select', { class: 'small', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기'))))));
     const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`), ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
@@ -303,7 +333,8 @@ async function screenDispatch() {
           lines.push({ type: 'Feature', properties: { c: ri % 4 }, geometry: { type: 'LineString', coordinates: coords } });
         });
         p.unassigned.forEach((u) => { const q = R[u.request_id]; if (q && q.lat != null) { b.extend([q.lon, q.lat]); M.pin(ml, map, { lng: q.lon, lat: q.lat, label: '미', cls: 'un' }); } });
-        map.on('load', () => {
+        const whenStyle = (f) => (map.isStyleLoaded() ? f() : map.once('style.load', f));
+        whenStyle(() => {
           map.addSource('routes', { type: 'geojson', data: { type: 'FeatureCollection', features: lines } });
           map.addLayer({ id: 'routes', type: 'line', source: 'routes', paint: { 'line-width': 3, 'line-dasharray': [2, 1], 'line-color': ['match', ['get', 'c'], 0, '#1d4ed8', 1, '#b45309', 2, '#7c3aed', '#0e7490'] } });
           map.fitBounds(b, { padding: 50, maxZoom: 16, duration: 0 });
@@ -400,13 +431,81 @@ async function screenClose() {
         d.closed ? h('p', {}, chip('마감 기록됨', 'ok'), ` ${d.closed.closed_at.replace('T', ' ').slice(0, 16)} UTC ${d.closed.note || ''}`) : null),
       h('div', { class: 'grid2' },
         list('결과 미회수 (배정했으나 결과 없음)', d.no_result, (x) => `${x.receipt_no} ${x.name}`),
-        list('재방문 후보 (일부·미수거·보류)', d.revisit, (x) => `${x.receipt_no} ${x.name} · ${STATUS[x.status]} · 남은 ${x.remaining}`),
-        list('금액 확인 대기', d.pending_fee, (x) => `${x.receipt_no} ${x.name} · ${x.count}건`)),
+        list('재방문 후보 (일부·미수거·보류)', d.revisit, (x) => `${x.receipt_no} ${x.name} · ${STATUS[x.status]} · 남은 ${x.remaining}${x.next_date ? ` · 재방문 약속 ${x.next_date}${x.appt ? ' ' + x.appt[0] + (x.appt[1] ? '~' + x.appt[1] : '') : ''}` : ''}`),
+        list('금액 확인 대기', d.pending_fee, (x) => `${x.receipt_no} ${x.name} · ${x.count}건`),
+        list('수납 확인 필요 (미납·부족·과납·금액 미확정)', d.payments, (x) => `${x.receipt_no} ${x.name} · ${PAY[x.status]} · 계산 ${x.calculated == null ? '미확정' : won(x.calculated)} / 납부 ${won(x.paid)}`)),
+      unloadCard(d),
       h('div', { class: 'card row' }, note, btn(d.closed ? '마감 다시 기록' : '마감 기록', wrap(async () => { await post('close', { date: s.date, note: note.value }); toast('마감을 기록했습니다'); load(); }), 'primary'),
         h('span', { class: 'muted' }, '미처리 건이 있어도 마감할 수 있으며, 그 목록이 함께 기록되어 다음 날로 이월됩니다.')));
   });
   date.addEventListener('change', load); load();
   return h('div', {}, h('h1', {}, '일일 마감'), h('div', { class: 'card' }, h('label', { class: 'f' }, '수거일', date)), body);
+}
+
+// 적재량 보정: 품목별 추정 부피와 담당자 보정값을 따로 관리 (노선 계산의 적재 제약에 사용)
+function volumeCard() {
+  const tbody = h('tbody');
+  const msg = h('span', { class: 'msg' });
+  api('volumes').then((list) => tbody.replaceChildren(...(list.length ? list.map((v) => {
+    const inp = h('input', { type: 'number', step: '0.1', min: 0, value: v.override ?? '', placeholder: '보정값', style: 'width:90px' });
+    return h('tr', {}, h('td', {}, `${v.name} ${v.spec}`), h('td', {}, `${v.estimate} m³/${v.unit_label}`), h('td', {}, inp, ' m³'),
+      h('td', {}, btn('저장', wrap(async () => { await post('volumes', { fee_rate_id: v.fee_rate_id, m3: inp.value === '' ? null : +inp.value }); toast(inp.value === '' ? '보정값을 지웠습니다(추정치 사용)' : '보정값을 저장했습니다'); }, msg), 'small')));
+  }) : [h('tr', {}, h('td', { colspan: 4, class: 'muted' }, '접수에 쓰인 품목이 생기면 여기에 나타납니다.'))]))).catch(() => {});
+  return h('div', { class: 'card' }, h('h2', {}, '적재량 보정'), h('p', { class: 'muted' }, '자주 쓰는 품목의 1단위 부피입니다. 추정치는 그대로 두고, 실측한 값이 있으면 보정값에 적으세요(비우면 추정치 사용).'),
+    h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '추정치', '보정값', ''].map((t) => h('th', {}, t)))), tbody), msg);
+}
+
+// 하차 기록: 반입지에서 내린 양(부피·중량)을 팀별로 기록
+function unloadCard(d) {
+  const msg = h('span', { class: 'msg' });
+  const crew = h('select', {}, ...boot.crews.map((c) => h('option', { value: c.id }, c.name)));
+  const at = h('input', { type: 'time' }), place = h('input', { placeholder: '반입지' });
+  const vol = h('input', { type: 'number', step: '0.1', placeholder: 'm³', style: 'width:90px' }), kg = h('input', { type: 'number', placeholder: 'kg', style: 'width:100px' });
+  const note = h('input', { placeholder: '메모', style: 'flex:1' });
+  return h('div', { class: 'card' }, h('h2', {}, `하차 기록 · 합계 ${d.unload_total.volume_m3}m³ · ${d.unload_total.weight_kg}kg`),
+    d.unloads.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '시각', '반입지', '부피', '중량', '메모'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...d.unloads.map((u) => h('tr', {}, h('td', {}, u.crew_name), h('td', {}, u.at_time || ''), h('td', {}, u.place), h('td', {}, u.volume_m3 ?? ''), h('td', {}, u.weight_kg ?? ''), h('td', {}, u.note || ''))))) : h('p', { class: 'muted' }, '기록 없음'),
+    boot.crews.length ? h('div', { class: 'row' }, crew, at, place, vol, kg, note, btn('하차 기록', wrap(async () => {
+      await post('unloads', { crew_id: crew.value, work_date: d.work_date, at_time: at.value, place: place.value, volume_m3: vol.value, weight_kg: kg.value, note: note.value });
+      toast('하차를 기록했습니다'); render();
+    }, msg), 'primary'), msg) : null);
+}
+
+// ------------------------------------------------------------ QR 실측 (가상 자료)
+async function screenQrTest() {
+  const devs = boot.devices.filter((d) => d.status === 'ACTIVE');
+  const sel = (opts, def) => h('select', {}, ...opts.map(([v, t]) => h('option', { value: v, selected: v === def }, t)));
+  const F = { device: sel(devs.map((d) => [d.id, `${d.id.slice(0, 8)} ${d.label || ''}`]), devs[0] && devs[0].id), count: sel([['20', '20건'], ['50', '50건'], ['100', '100건']], '20'),
+    addr: sel([['mixed', '섞음'], ['short', '짧은 주소'], ['medium', '보통(동·호)'], ['long', '긴 주소(설명 포함)']], 'mixed'),
+    chunk: sel([['400', '400B'], ['600', '600B'], ['800', '800B'], ['1200', '1,200B']], '800'), ec: sel([['L', 'L (용량 큼)'], ['M', 'M'], ['Q', 'Q (복원력 큼)']], 'M'),
+    fps: sel([['2', '초당 2장'], ['3', '초당 3장'], ['4', '초당 4장'], ['6', '초당 6장']], '3') };
+  const msg = h('p', { class: 'msg' });
+  const tbody = h('tbody');
+  const load = wrap(async () => {
+    const list = await api('qrtests');
+    tbody.replaceChildren(...list.map((t) => {
+      const el = h('input', { type: 'number', step: '0.1', placeholder: '초', style: 'width:80px', value: t.elapsed_s ?? '' });
+      const rd = h('input', { type: 'number', placeholder: '인식 횟수', style: 'width:90px', value: t.reads ?? '' });
+      const ck = h('input', { placeholder: '확인 4자리', style: 'width:100px' });
+      return h('tr', {}, h('td', {}, t.created_at.replace('T', ' ').slice(5, 16)), h('td', {}, `${t.params.count}건 · ${t.params.addr}`), h('td', {}, `${t.params.chunk}B · ${t.params.ec} · ${t.params.fps}장/초`),
+        h('td', {}, `${t.bytes.toLocaleString()}B · ${t.frames}장`), h('td', {}, t.verified == null ? '' : t.verified ? chip(`${t.elapsed_s}초 · 인식 ${t.reads}회 · 복원 일치`, 'ok') : chip('확인 코드 불일치', 'bad')),
+        h('td', {}, btn('QR 다시 표시', () => window.open('/qrtest/' + t.id.slice(0, 8), 'dg-qrtest', 'width=760,height=900'), 'small'), ' ', el, rd, ck,
+          btn('기록', wrap(async () => { const r = await post(`qrtest/${t.id}/result`, { elapsed_s: el.value, reads: rd.value, check: ck.value }); toast(r.verified ? '기록했습니다 (복원 일치)' : '확인 코드가 맞지 않습니다', !r.verified); load(); }), 'small primary')));
+    }));
+  });
+  load();
+  const run = wrap(async () => {
+    const r = await post('qrtest', { device_id: F.device.value, count: +F.count.value, addr: F.addr.value, chunk: +F.chunk.value, ec: F.ec.value, fps: +F.fps.value });
+    window.open('/qrtest/' + r.test_id.slice(0, 8), 'dg-qrtest', 'width=760,height=900');
+    toast(`실측 QR ${r.frames}장 (${r.bytes.toLocaleString()}B) 표시`); load();
+  }, msg);
+  const lab = (t, el) => h('label', { class: 'f' }, t, el);
+  return h('div', {}, h('h1', {}, 'QR 실측'),
+    h('div', { class: 'card' }, h('p', { class: 'muted' }, '기관 휴대폰으로 QR 전송 시간과 인식률을 잽니다. 가상 자료만 쓰며 업무 자료에 섞이지 않습니다. 휴대폰은 [오늘 목록 받기]로 읽으면 "실측 모드"로 결과만 보여 주고 저장하지 않습니다.'),
+      devs.length ? h('div', { class: 'row' }, lab('휴대폰', F.device), lab('건수', F.count), lab('주소 길이', F.addr), lab('조각 크기', F.chunk), lab('오류 복원', F.ec), lab('표시 속도', F.fps), btn('실측 QR 표시', run, 'primary'))
+        : h('p', { class: 'err' }, '설정에서 휴대폰을 먼저 등록하세요.'), msg),
+    h('div', { class: 'card', style: 'padding:0;overflow:auto' }, h('table', {}, h('thead', {}, h('tr', {}, ...['시각', '자료', '조건', '크기', '결과', '휴대폰 결과 입력'].map((x) => h('th', {}, x)))), tbody)),
+    h('p', { class: 'muted' }, '휴대폰에 나온 시간·인식 횟수·확인 4자리를 입력하세요. 확인 4자리가 맞아야 전체 복원이 정확했다는 뜻입니다. 같은 조건을 10회 반복해 평균을 비교하세요.'));
 }
 
 // ------------------------------------------------------------ 설정
@@ -442,6 +541,7 @@ async function screenSettings() {
     h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'row' }, '차고지 위도', dlat, '경도', dlon, dlabel), h('div', { class: 'row' }, '로컬 OSRM', osrm),
       h('div', { class: 'row' }, '지점당 기본 작업', sb, '분 + 품목당', sp, '분 (추정치)'),
       btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
+    volumeCard(),
     h('div', { class: 'card' }, h('h2', {}, '수수료표'), h('dl', { class: 'kv' }, h('dt', {}, '적용 표'), h('dd', {}, st.fee_label), h('dt', {}, '버전'), h('dd', {}, st.fee_version),
       h('dt', {}, '자료 확인일'), h('dd', {}, st.fee_checked_on), h('dt', {}, '시행일'), h('dd', {}, st.fee_effective_from || '미확인 (담당자 확인 필요)'))),
     msg);
@@ -461,9 +561,9 @@ async function render() {
     }
     if (boot) {
       const [, route, arg] = (location.hash || '#/requests').split('/');
-      const screens = { requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, settings: screenSettings };
+      const screens = { requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, settings: screenSettings };
       const content = await (screens[route] || screenRequests)();
-      const nav = [['requests', '접수'], ['dispatch', '배정·노선'], ['send', '목록 전송'], ['results', '결과 가져오기'], ['close', '일일 마감'], ['settings', '설정']];
+      const nav = [['requests', '접수'], ['dispatch', '배정·노선'], ['send', '목록 전송'], ['results', '결과 가져오기'], ['close', '일일 마감'], ['qrtest', 'QR 실측'], ['settings', '설정']];
       view = h('div', { class: 'shell' }, h('nav', { class: 'side' }, h('strong', {}, '동구 대형폐기물'),
         ...nav.map(([k, t]) => h('a', { href: '#/' + k, class: (route || 'requests') === k || (k === 'requests' && route === 'request') ? 'on' : '' }, t)),
         h('span', { class: 'grow' }), h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; render(); } }, '로그아웃')),

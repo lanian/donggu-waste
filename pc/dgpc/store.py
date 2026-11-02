@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS photo (
 CREATE TABLE IF NOT EXISTS photo_import (
   id TEXT PRIMARY KEY, package_sha256 TEXT NOT NULL UNIQUE, device_id TEXT NOT NULL, imported_at TEXT NOT NULL,
   summary_json TEXT, release_code TEXT);
+CREATE TABLE IF NOT EXISTS qr_test (
+  id TEXT PRIMARY KEY, device_id TEXT NOT NULL, params_json TEXT NOT NULL, frames_json TEXT NOT NULL, bytes INTEGER NOT NULL,
+  check_code TEXT NOT NULL, created_at TEXT NOT NULL, elapsed_s REAL, reads INTEGER, verified INTEGER, note TEXT, recorded_at TEXT);
+CREATE TABLE IF NOT EXISTS payment (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES request(id), kind TEXT NOT NULL CHECK (kind IN ('PAY','REFUND')),
+  amount INTEGER NOT NULL CHECK (amount > 0), method TEXT NOT NULL, paid_on TEXT NOT NULL, note TEXT,
+  recorded_at TEXT NOT NULL, void_reason TEXT, voided_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_payment_req ON payment(request_id);
+CREATE TABLE IF NOT EXISTS unload_log (
+  id TEXT PRIMARY KEY, crew_id TEXT NOT NULL REFERENCES crew(id), work_date TEXT NOT NULL, at_time TEXT, place TEXT NOT NULL,
+  volume_m3 REAL, weight_kg REAL, note TEXT, recorded_at TEXT NOT NULL, void_reason TEXT);
 CREATE TABLE IF NOT EXISTS day_close (work_date TEXT PRIMARY KEY, closed_at TEXT NOT NULL, summary_json TEXT NOT NULL, note TEXT);
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL,

@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import * as P from '../web/proto.js';
+import { BUILTIN_FEES } from '../web/fees-data.js';
 
 const require = createRequire(import.meta.url);
 const jsQR = require('jsqr');
@@ -63,6 +64,8 @@ ok(col.complete(key), '중복 조각을 무시하고 전체 조각 수집 완료
 
 const envBytes = col.assemble(key);
 const opened = await P.openEnvelope(envBytes, pcSignPub, dev.kex.privateKey, deviceId);
+ok(opened.payload.schema === 'dg.daylist/2', '압축 형식 v2로 전송');
+opened.payload = P.expandDaylist(opened.payload, BUILTIN_FEES);
 const s0 = opened.payload.stops[0];
 ok(opened.payload.stops.length === 20, '접수 20건 복원');
 ok(/^010/.test(s0.phone) && s0.name.length >= 2 && s0.address.includes('동구'), `이름·연락처(앞자리 0)·주소 복원 (${s0.name}, ${s0.phone})`);

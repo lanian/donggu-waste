@@ -117,3 +117,6 @@ dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; } dd { margi
 .pin.p-DONE { background: #6b7280; } .pin.p-PARTIAL, .pin.p-STARTED { background: #a14a00; }
 .pin.focus { transform: scale(1.25); background: #b42318; z-index: 2; } .pin.me { background: #1d4ed8; border-radius: 18px; }
 .btn.result .p.warnp { color: var(--warn); font-size: 14px; }
+.rrow { display: flex; gap: 6px; align-items: stretch; } .rrow .result { flex: 1; }
+.btn.star { width: var(--tap); padding: 0; font-size: 22px; color: var(--muted); } .btn.star.on { color: #c08a00; border-color: #c08a00; }
+details.revisit { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; } details.revisit summary { min-height: 44px; display: flex; align-items: center; font-weight: 700; cursor: pointer; }

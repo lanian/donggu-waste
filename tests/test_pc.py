@@ -55,7 +55,8 @@ class Phone:
         c = P.Collector()
         for f in frames:
             bid, *_ = c.add(f)
-        return P.open_envelope(c.assemble(bid), self.pc_sign, self.kex, self.id)
+        head, payload, receipt = P.open_envelope(c.assemble(bid), self.pc_sign, self.kex, self.id)
+        return head, P.expand_daylist(payload, S.FEE_ROWS), receipt
 
     def ev(self, stop, kind, body, assign_ver=None):
         self.seq += 1
@@ -157,24 +158,28 @@ def main():
         phone.ev(s1, "ITEM_RESULT", {"line_id": add_line, "line_kind": "FIELD", "qty_confirmed": 2, "qty_collected": 2, "reason": ""}),
         phone.ev(s1, "PHOTO_META", {"photo_id": photo_id, "phase": "AFTER", "sha256": hashlib.sha256(photo_raw).hexdigest(), "bytes": len(photo_raw)}),
         phone.ev(s1, "ATTEMPT", {"outcome": "PARTIAL"}),
+        phone.ev(s1, "REVISIT_APPT", {"date": "2026-11-05", "start": "14:00", "end": "16:00"}),
         phone.ev(s2, "CONTACT", {"result": "NO_ANSWER"}),
         phone.ev(s4, "ITEM_RESULT", {"line_id": s4["items"][0]["line_id"], "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
         phone.ev(s4, "ATTEMPT", {"outcome": "DONE"}),
     ]
     file1 = phone.seal({"schema": "dg.result/1", "work_date": day, "events": events, "photos": []}, P.TYPE_RESULT)
     rep = S.import_result(con, file1)
-    ok(rep["applied"] == 9 and rep["conflict"] == 0 and rep["release_code"], f"결과 9건 반영, 보관 종료 코드 {rep['release_code']}")
+    ok(rep["applied"] == 10 and rep["conflict"] == 0 and rep["release_code"], f"결과 10건 반영, 보관 종료 코드 {rep['release_code']}")
     g1 = S.get_request(con, r1["id"])
     lines = {l["line_id"]: l for l in g1["state"]["lines"]}
     ok(g1["status"] == "PARTIAL" and lines[s1["items"][0]["line_id"]]["remaining"] == 1 and lines[add_line]["remaining"] == 0,
        "접수 3 + 현장 추가 2 중 4개 수거 → 일부 수거, 원접수 행 남은 대상 1 (추가 품목으로 상쇄 안 됨)")
+    ok(g1["planned_date"] == "2026-11-05" and g1["appt_start"] == "14:00" and g1["versions"][0]["reason"].startswith("현장 통화로 재방문"),
+       "통화로 약속한 재방문(11/5 14~16시) → 접수 일정·방문 시간창 반영, 이전 일정은 버전 보존")
+    ok(S.fee_usage(con)[0] in (fee["의자|고정식 의자"], fee["침대|2인용 매트리스"], fee["장롱|120cm 이상 1쪽당"], fee["식탁|6인용 이상(대리석)"]), "자주 쓰는 품목 집계")
     ok(g1["state"]["fee"]["final"] == 12000, "수수료: 고정식 의자 3개 6,000 + 회전식 의자 2개 6,000 = 12,000원")
     ok(S.get_request(con, r4["id"])["status"] == "DONE", "필수 포함 건 수거 완료")
     ok(S.get_request(con, r2["id"])["status"] == "ASSIGNED" and S.get_request(con, r2["id"])["state"]["contact"] == "NO_ANSWER",
        "통화 결과(부재)는 수거 상태를 바꾸지 않음")
     ok(S.import_result(con, file1).get("duplicate_file"), "같은 결과 파일 재가져오기 → 변경 없음")
     resend = phone.seal({"schema": "dg.result/1", "work_date": day, "events": events}, P.TYPE_RESULT)
-    ok(S.import_result(con, resend)["skipped_duplicate"] == 9, "같은 이벤트를 새 파일로 재전송 → 9건 모두 중복 건너뜀")
+    ok(S.import_result(con, resend)["skipped_duplicate"] == 10, "같은 이벤트를 새 파일로 재전송 → 10건 모두 중복 건너뜀")
     bad = bytearray(file1); bad[150] ^= 1
     raises(lambda: S.import_result(con, bytes(bad)), "검증에 실패", "변조된 결과 파일 거부")
 
@@ -222,9 +227,43 @@ def main():
     raises(lambda: S.make_bundle(con, out2[0]["batch_id"]), "사용 중지", "분실 기기로는 목록 전송 안 됨")
     S.set_device_status(con, dev, "ACTIVE")
 
+    # 수납: 계산 금액·납부 금액·상태 분리, 정정은 지우지 않고 사유 기록
+    ps = S.payment_status(con, r4["id"])
+    ok(ps["status"] == "AMOUNT_PENDING" and ps["calculated"] is None, "금액 미확정 건은 '금액 확인 대기' (미납으로 단정하지 않음)")
+    p1 = S.get_request(con, r1["id"])["payment"]
+    ok(p1["calculated"] == 12000 and p1["status"] == "UNPAID", "수거 후 계산 12,000원 · 납부 기록 없음 → 미납")
+    S.add_payment(con, r1["id"], {"amount": 10000, "method": "현장 납부", "paid_on": day})
+    ok(S.payment_status(con, r1["id"])["status"] == "UNDERPAID", "10,000원 납부 → 부족")
+    p2 = S.add_payment(con, r1["id"], {"amount": 5000, "method": "무통장 입금", "paid_on": day})
+    ok(p2["status"] == "OVERPAID_REVIEW", "추가 5,000원 → 과납 확인 필요 (자동 환불 확정 안 함)")
+    raises(lambda: S.void_payment(con, p2["records"][-1]["id"], ""), "사유", "수납 정정에 사유 필수")
+    p3 = S.void_payment(con, p2["records"][-1]["id"], "중복 입력")
+    S.add_payment(con, r1["id"], {"amount": 2000, "method": "무통장 입금", "paid_on": day})
+    p4 = S.payment_status(con, r1["id"])
+    ok(p4["status"] == "PAID" and len(p4["records"]) == 3 and p4["records"][1]["void_reason"] == "중복 입력", "정정 기록 보존, 합계 12,000원 → 납부 확인")
+    raises(lambda: S.add_payment(con, r1["id"], {"amount": 1000, "method": "카드"}), "납부 방법", "정해진 납부 방법만")
+
+    # 같은 장소 묶음 + 적재량 보정
+    sp = [S.create_request(con, {**base, "planned_date": "2026-11-06", "name": n, "phone": ph, "address": "가상시 동구 예시로 77", "lat": 35.1480 + dx, "lon": 126.9260,
+                                  "items": [{"fee_rate_id": fee["장롱|120cm 이상 1쪽당"], "qty": 2}]}) for n, ph, dx in (("가상오", "01000005555", 0), ("가상육", "01000006666", 0.0001))]
+    reqs2 = [S.get_request(con, x["id"]) for x in sp]
+    res2 = routing.plan(reqs2, crews[:1], S.settings(con)["depot"], time_limit_s=1)
+    st2 = res2["routes"][0]["stops"]
+    ok(len(st2) == 2 and all(x["same_place"] == 2 for x in st2) and st2[0]["eta"] < st2[1]["eta"], "11m 떨어진 두 접수 → 같은 장소로 묶어 연속 방문, 접수는 각각 유지")
+    S.save_volume_override(con, fee["장롱|120cm 이상 1쪽당"], 4.0)
+    res3 = routing.plan(reqs2, crews[:1], S.settings(con)["depot"], time_limit_s=1, volume_overrides=S.volume_overrides(con))
+    ok(len(res3["routes"][0]["stops"]) == 0 and len(res3["unassigned"]) == 2 and "적재" in res3["unassigned"][0]["reason"],
+       "장롱 1쪽 부피 보정 4m³ → 16m³로 6m³ 차량 초과, 미배정 사유 '적재'")
+
+    # 하차 기록
+    S.add_unload(con, {"crew_id": c1, "work_date": day, "at_time": "12:10", "place": "가상 반입지", "volume_m3": 5.5, "weight_kg": 420})
+    raises(lambda: S.add_unload(con, {"crew_id": c1, "place": "가상 반입지"}), "부피나 중량", "하차 기록에 부피 또는 중량 필수")
+
     # 마감
     sm = S.day_summary(con, day)
     ok(sm["by_status"] == {"CANCELLED": 1, "RECEIVED": 1, "DONE": 1}, f"마감 요약 {day}: 완료 1·취소 1·미배정 1 {sm['by_status']}")
+    ok(sm["unload_total"] == {"volume_m3": 5.5, "weight_kg": 420.0}, "마감: 하차 합계 5.5m³ · 420kg")
+    ok(any(x["status"] == "AMOUNT_PENDING" for x in sm["payments"]), "마감: 금액 확인 대기 수납 건 표시")
     sm2 = S.day_summary(con, day2)
     ok([x["receipt_no"] for x in sm2["no_result"]] == [g1["receipt_no"]], f"마감 {day2}: 재배정했으나 결과 미회수 건 표시")
     S.close_day(con, day, "시험 마감")

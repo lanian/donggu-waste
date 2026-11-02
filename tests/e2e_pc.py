@@ -63,7 +63,8 @@ class Phone:
         c = P.Collector()
         for f in frames:
             bid, *_ = c.add(f)
-        return P.open_envelope(c.assemble(bid), self.pc_sign, self.kex, self.id)
+        head, payload, receipt = P.open_envelope(c.assemble(bid), self.pc_sign, self.kex, self.id)
+        return head, P.expand_daylist(payload, S.FEE_ROWS), receipt
 
     def ev(self, stop, kind, body):
         self.seq += 1
@@ -264,15 +265,46 @@ def run():
         page.goto(URL + f"#/request/{s1['request_id']}")
         expect(page.get_by_role("heading", name="현장 결과")).to_be_visible()
         ok(page.get_by_text("수거 완료").first.is_visible() and page.locator(".thumbs img").count() == 1, "접수 상세에 현장 결과(수거 완료)와 회수된 사진 표시")
+        expect(page.locator("h2", has_text="수납 기록")).to_contain_text("미납")
+        page.get_by_role("button", name="수납 기록").click()
+        expect(page.locator("h2", has_text="수납 기록")).to_contain_text("납부 확인")
+        ok(True, "수납: 미납 → 계산 금액 납부 기록 → 납부 확인")
 
         # 마감
         page.goto(URL + "#/close")
         page.get_by_label("수거일").fill(today)
         expect(page.get_by_text(re.compile("결과 미회수 \\(배정했으나 결과 없음\\) 1건"))).to_be_visible()
+        uc = page.locator(".card", has=page.get_by_role("heading", name=re.compile("하차 기록")))
+        uc.get_by_placeholder("반입지").fill("가상 반입지")
+        uc.get_by_placeholder("m³").fill("3.5")
+        uc.get_by_role("button", name="하차 기록").click()
+        expect(page.get_by_role("heading", name=re.compile("하차 기록 · 합계 3.5m³"))).to_be_visible()
+        ok(True, "하차 기록 → 마감 화면 합계 반영")
         page.get_by_role("button", name="마감 기록").click()
         expect(page.get_by_text("마감 기록됨")).to_be_visible()
         ok(True, "일일 마감: 결과 미회수 1건 이월 표시 후 마감 기록")
         page.screenshot(path=SHOTS / "pc_06_close.png", full_page=True)
+        # QR 실측
+        page.goto(URL + "#/qrtest")
+        with page.expect_popup() as pop2:
+            page.get_by_role("button", name="실측 QR 표시").click()
+        expect(pop2.value.locator("img#q")).to_have_attribute("src", re.compile("^data:image/png"))
+        pop2.value.close()
+        chk = S.rows(con, "SELECT check_code FROM qr_test ORDER BY created_at DESC LIMIT 1")[0]["check_code"]
+        row = page.locator("tbody tr").first
+        row.get_by_placeholder("초").fill("4.2"); row.get_by_placeholder("인식 횟수").fill("31"); row.get_by_placeholder("확인 4자리").fill(chk)
+        row.get_by_role("button", name="기록").click()
+        expect(page.get_by_text("4.2초 · 인식 31회 · 복원 일치")).to_be_visible()
+        ok(True, "QR 실측: 가상 목록 QR 표시 → 휴대폰 결과 입력, 확인 코드로 복원 일치 기록")
+
+        # 적재량 보정
+        page.goto(URL + "#/settings")
+        vrow = page.locator("tr", has=page.get_by_placeholder("보정값")).first
+        expect(vrow).to_be_visible()
+        vrow.get_by_placeholder("보정값").fill("1.8")
+        vrow.get_by_role("button", name="저장").click()
+        expect(page.get_by_text("보정값을 저장했습니다")).to_be_visible()
+        ok(abs(list(S.volume_overrides(store.connect()).values())[0] - 1.8) < 1e-9, "적재량 보정값 저장 (추정치와 별도)")
         ok(not errors, "화면 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
         b.close()
 

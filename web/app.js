@@ -7,7 +7,7 @@ import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
 import * as M from './map.js';
 
-export const APP_VERSION = '0.4.0';
+export const APP_VERSION = '0.5.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const AUTO_LOCK_MS = 5 * 60 * 1000;      // 5분 무조작
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱(전화 등)에 2분 넘게 있으면 잠금
@@ -203,7 +203,7 @@ async function startCamera(video, onText) {
   const loop = () => {
     if (cam.stop) return;
     if (video.readyState >= 2 && video.videoWidth) {
-      const scale = Math.min(1, 960 / Math.max(video.videoWidth, video.videoHeight));
+      const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight)); // 촘촘한 QR(버전 20 이상)도 읽히도록 1280까지 원본 크기로
       canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -277,13 +277,22 @@ async function screenScan() {
     miss.textContent = m.length && m.length <= 12 ? '남은 번호: ' + m.map((i) => i + 1).join(', ') : '';
   };
   show();
-  let finishing = false;
+  let finishing = false, reads = 0;
   const finish = async () => {
     finishing = true; stopCamera(); msg.textContent = '확인 중…';
     try {
       const envBytes = col.assemble(current);
       const opened = await P.openEnvelope(envBytes, await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
-      const pl = opened.payload;
+      if (opened.payload.schema === 'dg.qrtest/1') {
+        // 실측 모드: 가상 목록이므로 저장하지 않고 시간·장수·인식 횟수와 복원 확인 코드만 보여 준다
+        const b = col.bundles[current];
+        const exp = P.expandDaylist({ ...opened.payload, schema: 'dg.daylist/2' }, BUILTIN_FEES);
+        ui.qrtest = { secs: ((Date.now() - b.firstSeen) / 1000).toFixed(1), frames: b.total, reads: reads, count: exp.stops.length, code: opened.receipt.slice(0, 4), params: opened.payload.params };
+        col.drop(current); await S.putRaw('collect', col.bundles);
+        go('#/qrtest-result');
+        return;
+      }
+      const pl = P.expandDaylist(opened.payload, BUILTIN_FEES);
       if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
       if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
       const hash = P.toHex(await P.sha256(envBytes));
@@ -317,6 +326,7 @@ async function screenScan() {
     try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') msg.textContent = errMsg(e); return; }
     if (!current) current = r.key;
     if (r.key !== current) { msg.textContent = '다른 목록의 QR이 섞였습니다. 지금 받던 목록을 계속 비춰 주세요.'; return; }
+    reads += 1;
     if (!r.dup) { msg.textContent = ''; S.putRaw('collect', col.bundles); if (navigator.vibrate) navigator.vibrate(20); }
     show();
     if (col.complete(current)) finish();
@@ -337,6 +347,21 @@ function screenReceived() {
     h('p', {}, 'PC 담당자에게 아래 수신 확인 코드를 알려 주세요.'),
     h('p', { class: 'fp' }, r.code),
     btn('오늘 순서 보기', () => { ui.receipt = null; go('#/home'); }, 'primary big'));
+}
+
+function screenQrTestResult() {
+  const r = ui.qrtest;
+  if (!r) { go('#/home'); return h('main'); }
+  return h('main', { class: 'center' },
+    h('h1', {}, 'QR 실측 결과'),
+    h('p', {}, `가상 ${r.count}건 · 조각 ${r.params.chunk}B · 오류 복원 ${r.params.ec}`),
+    h('section', { class: 'card' }, h('dl', {},
+      h('dt', {}, '걸린 시간'), h('dd', { class: 'fp' }, `${r.secs}초`),
+      h('dt', {}, 'QR 장수'), h('dd', {}, `${r.frames}장`),
+      h('dt', {}, '인식 횟수'), h('dd', {}, `${r.reads}회 (중복 포함)`),
+      h('dt', {}, '확인 코드'), h('dd', { class: 'fp' }, r.code))),
+    h('p', { class: 'small' }, 'PC [QR 실측] 표에 이 값을 입력하세요. 실측 자료는 이 휴대폰에 저장하지 않았습니다.'),
+    btn('처음으로', () => { ui.qrtest = null; go('#/home'); }, 'primary big'));
 }
 
 // ------------------------------------------------------------ 접수 상세
@@ -382,7 +407,9 @@ async function screenStop(id) {
   const contact = h('section', { class: 'card' },
     h('h2', {}, '연락 결과', ui.afterCall === id ? h('span', { class: 'hint' }, ' — 통화 결과를 골라 주세요') : null),
     h('div', { class: 'grid2' }, ...['REACHED', 'NO_ANSWER', 'CALLBACK', 'WRONG_NUMBER'].map((k) =>
-      btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt'))));
+      btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt'))),
+    d.appt ? h('p', { class: 'notice' }, `재방문 약속: ${d.appt.date} ${d.appt.start || ''}${d.appt.end ? '~' + d.appt.end : ''}`) : null,
+    ['REACHED', 'CALLBACK'].includes(d.contact) && d.progress !== 'DONE' ? revisitForm(stop, d) : null);
 
   const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
     ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
@@ -462,6 +489,29 @@ async function screenStop(id) {
     info, contact, lines, fee, photos, outcome, manage);
 }
 
+// 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다
+function revisitForm(stop, d) {
+  const date = h('input', { type: 'date', value: d.appt ? d.appt.date : todayKST(1) });
+  const start = h('input', { type: 'time', value: d.appt ? d.appt.start || '' : '' });
+  const end = h('input', { type: 'time', value: d.appt ? d.appt.end || '' : '' });
+  return h('details', { class: 'revisit', open: !!ui.openAppt },
+    h('summary', {}, d.appt ? '재방문 약속 바꾸기' : '재방문 약속 기록'),
+    h('div', { class: 'grid2' }, h('label', { class: 'fld' }, h('span', {}, '날짜'), date), h('div', {})),
+    h('div', { class: 'grid2' }, h('label', { class: 'fld' }, h('span', {}, '부터'), start), h('label', { class: 'fld' }, h('span', {}, '까지'), end)),
+    btn('약속 저장', async () => {
+      if (!date.value) return toast('날짜를 골라 주세요', 'bad');
+      if (start.value && end.value && start.value >= end.value) return toast('시간 범위를 확인해 주세요', 'bad');
+      await addEvent(stop, 'REVISIT_APPT', { date: date.value, start: start.value || null, end: end.value || null });
+      if (isSolo()) { // 단독 방식: 원본 일정도 바꾸고 이전 일정은 버전으로 남김
+        const { versions = [], ...prev } = stop;
+        versions.push({ req_ver: stop.req_ver, at: new Date().toISOString(), reason: '통화로 재방문 약속', snapshot: prev });
+        Object.assign(stop, { versions, req_ver: stop.req_ver + 1, planned_date: date.value, eta: start.value || '', appt: start.value ? [start.value, end.value || null] : null, seq: nextSeq(date.value, stop.request_id) });
+        await commit();
+      }
+      ui.openAppt = false; toast('재방문 약속을 저장했습니다'); render();
+    }, 'primary big'));
+}
+
 async function savePhoto(stop, phase, file) {
   const bmp = await createImageBitmap(file);
   const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
@@ -481,12 +531,29 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
   const qtyBox = h('div', { class: 'row' });
   const addBtn = btn(addLabel, null, 'primary big');
   const drawQty = () => { qtyBox.replaceChildren(h('span', {}, '수량'), stepper(state.qty, (n) => { state.qty = n; drawQty(); }, 1)); };
+  // 검색어가 없을 때는 즐겨찾기와 자주 쓴 품목을 먼저 보여 준다(이 휴대폰 안에서만 집계)
+  const quickRows = () => {
+    const favs = st.feeFavs || [], use = st.feeUsage || {};
+    const ids = [...favs, ...Object.keys(use).sort((a, b) => use[b] - use[a]).filter((x) => !favs.includes(x))].slice(0, 10);
+    return ids.map((x) => table.rows.find((r) => r.id === x)).filter(Boolean);
+  };
+  const toggleFav = async (rid) => {
+    const f = new Set(st.feeFavs || []);
+    f.has(rid) ? f.delete(rid) : f.add(rid);
+    st.feeFavs = [...f]; await commit(); drawResults();
+  };
   const drawResults = () => {
-    const rows = searchFees(table, state.q).slice(0, 30);
-    results.replaceChildren(...(state.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
-      ...rows.map((r) => btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`),
-        h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`), r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 추가: ' + (r.note || '')) : null),
-        () => { state.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (state.sel && state.sel.id === r.id ? ' on' : ''))));
+    const quick = !state.q;
+    const rows = quick ? quickRows() : searchFees(table, state.q).slice(0, 30);
+    const favs = new Set(st.feeFavs || []);
+    results.replaceChildren(
+      ...(quick && rows.length ? [h('p', { class: 'small' }, '즐겨찾기·자주 쓴 품목')] : []),
+      ...(state.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
+      ...rows.map((r) => h('div', { class: 'rrow' },
+        btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`),
+          h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`), r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 추가: ' + (r.note || '')) : null),
+          () => { state.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (state.sel && state.sel.id === r.id ? ' on' : '')),
+        btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' }))));
     addBtn.disabled = !state.sel;
   };
   const q = h('input', { type: 'search', placeholder: '품목명 또는 규격 (예: 회전 의자, 2인용 매트리스)', class: 'search', value: state.q, autocomplete: 'off' });
@@ -494,6 +561,7 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
   addBtn.addEventListener('click', async () => {
     const r = table.rows.find((x) => x.id === (state.sel && state.sel.id));
     if (!r || r.price !== state.sel.price) { state.sel = null; drawResults(); return toast('선택이 바뀌었습니다. 다시 골라 주세요.', 'bad'); }
+    st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 };
     await onPick(r, state.qty);
     state.q = ''; state.sel = null; state.qty = 1; q.value = ''; drawResults(); drawQty();
   });
@@ -926,7 +994,7 @@ async function screenMap(focusId) {
       for (const { s, d } of placed) {
         M.pin(ml, map, { lng: d.loc.lon, lat: d.loc.lat, label: String(s.seq), cls: 'p-' + d.progress + (s.request_id === focusId ? ' focus' : ''), onClick: () => go(`#/stop/${s.request_id}`) });
       }
-      if (!focus) map.once('load', fitAll);
+      if (!focus) fitAll();
     } catch (e) { msg.textContent = '지도를 불러오지 못했습니다. 인터넷 연결을 확인하세요.'; }
   }, 0);
   return view;
@@ -950,7 +1018,7 @@ async function screenPick(id) {
     try {
       const { map, ml } = await M.createMap(box, { center: d.loc ? [d.loc.lon, d.loc.lat] : M.DEFAULT_CENTER, zoom: d.loc ? 18 : 15 });
       liveMap = map; ui.ml = ml;
-      map.once('load', () => { save.disabled = false; });
+      save.disabled = false; // 지도 조각이 늦게 와도 가운데 좌표는 바로 쓸 수 있다
     } catch { msg.textContent = '지도를 불러오지 못했습니다. 인터넷 연결을 확인하세요.'; }
   }, 0);
   return h('main', {},
@@ -1011,7 +1079,7 @@ async function render() {
     if (!isSolo() && ['intake', 'backup'].includes(route)) route = 'home';
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
-      stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
+      'qrtest-result': screenQrTestResult, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings,
       mode: screenMode, intake: () => screenIntake(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
