@@ -298,6 +298,14 @@ def cmd_import_solo(a):
     print(("미리보기: " if a.preview else "옮김: ") + json.dumps(r, ensure_ascii=False))
 
 
+def cmd_seed_dongs(_):
+    """시험용 가상 행정동(가상1동~가상3동)을 넣는다. 실제 운영 DB에는 쓰지 말 것."""
+    from sample_data import seed_dongs
+    c = con()
+    ids = seed_dongs(c)
+    print(f"가상 행정동 {len(ids)}개를 넣었습니다 (이미 있던 이름은 건너뜀).")
+
+
 def cmd_serve(a):
     from dgpc import server
     server.serve(a.port)
@@ -328,6 +336,7 @@ def main(argv=None):
     ia = s.add_parser("import-addr"); ia.add_argument("path"); ia.add_argument("--region", default="", help="시군구명 거르기 (예: 동구)")
     ia.add_argument("--columns", help="열 번호 직접 지정 (예: road=7,main=9,sub=10,x=16,y=17,sigungu=4)")
     ia.add_argument("--preview", action="store_true"); ia.set_defaults(fn=cmd_import_addr)
+    s.add_parser("seed-sample-dongs", help="시험용 가상 행정동 넣기").set_defaults(fn=cmd_seed_dongs)
     so = s.add_parser("import-solo"); so.add_argument("file"); so.add_argument("--crew"); so.add_argument("--preview", action="store_true"); so.set_defaults(fn=cmd_import_solo)
     a = p.parse_args(argv)
     a.fn(a)

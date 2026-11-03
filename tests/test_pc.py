@@ -517,5 +517,310 @@ def main():
     print(f"\n통과 {passed}개")
 
 
+def v10():
+    """v0.10: 행정동·달력·한도·마감 이월·마감 통제·팀장·일괄 처리·사유 코드·접수 경로·일괄 등록·쪽 나눔·민원 기록·이력 거르기."""
+    print("\n— v0.10 —")
+    old_state = os.environ["DG_STATE"]
+    # 이전 DB 올리기: 팀장 역할이 없는 사용자 표·날짜별 1행 마감 표·새 열이 없는 접수 표
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-old-")
+    import sqlcipher3
+    oldp = Path(os.environ["DG_STATE"]) / "pc.db"
+    oc = sqlcipher3.connect(str(oldp))
+    oc.execute("PRAGMA key = 'test-db-key-not-for-production'")
+    legacy = store.SCHEMA.replace(",'LEAD'", "").replace(", last_login_at TEXT, crew_id TEXT);", ", last_login_at TEXT);")
+    legacy = legacy.split("-- (구) 날짜별 마감")[0] + "CREATE TABLE day_close (work_date TEXT PRIMARY KEY, closed_at TEXT NOT NULL, summary_json TEXT NOT NULL, note TEXT);"
+    oc.executescript(legacy)
+    oc.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, created_at) VALUES ('u1','old','옛 관리자','ADMIN','00','00','2026-01-01T00:00:00Z')")
+    oc.execute("INSERT INTO day_close VALUES ('2026-10-01','2026-10-01T09:00:00Z','{}','옛 마감')")
+    oc.commit(); oc.close()
+    mc = store.connect()
+    cols = {r[1] for r in mc.execute("PRAGMA table_info(request)").fetchall()}
+    S.ACTOR.set("old")
+    lead_ok = S.create_user(mc, "lead0", "가상 팀장", "LEAD", "lead-pass-0001")
+    ok({"dong", "channel", "cancel_code", "cancelled_at"} <= cols and lead_ok and S.close_info(mc, "2026-10-01")["note"] == "옛 마감"
+       and S.check_login(mc, "lead0", "lead-pass-0001")["role"] == "LEAD" and {"dong_h", "dong_b"} <= store._cols(mc, "addr_point"),
+       "이전 DB 올리기: 접수 새 열(동·경로·취소 코드), 팀장 역할, 옛 마감 → 1회차, 주소 자료 동 열")
+    mc.close()
+    store.connect().close()
+    ok(True, "같은 DB를 다시 열어도 이전(migrate) 반복 안전")
+
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-v10-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    S.create_user(con, "admin", "관리자", "ADMIN", "admin-pass-001")
+    S.create_user(con, "kim", "김접수", "INTAKE", "intake-pass-01")
+    S.create_user(con, "boss", "가상 팀장", "LEAD", "lead-pass-0001")
+    fee = {r["name"] + "|" + r["spec"]: r["id"] for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    c1 = S.save_crew(con, {"name": "가상 1팀", "capacity_m3": 8})
+    c2 = S.save_crew(con, {"name": "가상 2팀", "capacity_m3": 8})
+    import sample_data
+    from dgpc import area as A, server as SV
+
+    # 행정동 관리
+    ids = sample_data.seed_dongs(con, [c1, c2, c1])
+    ok(len(ids) == 3 and [d["name"] for d in A.list_dongs(con)] == ["가상1동", "가상2동", "가상3동"] and A.get_dong(con, "가상1동")["weekdays_label"] == "월·수·금",
+       "가상 행정동 3개(가상1동~3동) 넣기: 수거 요일·판별 낱말·기본 담당 팀")
+    ok(sample_data.seed_dongs(con) == [], "가상 동을 다시 넣어도 중복 없음")
+    raises(lambda: A.save_dong(con, {"name": "가상1동"}), "같은 이름", "같은 이름 동 거부")
+    raises(lambda: A.save_dong(con, {"name": "가상9동", "weekdays": [7]}), "요일", "잘못된 요일 거부")
+    raises(lambda: A.save_dong(con, {"name": "가상9동", "daily_limit": "많이"}), "숫자", "한도는 숫자만")
+    tmp = A.save_dong(con, {"name": "가상임시동", "keywords": "임시로, 임시길"})
+    ok(A.get_dong(con, "가상임시동")["keywords"] == ["임시로", "임시길"], "판별 낱말 쉼표로 입력")
+    A.delete_dong(con, tmp)
+    ok(A.get_dong(con, "가상임시동") is None and S.list_audit(con, entity="dong")[0]["action"] == "DELETE", "쓰이지 않은 동 지우기, 이력 기록")
+
+    # 주소 → 동 자동 판별
+    ok(A.detect_dong(con, "가상시 동구 예시로 5")["dong"] == "가상1동" and A.detect_dong(con, "가상시 동구 예시로 5")["source"] == "KEYWORD", "주소 낱말(도로명)로 동 판별: 예시로 → 가상1동")
+    ok(A.detect_dong(con, "가상시 동구 없는로 3")["dong"] is None, "맞는 낱말이 없으면 동 미정")
+    A.save_dong(con, {**A.get_dong(con, "가상3동"), "keywords": ["샘플로", "모의로", "겹침로"]})
+    A.save_dong(con, {**A.get_dong(con, "가상2동"), "keywords": ["가상대로", "시험길", "겹침로"]})
+    amb = A.detect_dong(con, "가상시 동구 겹침로 1")
+    ok(amb["dong"] is None and amb.get("ambiguous") and set(amb["candidates"]) == {"가상2동", "가상3동"}, "두 동에 같은 낱말 → 고르지 않고 후보만")
+    from dgpc import geo
+    x, y = geo.wgs84_to_utmk(35.15, 126.92)
+    addr_raw = ("시군구명,읍면동명,도로명,건물본번,건물부번,관할행정동,X좌표,Y좌표\n" + f"동구,가상법정동,경계로,10,0,가상3동,{x:.3f},{y:.3f}\n").encode()
+    pv = S.import_addr_points(con, addr_raw, preview=True)
+    S.import_addr_points(con, addr_raw)
+    ok(pv["has_dong"] and pv["sample"][0]["dong_h"] == "가상3동" and A.detect_dong(con, "가상시 동구 경계로 10")["dong"] == "가상3동"
+       and A.detect_dong(con, "가상시 동구 경계로 10")["source"] == "ADDR", "주소 위치 자료의 관할 행정동 열로 동 판별 (낱말 없이도)")
+
+    # 접수: 동 자동·직접, 접수 경로
+    base = {"phone": "01000000001", "items": [{"fee_rate_id": chair, "qty": 1}]}
+    ra = S.create_request(con, {**base, "name": "가상가", "address": "가상시 동구 예시로 1"})
+    ok(ra["dong"] == "가상1동" and S.get_request(con, ra["id"])["channel"] == "전화", "접수 등록 시 동 자동 판별(가상1동), 접수 경로 기본 '전화'")
+    rb = S.create_request(con, {**base, "phone": "01000000002", "name": "가상나", "address": "가상시 동구 예시로 2", "dong": "가상2동", "channel": "방문"})
+    ok(rb["dong"] == "가상2동" and S.get_request(con, rb["id"])["channel"] == "방문", "화면에서 고른 동·접수 경로(방문)가 우선")
+    rc = S.create_request(con, {**base, "phone": "01000000003", "name": "가상다", "address": "가상시 동구 없는로 3", "dong": ""})
+    ok(rc["dong"] is None and any("행정동을 정하지" in w for w in rc["warnings"]), "동을 못 정하면 경고(막지 않음)")
+    raises(lambda: S.create_request(con, {**base, "phone": "01000000004", "name": "x", "address": "a", "dong": "없는동"}), "등록되지 않은 행정동", "없는 동 거부")
+    raises(lambda: S.create_request(con, {**base, "phone": "01000000004", "name": "x", "address": "a", "channel": "팩스"}), "접수 경로", "정해진 접수 경로만")
+
+    # 휴무일·쉬는 요일·동 수거 요일·한도
+    mon = "2026-11-09"  # 월
+    ok(A.working_reason(con, "2026-11-07") and "토요일" in A.working_reason(con, "2026-11-07") and A.working_reason(con, mon) is None, "기본: 토·일 수거 안 함")
+    A.add_holiday(con, "2026-11-10", "가상 휴무")
+    ok("휴무일(가상 휴무)" == A.working_reason(con, "2026-11-10") and A.next_working_day(con, mon) == "2026-11-11", "휴무일 등록 → 다음 업무일은 휴무일 건너뜀")
+    ok(A.next_working_day(con, mon, "가상1동") == "2026-11-11" and A.next_working_day(con, "2026-11-11", "가상2동") == "2026-11-12"
+       and A.next_working_day(con, "2026-11-13", "가상1동") == "2026-11-16", "동 수거 요일(가상1동 월·수·금, 가상2동 화·목) 반영")
+    with S.tx(con):
+        A.save_capacity(con, {"daily_count": 2, "closed_weekdays": [6]})
+    ok(A.working_reason(con, "2026-11-07") is None and A.capacity_settings(con)["daily_count"] == 2, "쉬는 요일·전체 한도 설정 (일요일만 쉼, 하루 2건)")
+    for i in range(2):
+        S.create_request(con, {**base, "phone": f"0100000010{i}", "name": f"가상한도{i}", "address": "가상시 동구 예시로 9", "planned_date": mon})
+    w = S.create_request(con, {**base, "phone": "01000000109", "name": "가상초과", "address": "가상시 동구 예시로 9", "planned_date": mon})["warnings"]
+    ok(any("한도" in x and "2건" in x for x in w), "전체 한도 넘는 예정일 → 경고 (등록은 됨)")
+    w2 = S.create_request(con, {**base, "phone": "01000000110", "name": "가상휴무", "address": "가상시 동구 시험길 1", "planned_date": "2026-11-10"})["warnings"]
+    ok(any("휴무일" in x for x in w2), "휴무일 예정일 → 경고")
+    cal = A.calendar(con, mon, 5, "가상1동")
+    ok([d["date"] for d in cal] == ["2026-11-09", "2026-11-11", "2026-11-13", "2026-11-16", "2026-11-18"] and cal[0]["booked"] == 3 and cal[0]["over"]
+       and cal[0]["dong_booked"] == 3, "예약 달력: 가상1동 수거 요일 업무일 5개, 날짜별 예약/한도")
+    ok(A.earliest_available(con, mon, "가상1동") == "2026-11-11" and A.earliest_available(con, mon) == "2026-11-11", "가장 빠른 가능일: 꽉 찬 날·휴무일 건너뜀")
+    A.save_dong(con, {**A.get_dong(con, "가상1동"), "daily_limit": 1})
+    S.create_request(con, {**base, "phone": "01000000111", "name": "가상동한도", "address": "가상시 동구 예시로 8", "planned_date": "2026-11-11"})
+    ok(A.earliest_available(con, mon, "가상1동") == "2026-11-13" and A.earliest_available(con, mon, "가상2동") == "2026-11-12", "동 한도가 찬 날은 그 동만 건너뜀")
+    with S.tx(con):
+        A.save_capacity(con, {"daily_count": None, "closed_weekdays": [5, 6]})
+
+    # 마감 이월 (B1)
+    day = "2026-11-12"  # 목
+    t = {}
+    for k, addr in (("un", "가상시 동구 시험길 3"), ("as", "가상시 동구 시험길 4"), ("done", "가상시 동구 시험길 5"), ("nc", "가상시 동구 시험길 6")):
+        t[k] = S.create_request(con, {**base, "phone": "0100000020" + str(len(t)), "name": "가상이월" + k, "address": addr, "planned_date": day, "lat": 35.15, "lon": 126.92})["id"]
+    S.confirm_plan(con, day, {c1: [{"request_id": t["as"]}, {"request_id": t["done"]}, {"request_id": t["nc"]}]})
+    with S.tx(con):  # 현장 결과 흉내: 완료 1, 미수거(재방문 약속 없음) 1
+        for rid_, st_ in ((t["done"], "DONE"), (t["nc"], "NOT_COLLECTED")):
+            con.execute("UPDATE request SET status=? WHERE id=?", (st_, rid_))
+            con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid_,))
+    A.add_holiday(con, "2026-11-13", "가상 휴무2")
+    sm = S.day_summary(con, day)
+    carry = {c["id"]: c for c in sm["carry"]}
+    ok(set(carry) == {t["un"], t["as"], t["nc"]} and all(c["to"] == "2026-11-17" for c in carry.values())
+       and carry[t["as"]]["kind"] == "결과 없음" and carry[t["un"]]["kind"] == "미배정",
+       "마감 화면 이월 대상: 미배정·결과 없음·재방문 약속 없는 미수거 → 다음 업무일(휴무일·주말·가상2동 화목 → 11/17)")
+    S.ACTOR.set("kim")
+    cl = S.close_day(con, day, "가상 마감")
+    g_as = S.get_request(con, t["as"])
+    ok(len(cl["carried"]) == 3 and g_as["planned_date"] == "2026-11-17" and g_as["status"] == "RECEIVED" and g_as["versions"][0]["reason"].startswith("마감 이월")
+       and not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (t["as"],)) and S.get_request(con, t["done"])["planned_date"] == day,
+       "마감 기록 → 미처리 3건 예정일 이월(버전 사유 '마감 이월'), 결과 없는 배정은 풀림, 완료 건은 그대로")
+    ok(S.list_audit(con, entity="request", action="CARRY") and S.close_info(con, day)["status"] == "RECORDED" and S.close_info(con, day)["closed_by"] == "kim",
+       "이월 건별 이력(CARRY), 마감 1회차 = 담당자 기록")
+    # 팀장 확인(2단계)
+    raises(lambda: S.approve_close(con, day), "기록한 사람", "마감을 기록한 사람은 확인 불가")
+    S.ACTOR.set("boss")
+    S.approve_close(con, day, "확인")
+    ok(S.close_info(con, day)["status"] == "APPROVED" and S.close_info(con, day)["approved_by"] == "boss", "팀장(검토자)이 마감 확인")
+    raises(lambda: S.approve_close(con, day), "이미 확인", "같은 회차 두 번 확인 거부")
+    raises(lambda: S.approve_close(con, "2026-11-20"), "아직 마감", "마감 기록 없는 날 확인 거부")
+    # 마감 후 수정
+    S.ACTOR.set("kim")
+    gd = S.get_request(con, t["done"])
+    ok(gd["closed"] and gd["closed"]["status"] == "APPROVED", "접수 상세에 '마감한 날' 표시")
+    raises(lambda: S.update_request(con, t["done"], {**base, "name": "가상이월done", "address": "가상시 동구 시험길 5", "planned_date": day,
+                                                       "items": [{"line_id": gd["items"][0]["line_id"], "fee_rate_id": chair, "qty": 1}]}, ""), "마감한 날", "마감한 날 접수 수정은 사유 필수")
+    upd = S.update_request(con, t["done"], {**base, "name": "가상이월done", "address": "가상시 동구 시험길 5, 2층", "planned_date": day,
+                                            "items": [{"line_id": gd["items"][0]["line_id"], "fee_rate_id": chair, "qty": 1}]}, "주소 보완(가상)")
+    raises(lambda: S.add_payment(con, t["done"], {"amount": 2000, "method": "현장 납부", "paid_on": day}), "사유", "마감한 날 수납 기록은 사유 필수")
+    S.add_payment(con, t["done"], {"amount": 2000, "method": "현장 납부", "paid_on": day, "reason": "늦게 확인한 납부(가상)"})
+    edits = S.day_summary(con, day)["post_close_edits"]
+    ok(upd["after_close"] and len(edits) == 2 and {e["entity"] for e in edits} == {"request", "payment"} and edits[0]["receipt_no"],
+       "마감 후 수정 2건(접수 수정·수납)이 '마감 후 수정'으로 표시·마감 화면 목록에")
+    # 다시 마감: 회차가 쌓임
+    S.close_day(con, day, "다시 마감")
+    hist = S.day_summary(con, day)["closes"]
+    ok([h["seq"] for h in hist] == [1, 2] and hist[0]["status"] == "APPROVED" and hist[1]["status"] == "RECORDED" and hist[0]["carried"] == 3 and hist[1]["carried"] == 0,
+       "다시 마감 → 새 회차(덮어쓰지 않음), 새 회차는 다시 팀장 확인 필요")
+
+    # 납부 뒤 취소 → 환불 필요 (B4)
+    rp = S.create_request(con, {**base, "phone": "01000000301", "name": "가상환불", "address": "가상시 동구 예시로 30", "planned_date": "2026-11-18"})["id"]
+    S.add_payment(con, rp, {"amount": 2000, "method": "무통장 입금", "paid_on": "2026-11-03"})
+    raises(lambda: S.cancel_request(con, rp, "", "OTHER"), "직접", "기타 사유는 글 필수")
+    raises(lambda: S.cancel_request(con, rp, "x", "NOPE"), "코드", "없는 사유 코드 거부")
+    cr = S.cancel_request(con, rp, "", "RESIDENT")
+    g = S.get_request(con, rp)
+    ok(cr["refund_needed"] and cr["paid"] == 2000 and g["payment"]["status"] == "REFUND_NEEDED" and g["cancel_code"] == "RESIDENT" and g["cancel_label"] == "주민 취소",
+       "납부 2,000원 뒤 취소 → 환불 필요 경고, 사유 코드 '주민 취소' 저장")
+    ok(any(x["id"] == rp and x["status"] == "REFUND_NEEDED" for x in S.day_summary(con, "2026-11-18")["payments"]), "환불 필요 건이 마감 수납 확인 목록에")
+    ok(S.search_requests(con, {"status": "", "quick": "REFUND"})["total"] == 1, "'환불 필요' 빠른 조회")
+    S.add_payment(con, rp, {"kind": "REFUND", "amount": 2000, "method": "무통장 입금", "paid_on": "2026-11-04"})
+    ok(S.payment_status(con, rp)["status"] == "NONE" and S.search_requests(con, {"quick": "REFUND"})["total"] == 0, "환불 기록하면 목록에서 빠짐")
+
+    # 일괄 처리
+    bl = [S.create_request(con, {**base, "phone": f"0100000040{i}", "name": f"가상일괄{i}", "address": f"가상시 동구 샘플로 {i}", "planned_date": "2026-11-18",
+                                 "lat": 35.15, "lon": 126.92})["id"] for i in range(3)]
+    S.confirm_plan(con, "2026-11-18", {c1: [{"request_id": bl[0]}]})
+    raises(lambda: S.reschedule_requests(con, bl, "2026-11-19"), "사유", "예정일 일괄 변경은 사유 필수")
+    raises(lambda: S.reschedule_requests(con, bl + [t["done"]], "2026-11-19", "RESIDENT"), "수거 완료", "완료 건이 섞이면 전체 거부")
+    ok(all(S.get_request(con, i)["planned_date"] == "2026-11-18" for i in bl), "한 트랜잭션: 실패하면 아무것도 바뀌지 않음")
+    rs = S.reschedule_requests(con, bl, "2026-11-19", "RESIDENT", "단지 요청(가상)")
+    g0 = S.get_request(con, bl[0])
+    ok(rs["changed"] == 3 and g0["planned_date"] == "2026-11-19" and g0["status"] == "RECEIVED" and g0["versions"][0]["reason"].startswith("예정일 변경 · 주민 요청")
+       and len(S.list_audit(con, entity="request", action="RESCHEDULE")) == 3, "예정일 일괄 변경 3건: 건별 버전·이력, 다른 날 배정은 풀림")
+    sd = S.set_requests_dong(con, bl[:2], "가상2동")
+    ok(sd["changed"] == 2 and S.get_request(con, bl[0])["dong"] == "가상2동", "동 일괄 지정")
+    csv_np = S.export_requests(con, bl).decode("utf-8-sig")
+    csv_p = S.export_requests(con, bl, include_pii=True).decode("utf-8-sig")
+    ok("가상일괄0" not in csv_np and "01000000400" not in csv_np and "행정동" in csv_np.splitlines()[0] and "가상일괄0" in csv_p and "샘플로" in csv_p
+       and len([a for a in S.list_audit(con, entity="request", action="EXPORT") if '"pii": true' in a["detail"]]) == 3,
+       "고른 접수 CSV: 기본은 개인정보 없음, 개인정보 포함은 건마다 내보낸 기록")
+    pr = S.print_requests(con, bl)
+    ok(len(pr["rows"]) == 3 and S.list_audit(con, entity="request", action="PRINT"), "고른 접수 목록 인쇄 자료 + 건별 출력 기록")
+    bc = S.cancel_requests(con, bl[1:], "DUPLICATE")
+    ok(bc["cancelled"] == 2 and S.get_request(con, bl[1])["cancel_code"] == "DUPLICATE", "일괄 취소(사유 코드 '중복 접수')")
+    ok(S.cancel_requests(con, bl[1:], "DUPLICATE")["skipped"] == 2, "이미 취소된 건은 건너뜀")
+    ok(SV.allowed("INTAKE", "POST", "requests/bulk") and SV.allowed("INTAKE", "POST", "requests/export") and not SV.allowed("FIELD", "POST", "requests/export")
+       and not SV.allowed("LEAD", "POST", "requests/export"), "일괄 처리·내보내기: 접수 담당자·관리자만")
+
+    # 접수 일괄 등록 (CSV)
+    tpl = S.import_template().decode("utf-8-sig")
+    ok(tpl.startswith("이름,연락처,배출 주소") and "품목5" in tpl, "일괄 등록 서식 내려받기")
+    head = tpl.splitlines()[0]
+    lines_ = [head,
+              "가상등록1,010-0000-0501,가상시 동구 모의로 1,,2026-11-19,,단체(공동주택),,의자,고정식 의자,2,,,,,,,,,,,,",
+              "가상등록2,123,가상시 동구 모의로 2,,2026-11-19,,,,의자,고정식 의자,1,,,,,,,,,,,,",
+              "가상등록3,010-0000-0503,가상시 동구 모의로 3,,2026-11-19,없는동,,,의자,고정식 의자,x,,,,,,,,,,,,",
+              "가상등록4,010-0000-0501,가상시 동구 모의로 4,,,가상3동,전화,,안마의자,,1,,,,,,,,,,,,",
+              "가상등록5,010-0000-0505,가상시 동구 예시로 1,,,,,,의자,고정식 의자,1,,,,,,,,,,,,"]
+    raw = "\n".join(lines_).encode("cp949")
+    pv = S.import_requests(con, raw, preview=True)
+    L = {x["line"]: x for x in pv["lines"]}
+    ok(pv["rows"] == 5 and pv["errors"] == 2 and L[3]["errors"] and any("연락처" in e for e in L[3]["errors"]) and any("없는동" in e for e in L[4]["errors"])
+       and any("수량" in e for e in L[4]["errors"]), "미리보기: 연락처·없는 동·수량 오류 표시 (저장 안 함)")
+    ok("파일 2행" in L[5]["duplicates"] and L[6]["duplicates"] and L[2]["summary"]["dong"] == "가상3동" and any("금액 확인 대기" in w_ for w_ in L[5]["warnings"]),
+       "중복 후보: 파일 안 같은 연락처·기존 접수 같은 주소, 동 자동 판별, 표에 없는 품목은 금액 확인 대기")
+    n0 = S.one(con, "SELECT COUNT(*) AS n FROM request")["n"]
+    im = S.import_requests(con, raw, preview=False)
+    ok(im["created"] == 3 and im["skipped_lines"] == [3, 4] and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n0 + 3
+       and S.search_requests(con, {"channel": "단체(공동주택)", "status": ""})["total"] == 2 and S.list_audit(con, entity="request_import")[0]["action"] == "IMPORT",
+       "등록: 오류 행은 건너뛰고 3건 등록, 접수 경로·일괄 등록 이력")
+    ok(S.import_requests(con, raw, preview=False, skip_duplicates=True)["created"] == 0, "중복 후보 건너뛰기 선택 시 이미 들어간 행은 다시 안 들어감")
+
+    # 접수 목록: 서버 쪽 쪽 나눔·전체 건수·정렬·기간·팀·동·수납 상태
+    for i in range(55):
+        S.create_request(con, {**base, "phone": f"010000{6000 + i:05d}", "name": f"가상쪽{i:02d}", "address": f"가상시 동구 모의로 {100 + i}", "planned_date": "2026-11-24"})
+    pg = S.search_requests(con, {"date": "2026-11-24", "size": 20, "page": 3, "sort": "name", "dir": "desc"})
+    ok(pg["total"] == 55 and pg["pages"] == 3 and len(pg["rows"]) == 15 and pg["rows"][0]["name"] == "가상쪽14" and pg["rows"][-1]["name"] == "가상쪽00",
+       "쪽 나눔: 55건 중 3쪽 15건, 이름 내림차순 (500건 상한 없음)")
+    ok(S.search_requests(con, {"date_from": "2026-11-18", "date_to": "2026-11-19", "status": ""})["total"] >= 5
+       and S.search_requests(con, {"date_from": "2026-11-24", "date_to": "2026-11-24"})["total"] == 55, "예정일 기간으로 찾기")
+    ok(S.search_requests(con, {"date_field": "received", "date_from": S.today_kst(), "date_to": S.today_kst(), "status": ""})["total"] >= 55, "접수일 기간으로 찾기")
+    ok(S.search_requests(con, {"dong": "가상3동", "date": "2026-11-24"})["total"] == 55 and S.search_requests(con, {"dong": "-", "status": ""})["total"] >= 1, "동으로 찾기·동 미지정")
+    ok(S.search_requests(con, {"crew": c1, "status": ""})["total"] == 0 and S.search_requests(con, {"pay": "PAID", "status": ""})["total"] >= 1, "팀·수납 상태로 찾기")
+    sc = S.search_requests(con, {"status": ""}, scope_ids={ra["id"]})
+    ok(sc["total"] == 1, "수거팀 범위 거르기도 쪽 나눔 안에서")
+    raises(lambda: S.search_requests(con, {"date_from": "11/24"}), "날짜", "잘못된 기간 거부")
+
+    # 민원·통화 기록
+    raises(lambda: S.add_contact(con, ra["id"], {"kind": "칭찬", "content": "x"}), "유형", "정해진 유형만")
+    S.add_contact(con, ra["id"], {"kind": "독촉", "content": "언제 오는지 문의(가상)", "at": "2026-11-03T10:20"})
+    gc = S.get_request(con, ra["id"])
+    ok(gc["contacts"][0]["kind"] == "독촉" and gc["contacts"][0]["actor"] == "kim" and "언제" not in (S.list_audit(con, entity="contact")[0]["detail"] or ""),
+       "민원·통화 기록: 일시·유형·내용·담당자, 이력에는 내용 없음")
+
+    # 접수 시 안내(설정)
+    S.save_settings(con, {"intake_notices": [{"keywords": "냉장고, 세탁기", "text": "폐가전은 무상 방문수거 안내(가상)"}]})
+    ok(S.settings(con)["intake_notices"][0]["keywords"] == ["냉장고", "세탁기"], "접수 시 안내 설정 (품목 낱말 → 안내문)")
+    raises(lambda: S.save_settings(con, {"intake_notices": [{"keywords": "", "text": "x"}]}), "낱말", "안내문에 품목 낱말 필수")
+
+    # 휴대폰 목록·배차표에 동
+    bat = S.confirm_plan(con, "2026-11-19", {c2: [{"request_id": bl[0]}]})[0]["batch_id"]
+    pl, _ = S.build_daylist(con, bat)
+    ok(pl["stops"][0]["dong"] == "가상2동" and S.dispatch_sheet(con, bat)["stops"][0]["dong"] == "가상2동", "휴대폰 목록 묶음·배차표 지점에 'dong'(문자열)")
+    comp = P.compact_daylist({**pl, "fee_table": S.fee_table_for_phone(con)}, S.FEE_ROWS)
+    ok(comp["s"][0]["i"], "목록 압축 형식은 그대로 동작 (동 칸은 형식이 지원할 때 전달)")
+
+    # 노선: 동 기본 담당 팀(약한 선호)
+    pts = [{"id": f"p{i}", "lat": 35.1462 + 0.002 * (i % 3), "lon": 126.9233 + 0.002 * (i // 3), "items": [{"name": "의자", "spec": "", "qty": 1}]} for i in range(6)]
+    crews_ = [{"id": "A", "name": "A", "capacity_m3": 8, "shift_start": "09:00", "shift_end": "17:00"}, {"id": "B", "name": "B", "capacity_m3": 8, "shift_start": "09:00", "shift_end": "17:00"}]
+    pref = {"p0": "B", "p1": "A", "p2": "B", "p3": "A", "p4": "B", "p5": "A"}
+    rp_ = routing.plan(pts, crews_, {"lat": 35.1462, "lon": 126.9233}, time_limit_s=2, crew_pref=pref, pref_penalty=60)
+    got = {s_["request_id"]: rt["crew_id"] for rt in rp_["routes"] for s_ in rt["stops"]}
+    ok(len(got) == 6 and all(got[k] == v for k, v in pref.items()) and not any(s_.get("off_pref") for rt in rp_["routes"] for s_ in rt["stops"]),
+       "노선 계산: 동 기본 담당 팀 선호 반영 (6곳 모두 담당 팀으로)")
+    full = routing.plan(pts, crews_[:1], {"lat": 35.1462, "lon": 126.9233}, time_limit_s=1, crew_pref=pref)
+    ok(len(full["routes"][0]["stops"]) == 6, "선호는 약하게: 담당 팀이 없으면 다른 팀이 모두 가져감")
+
+    # 통계: 동별·경로별, CSV에 동·경로
+    st = S.stats(con, "2026-11-01", "2026-11-30")
+    ok(any(d["dong"] == "가상3동" and d["planned"] >= 55 for d in st["dongs"]) and any(c["channel"] == "단체(공동주택)" for c in st["channels"]), "통계: 동별·접수 경로별 집계")
+    hdr = S.stats_csv(con, "2026-11-01", "2026-11-30").decode("utf-8-sig").splitlines()[0]
+    ok(hdr.startswith("접수번호,") and "행정동" in hdr and "접수 경로" in hdr, "접수별 CSV에 행정동·접수 경로 열")
+    ds = S.day_summary(con, "2026-11-24")
+    ok(any(d["dong"] == "가상3동" and d["total"] == 55 for d in ds["dongs"]), "오늘 현황(마감 요약) 동별 건수")
+
+    # 변경 이력: 대상 이름·기간·쪽 나눔·CSV
+    ok(set(S.AUDIT_ENTITIES) >= {r["entity"] for r in S.rows(con, "SELECT DISTINCT entity FROM audit_log")}, "이력 대상 목록이 실제 기록 대상을 모두 포함")
+    ap = S.audit_page(con, {"entity": "request", "size": 50, "page": 2, "date_from": S.today_kst(), "date_to": S.today_kst()})
+    ok(ap["total"] > 50 and len(ap["rows"]) == min(50, ap["total"] - 50) and ap["page"] == 2, f"변경 이력 기간·대상·쪽 나눔 (전체 {ap['total']}건, 300건 상한 없음)")
+    ok(S.audit_page(con, {"date_from": "2020-01-01", "date_to": "2020-01-02"})["total"] == 0, "기간 밖은 0건")
+    acsv = S.audit_csv(con, {"entity": "request"}).decode("utf-8-sig")
+    names_ = [r["name"] for r in S.rows(con, "SELECT name FROM request")]
+    ok(acsv.startswith("번호,시각") and acsv.count("\n") > 50 and not any(n_ in acsv for n_ in names_) and "0100000" not in acsv
+       and S.list_audit(con, entity="report")[0]["detail"].find('"rows"') > 0, "거른 변경 이력 CSV (개인정보 없음, 내보낸 기록)")
+
+    # 로그인 실패 잠금: 아이디별 (B3)
+    SV.FAILS.clear()
+    for _ in range(5):
+        SV.login_failed("kim")
+    ok(SV.login_blocked("kim") > 0 and SV.login_blocked("KIM ") > 0 and SV.login_blocked("boss") == 0, "로그인 5번 실패 → 그 아이디만 잠김 (다른 아이디는 영향 없음)")
+    SV.login_failed("kim")
+    ok(SV.login_blocked("kim") > 30, "계속 틀리면 잠금 시간 늘어남")
+    SV.login_succeeded("kim")
+    ok(SV.login_blocked("kim") == 0, "로그인 성공하면 실패 횟수 초기화")
+    # 팀장 역할
+    ok(SV.allowed("LEAD", "GET", "audit") and SV.allowed("LEAD", "GET", "audit.csv") and SV.allowed("LEAD", "GET", "requests") and SV.allowed("LEAD", "POST", "close/approve")
+       and not SV.allowed("LEAD", "POST", "close") and not SV.allowed("LEAD", "POST", "users") and not SV.allowed("LEAD", "POST", "settings")
+       and not SV.allowed("LEAD", "POST", "requests") and not SV.allowed("LEAD", "GET", "backups"), "팀장: 전체 조회·이력·마감 확인, 사용자·설정·업무 변경 불가")
+    ok(not SV.allowed("INTAKE", "POST", "close/approve") and SV.allowed("INTAKE", "POST", "close") and not SV.allowed("INTAKE", "POST", "dongs")
+       and not SV.allowed("INTAKE", "POST", "holidays") and SV.allowed("INTAKE", "GET", "calendar"), "접수 담당자: 마감 기록 가능·확인 불가, 동·휴무일 관리 불가, 달력 조회 가능")
+    raises(lambda: S.set_user_crew(con, S.one(con, "SELECT id FROM app_user WHERE username='boss'")["id"], c1), "수거팀 계정만", "팀장 계정에는 팀 연결 안 함")
+    con.close()
+    os.environ["DG_STATE"] = old_state
+    print(f"\n통과 {passed}개 (v0.10 포함)")
+
+
 if __name__ == "__main__":
     main()
+    v10()

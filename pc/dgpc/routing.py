@@ -6,6 +6,8 @@
 - 오늘 반드시 포함(must_today)은 빠질 수 없는 지점, 나머지는 우선순위가 높을수록 빠지기 어렵게(벌점) 한다.
 - "먼저 방문"(오전 등)은 벌점이 아니라 시간창으로만 표현한다.
 - 반입지 좌표가 설정되어 있으면, 적재가 차면 반입지에 들러 비우고(하차) 이어서 수거하는 경로를 만든다(차량당 최대 2회).
+- 행정동의 기본 담당 팀(crew_pref)이 있으면 다른 팀이 그 지점에 갈 때 이동 비용에 벌점(pref_penalty 분)을 더한다(약한 선호).
+  팀을 막지는 않으므로 담당 팀이 꽉 차면 다른 팀이 가져갈 수 있다.
 - 결과는 추천안이다. 담당자가 순서를 바꾸고 확정한다.
 """
 from __future__ import annotations
@@ -70,9 +72,11 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
 
 def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str = "", service_base: int = 5,
          service_per_item: int = 3, time_limit_s: int = 5, today: str = "", volume_overrides: dict | None = None,
-         unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None) -> dict:
+         unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None,
+         crew_pref: dict | None = None, pref_penalty: int = 30) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
-    crews: id, name, capacity_m3, shift_start, shift_end"""
+    crews: id, name, capacity_m3, shift_start, shift_end
+    crew_pref: {request_id: 선호 팀 id} (행정동 기본 담당 팀, 약한 선호)"""
     unassigned = [{"request_id": r["id"], "reason": "배출 위치 좌표가 없음 (위치 지정 필요)"} for r in requests if r.get("lat") is None]
     reqs = [r for r in requests if r.get("lat") is not None]
     if not crews:
@@ -121,7 +125,23 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         a, b = mgr.IndexToNode(i), mgr.IndexToNode(j)
         return tmat[a][b] + service[a]
     tcb = model.RegisterTransitCallback(transit)
-    model.SetArcCostEvaluatorOfAllVehicles(tcb)
+    # 행정동 기본 담당 팀: 지점(묶음)마다 구성원 다수의 선호 팀 → 다른 팀이 들어오면 벌점
+    crew_idx = {c["id"]: k for k, c in enumerate(crews)}
+    node_pref: list[int | None] = [None] * n
+    for node, g in enumerate(groups, start=1):
+        prefs = [crew_idx[(crew_pref or {}).get(r["id"])] for r, _ in g["members"] if (crew_pref or {}).get(r["id"]) in crew_idx]
+        if prefs:
+            node_pref[node] = max(set(prefs), key=prefs.count)
+    keep = []  # 콜백이 가비지 컬렉션되지 않게
+    if any(x is not None for x in node_pref) and pref_penalty > 0 and v > 1:
+        for k in range(v):
+            def cost(i, j, k=k):
+                a, b = mgr.IndexToNode(i), mgr.IndexToNode(j)
+                return tmat[a][b] + service[a] + (pref_penalty if node_pref[b] is not None and node_pref[b] != k else 0)
+            keep.append(cost)
+            model.SetArcCostEvaluatorOfVehicle(model.RegisterTransitCallback(cost), k)
+    else:
+        model.SetArcCostEvaluatorOfAllVehicles(tcb)
     model.AddDimension(tcb, 600, 24 * 60, False, "Time")
     tdim = model.GetDimensionOrDie("Time")
     for k in range(v):
@@ -175,8 +195,9 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                 load += demand[node]
                 t = sol.Min(tdim.CumulVar(idx))
                 for r, svc in g["members"]:
+                    pc = (crew_pref or {}).get(r["id"])
                     stops.append({"request_id": r["id"], "eta": hhmm(t), "service_min": svc, "load_m3": round(load / scale, 2),
-                                  "same_place": len(g["members"])})
+                                  "same_place": len(g["members"]), **({"pref_crew_id": pc, "off_pref": pc != c["id"]} if pc else {})})
                     visited.add(r["id"])
                     t += svc
             idx = sol.Value(model.NextVar(idx))

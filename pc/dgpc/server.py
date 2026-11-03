@@ -23,7 +23,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import routing, service as S, store
+from . import area as A, routing, service as S, store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
@@ -36,22 +36,52 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://tiles.openfreemap.org; "
        "connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; media-src 'self' blob: mediastream:; object-src 'none'; base-uri 'none'; "
        "form-action 'none'; frame-ancestors 'none'")
-IDLE_S = 30 * 60
+# 세션 무조작 만료(30분). 자동 시험에서만 DG_SESSION_IDLE_S 로 줄일 수 있다(60초 이상).
+IDLE_S = max(60, int(os.environ.get("DG_SESSION_IDLE_S") or 30 * 60))
 MAX_BODY = 40 * 1024 * 1024
 
 LOCK = threading.Lock()
 CON = None
 SESSIONS: dict[str, dict] = {}
-FAILS = {"n": 0, "until": 0.0}
+FAILS: dict[str, dict] = {}  # 아이디별 로그인 실패 {"n": 횟수, "until": 잠금 끝 시각, "at": 마지막 실패}
+PRINTS: dict[str, dict] = {}  # 고른 접수 인쇄: 잠깐 쓰는 표(주소에 접수 ID를 길게 싣지 않게)
 PORT = 8765
 
 
+def _fail_key(username: str) -> str:
+    return (username or "").strip().lower()[:30] or "?"
+
+
+def login_blocked(username: str) -> int:
+    """이 아이디가 잠겨 있으면 남은 초, 아니면 0. (다른 아이디의 실패는 영향 없음)"""
+    f = FAILS.get(_fail_key(username))
+    return max(0, int(f["until"] - time.time()) + 1) if f and f["until"] > time.time() else 0
+
+
+def login_failed(username: str):
+    """5번째 실패부터 30초·60초·120초… (최대 30분) 잠근다."""
+    now_ = time.time()
+    if len(FAILS) > 1000:  # 아무 아이디나 넣어 메모리를 채우지 못하게 오래된 기록 정리
+        for k in [k for k, v in FAILS.items() if now_ - v["at"] > 3600]:
+            FAILS.pop(k, None)
+    f = FAILS.setdefault(_fail_key(username), {"n": 0, "until": 0.0, "at": now_})
+    f["n"] += 1
+    f["at"] = now_
+    if f["n"] >= 5:
+        f["until"] = now_ + min(30 * 2 ** (f["n"] - 5), 1800)
+
+
+def login_succeeded(username: str):
+    FAILS.pop(_fail_key(username), None)
+
+
 # 역할별 허용 API (운영 관리자는 전부)
-#  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감
+#  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감 기록
 #  FIELD(수거팀): 조회, 결과·사진 가져오기, 하차 기록, QR 실측
+#  LEAD(팀장·검토자): 모든 조회(변경 이력 포함) + 마감 확인. 사용자·설정 관리와 업무 변경은 못 함
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
-                       "fee-table", "geocode", "stats", "stats.csv"},
+                       "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
                         "fee-revisions", "geocode", "links"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
@@ -59,10 +89,18 @@ PERM = {
 }
 
 
+LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr"}
+LEAD_POST = {"password", "close/approve"}
+
+
 def allowed(role: str, method: str, p: str) -> bool:
     if role == "ADMIN":
         return True
     head = p.split("/")[0]
+    if role == "LEAD":
+        return (method == "GET" and head not in LEAD_GET_DENY) or (method == "POST" and p in LEAD_POST)
+    if p == "close/approve":  # 마감 확인은 팀장(검토자)·관리자만
+        return False
     if role == "FIELD" and method == "POST" and head == "requests":
         return False
     if role == "INTAKE" and method == "POST" and p == "fee-revisions":  # 개정안 작성은 관리자, 승인은 다른 담당자도 가능
@@ -190,6 +228,14 @@ class Handler(BaseHTTPRequestHandler):
                         if not b or b["crew_id"] != sess.get("crew_id"):
                             return self.send_json({"error": "내 팀의 배차표만 볼 수 있습니다."}, 403)
                     return self.print_page(path[13:])
+            if method == "GET" and path.startswith("/print/requests/"):
+                sess = SESSIONS.get(self.session() or "")
+                if not sess:
+                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
+                job = PRINTS.pop(path[16:], None)
+                if not job or job["exp"] < time.time() or job["user"] != sess["user_id"]:
+                    return self.send_json({"error": "인쇄 자료가 없거나 시간이 지났습니다. 목록에서 다시 인쇄하세요."}, 404)
+                return self.print_requests_page(job["data"])
             if method == "GET" and path.startswith("/qrtest/"):
                 if not self.session():
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
@@ -217,9 +263,10 @@ class Handler(BaseHTTPRequestHandler):
                 u = S.check_login(CON, d.get("username") or "", d.get("password") or "")
             return self.login_ok(u)
         if p == "login" and method == "POST":
-            if time.time() < FAILS["until"]:
-                raise S.UserError(f"여러 번 틀렸습니다. {int(FAILS['until'] - time.time())}초 뒤 다시 시도하세요.")
             d = self.json_body()
+            wait = login_blocked(d.get("username") or "")
+            if wait:
+                raise S.UserError(f"이 아이디로 여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")
             with LOCK:
                 good = S.check_login(CON, d.get("username") or "", d.get("password") or "")
                 if good:
@@ -231,11 +278,9 @@ class Handler(BaseHTTPRequestHandler):
                     with S.tx(CON):
                         S.audit(CON, "user", "-", "LOGIN_FAIL", None)
             if not good:
-                FAILS["n"] += 1
-                if FAILS["n"] >= 5:
-                    FAILS["until"] = time.time() + min(30 * 2 ** (FAILS["n"] - 5), 1800)
+                login_failed(d.get("username") or "")
                 raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
-            FAILS.update(n=0, until=0)
+            login_succeeded(d.get("username") or "")
             return self.login_ok(good)
         tok = self.session()
         if not tok:
@@ -265,7 +310,28 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if p == "bootstrap":
                 return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
-                                       "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c)})
+                                       "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
+                                       "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
+                                       "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES})
+            if p == "calendar":
+                start = qs.get("start") or S.today_kst()
+                dong = qs.get("dong") or None
+                ex = qs.get("exclude") or None
+                out = {"days": A.calendar(c, start, min(31, int(qs.get("days") or 14)), dong, ex),
+                       "earliest": A.earliest_available(c, start, dong, ex)}
+                if qs.get("date"):
+                    out["warnings"] = A.capacity_warnings(c, qs["date"], dong, ex)
+                return self.send_json(out)
+            if p == "dong-detect":
+                return self.send_json(A.detect_dong(c, qs.get("address", "")))
+            if p == "dongs":
+                return self.send_json(A.list_dongs(c))
+            if p == "holidays":
+                return self.send_json(A.list_holidays(c, qs.get("start", ""), qs.get("end", "")))
+            if p == "requests/import-template":
+                return self.send_bytes(S.import_template(), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-intake-template.csv"'})
+            if p == "audit.csv":
+                return self.send_bytes(S.audit_csv(c, qs), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-audit.csv"'})
             if p == "stats":
                 return self.send_json(S.stats(c, qs.get("start", ""), qs.get("end", "")))
             if p == "stats.csv":
@@ -290,13 +356,11 @@ class Handler(BaseHTTPRequestHandler):
                 cand = S.purge_candidates(c)
                 return self.send_json({"count": len(cand), "bytes": sum(x["bytes"] or 0 for x in cand), "days": S.settings(c)["photo_retention_days"]})
             if p == "audit":
-                return self.send_json(S.list_audit(c, qs.get("entity", ""), qs.get("date", ""), qs.get("actor", "")))
+                return self.send_json(S.audit_page(c, qs))
             if p == "requests":
-                out = S.list_requests(c, qs.get("q", ""), qs.get("date", ""), qs.get("status", ""))
-                if self.crew_scope() is not None:  # 수거팀 계정: 자기 팀에 배정된 접수만
-                    mine = S.crew_request_ids(c, self.crew_scope())
-                    out = [r for r in out if r["id"] in mine]
-                return self.send_json(out)
+                # 수거팀 계정: 자기 팀에 배정된 접수만
+                scope = S.crew_request_ids(c, self.crew_scope()) if self.crew_scope() is not None else None
+                return self.send_json(S.search_requests(c, qs, scope))
             if parts[0] == "requests" and len(parts) == 2:
                 self.require_crew_request(parts[1])
                 return self.send_json(S.get_request(c, parts[1]))
@@ -334,11 +398,32 @@ class Handler(BaseHTTPRequestHandler):
             if p == "requests":
                 d = self.json_body()
                 return self.send_json(S.create_request(c, d))
+            if p == "requests/bulk":
+                return self.send_json(self.bulk(self.json_body()))
+            if p == "requests/export":
+                d = self.json_body()
+                pii = bool(d.get("include_pii"))
+                if pii and self.user["role"] not in ("ADMIN", "INTAKE"):
+                    return self.send_json({"error": "개인정보가 든 목록은 접수 담당자·관리자만 내보낼 수 있습니다."}, 403)
+                return self.send_bytes(S.export_requests(c, d.get("ids"), pii), "text/csv; charset=utf-8",
+                                       extra={"Content-Disposition": 'attachment; filename="donggu-selected.csv"'})
+            if p == "requests/print":
+                data = S.print_requests(c, self.json_body().get("ids"))
+                t = secrets.token_urlsafe(12)
+                for k in [k for k, v in PRINTS.items() if v["exp"] < time.time()]:
+                    PRINTS.pop(k, None)
+                PRINTS[t] = {"exp": time.time() + 120, "data": data, "user": self.user["user_id"]}
+                return self.send_json({"token": t})
+            if p == "requests/import":
+                return self.send_json(S.import_requests(c, self.body(), preview=qs.get("preview") == "1", skip_duplicates=qs.get("skip_dup") == "1"))
             if parts[0] == "requests" and len(parts) == 2:
                 d = self.json_body()
                 return self.send_json(S.update_request(c, parts[1], d, d.get("reason", "")))
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "cancel":
-                return self.send_json(S.cancel_request(c, parts[1], self.json_body().get("reason", "")))
+                d = self.json_body()
+                return self.send_json(S.cancel_request(c, parts[1], d.get("reason", ""), d.get("code") or None))
+            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "contacts":
+                return self.send_json({"id": S.add_contact(c, parts[1], self.json_body())})
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "location":
                 d = self.json_body()
                 S.set_location(c, parts[1], d["lat"], d["lon"])
@@ -373,7 +458,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if p == "close":
                 d = self.json_body()
-                return self.send_json(S.close_day(c, d["date"], d.get("note", "")))
+                return self.send_json(S.close_day(c, d.get("date", ""), d.get("note", "")))
+            if p == "close/approve":
+                d = self.json_body()
+                return self.send_json(S.approve_close(c, d.get("date", ""), d.get("note", "")))
+            if p == "dongs":
+                return self.send_json({"id": A.save_dong(c, self.json_body())})
+            if parts[0] == "dongs" and len(parts) == 3 and parts[2] == "delete":
+                A.delete_dong(c, parts[1])
+                return self.send_json({"ok": True})
+            if p == "holidays":
+                d = self.json_body()
+                A.add_holiday(c, d.get("day", ""), d.get("label", ""))
+                return self.send_json({"ok": True})
+            if parts[0] == "holidays" and len(parts) == 3 and parts[2] == "delete":
+                A.delete_holiday(c, parts[1])
+                return self.send_json({"ok": True})
             if p == "crews":
                 return self.send_json({"id": S.save_crew(c, self.json_body())})
             if p == "devices/register":
@@ -474,14 +574,29 @@ class Handler(BaseHTTPRequestHandler):
                 r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"], "fee_rate_id": l["fee_rate_id"]} for l in r["state"]["lines"] if l["remaining"]]
             reqs.append(r)
         st = S.settings(c)
+        dongs = {x["name"]: x for x in A.list_dongs(c)}
+        pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
+            if st["capacity"]["prefer_dong_crew"] else {}
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
                            volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
-                           max_unloads=st["max_unloads"], end_site=st["end_site"])
+                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref)
+        res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
-                                     "status": r["status"]} for r in reqs}
+                                     "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"])} for r in reqs}
         return res
+
+    def bulk(self, d: dict) -> dict:
+        """일괄 처리: 예정일 변경·취소·동 지정 (한 트랜잭션, 건별 이력)."""
+        act, ids = d.get("action"), d.get("ids")
+        if act == "reschedule":
+            return S.reschedule_requests(CON, ids, d.get("date", ""), d.get("code") or None, d.get("text", ""))
+        if act == "cancel":
+            return S.cancel_requests(CON, ids, d.get("code") or None, d.get("text", ""))
+        if act == "dong":
+            return S.set_requests_dong(CON, ids, d.get("dong", ""), d.get("reason", ""))
+        raise S.UserError("알 수 없는 일괄 처리입니다.")
 
     def raw_page(self, page: bytes):
         self.send_response(200)
@@ -521,19 +636,42 @@ class Handler(BaseHTTPRequestHandler):
             appt = f'{s["appt"][0] or ""}~{s["appt"][1] or ""}' if s.get("appt") else ""
             rows_html.append(f'<tr><td class="n">{s["seq"]}</td><td>{e(s.get("eta") or "")}<br><small>{e(appt)}</small></td>'
                              f'<td><b>{e(s["name"])}</b><br>{e(s["phone"][:3] + "-" + s["phone"][3:-4] + "-" + s["phone"][-4:] if len(s["phone"]) >= 9 else s["phone"])}</td>'
-                             f'<td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
+                             f'<td>{e(s.get("dong") or "")}</td><td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
                              f'<td class="r">{amt:,}원{"<br><small>확인 대기 있음</small>" if pend else ""}</td><td class="chk"></td><td class="chk"></td></tr>')
             if s.get("unload_after"):
                 u = s["unload_after"]
-                rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="6">{e(u["label"])} 하차 · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
+                rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="7">{e(u["label"])} 하차 · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
         page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>배차표 {e(d['work_date'])} {e(d['crew'])}</title>
 <link rel="stylesheet" href="/print.css"><script src="/print.js" defer></script></head><body>
 <header><h1>대형폐기물 수거 배차표</h1><p>{e(d['work_date'])} · {e(d['crew'])} · 갱신본 {d['assign_ver']} · 수수료표 {e(d['fee_version'])}</p>
 <button type="button" id="print">인쇄</button></header>
 <p class="warn">개인정보(이름·연락처·주소)가 들어 있습니다. 휴대폰 고장 대비 예비본으로만 쓰고, 업무가 끝나면 파쇄하세요. 결과는 휴대폰 앱에 기록합니다.</p>
-<table><thead><tr><th>순서</th><th>도착·약속</th><th>신청인</th><th>배출 위치</th><th>품목</th><th>금액</th><th>연락</th><th>수거</th></tr></thead>
+<table><thead><tr><th>순서</th><th>도착·약속</th><th>신청인</th><th>행정동</th><th>배출 위치</th><th>품목</th><th>금액</th><th>연락</th><th>수거</th></tr></thead>
 <tbody>{''.join(rows_html)}</tbody></table>
 <footer>출력 {e(d['printed_at'])} · 출력 기록은 변경 이력에 남습니다.</footer></body></html>"""
+        return self.send_bytes(page.encode(), "text/html; charset=utf-8")
+
+    def print_requests_page(self, d: dict):
+        """고른 접수 목록 인쇄(개인정보 포함 → 파쇄 안내). 건마다 출력 기록은 service.print_requests 가 남겼다."""
+        import html as _h
+        e = _h.escape
+        trs = []
+        for i, r in enumerate(d["rows"], 1):
+            ph = r["phone"]
+            ph = f"{ph[:3]}-{ph[3:-4]}-{ph[-4:]}" if len(ph) >= 9 else ph
+            items = "<br>".join(e(f'{x["name"]} {x["spec"]} {x["qty"]}{x["unit_label"]}') for x in r["items"])
+            asg = f'{r["assigned"]["name"]} {r["assigned"]["work_date"]}' if r.get("assigned") else ""
+            st = {"CANCELLED": "취소", "DONE": "수거 완료"}.get(r["status"], "")
+            trs.append(f'<tr><td class="n">{i}</td><td>{e(r["receipt_no"])}<br><small>{e(st)}</small></td><td>{e(r["planned_date"] or "")}</td><td>{e(r["dong"] or "")}</td>'
+                       f'<td><b>{e(r["name"])}</b><br>{e(ph)}</td><td>{e(r["address"])}<br><small>{e(r["spot_note"] or "")}</small></td><td>{items}</td>'
+                       f'<td>{e(asg)}</td><td class="chk"></td></tr>')
+        page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>접수 목록 {len(d['rows'])}건</title>
+<link rel="stylesheet" href="/print.css"><script src="/print.js" defer></script></head><body>
+<header><h1>대형폐기물 접수 목록</h1><p>{len(d['rows'])}건 · 출력 {e(d['printed_at'])}</p><button type="button" id="print">인쇄</button></header>
+<p class="warn">개인정보(이름·연락처·주소)가 들어 있습니다. 업무가 끝나면 파쇄하세요. 출력 기록은 건마다 변경 이력에 남습니다.</p>
+<table><thead><tr><th>번호</th><th>접수번호</th><th>예정일</th><th>행정동</th><th>신청인</th><th>배출 위치</th><th>품목</th><th>배정</th><th>확인</th></tr></thead>
+<tbody>{''.join(trs)}</tbody></table>
+<footer>출력 {e(d['printed_at'])}</footer></body></html>"""
         return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 
     def bundle_page(self, bundle_short: str):

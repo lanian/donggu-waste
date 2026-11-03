@@ -117,12 +117,30 @@ CREATE TABLE IF NOT EXISTS fee_revision (
   created_by TEXT NOT NULL, created_at TEXT NOT NULL, approved_by TEXT, approved_at TEXT, reject_reason TEXT);
 CREATE TABLE IF NOT EXISTS app_user (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('ADMIN','INTAKE','FIELD')), pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login_at TEXT);
+  role TEXT NOT NULL CHECK (role IN ('ADMIN','INTAKE','FIELD','LEAD')), pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login_at TEXT, crew_id TEXT);
+-- (구) 날짜별 마감 1행. v0.10부터 마감 기록은 day_close_log 에 회차별로 쌓는다(덮어쓰지 않음). 이 표는 이전 DB 이전용으로만 읽는다.
 CREATE TABLE IF NOT EXISTS day_close (work_date TEXT PRIMARY KEY, closed_at TEXT NOT NULL, summary_json TEXT NOT NULL, note TEXT);
+-- 마감 기록 회차: 담당자 기록(RECORDED) → 팀장 확인(APPROVED). 다시 마감하면 새 회차가 생긴다.
+CREATE TABLE IF NOT EXISTS day_close_log (
+  id TEXT PRIMARY KEY, work_date TEXT NOT NULL, seq INTEGER NOT NULL, closed_at TEXT NOT NULL, closed_by TEXT, summary_json TEXT NOT NULL,
+  note TEXT, carried_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'RECORDED' CHECK (status IN ('RECORDED','APPROVED')),
+  approved_by TEXT, approved_at TEXT, approve_note TEXT, UNIQUE (work_date, seq));
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL,
   detail TEXT, at TEXT NOT NULL);
+-- 행정동: 기본 담당 팀, 수거 요일(0=월 … 6=일, 쉼표), 일일 한도(건수·m³), 주소 자동 판별 낱말(법정동·도로명 등)
+CREATE TABLE IF NOT EXISTS dong (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, crew_id TEXT,
+  weekdays TEXT NOT NULL DEFAULT '', daily_limit INTEGER, daily_limit_m3 REAL, keywords_json TEXT NOT NULL DEFAULT '[]',
+  sort INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+-- 휴무일·공휴일 (관리자가 직접 넣음. 실제 공휴일을 미리 넣어 두지 않는다)
+CREATE TABLE IF NOT EXISTS holiday (day TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+-- 민원·통화 기록 (접수별)
+CREATE TABLE IF NOT EXISTS contact_log (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES request(id), at TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+  actor TEXT, recorded_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_contact_req ON contact_log(request_id);
 """
 
 
@@ -167,7 +185,7 @@ def db_key(create: bool = False) -> str:
 
 def connect(create: bool = False):
     if not ENCRYPTED and os.environ.get("DG_ALLOW_PLAIN_DB") != "1":
-        sys.exit("SQLCipher 모듈(sqlcipher3)이 없어 실행을 멈춥니다. 'pip install sqlcipher3-binary' 후 다시 실행하세요.")
+        sys.exit("SQLCipher 모듈(sqlcipher3)이 없어 실행을 멈춥니다. 'pip install -r pc/requirements.txt' 후 다시 실행하세요.")
     d = state_dir()
     path = d / "pc.db"
     if not path.exists() and not create:
@@ -194,11 +212,47 @@ def connect(create: bool = False):
         con.execute("ALTER TABLE app_user ADD COLUMN crew_id TEXT")
     if "purged_at" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:
         con.execute("ALTER TABLE photo ADD COLUMN purged_at TEXT")
+    migrate(con)
     try:
         os.chmod(path, 0o600)
     except OSError:
         pass
     return con
+
+
+def _cols(con, table) -> set[str]:
+    return {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def migrate(con):
+    """v0.10 이전 DB를 올린다(행정동·접수 경로·취소 코드·주소 자료의 동·팀장 역할·마감 회차). 여러 번 실행해도 같다."""
+    for col, decl in (("dong", "TEXT"), ("channel", "TEXT NOT NULL DEFAULT '전화'"), ("cancel_code", "TEXT"), ("cancelled_at", "TEXT")):
+        if col not in _cols(con, "request"):
+            con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_request_dong ON request(dong)")
+    for col in ("dong_h", "dong_b"):  # 주소 자료의 관할 행정동·법정동(파일에 있으면)
+        if col not in _cols(con, "addr_point"):
+            con.execute(f"ALTER TABLE addr_point ADD COLUMN {col} TEXT")
+    sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='app_user'").fetchone()[0]
+    if "'LEAD'" not in sql:  # 역할 목록(CHECK)에 팀장(LEAD) 추가: 표를 새로 만들어 옮긴다
+        cols = "id, username, display_name, role, pw_salt, pw_hash, active, must_change, created_at, last_login_at, crew_id"
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            con.execute("""CREATE TABLE app_user_v10 (
+              id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+              role TEXT NOT NULL CHECK (role IN ('ADMIN','INTAKE','FIELD','LEAD')), pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL,
+              active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login_at TEXT, crew_id TEXT)""")
+            con.execute(f"INSERT INTO app_user_v10 ({cols}) SELECT {cols} FROM app_user")
+            con.execute("DROP TABLE app_user")
+            con.execute("ALTER TABLE app_user_v10 RENAME TO app_user")
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+    if not con.execute("SELECT 1 FROM day_close_log LIMIT 1").fetchone():  # 이전 마감 기록(날짜별 1행) → 1회차
+        for wd, at, sj, note in con.execute("SELECT work_date, closed_at, summary_json, note FROM day_close").fetchall():
+            con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note) VALUES (?,?,1,?,NULL,?,?)",
+                        (secrets.token_hex(16), wd, at, sj, note))
 
 
 def _quote(s: str) -> str:
