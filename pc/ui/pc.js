@@ -96,7 +96,7 @@ async function screenLogin() {
   pw.addEventListener('keydown', (e) => { if (e.key === 'Enter' && pw2) { e.preventDefault(); pw2.focus(); } });
   setTimeout(() => (st.setup_needed ? dname : user).focus(), 30);
   return h('main', { class: 'login-wrap' }, h('div', { class: 'login card' }, h('h1', { class: 'sr-only' }, st.setup_needed ? '관리자 계정 만들기' : '로그인'),
-    h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물'), h('small', {}, 'PC 업무 화면'))),
+    h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, '접수·배차·수거 업무 (PC)'))),
     h('p', { class: 'muted' }, st.setup_needed ? '처음 사용합니다. 운영 관리자 계정을 만드세요. 비밀번호는 10자 이상입니다.' : '아이디와 비밀번호를 입력하세요.'),
     h('label', { class: 'f' }, '아이디', user), dname && h('label', { class: 'f' }, '이름', dname), h('label', { class: 'f' }, '비밀번호', pw), pw2 && h('label', { class: 'f' }, '비밀번호 확인', pw2),
     btn(st.setup_needed ? '관리자 계정 만들기' : '로그인', go1, 'primary block'), msg,
@@ -264,34 +264,64 @@ async function screenHome() {
     [sum.photos_missing, `사진 미회수 ${sum.photos_missing}장`, '#/results', '', 'ADMIN INTAKE FIELD'],
     [revisit, `재방문 후보 ${revisit}건`, '#/close', 'warn', 'ADMIN INTAKE'],
   ].filter(([n, , , , r]) => n && r.split(' ').includes(role));
-  return h('div', {}, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, date, sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
+  const act = batches.filter((b) => b.status === 'ACTIVE');
+  // 배차 지도: 팀 색 핀 + 순서 선 (핀은 이 화면에서만 그림, 지도 서버로 보내지 않음)
+  const mapBox = h('div', { class: 'mapbox dash-map' });
+  const dep = boot.settings.depot;
+  setTimeout(async () => {
+    try {
+      const { map, ml } = await mapIn(mapBox, { center: [dep.lon, dep.lat], zoom: 13 });
+      const bnd = new ml.LngLatBounds(); bnd.extend([dep.lon, dep.lat]);
+      M.pin(ml, map, { lng: dep.lon, lat: dep.lat, label: '출발', cls: 'me' });
+      const lines = [];
+      act.forEach((b, bi) => {
+        const coords = [[dep.lon, dep.lat]];
+        b.stops.forEach((x, i) => { if (x.lat == null) return; coords.push([x.lon, x.lat]); bnd.extend([x.lon, x.lat]); M.pin(ml, map, { lng: x.lon, lat: x.lat, label: `${bi + 1}-${i + 1}`, cls: x.status === 'DONE' ? 'done' : 'c' + ((bi % 4) + 1) }); });
+        lines.push({ type: 'Feature', properties: { c: bi % 4 }, geometry: { type: 'LineString', coordinates: coords } });
+      });
+      // 핀이 모두 보이게 먼저 맞춘다 (바탕 지도가 늦거나 못 와도 핀은 보이게)
+      if (lines.length) map.fitBounds(bnd, { padding: 50, maxZoom: 15, duration: 0 });
+      const whenStyle = (f) => (map.isStyleLoaded() ? f() : map.once('style.load', f));
+      whenStyle(() => {
+        map.addSource('routes', { type: 'geojson', data: { type: 'FeatureCollection', features: lines } });
+        map.addLayer({ id: 'routes', type: 'line', source: 'routes', paint: { 'line-width': 3, 'line-dasharray': [2, 1], 'line-color': ['match', ['get', 'c'], 0, '#2557a7', 1, '#a5560d', 2, '#6c3fb5', '#0e7490'] } });
+      });
+    } catch { mapBox.replaceChildren(h('p', { class: 'pad muted' }, '지도를 불러오지 못했습니다(인터넷 연결 확인).')); }
+  }, 30);
+  const nodeCls = (st) => (st === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(st) ? 'warn' : st === 'CANCELLED' ? 'neutral' : st === 'IN_PROGRESS' ? 'info' : '');
+  return h('div', { class: 'dash' }, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, h('label', { class: 'f inline' }, h('span', { class: 'sr-only' }, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
     h('div', { class: 'kpis' },
       kpi('수거 예정', `${active}건`, (bs.CANCELLED ? `취소 ${bs.CANCELLED}건 제외` : ' '), '', '#/requests'),
       kpi('수거 완료', `${done}건`, h('span', { class: 'bar' }, h('i', { style: `width:${pct}%` })), 'ok'),
       kpi('진행·대기', `${open}건`, bs.IN_PROGRESS ? `처리 중 ${bs.IN_PROGRESS}` : ' ', ''),
       kpi('재방문·보류', `${revisit}건`, bs.NOT_COLLECTED ? `미수거 ${bs.NOT_COLLECTED}` : ' ', revisit ? 'warn' : ''),
       kpi('하차 기록', `${sum.unload_total.volume_m3}m³`, sum.unloads.length ? `${sum.unloads.length}회 · ${sum.unload_total.weight_kg}kg` : '기록 없음', '')),
-    h('div', { class: 'grid2' },
-      h('div', { class: 'card' }, h('h2', {}, '처리할 일'),
+    h('div', { class: 'dash-grid' },
+      h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '배차 지도'), h('span', { class: 'muted small' }, act.length ? `확정 배정 ${act.length}팀 · ${act.reduce((a, b) => a + b.stops.length, 0)}곳` : '확정된 배정 없음')), mapBox,
+        h('p', { class: 'muted small' }, '핀 번호는 팀-방문 순서, 녹색 핀은 수거 완료. 선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다.')),
+      h('div', { class: 'dash-side' },
+      h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '처리할 일'), todo.length ? h('span', { class: 'muted small' }, `${todo.length}종`) : null),
         todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
           : h('p', { class: 'empty' }, sum.total ? '지금 처리할 일이 없습니다.' : '이 날짜의 접수가 없습니다.')),
-      h('div', { class: 'card' }, h('h2', {}, '팀별 진행'),
-        batches.filter((b) => b.status === 'ACTIVE').length ? h('div', { class: 'crews' }, ...batches.filter((b) => b.status === 'ACTIVE').map((b) => {
+      h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '팀별 진행'), act.length ? h('span', { class: 'legend small' }, h('span', { class: 'lg ok' }, '완료'), h('span', { class: 'lg warn' }, '재방문'), h('span', { class: 'lg track' }, '남음')) : null),
+        act.length ? h('div', { class: 'crews' }, ...act.map((b, bi) => {
           const n = b.stops.length, d = b.stops.filter((x) => x.status === 'DONE').length, w = b.stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.status)).length;
           const last = b.bundles[0];
-          return h('div', { class: 'crew' }, h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', {}, b.crew_name), h('span', { class: 'muted' }, `갱신본 ${b.assign_ver}`)),
+          return h('div', { class: `crew route c${(bi % 4) + 1}` }, h('div', { class: 'row crew-h' }, h('span', { class: 'swatch', 'aria-hidden': 'true' }), h('b', {}, b.crew_name), h('span', { class: 'muted small' }, `갱신본 ${b.assign_ver}`), h('span', { class: 'grow' }),
+              !last ? chip('미전송', 'warn') : last.receipt_confirmed_at ? chip('수신 확인', 'ok') : chip('수신 미확인', 'warn'), b.resend_needed ? chip('재전송 필요', 'bad') : null),
             h('div', { class: 'seg' }, h('i', { class: 'ok', style: `flex:${d}` }), h('i', { class: 'warn', style: `flex:${w}` }), h('i', { class: 'rest', style: `flex:${Math.max(0, n - d - w)}` })),
-            h('div', { class: 'row small' }, `${n}곳 중 완료 ${d} · 재방문 ${w}`, h('span', { class: 'grow' }),
-              !last ? chip('미전송', 'warn') : last.receipt_confirmed_at ? chip('수신 확인', 'ok') : chip('수신 미확인', 'warn'), b.resend_needed ? chip('재전송 필요', 'bad') : null));
-        })) : h('p', { class: 'empty' }, '확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null))),
+            h('div', { class: 'row small' }, `${n}곳 중 완료 ${d} · 재방문 ${w}`),
+            n ? h('ol', { class: 'tline', 'aria-label': `${b.crew_name} 방문 순서` }, ...b.stops.map((x, i) => h('li', { class: nodeCls(x.status), title: `${i + 1}. ${x.name} · ${STATUS[x.status] || x.status}` },
+              h('b', {}, i + 1), h('small', {}, x.eta || '—'), h('span', { class: 'sr-only' }, ` ${x.name} ${STATUS[x.status] || ''}`)))) : null);
+        })) : h('p', { class: 'empty' }, '확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null)))),
     h('p', { class: 'muted small' }, '현황은 이 PC에 가져온 결과 기준입니다. 휴대폰에서 아직 보내지 않은 결과는 반영되지 않습니다.'));
 }
-
 async function screenRequests() {
   const f = (screenRequests.f ||= { q: '', date: '', status: 'OPEN', quick: 'ALL' });
-  const q = h('input', { type: 'search', placeholder: '이름·연락처·주소·접수번호', value: f.q });
-  const date = h('input', { type: 'date', value: f.date });
-  const status = h('select', {}, ...[['OPEN', '미완료 전체'], ['', '전체'], ...Object.entries(STATUS)].map(([v, t]) => h('option', { value: v, selected: v === f.status }, t)));
+  const q = h('input', { type: 'search', id: 'rq-q', placeholder: '이름·연락처·주소·접수번호', value: f.q });
+  const date = h('input', { type: 'date', id: 'rq-date', value: f.date });
+  const count = h('b', {}, '0');
+  const status = h('select', { id: 'rq-status' }, ...[['OPEN', '미완료 전체'], ['', '전체'], ...Object.entries(STATUS)].map(([v, t]) => h('option', { value: v, selected: v === f.status }, t)));
   const tbody = h('tbody');
   const quickBar = h('div', { class: 'quick' });
   const QUICK = [['ALL', '전체', () => true], ['TODAY', '오늘 예정', (r) => r.planned_date === boot.today], ['NOLOC', '위치 없음', (r) => r.lat == null],
@@ -301,15 +331,16 @@ async function screenRequests() {
     quickBar.replaceChildren(...QUICK.map(([k, t, fn]) => h('button', { type: 'button', class: 'qchip' + (f.quick === k ? ' on' : ''), 'aria-pressed': f.quick === k ? 'true' : 'false',
       onclick: () => { f.quick = k; draw(); } }, t, h('b', {}, all.filter(fn).length))));
     const list = all.filter(QUICK.find(([k]) => k === f.quick)[2]);
+    count.textContent = list.length;
     const shortDate = (d) => (!d ? '-' : d === boot.today ? '오늘' : d.slice(5));
-    tbody.replaceChildren(...(list.length ? list.map((r) => h('tr', { class: 'click', onclick: (e) => { if (e.target.tagName !== 'A') go(`#/request/${r.id}`); } },
-      h('td', { class: 'code' }, h('a', { href: `#/request/${r.id}`, title: r.receipt_no }, r.receipt_no.replace(/^DG-\d{4}/, ''))), h('td', { class: 'code' }, shortDate(r.planned_date)), h('td', { class: 'nowrap' }, r.name), h('td', { class: 'code' }, fmtPhone(r.phone)),
+    tbody.replaceChildren(...(list.length ? list.map((r, ri) => h('tr', { class: 'click', onclick: (e) => { if (e.target.tagName !== 'A') go(`#/request/${r.id}`); } },
+      h('td', { class: 'num rn' }, ri + 1), h('td', { class: 'code' }, h('a', { href: `#/request/${r.id}`, title: r.receipt_no }, r.receipt_no.replace(/^DG-\d{4}/, ''))), h('td', { class: 'code' }, shortDate(r.planned_date)), h('td', { class: 'nowrap' }, r.name), h('td', { class: 'code' }, fmtPhone(r.phone)),
       h('td', {}, h('span', { class: 'clamp' }, r.address)),
       h('td', {}, h('span', { class: 'clamp' }, r.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', '))),
       h('td', {}, r.status !== 'RECEIVED' ? statusChip(r.status) : null, r.state.contact !== 'NOT_CONTACTED' ? chip(CONTACT[r.state.contact]) : null, r.must_today ? chip('오늘 필수', 'warn') : null, (r.warnings || []).length ? h('span', { class: 'chip bad', title: r.warnings.join(' ') }, '관할 확인') : null),
       h('td', {}, r.state.fee.final == null ? chip('금액 확인 대기', 'warn') : won(r.state.fee.final)),
       h('td', {}, r.lat == null ? chip('위치 없음', 'warn') : '✓'),
-      h('td', {}, r.assigned_to ? `${r.assigned_to.name} ${r.assigned_to.work_date}` : ''))) : [h('tr', {}, h('td', { colspan: 10, class: 'muted' }, f.q ? `'${f.q}'에 맞는 접수가 없습니다. 초성(예: ㄱㅅ)이나 전화번호 뒷자리로도 찾을 수 있습니다.` : '해당 접수가 없습니다. ', !f.q && boot.me.role !== 'FIELD' ? h('a', { href: '#/request/new' }, '전화 접수 등록 →') : null))]));
+      h('td', {}, r.assigned_to ? `${r.assigned_to.name} ${r.assigned_to.work_date}` : ''))) : [h('tr', {}, h('td', { colspan: 11, class: 'muted' }, f.q ? `'${f.q}'에 맞는 접수가 없습니다. 초성(예: ㄱㅅ)이나 전화번호 뒷자리로도 찾을 수 있습니다.` : '해당 접수가 없습니다. ', !f.q && boot.me.role !== 'FIELD' ? h('a', { href: '#/request/new' }, '전화 접수 등록 →') : null))]));
   };
   const load = wrap(async () => {
     Object.assign(f, { q: q.value, date: date.value, status: status.value });
@@ -319,13 +350,21 @@ async function screenRequests() {
   let t = null;
   q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(load, 300); });
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(t); load(); } });
-  [date, status].forEach((x) => x.addEventListener('change', load));
+  // 조건을 바꾸면 이전 결과를 지우고 불러오는 중 표시 (옛 목록을 새 결과로 오인하지 않게)
+  const reload = () => { tbody.replaceChildren(h('tr', {}, h('td', { colspan: 11, class: 'muted' }, '불러오는 중…'))); load(); };
+  [date, status].forEach((x) => x.addEventListener('change', reload));
   load();
   setTimeout(() => { if (!document.activeElement || document.activeElement === document.body) q.focus(); }, 30);
-  return h('div', {}, h('div', { class: 'pagehead' }, h('h1', {}, '접수'), boot.me.role !== 'FIELD' ? btn('+ 전화 접수 등록', () => go('#/request/new'), 'primary') : null),
-    h('div', { class: 'card filters' }, h('div', { class: 'row' }, q, date, status, btn('검색', load), h('span', { class: 'muted small' }, '단축키: / 찾기 · N 새 접수')), quickBar),
-    h('div', { class: 'card tablecard' }, h('table', {},
-      h('thead', {}, h('tr', {}, ...['접수번호', '예정일', '이름', '연락처', '배출 주소', '품목', '상태', '금액', '위치', '배정'].map((t) => h('th', {}, t)))), tbody)));
+  // 조회조건 상자(회색 이름 칸 + 값 칸) → 목록 머리줄(총 N건 · 단추) → 목록 표
+  const cl = (t, forId) => h('label', { class: 'cond-l', for: forId }, t);
+  return h('div', {}, h('div', { class: 'pagehead' }, h('h1', {}, '접수'), h('span', { class: 'muted small' }, '단축키: ', h('kbd', {}, '/'), ' 찾기 · ', h('kbd', {}, 'N'), ' 새 접수')),
+    h('div', { class: 'card filters searchbox', role: 'search', 'aria-label': '조회조건' },
+      h('div', { class: 'cond' }, cl('검색어', 'rq-q'), h('div', { class: 'cond-v' }, q), cl('수거 예정일', 'rq-date'), h('div', { class: 'cond-v' }, date), cl('처리 상태', 'rq-status'), h('div', { class: 'cond-v' }, status),
+        h('span', { class: 'cond-l' }, '빠른 조회'), h('div', { class: 'cond-v wide' }, quickBar)),
+      h('div', { class: 'cond-btns' }, btn('검색', load, 'dark'))),
+    h('div', { class: 'gridbar' }, h('span', { class: 'cnt' }, '총 ', count, '건'), h('span', { class: 'grow' }), boot.me.role !== 'FIELD' ? btn('+ 전화 접수 등록', () => go('#/request/new'), 'primary') : null),
+    h('div', { class: 'card tablecard' }, h('table', { class: 'grid' },
+      h('thead', {}, h('tr', {}, ...['번호', '접수번호', '예정일', '이름', '연락처', '배출 주소', '품목', '상태', '금액', '위치', '배정'].map((t, i) => h('th', { class: i === 0 ? 'num' : null, scope: 'col' }, t)))), tbody)));
 }
 
 // ------------------------------------------------------------ 접수 등록·수정
@@ -472,12 +511,12 @@ async function screenRequest(id) {
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_reason || '-')) : null,
     h('div', { class: 'grid2' },
       h('div', {},
-        h('div', { class: 'card' }, h('h2', {}, '신청자'),
+        h('div', { class: 'card formtable' }, h('h2', {}, '신청자'),
           h('div', { class: 'grid2' }, lab('이름', F.name), lab('연락처', F.phone)), lab('배출 주소', F.address), lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo), dupBox),
         h('div', { class: 'card' }, h('h2', {}, '버릴 물건'), itemsBox, total, editable ? picker : null)),
       h('div', {},
-        h('div', { class: 'card' }, h('h2', {}, '일정·우선순위'),
-          h('div', { class: 'grid3' }, lab('수거 예정일', F.planned_date), lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
+        h('div', { class: 'card formtable' }, h('h2', {}, '일정·우선순위'),
+          lab('수거 예정일', F.planned_date), h('div', { class: 'grid2' }, lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),
         h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
@@ -522,13 +561,13 @@ function photoImg(pid) {
 // ------------------------------------------------------------ 배정·노선
 async function screenDispatch() {
   const s = (screenDispatch.s ||= { date: boot.today, crews: new Set(), seen: new Set(), plan: null });
-  const date = h('input', { type: 'date', value: s.date });
+  const date = h('input', { type: 'date', id: 'dp-date', value: s.date });
   const crews = boot.crews.filter((c) => c.active);
   crews.forEach((c) => { if (!s.seen.has(c.id)) { s.seen.add(c.id); s.crews.add(c.id); } });  // 새로 만든 팀은 자동으로 포함
   const calcBtn = btn('노선 계산', null, 'primary');
   const crewHint = h('span', { class: 'muted small' });
   const syncCalc = () => { const none = ![...s.crews].some((id) => crews.some((c) => c.id === id)); calcBtn.disabled = none; crewHint.textContent = none ? '팀을 하나 이상 고르세요.' : ''; };
-  const crewBox = h('div', { class: 'row' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); syncCalc(); } }),
+  const crewBox = h('div', { class: 'row crewpick' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); syncCalc(); } }),
     `${c.name} (${c.capacity_m3}m³, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
   const msg = h('p', { class: 'msg' });
   const planMsg = h('p', { class: 'msg' });
@@ -546,7 +585,7 @@ async function screenDispatch() {
   const draw = () => {
     liveMaps.forEach((m) => { try { m.remove(); } catch {} }); liveMaps = [];
     const p = s.plan;
-    if (!p) { out.replaceChildren(h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.')); return; }
+    if (!p) { out.replaceChildren(h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.'))); return; }
     const R = p.res.requests;
     const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
     const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); p.adjusted = true; draw(); };
@@ -576,10 +615,15 @@ async function screenDispatch() {
       const res = await post('assign', { date: s.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
     }, planMsg), 'primary');
+    const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
+    const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
     out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
-      h('div', { class: 'dispatch-grid' }, h('div', {}, h('div', { class: 'cols' }, ...cols), un), h('div', { class: 'mapcol' }, h('div', { class: 'card' }, h('h2', {}, '지도'), mapBox,
-        h('p', { class: 'muted' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.')))),
+      h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
+        ['반입지 경유', `${p.routes.reduce((a, rt) => a + (rt.unloads || 0), 0)}회`, ''], ['마지막 예상 종료', lastEnd || '—', '']].map(([k, v, c]) => h('div', { class: 'kpi ' + c }, h('span', { class: 'k' }, k), h('b', { class: 'v' }, v)))),
+      h('div', { class: 'dispatch-grid' }, h('div', { class: 'mapcol' }, h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '지도'), h('span', { class: 'legend small' }, ...p.routes.map((rt, ri) => h('span', { class: `lg route c${(ri % 4) + 1}` }, rt.crew_name)))), mapBox,
+        h('p', { class: 'muted small' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.'))),
+        h('div', { class: 'routecol' }, h('div', { class: 'routecol-h' }, h('b', {}, '팀별 방문 순서'), h('span', { class: 'muted small' }, '▲▼로 순서 변경, [이동…]으로 팀 변경')), h('div', { class: 'cols' }, ...cols), un)),
       h('div', { class: 'actionbar' }, h('b', {}, summary), p.adjusted ? adjReason : h('span', { class: 'muted' }, '추천 순서 그대로 확정합니다.'), h('span', { class: 'grow' }), planMsg, confirmBtn));
     setTimeout(async () => {
       try {
@@ -593,18 +637,21 @@ async function screenDispatch() {
           lines.push({ type: 'Feature', properties: { c: ri % 4 }, geometry: { type: 'LineString', coordinates: coords } });
         });
         p.unassigned.forEach((u) => { const q = R[u.request_id]; if (q && q.lat != null) { b.extend([q.lon, q.lat]); M.pin(ml, map, { lng: q.lon, lat: q.lat, label: '미', cls: 'un' }); } });
+        map.fitBounds(b, { padding: 50, maxZoom: 16, duration: 0 });  // 바탕 지도가 늦어도 핀은 모두 보이게
         const whenStyle = (f) => (map.isStyleLoaded() ? f() : map.once('style.load', f));
         whenStyle(() => {
           map.addSource('routes', { type: 'geojson', data: { type: 'FeatureCollection', features: lines } });
           map.addLayer({ id: 'routes', type: 'line', source: 'routes', paint: { 'line-width': 3, 'line-dasharray': [2, 1], 'line-color': ['match', ['get', 'c'], 0, '#2557a7', 1, '#a5560d', 2, '#6c3fb5', '#0e7490'] } });
-          map.fitBounds(b, { padding: 50, maxZoom: 16, duration: 0 });
         });
       } catch { mapBox.replaceChildren(h('p', { class: 'pad muted' }, '지도를 불러오지 못했습니다.')); }
     }, 0);
   };
   draw();
-  return h('div', {}, h('h1', {}, '배정·노선'),
-    h('div', { class: 'card' }, h('div', { class: 'row' }, h('label', { class: 'f' }, '수거일', date), calcBtn), h('h3', {}, '팀'), crewBox,
+  return h('div', { class: 'dispatch' }, h('h1', {}, '배정·노선'),
+    h('div', { class: 'card searchbox', role: 'group', 'aria-label': '조회조건' },
+      h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'dp-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
+        h('span', { class: 'cond-l' }, '수거팀'), h('div', { class: 'cond-v wide' }, crewBox)),
+      h('div', { class: 'cond-btns' }, calcBtn),
       crews.length ? null : h('p', { class: 'err' }, '설정에서 수거팀을 먼저 만드세요.'), msg),
     out);
 }
@@ -1148,13 +1195,29 @@ async function render(fromNav) {
       if (!['request', 'me'].includes(cur) && !nav.some(([k]) => k === cur)) cur = 'home';
       const content = await (screens[cur] || screenHome)();
       const active = cur === 'request' ? 'requests' : cur;
-      view = h('div', { class: 'shell' }, h('nav', { class: 'side' },
-        h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물'), h('small', {}, '접수·수거 관리'))),
-        ...nav.map(([k, t]) => h('a', { href: '#/' + k, class: active === k ? 'on' : '' }, t)),
-        h('span', { class: 'grow' }),
-        h('a', { href: '#/me', class: 'who' + (active === 'me' ? ' on' : '') }, h('b', {}, boot.me.display_name), h('small', {}, boot.me.role_label)),
-        h('a', { href: '#', onclick: async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; render(); } }, '로그아웃')),
-      h('main', {}, content));
+      // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
+      const GROUPS = [['업무 현황', ['home']], ['접수 업무', ['requests']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'stats']], ['관리', ['fees', 'qrtest', 'settings', 'users']]];
+      const navLabel = Object.fromEntries(NAV.map(([k, t]) => [k, t]));
+      const group = GROUPS.find(([, ks]) => ks.includes(active));
+      const pageName = cur === 'request' ? (arg === 'new' ? '전화 접수 등록' : '접수 상세') : cur === 'me' ? '내 계정' : navLabel[active];
+      const crumbs = [group ? group[0] : '개인', ...(cur === 'request' ? [navLabel.requests] : []), pageName];
+      const d = new Date(boot.today + 'T00:00:00');
+      const dayTxt = isNaN(d) ? boot.today : `${boot.today.replace(/-/g, '.')} (${'일월화수목금토'[d.getDay()]})`;
+      const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; render(); };
+      view = h('div', { class: 'shell' },
+        h('header', { class: 'topbar' },
+          h('a', { class: 'brand', href: '#/home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '동'), h('span', { class: 'bt' }, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, '접수·배차·수거 업무 (PC)'))),
+          h('span', { class: 'grow' }),
+          h('span', { class: 'tb-date' }, h('span', { class: 'sr-only' }, '업무 기준일 '), dayTxt),
+          h('a', { href: '#/me', class: 'who' + (active === 'me' ? ' on' : ''), title: '내 계정' }, h('b', {}, boot.me.display_name), h('small', {}, boot.me.role_label)),
+          h('a', { href: '#', class: 'tb-logout', onclick: logout }, '로그아웃')),
+        h('nav', { class: 'side', 'aria-label': '업무 메뉴' },
+          ...GROUPS.map(([gt, ks]) => {
+            const items = nav.filter(([k]) => ks.includes(k));
+            return items.length ? h('div', { class: 'navgrp' + (group && group[0] === gt ? ' cur' : '') }, h('span', { class: 'navgrp-t', 'aria-hidden': 'true' }, gt),
+              ...items.map(([k, t]) => h('a', { href: '#/' + k, class: active === k ? 'on' : '', 'aria-current': active === k ? 'page' : null }, t))) : null;
+          })),
+        h('main', {}, h('nav', { class: 'crumb', 'aria-label': '현재 위치' }, h('span', {}, '홈'), ...crumbs.map((c, i) => h('span', { 'aria-current': i === crumbs.length - 1 ? 'page' : null }, c))), content));
     }
   } catch (e) {
     // 화면 하나가 실패해도 메뉴는 남기고 그 자리에 안내와 다시 시도를 보여 준다
