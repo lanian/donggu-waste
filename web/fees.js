@@ -55,7 +55,8 @@ export function deriveStop(stop, events) {
   }));
   const byId = Object.fromEntries(lines.map((l) => [l.line_id, l]));
   let contact = 'NOT_CONTACTED', outcome = null, photos = [], loc = null, appt = null;
-  const memos = [];
+  const memos = [], stickers = {}, notices = [];
+  let arrive = null, noPhotoReason = null;
   for (const e of mine) {
     const b = e.body || {};
     if (e.kind === 'CONTACT') contact = b.result;
@@ -66,7 +67,10 @@ export function deriveStop(stop, events) {
       lines.push(l); byId[l.line_id] = l;
     } else if (e.kind === 'ITEM_RESULT' && byId[b.line_id]) {
       Object.assign(byId[b.line_id], { qty_confirmed: b.qty_confirmed, qty_collected: b.qty_collected, reason: b.reason || '' });
-    } else if (e.kind === 'ATTEMPT') outcome = b.outcome;
+    } else if (e.kind === 'ATTEMPT') { outcome = b.outcome; noPhotoReason = b.no_photo_reason || null; }
+    else if (e.kind === 'STICKER_CHECK') stickers[b.line_id] = { result: b.result, number: b.number || '', decision: b.decision || null };
+    else if (e.kind === 'FEE_NOTICE') notices.push({ ...b, ts: e.ts });
+    else if (e.kind === 'ARRIVE') arrive = { ts: e.ts, lat: b.lat ?? null, lon: b.lon ?? null, acc: b.acc ?? null };
     else if (e.kind === 'PHOTO_META') photos.push(b);
     else if (e.kind === 'FIELD_MEMO') memos.push({ text: b.text, ts: e.ts });
     else if (e.kind === 'LOCATION_FIX') loc = { lat: b.lat, lon: b.lon };
@@ -75,7 +79,20 @@ export function deriveStop(stop, events) {
   for (const l of lines) l.remaining = Math.max(0, l.qty_confirmed - l.qty_collected);
   // 위치: 현장에서 고친 위치(LOCATION_FIX) 우선, 없으면 접수 자료의 좌표
   if (!loc && stop.lat != null && stop.lon != null) loc = { lat: stop.lat, lon: stop.lon };
-  return { lines, contact, outcome, photos, loc, appt, fee: calcFee(lines), progress: progressOf(lines, mine.filter((e) => !['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO'].includes(e.kind)).length), memos };
+  const fee = calcFee(lines);
+  const notice = notices.length ? notices[notices.length - 1] : null;
+  return { lines, contact, outcome, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
+    progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
+}
+// 수거 진행으로 세지 않는 기록 (연락·안내·위치 같은 것)
+export const NON_PROGRESS = ['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO', 'SMS_INTENT', 'NAV_INTENT'];
+
+// 현장 금액 변경 고지: 확인된 소계가 접수 당시 금액보다 커졌는데, 그 금액 이상으로 안내한 기록이 없으면 안내가 필요하다.
+export function feeExtra(d) { return Math.max(0, d.fee.confirmedSubtotal - d.fee.received); }
+export function needsFeeNotice(d) {
+  const x = feeExtra(d);
+  // 거부(해당 품목 미수거)도 안내가 끝난 것으로 본다 — 같은 금액으로 다시 묻지 않음
+  return x > 0 && !d.notices.some((n) => n.extra >= x);
 }
 
 // 수수료: 산정 수량 = 현장 확인 수량. 실제 수거 수량은 금액에 쓰지 않는다. 단위가 다른 행은 합산하지 않는다.
@@ -108,5 +125,9 @@ export const LABEL = {
   contact: { NOT_CONTACTED: '연락 전', REACHED: '통화 완료', NO_ANSWER: '부재', CALLBACK: '재연락 예정', WRONG_NUMBER: '번호 오류' },
   progress: { TODO: '방문 전', STARTED: '처리 중', PARTIAL: '일부 수거', DONE: '수거 완료' },
   outcome: { DONE: '수거 완료', PARTIAL: '일부 수거', NOT_COLLECTED: '미수거', ON_HOLD: '보류' },
-  reason: { '': '사유 선택', NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기', OTHER: '기타' },
+  reason: { '': '사유 선택', NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기',
+    NO_STICKER: '스티커·필증 없음·불일치', FEE_REFUSED: '추가 금액 거부', OTHER: '기타' },
+  sticker: { OK: '확인', MISSING: '없음', MISMATCH: '번호 불일치' },
+  feeResponse: { NOTIFIED: '주민에게 안내함', AGREED: '동의', REFUSED: '거부(해당 품목 미수거)' },
+  noPhoto: { DARK: '어두워 촬영 불가', REFUSED: '주민이 촬영 거부', CAMERA: '카메라 고장', OTHER: '기타' },
 };

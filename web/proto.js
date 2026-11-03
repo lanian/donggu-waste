@@ -209,6 +209,7 @@ export class Collector {
 }
 
 // ------------------------------------------------------------ 목록 압축 형식 v2 풀기 (pc/dgproto.py expand_daylist 와 같은 규칙)
+// v0.10: 지점의 선택 항목 "d" = 행정동 이름. 없으면 ''. 형식 번호는 그대로 v2(이전 목록도 그대로 풀림).
 const fromSid = (s) => {
   const b = Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '=='), (c) => c.charCodeAt(0));
   return uuidStr(b);
@@ -217,7 +218,7 @@ export function expandDaylist(p, feeTable) {
   if (!p || p.schema !== 'dg.daylist/2') return p;
   const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
   const stops = p.s.map((c) => ({
-    seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a,
+    seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a, dong: c.d || '',
     spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
     appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
     unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3] } : null,
