@@ -41,6 +41,13 @@ function h(tag, attrs = {}, ...kids) {
 const btn = (label, onclick, cls = '', extra = {}) => h('button', { class: 'btn ' + cls, onclick, type: 'button', ...(/\b(opt|tab)\b/.test(cls) ? { 'aria-pressed': /\bon\b/.test(cls) ? 'true' : 'false' } : {}), ...extra }, label);
 const fmtPhone = (p) => p.length === 11 ? `${p.slice(0, 3)}-${p.slice(3, 7)}-${p.slice(7)}` : p;
 const go = (hash) => { location.hash = hash; };
+// 아래 탭 막대: 맨 위 단계 화면(목록·지도·설정)끼리 바로 옮겨 다닌다. 다른 화면은 위 [← 목록]으로 돌아온다.
+function tabBar(active) {
+  const tabs = [['list', '#/home', '목록'], ...(st && st.mapEnabled ? [['map', '#/map', '지도']] : []), ['set', '#/settings', '설정·정보']];
+  return h('nav', { class: 'tabbar', 'aria-label': '주 메뉴' }, ...tabs.map(([k, href, t]) =>
+    h('a', { href, class: 't-' + k, 'aria-current': k === active ? 'page' : null }, t)));
+}
+const appLogo = (cls = 'logo') => h('img', { src: 'icons/icon.svg', alt: '', class: cls, width: 72, height: 72 });
 const toast = (msg, kind = '') => {
   document.querySelectorAll('.toast').forEach((x) => x.remove());  // 한 번에 하나만, 다음 화면으로 넘어가지 않게
   const t = h('div', { class: 'toast ' + kind, role: kind === 'bad' ? 'alert' : 'status' }, msg);
@@ -157,7 +164,7 @@ function screenSetup() {
     await S.persist();
     await loadState(); go('#/mode'); render();
   }, 'primary big');
-  return h('main', { class: 'center' },
+  return h('main', { class: 'center' }, appLogo('app-icon'),
     h('h1', {}, '동구 대형폐기물 수거'),
     h('p', {}, '이 휴대폰에서 쓸 잠금 PIN을 정하세요. 업무 자료는 이 PIN으로 잠긴 채 휴대폰 안에만 저장됩니다.'),
     p1, p2, ok, msg,
@@ -177,7 +184,7 @@ function screenLock() {
   }, 'primary big');
   pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
   setTimeout(() => pin.focus(), 50);
-  return h('main', { class: 'center' }, h('h1', {}, '잠겨 있습니다'), pin, ok, msg);
+  return h('main', { class: 'center' }, appLogo('app-icon'), h('h1', {}, '잠겨 있습니다'), pin, ok, msg);
 }
 
 // ------------------------------------------------------------ 홈
@@ -187,6 +194,7 @@ function daySummary(items) {
   const hold = items.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome)).length;
   const pend = items.filter((x) => x.d.fee.pendingCount).length;
   return h('section', { class: 'summary', 'aria-label': '오늘 진행' },
+    h('div', { class: 'sum-top', 'aria-hidden': 'true' }, h('span', {}, '오늘 진행'), h('span', { class: 'sum-pct' }, `${n ? Math.round((done / n) * 100) : 0}%`)),
     h('div', { class: 'sum-main' }, h('b', {}, done), h('span', {}, ` / ${n}곳 완료`)),
     h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done }, h('div', { class: 'fill', style: `width:${n ? (done / n) * 100 : 0}%` })),
     h('div', { class: 'sum-sub' }, hold ? h('span', { class: 'chip warn' }, `재방문·보류 ${hold}`) : null, pend ? h('span', { class: 'chip warn' }, `금액 확인 대기 ${pend}`) : null));
@@ -207,7 +215,7 @@ async function screenHome() {
   const registered = !!(await S.getRaw('pc')) && !!(await S.getRaw('device'));
   const n = unsent().length;
   const dl = st.daylist;
-  const top = h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '동구 수거'), btn('잠금', lockNow, 'ghost'));
+  const top = h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), btn('잠금', lockNow, 'ghost'));
   // 목록이 있으면 하루 한두 번 쓰는 버튼은 작게, 방문 순서가 먼저 보이게
   const stale = n && dl && dl.work_date < todayKST();
   const actions = dl
@@ -252,8 +260,8 @@ async function screenHome() {
     const myUnloads = st.events.filter((e) => e.kind === 'UNLOAD');
     out.push(btn(myUnloads.length ? `하차 기록 (${myUnloads.length}회)` : '하차 기록', () => go('#/unload'), 'big'));
   }
-  out.push(h('footer', { class: 'foot' }, h('a', { href: '#/settings' }, '설정·정보')));
-  return h('main', {}, ...out);
+  out.push(tabBar('list'));
+  return h('main', { class: 'with-tabs' }, ...out);
 }
 
 // ------------------------------------------------------------ 하차 기록 (반입지에서 비운 양)
@@ -515,9 +523,9 @@ async function screenStop(id) {
   const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
     ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
       h('div', { class: 'lhead' },
-        h('strong', {}, `${l.name} ${l.spec}`),
-        h('em', { class: 'tag' }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수')),
-      h('div', { class: 'price' }, l.price == null ? '금액 확인 대기' : `${won(l.price)} / ${l.unit_label}`),
+        h('div', { class: 'lname' }, h('em', { class: 'tag' }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
+        l.price == null ? h('span', { class: 'amt pending' }, '확인 대기') : h('span', { class: 'amt', 'aria-label': `금액 ${won(l.price * l.qty_confirmed)}` }, won(l.price * l.qty_confirmed))),
+      h('div', { class: 'price' }, l.price == null ? '금액 확인 대기' : `${won(l.price)} / ${l.unit_label} × ${l.qty_confirmed}`),
       l.kind === 'RECEIVED' ? h('div', { class: 'row' }, h('span', {}, '접수 수량'), h('span', { class: 'val' }, l.qty_received)) : null,
       h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }), 0, 99, 350)),
       h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }), 0, l.qty_confirmed, 350)),
@@ -537,8 +545,10 @@ async function screenStop(id) {
       h('dt', {}, '현장 추가분'), h('dd', {}, won(f.fieldAdded)),
       h('dt', {}, '확인된 소계'), h('dd', {}, won(f.confirmedSubtotal)),
       h('dt', {}, '접수 대비 증감'), h('dd', {}, (f.diff > 0 ? '+' : '') + won(f.diff)),
-      h('dt', {}, '금액 확인 대기'), h('dd', {}, f.pendingCount + '건'),
-      h('dt', { class: 'total' }, '최종 금액'), h('dd', { class: 'total' }, f.final == null ? '미확정 (금액 확인 대기 있음)' : won(f.final))),
+      h('dt', {}, '금액 확인 대기'), h('dd', {}, f.pendingCount + '건')),
+    h('div', { class: 'total-box' + (f.final == null ? ' pending' : ''), role: 'group', 'aria-label': '총 수수료' },
+      h('span', { class: 'tb-label' }, '총 수수료', h('small', {}, f.final == null ? '최종 금액 · 금액 확인 대기 있음' : '최종 금액')),
+      h('strong', { class: 'tb-val' }, f.final == null ? '미확정' : won(f.final))),
     h('p', { class: 'small' }, `수량(단위별): ${units}. 금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다.`));
 
   const photoIn = (phase) => {
@@ -889,12 +899,12 @@ function screenMode() {
     st.mode = mode; await commit(); go('#/home'); render();
   };
   return h('main', {},
-    h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '사용 방식 선택')),
-    h('section', { class: 'card' },
+    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '사용 방식 선택')),
+    h('section', { class: 'card mode-card' },
       h('h2', {}, 'PC와 연결해서 사용 (권장)'),
       h('p', {}, 'PC가 접수 원본을 갖고, 휴대폰은 QR로 오늘 목록을 받아 현장 기록 후 결과 파일을 보냅니다.'),
       btn('PC와 연결해서 사용', () => pick('PC'), 'primary big')),
-    h('section', { class: 'card' },
+    h('section', { class: 'card mode-card' },
       h('h2', {}, '이 휴대폰만으로 사용'),
       h('p', {}, '전화 접수 등록부터 연락·수거 기록까지 이 휴대폰에서 모두 합니다. PC가 필요 없습니다.'),
       h('p', { class: 'small' }, '원본이 이 휴대폰에만 있으므로 매일 암호화 백업이 필요합니다. 여러 휴대폰이 같은 접수를 나눠 처리할 수는 없습니다.'),
@@ -925,7 +935,7 @@ function screenHomeSolo() {
     await commit(); render();
   };
   const out = [
-    h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'small' }, '단독'), btn('잠금', lockNow, 'ghost')),
+    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'mode-tag' }, '단독'), btn('잠금', lockNow, 'ghost')),
     needBackup ? h('section', { class: 'card notice' },
       h('p', {}, `마지막 백업: ${ago(st.lastBackupAt)}. 휴대폰을 잃어버리거나 고장 나면 접수 원본이 사라집니다.`),
       btn('지금 백업', () => go('#/backup'), 'primary')) : null,
@@ -942,7 +952,7 @@ function screenHomeSolo() {
     if (st.mapEnabled && view !== 'CANCELLED') out.push(btn('🗺 지도로 보기', () => go('#/map'), 'big'));
     if (view === 'TODAY' || view === 'TOMORROW') out.push(btn(ui.reorder ? '순서 정하기 끝' : '방문 순서 바꾸기', () => { ui.reorder = !ui.reorder; render(); }, 'ghost'));
     out.push(h('ul', { class: 'stops' + (view === 'TODAY' || view === 'TOMORROW' ? ' route' : '') }, list.map(({ s, d }) => h('li', { class: 'srow' },
-      h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${s.status === 'CANCELLED' ? 'CANCELLED' : d.outcome || d.progress}` + (d.progress === 'DONE' || s.status === 'CANCELLED' ? ' done' : '') },
+      h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${s.status === 'CANCELLED' ? 'CANCELLED' : d.outcome || d.progress} c-${d.contact}` + (d.progress === 'DONE' || s.status === 'CANCELLED' ? ' done' : '') },
         h('span', { class: 'seq' }, s.seq),
         h('span', { class: 'body' },
           h('strong', {}, s.name), h('span', { class: 'addr' }, s.address),
@@ -955,8 +965,8 @@ function screenHomeSolo() {
         h('span', { class: 'eta' }, s.eta || '')),
       ui.reorder ? h('span', { class: 'mv' }, btn('▲', () => move(s, -1), 'step', { 'aria-label': '위로' }), btn('▼', () => move(s, 1), 'step', { 'aria-label': '아래로' })) : null))));
   }
-  out.push(h('footer', { class: 'foot' }, h('a', { href: '#/settings' }, '설정·정보')));
-  return h('main', {}, ...out);
+  out.push(tabBar('list'));
+  return h('main', { class: 'with-tabs' }, ...out);
 }
 
 // ------------------------------------------------------------ 단독 모드 접수 등록·수정
@@ -990,11 +1000,13 @@ function screenIntake(id) {
   const totalBox = h('p', { class: 'small' });
   const drawItems = () => {
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
-      h('div', { class: 'lhead' }, h('strong', {}, `${it.name} ${it.spec}`), locked.has(it.line_id) ? h('em', { class: 'tag' }, '현장 기록 있음') :
-        btn('삭제', () => { f.items.splice(i, 1); drawItems(); saveDraft(); }, 'ghost')),
+      h('div', { class: 'lhead' }, h('div', { class: 'lname' }, h('strong', {}, `${it.name} ${it.spec}`)),
+        it.price_status === 'CONFIRMED' ? h('span', { class: 'amt' }, won(it.unit_price * it.qty)) : h('span', { class: 'amt pending' }, '확인 대기')),
+      locked.has(it.line_id) ? h('em', { class: 'tag' }, '현장 기록 있음') : null,
       h('div', { class: 'price' }, it.price_status === 'CONFIRMED' ? `${won(it.unit_price)} / ${it.unit_label}` : it.unit_price != null ? `금액 확인 대기 (원문 ${won(it.unit_price)} / ${it.unit_label})` : '금액 확인 대기'),
       h('div', { class: 'row' }, h('span', {}, '수량'), locked.has(it.line_id) ? h('span', { class: 'val' }, it.qty) :
-        stepper(it.qty, (n) => { it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1)))) :
+        stepper(it.qty, (n) => { it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1)),
+      locked.has(it.line_id) ? null : btn('삭제', () => { f.items.splice(i, 1); drawItems(); saveDraft(); }, 'ghost link'))) :
       [h('p', { class: 'small' }, '아래에서 품목을 검색해 추가하세요.')]));
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.amount, 0);
@@ -1060,7 +1072,7 @@ function screenIntake(id) {
     h('section', { class: 'card' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox),
     picker.search, picker.free,
     editing ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
-    dupBox, save, msg);
+    dupBox, h('div', { class: 'cta' }, msg, save));
 }
 function nextSeq(date, exceptId) {
   return st.requests.filter((r) => r.planned_date === date && r.request_id !== exceptId).reduce((m, r) => Math.max(m, r.seq || 0), 0) + 1;
@@ -1142,7 +1154,7 @@ async function screenMap(focusId) {
   const placed = items.filter((x) => x.d.loc), missing = items.filter((x) => !x.d.loc);
   const box = h('div', { class: 'mapbox', id: 'map' });
   const msg = h('p', { class: 'msg' });
-  const view = h('main', {}, back, box,
+  const view = h('main', { class: focusId ? '' : 'with-tabs' }, back, box,
     h('div', { class: 'grid2' }, btn('📍 내 위치', async () => {
       try { const p = await M.myPosition(); if (liveMap) { liveMap.flyTo({ center: p, zoom: 16 }); M.pin(ui.ml, liveMap, { lng: p[0], lat: p[1], label: '나', cls: 'me' }); } }
       catch (e) { msg.textContent = e.message; }
@@ -1151,7 +1163,8 @@ async function screenMap(focusId) {
     missing.length ? h('section', { class: 'card' }, h('h2', {}, `위치 미지정 ${missing.length}건`),
       h('ul', { class: 'stops' }, missing.map(({ s }) => h('li', {}, h('a', { href: `#/pick/${s.request_id}`, class: 'stop' },
         h('span', { class: 'seq' }, s.seq), h('span', { class: 'body' }, h('strong', {}, s.name), h('span', { class: 'addr' }, s.address)),
-        h('span', { class: 'eta' }, '위치 지정 →')))))) : null);
+        h('span', { class: 'eta' }, '위치 지정 →')))))) : null,
+    focusId ? null : tabBar('map'));
   const fitAll = () => {
     if (!liveMap || !placed.length) return;
     if (placed.length === 1) return liveMap.flyTo({ center: [placed[0].d.loc.lon, placed[0].d.loc.lat], zoom: 16 });
@@ -1245,7 +1258,7 @@ async function screenSettings() {
   try { persisted = navigator.storage && navigator.storage.persisted ? ((await navigator.storage.persisted()) ? '보존 요청됨' : '보존 요청 안 됨') : '지원 안 함'; } catch {}
   let quota = '';
   try { const e = await navigator.storage.estimate(); quota = `${(e.usage / 1048576).toFixed(1)}MB 사용`; } catch {}
-  return h('main', {},
+  return h('main', { class: 'with-tabs' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '설정·정보')),
     h('section', { class: 'card' }, h('dl', {},
       h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
@@ -1270,7 +1283,8 @@ async function screenSettings() {
         if (unsent().length && !confirm2(`보내지 않은 기록 ${unsent().length}건이 사라집니다. 정말 지울까요?`)) return;
         if (!confirm2('PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다.')) return;
         stopCamera(); await S.wipeAll(); st = null; location.hash = ''; location.reload();
-      }, 'danger')));
+      }, 'danger')),
+    tabBar('set'));
 }
 
 // 단독 방식: 확인 필요 품목의 단가 정하기 (근거 필수, 바꾼 이력 보존)
