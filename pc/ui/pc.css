@@ -176,3 +176,8 @@ label.f.inline { flex-direction: row; align-items: center; gap: 8px; margin: 0; 
 input[type=file] { padding: 6px; background: #fff; }
 input[type=file]::file-selector-button { font: inherit; font-weight: 600; margin-right: 10px; padding: 6px 12px; border: 1px solid #bcc5c0; border-radius: var(--r-s); background: var(--paper); color: var(--ink); cursor: pointer; }
 input[type=file]::file-selector-button:hover { border-color: var(--asphalt); }
+
+.linkbox { background: var(--paper); border: 1px solid var(--line); border-radius: var(--r-s); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.thumbs figure.ph { margin: 0; text-align: center; } .thumbs figure.ph figcaption { font-size: 12px; color: var(--muted); }

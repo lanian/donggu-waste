@@ -118,9 +118,17 @@ async function screenUsers() {
   const msg = h('p', { class: 'msg' });
   const users = await api('users');
   const F = { username: h('input', { placeholder: '아이디 (영문)' }), display_name: h('input', { placeholder: '이름' }),
-    role: h('select', {}, ...Object.entries(ROLE).map(([k, t]) => h('option', { value: k, selected: k === 'INTAKE' }, t))), password: h('input', { type: 'password', placeholder: '임시 비밀번호 (10자 이상)', autocomplete: 'new-password' }) };
-  const utable = h('table', {}, h('thead', {}, h('tr', {}, ...['아이디', '이름', '역할', '상태', '마지막 로그인', ''].map((t) => h('th', {}, t)))),
+    role: h('select', {}, ...Object.entries(ROLE).map(([k, t]) => h('option', { value: k, selected: k === 'INTAKE' }, t))),
+    crew: h('select', { hidden: true }, h('option', { value: '' }, '(팀 선택)'), ...boot.crews.map((c) => h('option', { value: c.id }, c.name))), password: h('input', { type: 'password', placeholder: '임시 비밀번호 (10자 이상)', autocomplete: 'new-password' }) };
+  F.role.addEventListener('change', () => { F.crew.hidden = F.role.value !== 'FIELD'; });
+  const crewSel = (u) => {
+    const sel = h('select', { class: 'small', 'aria-label': `${u.username} 수거팀` }, h('option', { value: '' }, '(팀 없음 — 아무것도 안 보임)'), ...boot.crews.map((c) => h('option', { value: c.id, selected: c.id === u.crew_id }, c.name)));
+    sel.addEventListener('change', wrap(async () => { await post(`users/${u.id}/crew`, { crew_id: sel.value }); toast('팀을 연결했습니다'); }));
+    return sel;
+  };
+  const utable = h('table', {}, h('thead', {}, h('tr', {}, ...['아이디', '이름', '역할', '팀', '상태', '마지막 로그인', ''].map((t) => h('th', {}, t)))),
     h('tbody', {}, ...users.map((u) => h('tr', {}, h('td', {}, u.username), h('td', {}, u.display_name), h('td', {}, ROLE[u.role]),
+      h('td', {}, u.role === 'FIELD' ? crewSel(u) : h('span', { class: 'muted' }, '전체')),
       h('td', {}, u.active ? (u.must_change ? chip('임시 비밀번호', 'warn') : chip('사용', 'ok')) : chip('중지', 'bad')),
       h('td', {}, u.last_login_at ? u.last_login_at.replace('T', ' ').slice(0, 16) : '—'),
       h('td', {}, btn(u.active ? '중지' : '다시 사용', wrap(async () => { await post(`users/${u.id}/active`, { active: !u.active }); render(); }, msg), 'small'), ' ',
@@ -138,9 +146,9 @@ async function screenUsers() {
   load();
   return h('div', {}, h('h1', {}, '사용자·변경 이력'),
     h('div', { class: 'card' }, h('h2', {}, '사용자'), utable,
-      h('div', { class: 'row', style: 'margin-top:12px' }, F.username, F.display_name, F.role, F.password,
-        btn('사용자 추가', wrap(async () => { await post('users', { username: F.username.value, display_name: F.display_name.value, role: F.role.value, password: F.password.value }); toast('추가했습니다. 첫 로그인 때 비밀번호를 바꾸게 됩니다.'); render(); }, msg), 'primary')),
-      h('p', { class: 'muted' }, '접수 담당자: 접수·배정·전송·결과·수납·마감. 수거팀: 조회, 결과·사진 가져오기, 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg),
+      h('div', { class: 'row', style: 'margin-top:12px' }, F.username, F.display_name, F.role, F.crew, F.password,
+        btn('사용자 추가', wrap(async () => { if (F.role.value === 'FIELD' && !F.crew.value) throw new Error('수거팀 계정은 팀을 골라 주세요.'); await post('users', { username: F.username.value, display_name: F.display_name.value, role: F.role.value, password: F.password.value, crew_id: F.crew.value }); toast('추가했습니다. 첫 로그인 때 비밀번호를 바꾸게 됩니다.'); render(); }, msg), 'primary')),
+      h('p', { class: 'muted' }, '접수 담당자: 접수·배정·전송·결과·수납·마감. 수거팀: 연결한 팀에 배정된 접수만 조회, 그 팀 휴대폰의 결과·사진 가져오기, 그 팀 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg),
     h('div', { class: 'card' }, h('h2', {}, '변경 이력'), h('div', { class: 'row' }, '날짜', fDate, '대상', fEntity, fActor, btn('새로 고침', load, 'small')),
       h('div', { style: 'overflow:auto;max-height:520px' }, h('table', { class: 'audit' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', 'ID', '내용'].map((t) => h('th', {}, t)))), tbody)),
       h('p', { class: 'muted' }, '이력은 지우거나 고칠 수 없습니다. 내용에는 이름·연락처·주소를 넣지 않습니다(사유·건수·코드만).')));
@@ -253,7 +261,7 @@ async function screenRequests() {
     tbody.replaceChildren(...(list.length ? list.map((r) => h('tr', { class: 'click', tabindex: 0, onkeydown: (e) => { if (e.key === 'Enter') go(`#/request/${r.id}`); }, onclick: () => go(`#/request/${r.id}`) },
       h('td', {}, r.receipt_no), h('td', {}, r.planned_date || '-'), h('td', {}, r.name), h('td', {}, fmtPhone(r.phone)), h('td', {}, r.address),
       h('td', {}, r.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', ')),
-      h('td', {}, statusChip(r.status), r.state.contact !== 'NOT_CONTACTED' ? chip(CONTACT[r.state.contact]) : null, r.must_today ? chip('오늘 필수', 'warn') : null),
+      h('td', {}, statusChip(r.status), r.state.contact !== 'NOT_CONTACTED' ? chip(CONTACT[r.state.contact]) : null, r.must_today ? chip('오늘 필수', 'warn') : null, (r.warnings || []).length ? h('span', { class: 'chip bad', title: r.warnings.join(' ') }, '관할 확인') : null),
       h('td', {}, r.state.fee.final == null ? chip('금액 확인 대기', 'warn') : won(r.state.fee.final)),
       h('td', {}, r.lat == null ? chip('위치 없음', 'warn') : '✓'),
       h('td', {}, r.assigned_to ? `${r.assigned_to.name} ${r.assigned_to.work_date}` : ''))) : [h('tr', {}, h('td', { colspan: 10, class: 'muted' }, f.q ? `'${f.q}'에 맞는 접수가 없습니다. 초성(예: ㄱㅅ)이나 전화번호 뒷자리로도 찾을 수 있습니다.` : '해당 접수가 없습니다.'))]));
@@ -354,10 +362,10 @@ async function screenRequest(id) {
         if (dupBox.childNodes.length) { dupAck = true; msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
       }
       const res = await post('requests', data());
-      toast(`${res.receipt_no} 등록했습니다`); go(`#/request/${res.id}`);
+      toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
     } else {
       const res = await post('requests/' + id, { ...data(), reason: reason.value });
-      toast(res.resend_needed ? '수정했습니다. 이미 배정된 건이라 목록 재전송이 필요합니다.' : '수정했습니다'); render();
+      toast(res.resend_needed ? '수정했습니다. 이미 배정된 건이라 목록 재전송이 필요합니다.' : '수정했습니다'); (res.warnings || []).forEach((w) => toast(w, true)); render();
     }
   }, msg);
   const cancel = wrap(async () => {
@@ -368,18 +376,44 @@ async function screenRequest(id) {
   }, msg);
   const editable = r.status !== 'CANCELLED';
 
+  // 유사 품목 적용: 표에 없는 품목(확인 대기)을 단가가 확정된 수수료표 행에 연결 (근거·확인자 기록)
+  let linkOpen = null;
+  const linkBox = (l) => {
+    document.querySelectorAll('tr.linkrow').forEach((tr) => { tr.hidden = tr.dataset.line !== linkOpen; });
+    const tr = document.querySelector(`tr.linkrow[data-line="${l.line_id}"]`); if (!tr || tr.hidden) return;
+    const q = h('input', { type: 'search', placeholder: `${l.name}와 비슷한 품목 찾기 (단위: ${l.unit_label})`, style: 'width:320px' });
+    const res = h('div', { class: 'results' }); let sel = null;
+    const why = h('input', { placeholder: '적용 근거 (예: 같은 재질·크기, 담당 부서 확인)', style: 'flex:1;min-width:260px' });
+    const who = h('input', { placeholder: '확인자', value: boot.me.display_name, style: 'width:140px' });
+    const m = h('span', { class: 'msg' });
+    const draw = () => res.replaceChildren(...searchFees(FEES(), q.value).filter((x) => x.status === 'CONFIRMED').slice(0, 20).map((x) =>
+      h('button', { type: 'button', class: sel === x.id ? 'on' : '', onclick: () => { sel = x.id; draw(); } }, `${x.name} ${x.spec}`, h('span', { class: 'p' }, `${won(x.price)} / ${x.unit_label}`),
+        x.unit_label !== l.unit_label ? h('span', { class: 'w' }, '단위 다름') : null)));
+    q.addEventListener('input', () => { sel = null; draw(); });
+    tr.firstChild.replaceChildren(h('div', { class: 'linkbox' }, q, res, h('div', { class: 'row' }, why, who,
+      btn('적용', wrap(async () => { if (!sel) throw new Error('적용할 품목 행을 고르세요.'); await post(`requests/${id}/link`, { line_id: l.line_id, fee_rate_id: sel, reason: why.value, confirmed_by: who.value }); toast('유사 품목 단가를 적용했습니다'); render(); }, m), 'primary'), m),
+      h('p', { class: 'small muted' }, '단가가 확정된 행만, 부과단위가 같은 행만 적용됩니다. 원래 품목 이름은 그대로 두고 적용 기록을 따로 남깁니다.')));
+    setTimeout(() => q.focus(), 20);
+  };
+
   // 현장 결과
   const st = r.state;
   const field = !isNew && st ? h('div', { class: 'card' }, h('h2', {}, '현장 결과'),
     h('div', { class: 'row' }, statusChip(r.status), chip('연락: ' + CONTACT[st.contact]), st.outcome ? chip('저장된 결과: ' + (STATUS[st.outcome] || st.outcome)) : null),
-    h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '구분', '원접수', '현장 확인', '실제 수거', '남은 대상', '사유'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, ...st.lines.map((l) => h('tr', {}, h('td', {}, `${l.name} ${l.spec}`), h('td', {}, l.kind === 'FIELD' ? chip('현장 추가', 'warn') : '원접수'),
-        h('td', {}, l.qty_received), h('td', {}, l.qty_confirmed), h('td', {}, l.qty_collected), h('td', {}, l.remaining ? chip(`${l.remaining}${l.unit_label}`, 'warn') : '0'), h('td', {}, REASON[l.reason] || ''))))),
+    h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '구분', '원접수', '현장 확인', '실제 수거', '남은 대상', '사유', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...st.lines.flatMap((l) => [h('tr', {}, h('td', {}, `${l.name} ${l.spec}`,
+          l.link ? h('div', { class: 'small muted' }, `유사 품목 적용: ${l.link.name} ${l.link.spec} ${won(l.price)}/${l.unit_label} · 근거 ${l.link.reason} · 확인 ${l.link.confirmed_by}`) : null),
+        h('td', {}, l.kind === 'FIELD' ? chip('현장 추가', 'warn') : '원접수'),
+        h('td', {}, l.qty_received), h('td', {}, l.qty_confirmed), h('td', {}, l.qty_collected), h('td', {}, l.remaining ? chip(`${l.remaining}${l.unit_label}`, 'warn') : '0'), h('td', {}, REASON[l.reason] || ''),
+        h('td', {}, l.price == null && editable && boot.me.role !== 'FIELD' ? btn('유사 품목 적용', () => { linkOpen = linkOpen === l.line_id ? null : l.line_id; linkBox(l); }, 'small') : null,
+          l.link && editable && boot.me.role !== 'FIELD' ? btn('해제', wrap(async () => { const why = prompt('유사 품목 적용을 해제하는 사유'); if (!why) return; await post(`links/${l.link.id}/void`, { reason: why }); toast('해제했습니다'); render(); }), 'small') : null)),
+        h('tr', { class: 'linkrow', hidden: true, 'data-line': l.line_id }, h('td', { colspan: 8 }))]))),
     h('dl', { class: 'kv' }, h('dt', {}, '접수 당시 금액'), h('dd', {}, won(st.fee.received)), h('dt', {}, '현장 추가분'), h('dd', {}, won(st.fee.field_added)),
       h('dt', {}, '접수 대비 증감'), h('dd', {}, (st.fee.diff > 0 ? '+' : '') + won(st.fee.diff)), h('dt', {}, '금액 확인 대기'), h('dd', {}, st.fee.pending_count + '건'),
       h('dt', {}, '최종 금액'), h('dd', {}, st.fee.final == null ? '미확정' : won(st.fee.final))),
     h('p', { class: 'muted' }, '금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다. 일부 수거로 금액을 자동 감액하지 않습니다.'),
-    r.photos && r.photos.length ? h('div', { class: 'thumbs' }, ...r.photos.map((p) => p.purged_at ? chip(`보관 기간 만료로 정리됨 (${p.purged_at.slice(0, 10)})`) : p.recovery_status === 'RECOVERED' ? photoImg(p.photo_id) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null;
+    (st.memos || []).length ? h('div', { class: 'notice' }, h('strong', {}, '현장 메모'), h('ul', {}, ...st.memos.map((m) => h('li', {}, m)))) : null,
+    r.photos && r.photos.length ? h('div', { class: 'thumbs' }, ...r.photos.map((p) => p.purged_at ? chip(`보관 기간 만료로 정리됨 (${p.purged_at.slice(0, 10)})`) : p.recovery_status === 'RECOVERED' ? h('figure', { class: 'ph' }, photoImg(p.photo_id), h('figcaption', {}, (p.phase === 'BEFORE' ? '수거 전' : '수거 후') + (p.line_id && st.lines.find((l) => l.line_id === p.line_id) ? ` · ${st.lines.find((l) => l.line_id === p.line_id).name}` : ''))) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null;
 
   return h('div', {},
     h('div', { class: 'pagehead' }, h('h1', {}, isNew ? '전화 접수 등록' : `접수 ${r.receipt_no}`), btn('← 목록', () => go('#/requests'))),
@@ -456,8 +490,8 @@ async function screenDispatch() {
     if (!p) { out.replaceChildren(h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.')); return; }
     const R = p.res.requests;
     const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
-    const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); draw(); };
-    const toCrew = (ri, i, target) => { clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
+    const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); p.adjusted = true; draw(); };
+    const toCrew = (ri, i, target) => { p.adjusted = true; clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
     const cols = p.routes.map((rt, ri) => h('div', { class: 'card' }, h('h2', {}, `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null),
       rt.unloadStale ? h('div', { class: 'notice warn small' }, '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
       ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
@@ -473,17 +507,19 @@ async function screenDispatch() {
         h('span', { class: 'muted' }, '찾은 위치는 건물 출입구 기준입니다.')) : null, ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
       h('span', { class: 't' }, R[u.request_id] ? `${R[u.request_id].name} · ${R[u.request_id].address}` : u.request_id, h('br'), h('span', { class: 'muted' }, u.reason)),
       R[u.request_id] && R[u.request_id].lat == null ? btn('위치 지정', () => go(`#/request/${u.request_id}`), 'small') : null,
-      h('select', { class: 'small', onchange: (e) => { if (e.target.value === '') return; const [x] = p.unassigned.splice(i, 1); p.routes[+e.target.value].stops.push({ request_id: x.request_id, eta: '' }); draw(); } },
+      h('select', { class: 'small', onchange: (e) => { if (e.target.value === '') return; const [x] = p.unassigned.splice(i, 1); p.routes[+e.target.value].stops.push({ request_id: x.request_id, eta: '' }); p.adjusted = true; draw(); } },
         h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi }, o.crew_name))))));
     const mapBox = h('div', { class: 'mapbox', style: 'height:460px' });
+    const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
     const confirmBtn = btn('배정 확정', wrap(async () => {
+      if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }
       const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
-      const res = await post('assign', { date: s.date, plan });
+      const res = await post('assign', { date: s.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
     }, msg), 'primary');
     out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${p.res.matrix_note || '-'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       h('div', { class: 'grid2' }, h('div', {}, h('div', { class: 'cols' }, ...cols), un), h('div', {}, h('div', { class: 'card' }, h('h2', {}, '지도'), mapBox,
-        h('p', { class: 'muted' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.')), h('div', { class: 'card row' }, confirmBtn, msg))));
+        h('p', { class: 'muted' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.')), h('div', { class: 'card row' }, p.adjusted ? adjReason : h('span', { class: 'muted' }, '추천 순서 그대로 확정합니다.'), confirmBtn, msg))));
     setTimeout(async () => {
       try {
         const { map, ml } = await mapIn(mapBox, { center: [boot.settings.depot.lon, boot.settings.depot.lat], zoom: 13 });
@@ -781,6 +817,7 @@ async function screenSettings() {
   const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (비우면 직선거리 추정)', style: 'width:320px' });
   const sb = h('input', { type: 'number', value: st.service_min_base, style: 'width:70px' }), sp = h('input', { type: 'number', value: st.service_min_per_item, style: 'width:70px' });
   const us = st.unload_site || {}, es = st.end_site || {};
+  const jur = h('input', { value: st.jurisdiction || '', placeholder: '예: 동구', style: 'width:120px' });
   const elat = h('input', { value: es.lat ?? '', placeholder: '위도', style: 'width:120px' }), elon = h('input', { value: es.lon ?? '', placeholder: '경도', style: 'width:120px' }), elabel = h('input', { value: es.label || '', placeholder: '종료지 이름' });
   const ulat = h('input', { value: us.lat ?? '', placeholder: '위도', style: 'width:120px' }), ulon = h('input', { value: us.lon ?? '', placeholder: '경도', style: 'width:120px' }), ulabel = h('input', { value: us.label || '', placeholder: '반입지 이름' });
   const umin = h('input', { type: 'number', value: st.unload_min, style: 'width:70px' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, style: 'width:60px' });
@@ -794,9 +831,10 @@ async function screenSettings() {
       h('div', { class: 'row' }, '지점당 기본 작업', sb, '분 + 품목당', sp, '분 (추정치)'),
       h('div', { class: 'row' }, '반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'),
       h('div', { class: 'row' }, '종료지', elat, elon, elabel, h('span', { class: 'muted' }, '비우면 차고지로 돌아옴')),
+      h('div', { class: 'row' }, '관할 구역', jur, h('span', { class: 'muted' }, '주소의 구 이름이 다르면 접수할 때 경고 (막지는 않음)')),
       h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
       btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
-        unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
+        unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'primary')),
     volumeCard(),
     addrCard(),
     backupCard(),

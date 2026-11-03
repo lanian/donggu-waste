@@ -55,6 +55,7 @@ export function deriveStop(stop, events) {
   }));
   const byId = Object.fromEntries(lines.map((l) => [l.line_id, l]));
   let contact = 'NOT_CONTACTED', outcome = null, photos = [], loc = null, appt = null;
+  const memos = [];
   for (const e of mine) {
     const b = e.body || {};
     if (e.kind === 'CONTACT') contact = b.result;
@@ -67,13 +68,14 @@ export function deriveStop(stop, events) {
       Object.assign(byId[b.line_id], { qty_confirmed: b.qty_confirmed, qty_collected: b.qty_collected, reason: b.reason || '' });
     } else if (e.kind === 'ATTEMPT') outcome = b.outcome;
     else if (e.kind === 'PHOTO_META') photos.push(b);
+    else if (e.kind === 'FIELD_MEMO') memos.push({ text: b.text, ts: e.ts });
     else if (e.kind === 'LOCATION_FIX') loc = { lat: b.lat, lon: b.lon };
     else if (e.kind === 'REVISIT_APPT') appt = { date: b.date, start: b.start, end: b.end };
   }
   for (const l of lines) l.remaining = Math.max(0, l.qty_confirmed - l.qty_collected);
   // 위치: 현장에서 고친 위치(LOCATION_FIX) 우선, 없으면 접수 자료의 좌표
   if (!loc && stop.lat != null && stop.lon != null) loc = { lat: stop.lat, lon: stop.lon };
-  return { lines, contact, outcome, photos, loc, appt, fee: calcFee(lines), progress: progressOf(lines, mine.filter((e) => !['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT'].includes(e.kind)).length) };
+  return { lines, contact, outcome, photos, loc, appt, fee: calcFee(lines), progress: progressOf(lines, mine.filter((e) => !['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO'].includes(e.kind)).length), memos };
 }
 
 // 수수료: 산정 수량 = 현장 확인 수량. 실제 수거 수량은 금액에 쓰지 않는다. 단위가 다른 행은 합산하지 않는다.

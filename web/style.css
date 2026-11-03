@@ -179,3 +179,5 @@ html.text-big .btn { min-height: 64px; }
 .step.done { color: var(--ok); } .step.done .n { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
 .step.next { color: var(--ink); background: var(--card); box-shadow: inset 0 -3px 0 var(--sticker); } .step.next .n { border-color: var(--ink); }
 section[id^="st-"] { scroll-margin-top: 140px; }
+
+.memo-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }

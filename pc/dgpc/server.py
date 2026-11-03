@@ -53,7 +53,7 @@ PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
                        "fee-table", "geocode", "stats", "stats.csv"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
-                        "fee-revisions", "geocode"}},
+                        "fee-revisions", "geocode", "links"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
               "POST": {"import", "unloads", "qrtest", "password"}},
 }
@@ -129,9 +129,21 @@ class Handler(BaseHTTPRequestHandler):
         self.json_body_cache = json.loads(b.decode() or "{}") if b else {}
         return self.json_body_cache
 
+    def crew_scope(self):
+        """수거팀 계정이면 연결된 팀 ID(없으면 빈 문자열 → 아무것도 안 보임), 그 외 역할은 None."""
+        u = self.user or {}
+        if u.get("role") != "FIELD":
+            return None
+        return u.get("crew_id") or ""
+
+    def require_crew_request(self, rid: str):
+        cs = self.crew_scope()
+        if cs is not None and not (cs and S.request_in_crew(CON, rid, cs)):
+            raise S.UserError("내 팀에 배정된 접수만 볼 수 있습니다.")
+
     def me(self) -> dict:
         u = self.user
-        return {"username": u["username"], "display_name": u["display_name"], "role": u["role"], "role_label": S.ROLES[u["role"]],
+        return {"username": u["username"], "display_name": u["display_name"], "role": u["role"], "role_label": S.ROLES[u["role"]], "crew_id": u.get("crew_id"),
                 "must_change": bool(u.get("must_change"))}
 
     # ---------------------------------------------------------- 진입점
@@ -173,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 S.ACTOR.set(sess["username"])
                 with LOCK:
+                    if sess["role"] == "FIELD":
+                        b = S.one(CON, "SELECT crew_id FROM assignment_batch WHERE id LIKE ?", (path[13:] + "%",))
+                        if not b or b["crew_id"] != sess.get("crew_id"):
+                            return self.send_json({"error": "내 팀의 배차표만 볼 수 있습니다."}, 403)
                     return self.print_page(path[13:])
             if method == "GET" and path.startswith("/qrtest/"):
                 if not self.session():
@@ -240,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
     def login_ok(self, u):
         t = secrets.token_urlsafe(32)
         SESSIONS[t] = {"exp": time.time() + IDLE_S, "user_id": u["id"], "username": u["username"], "role": u["role"],
-                       "display_name": u["display_name"], "must_change": u.get("must_change", False)}
+                       "display_name": u["display_name"], "must_change": u.get("must_change", False), "crew_id": u.get("crew_id")}
         return self.send_json({"ok": True}, extra={"Set-Cookie": f"dg_s={t}; Path=/; HttpOnly; SameSite=Strict"})
 
     def api_authed(self, method, p, qs):
@@ -276,22 +292,30 @@ class Handler(BaseHTTPRequestHandler):
             if p == "audit":
                 return self.send_json(S.list_audit(c, qs.get("entity", ""), qs.get("date", ""), qs.get("actor", "")))
             if p == "requests":
-                return self.send_json(S.list_requests(c, qs.get("q", ""), qs.get("date", ""), qs.get("status", "")))
+                out = S.list_requests(c, qs.get("q", ""), qs.get("date", ""), qs.get("status", ""))
+                if self.crew_scope() is not None:  # 수거팀 계정: 자기 팀에 배정된 접수만
+                    mine = S.crew_request_ids(c, self.crew_scope())
+                    out = [r for r in out if r["id"] in mine]
+                return self.send_json(out)
             if parts[0] == "requests" and len(parts) == 2:
+                self.require_crew_request(parts[1])
                 return self.send_json(S.get_request(c, parts[1]))
             if p == "duplicates":
                 return self.send_json(S.find_duplicates(c, qs.get("phone", ""), qs.get("address", ""), qs.get("exclude") or None))
             if p == "batches":
-                return self.send_json(S.list_batches(c, qs["date"]))
+                out = S.list_batches(c, qs["date"])
+                if self.crew_scope() is not None:
+                    out = [b for b in out if b["crew_id"] == self.crew_scope()]
+                return self.send_json(out)
             if p == "conflicts":
                 return self.send_json(S.list_conflicts(c))
             if p == "close":
-                return self.send_json(S.day_summary(c, qs["date"]))
+                return self.send_json(S.day_summary(c, qs["date"], self.crew_scope()))
             if p == "registration-qr":
                 from pc_tool import qr_png_data_uri
                 return self.send_json({"image": qr_png_data_uri(S.registration_text(c), "M")[0]})
             if p == "unloads":
-                return self.send_json(S.list_unloads(c, qs["date"]))
+                return self.send_json([u for u in S.list_unloads(c, qs["date"]) if self.crew_scope() is None or u["crew_id"] == self.crew_scope()])
             if p == "volumes":
                 ov = S.volume_overrides(c)
                 ids = list(dict.fromkeys(S.fee_usage(c, 20) + list(ov)))
@@ -303,6 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             if p == "qrtests":
                 return self.send_json(S.list_qr_tests(c))
             if parts[0] == "photo" and len(parts) == 2:
+                self.require_crew_request(S.photo_request(c, parts[1]) or "")
                 b = S.photo_bytes(c, parts[1])
                 return self.send_bytes(b, "image/jpeg") if b else self.send_json({"error": "없음"}, 404)
         if method == "POST":
@@ -322,13 +347,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(self.route_plan(self.json_body()))
             if p == "assign":
                 d = self.json_body()
-                return self.send_json(S.confirm_plan(c, d["date"], d["plan"]))
+                return self.send_json(S.confirm_plan(c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted"))))
             if p == "bundles":
                 b = S.make_bundle(c, self.json_body()["batch_id"])
                 return self.send_json({k: b[k] for k in ("bundle_id", "bytes", "count", "work_date", "assign_ver")} | {"frames": len(b["frames"])})
             if parts[0] == "bundles" and len(parts) == 3 and parts[2] == "receipt":
                 S.confirm_receipt(c, parts[1], self.json_body().get("code", ""))
                 return self.send_json({"ok": True})
+            if p in ("import/result", "import/photos") and self.crew_scope() is not None:
+                body = self.body()
+                if S.device_crew(c, body) != self.crew_scope():
+                    raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
+                self.body = lambda b=body: b  # 이미 읽은 본문을 다시 쓰도록
             if p == "import/result":
                 return self.send_json(S.import_result(c, self.body(), "QR" if qs.get("channel") == "QR" else "MAIL"))
             if p == "import/solo":
@@ -352,12 +382,21 @@ class Handler(BaseHTTPRequestHandler):
             if parts[0] == "devices" and len(parts) == 3 and parts[2] == "status":
                 S.set_device_status(c, parts[1], self.json_body().get("status", ""))
                 return self.send_json({"ok": True})
+            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "link":
+                d = self.json_body()
+                return self.send_json({"id": S.link_similar(c, parts[1], d.get("line_id", ""), d.get("fee_rate_id", ""), d.get("reason", ""), d.get("confirmed_by", ""))})
+            if parts[0] == "links" and len(parts) == 3 and parts[2] == "void":
+                S.unlink_similar(c, parts[1], self.json_body().get("reason", ""))
+                return self.send_json({"ok": True})
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "payments":
                 return self.send_json(S.add_payment(c, parts[1], self.json_body()))
             if parts[0] == "payments" and len(parts) == 3 and parts[2] == "void":
                 return self.send_json(S.void_payment(c, parts[1], self.json_body().get("reason", "")))
             if p == "unloads":
-                return self.send_json({"id": S.add_unload(c, self.json_body())})
+                d = self.json_body()
+                if self.crew_scope() is not None and d.get("crew_id") != self.crew_scope():
+                    raise S.UserError("내 팀의 하차만 기록할 수 있습니다.")
+                return self.send_json({"id": S.add_unload(c, d)})
             if p == "volumes":
                 d = self.json_body()
                 S.save_volume_override(c, d.get("fee_rate_id", ""), d.get("m3"))
@@ -372,7 +411,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "users":
                 d = self.json_body()
                 return self.send_json({"id": S.create_user(c, d.get("username", ""), d.get("display_name", ""), d.get("role", ""),
-                                                           d.get("password", ""), must_change=True)})
+                                                           d.get("password", ""), must_change=True, crew_id=d.get("crew_id") or None)})
+            if parts[0] == "users" and len(parts) == 3 and parts[2] == "crew":
+                S.set_user_crew(c, parts[1], self.json_body().get("crew_id") or None)
+                for v in SESSIONS.values():
+                    if v["user_id"] == parts[1]:
+                        v["crew_id"] = self.json_body().get("crew_id") or None
+                return self.send_json({"ok": True})
             if parts[0] == "users" and len(parts) == 3 and parts[2] == "active":
                 S.set_user_active(c, parts[1], bool(self.json_body().get("active")), self.user["user_id"])
                 if not self.json_body_cache.get("active"):

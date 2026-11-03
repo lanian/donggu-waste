@@ -168,6 +168,7 @@ def settings(con) -> dict:
         "photo_retention_days": get_setting(con, "photo_retention_days", 90),
         "unload_site": get_setting(con, "unload_site", None),
         "end_site": get_setting(con, "end_site", None),
+        "jurisdiction": get_setting(con, "jurisdiction", "동구"),
         "unload_min": get_setting(con, "unload_min", 20),
         "max_unloads": get_setting(con, "max_unloads", 2),
         "backup_dir": get_setting(con, "backup_dir", ""),
@@ -203,6 +204,8 @@ def save_settings(con, data: dict):
         for k, lo, hi in (("unload_min", 0, 180), ("max_unloads", 0, 5)):
             if k in data:
                 set_setting(con, k, min(hi, max(lo, int(data[k]))))
+        if "jurisdiction" in data:
+            set_setting(con, "jurisdiction", (data["jurisdiction"] or "").strip()[:20])
         if "photo_retention_days" in data:
             n = int(data["photo_retention_days"])
             if not 7 <= n <= 3650:
@@ -305,7 +308,7 @@ def create_request(con, data: dict) -> dict:
         for it in items:
             _insert_item(con, rid, it)
         audit(con, "request", rid, "CREATE", {"receipt_no": receipt})
-    return {"id": rid, "receipt_no": receipt}
+    return {"id": rid, "receipt_no": receipt, "warnings": jurisdiction_warnings(con, d["address"])}
 
 
 def _insert_item(con, rid, it):
@@ -364,7 +367,8 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
             else:
                 _insert_item(con, rid, it)
         audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"]})
-    return {"id": rid, "resend_needed": bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,)))}
+    return {"id": rid, "resend_needed": bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
+            "warnings": jurisdiction_warnings(con, d["address"])}
 
 
 def cancel_request(con, rid: str, reason: str) -> dict:
@@ -421,6 +425,7 @@ def list_requests(con, q: str = "", date: str = "", status: str = "") -> list[di
     for r in out:
         r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
         r["state"] = derive(con, r)
+        r["warnings"] = jurisdiction_warnings(con, r["address"])
         r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
             JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
     return out
@@ -436,7 +441,7 @@ def get_request(con, rid: str) -> dict:
     r["state"] = derive(con, r)
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event
         WHERE request_id=? ORDER BY device_ts""", (rid,))
-    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at FROM photo WHERE request_id=?", (rid,))
+    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at, line_id FROM photo WHERE request_id=?", (rid,))
     r["payment"] = payment_status(con, rid)
     return r
 
@@ -456,6 +461,7 @@ def derive(con, req: dict) -> dict:
               "fee_rate_id": i["fee_rate_id"]} for i in items]
     by = {l["line_id"]: l for l in lines}
     contact, outcome, loc, n = "NOT_CONTACTED", None, None, 0
+    memos = []
     for e in _events_for(con, req["id"]):
         b = json.loads(e["body_json"])
         k = e["kind"]
@@ -474,6 +480,16 @@ def derive(con, req: dict) -> dict:
             outcome = b.get("outcome"); n += 1
         elif k == "LOCATION_FIX":
             loc = {"lat": b.get("lat"), "lon": b.get("lon")}
+        elif k == "FIELD_MEMO":
+            memos.append((b.get("text") or "")[:300])
+    # 표에 없던 품목을 담당자가 유사 품목 단가로 확정한 기록(근거·확인자)을 덧씌운다. 원래 행은 그대로 둔다.
+    for lk in rows(con, "SELECT * FROM item_link WHERE request_id=? AND void_reason IS NULL ORDER BY at", (req["id"],)):
+        l = by.get(lk["line_id"])
+        if l and l["price"] is None:
+            row = FEE_ROWS.get(lk["fee_rate_id"]) or {}
+            l["price"] = lk["unit_price"]
+            l["link"] = {"id": lk["id"], "fee_rate_id": lk["fee_rate_id"], "name": row.get("name"), "spec": row.get("spec"), "reason": lk["reason"],
+                         "confirmed_by": lk["confirmed_by"], "at": lk["at"], "fee_version_id": lk["fee_version_id"]}
     for l in lines:
         l["remaining"] = max(0, l["qty_confirmed"] - l["qty_collected"])
     received = sum(l["amount_received"] or 0 for l in lines if l["kind"] == "RECEIVED")
@@ -482,7 +498,7 @@ def derive(con, req: dict) -> dict:
     qty_by_unit: dict[str, int] = {}
     for l in lines:
         qty_by_unit[l["unit_label"]] = qty_by_unit.get(l["unit_label"], 0) + l["qty_confirmed"]
-    return {"lines": lines, "contact": contact, "outcome": outcome, "field_loc": loc, "has_field_records": n > 0,
+    return {"lines": lines, "contact": contact, "outcome": outcome, "field_loc": loc, "has_field_records": n > 0, "memos": memos,
             "fee": {"received": received, "confirmed_subtotal": subtotal, "diff": subtotal - received,
                     "field_added": sum(l["price"] * l["qty_confirmed"] for l in lines if l["kind"] == "FIELD" and l["price"] is not None),
                     "pending_count": len(pending), "final": None if pending else subtotal, "qty_by_unit": qty_by_unit},
@@ -510,12 +526,14 @@ def _refresh_status(con, rid):
 
 
 # ------------------------------------------------------------------ 배정
-def confirm_plan(con, work_date: str, plan: dict[str, list[dict]]) -> list[dict]:
+def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason: str = "", adjusted: bool = False) -> list[dict]:
     """plan = {crew_id: [{request_id, eta}, ...]} 순서대로. 팀별로 새 배정 버전을 만든다."""
     crews = {c["id"]: c for c in list_crews(con)}
     for cid in plan:
         if cid not in crews:
             raise UserError("없는 팀이 포함되어 있습니다.")
+    if adjusted and not (adjust_reason or "").strip():
+        raise UserError("추천 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요 (예: 골목 진입 불가, 주민 요청 시간).")
     seen = set()
     for cid, stops in plan.items():
         for s in stops:
@@ -557,7 +575,8 @@ def confirm_plan(con, work_date: str, plan: dict[str, list[dict]]) -> list[dict]
                 con.execute("UPDATE request SET status=CASE WHEN status IN ('RECEIVED','PARTIAL','NOT_COLLECTED','ON_HOLD') THEN 'ASSIGNED' ELSE status END, planned_date=?, updated_at=? WHERE id=?",
                             (work_date, now(), s["request_id"]))
             out.append({"batch_id": bid, "crew_id": cid, "assign_ver": prev + 1, "count": len(stops)})
-            audit(con, "batch", bid, "CONFIRM", {"crew": crews[cid]["name"], "date": work_date, "ver": prev + 1, "n": len(stops)})
+            audit(con, "batch", bid, "CONFIRM", {"crew": crews[cid]["name"], "date": work_date, "ver": prev + 1, "n": len(stops),
+                                                 **({"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else {})})
         # 이전 버전에만 있고 새 버전에서 빠진 접수는 활성 배정을 풀고 접수 상태로 되돌린다
         for rid, in con.execute("SELECT request_id FROM active_assignment WHERE batch_id IN (%s)" % ",".join("?" * len(replaced)), list(replaced)).fetchall() if replaced else []:
             con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
@@ -739,8 +758,8 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                          ev["kind"], json.dumps(ev.get("body", {}), ensure_ascii=False), status, note, ev.get("device_ts")))
             if ev["kind"] == "PHOTO_META" and not reason:
                 b = ev.get("body", {})
-                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id) VALUES (?,?,?,?,?,?)",
-                            (b.get("photo_id"), ev["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id))
+                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id) VALUES (?,?,?,?,?,?,?)",
+                            (b.get("photo_id"), ev["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id")))
                 counts["photos_expected"] += 1
             if not reason:
                 touched.add(ev["request_id"])
@@ -847,8 +866,11 @@ def photo_bytes(con, photo_id: str) -> bytes | None:
 
 
 # ------------------------------------------------------------------ 일일 마감
-def day_summary(con, work_date: str) -> dict:
+def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     reqs = rows(con, "SELECT * FROM request WHERE planned_date=?", (work_date,))
+    if crew_id:
+        mine = crew_request_ids(con, crew_id)
+        reqs = [r for r in reqs if r["id"] in mine]
     by_status: dict[str, int] = {}
     pending_fee, revisit, no_result = [], [], []
     assigned_ids = {r["request_id"] for r in rows(con, """SELECT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
@@ -863,10 +885,12 @@ def day_summary(con, work_date: str) -> dict:
                             "next_date": r["planned_date"] if r["planned_date"] != work_date else None, "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None})
         if r["id"] in assigned_ids and r["status"] == "ASSIGNED":
             no_result.append({"receipt_no": r["receipt_no"], "name": r["name"]})
-    photos = rows(con, """SELECT p.photo_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
-        WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,))
-    conflicts = [c for c in list_conflicts(con) if one(con, "SELECT 1 AS x FROM request WHERE id=? AND planned_date=?", (c["request_id"], work_date))]
-    unconfirmed = rows(con, "SELECT id, work_date, assign_ver FROM transfer_bundle WHERE work_date=? AND receipt_confirmed_at IS NULL", (work_date,))
+    ids = {r["id"] for r in reqs}
+    photos = [x for x in rows(con, """SELECT p.photo_id, p.request_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
+        WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,)) if x["request_id"] in ids]
+    conflicts = [c for c in list_conflicts(con) if c["request_id"] in ids]
+    unconfirmed = rows(con, """SELECT t.id, t.work_date, t.assign_ver FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id
+        WHERE t.work_date=? AND t.receipt_confirmed_at IS NULL""" + (" AND b.crew_id=?" if crew_id else ""), (work_date, crew_id) if crew_id else (work_date,))
     closed = one(con, "SELECT * FROM day_close WHERE work_date=?", (work_date,))
     unpaid = []
     for r in reqs:
@@ -874,7 +898,7 @@ def day_summary(con, work_date: str) -> dict:
             ps = payment_status(con, r["id"])
             if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING"):
                 unpaid.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"], "paid": ps["paid"]})
-    unloads = list_unloads(con, work_date)
+    unloads = [u for u in list_unloads(con, work_date) if not crew_id or u["crew_id"] == crew_id]
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
             "payments": unpaid, "unloads": unloads,
@@ -1071,7 +1095,7 @@ def migrate_legacy_login(con):
             con.execute("DELETE FROM meta WHERE key='login'")
 
 
-def create_user(con, username: str, display_name: str, role: str, password: str, must_change: bool = False) -> str:
+def create_user(con, username: str, display_name: str, role: str, password: str, must_change: bool = False, crew_id: str | None = None) -> str:
     username = (username or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9._-]{3,30}", username):
         raise UserError("아이디는 영문 소문자·숫자·.-_ 3~30자로 정해 주세요.")
@@ -1082,11 +1106,14 @@ def create_user(con, username: str, display_name: str, role: str, password: str,
     _check_pw_rules(password)
     if one(con, "SELECT 1 AS x FROM app_user WHERE username=?", (username,)):
         raise UserError("이미 있는 아이디입니다.")
+    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
+        raise UserError("없는 수거팀입니다.")
     salt = _secrets.token_bytes(16)
     uid = str(uuid.uuid4())
     with tx(con):
-        con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, must_change, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (uid, username, display_name.strip(), role, salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, now()))
+        con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, must_change, created_at, crew_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (uid, username, display_name.strip(), role, salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, now(),
+                     crew_id if role == "FIELD" else None))
         audit(con, "user", uid, "CREATE", {"username": username, "role": role})
     return uid
 
@@ -1099,11 +1126,13 @@ def check_login(con, username: str, password: str) -> dict | None:
     if not _hmac.compare_digest(_pw_hash(password or "", bytes.fromhex(u["pw_salt"])), u["pw_hash"]):
         return None
     con.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (now(), u["id"]))
-    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"])}
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
+            "crew_id": u["crew_id"]}
 
 
 def list_users(con) -> list[dict]:
-    return rows(con, "SELECT id, username, display_name, role, active, must_change, created_at, last_login_at FROM app_user ORDER BY created_at")
+    return rows(con, """SELECT u.id, u.username, u.display_name, u.role, u.active, u.must_change, u.created_at, u.last_login_at, u.crew_id, c.name AS crew_name
+        FROM app_user u LEFT JOIN crew c ON c.id=u.crew_id ORDER BY u.created_at""")
 
 
 def set_user_active(con, uid: str, active: bool, me: str):
@@ -1587,9 +1616,9 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                 b = e.get("body") or {}
                 data = base64.b64decode(photos[b["photo_id"]]) if b.get("photo_id") in photos else None
                 good = data is not None and hashlib.sha256(data).hexdigest() == b.get("sha256")
-                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, data, recovery_status, recovered_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, data, recovery_status, recovered_at, line_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (b.get("photo_id"), e["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), "SOLO", data if good else None,
-                             "RECOVERED" if good else "EXPECTED", now() if good else None))
+                             "RECOVERED" if good else "EXPECTED", now() if good else None, b.get("line_id")))
                 counts["photos_recovered"] += good
             elif e["kind"] == "REVISIT_APPT":
                 _apply_revisit(con, e["request_id"], e.get("body") or {})
@@ -1598,3 +1627,97 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts}), imp))
         audit(con, "import", imp, "SOLO", counts)
     return {**info, **counts}
+
+
+
+# ------------------------------------------------------------------ 유사 품목 적용 (표에 없는 품목의 단가를 근거와 함께 확정)
+def link_similar(con, rid: str, line_id: str, fee_rate_id: str, reason: str, confirmed_by: str) -> str:
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    if not r:
+        raise UserError("접수를 찾을 수 없습니다.")
+    st = derive(con, r)
+    line = next((l for l in st["lines"] if l["line_id"] == line_id), None)
+    if not line:
+        raise UserError("품목 행을 찾을 수 없습니다.")
+    if line["price"] is not None:
+        raise UserError("이미 단가가 정해진 품목입니다.")
+    rows_now = fee_rows(con)
+    row = rows_now.get(fee_rate_id)
+    if not row or row["status"] != "CONFIRMED":
+        raise UserError("단가가 확정된 수수료표 행만 적용할 수 있습니다.")
+    if row["unit_label"] != line["unit_label"]:
+        raise UserError(f"부과단위가 다릅니다({line['unit_label']} ↔ {row['unit_label']}). 단위가 같은 행을 고르거나 확인 대기로 두세요.")
+    if not (reason or "").strip():
+        raise UserError("적용 근거를 적어 주세요 (예: 같은 재질·크기, 담당 부서 확인).")
+    if not (confirmed_by or "").strip():
+        raise UserError("확인자를 적어 주세요.")
+    lid = str(uuid.uuid4())
+    with tx(con):
+        con.execute("INSERT INTO item_link (id, request_id, line_id, fee_rate_id, fee_version_id, unit_price, reason, confirmed_by, actor, at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (lid, rid, line_id, fee_rate_id, fee_state(con)["version_id"], int(row["price"]), reason.strip()[:200], confirmed_by.strip()[:40], ACTOR.get(), now()))
+        audit(con, "request", rid, "LINK_SIMILAR", {"line": line_id[:8], "fee_rate_id": fee_rate_id, "price": row["price"], "confirmed_by": confirmed_by.strip()[:40]})
+    return lid
+
+
+def unlink_similar(con, link_id: str, reason: str):
+    lk = one(con, "SELECT * FROM item_link WHERE id=? AND void_reason IS NULL", (link_id,))
+    if not lk:
+        raise UserError("해제할 적용 기록이 없습니다.")
+    if not (reason or "").strip():
+        raise UserError("해제 사유를 적어 주세요.")
+    with tx(con):
+        con.execute("UPDATE item_link SET void_reason=?, voided_at=? WHERE id=?", (reason.strip()[:200], now(), link_id))
+        audit(con, "request", lk["request_id"], "UNLINK_SIMILAR", {"line": lk["line_id"][:8], "reason": reason.strip()[:200]})
+
+
+
+# ------------------------------------------------------------------ 수거팀 계정의 접근 범위 (자기 팀 배정만)
+def set_user_crew(con, uid: str, crew_id: str | None):
+    u = one(con, "SELECT role FROM app_user WHERE id=?", (uid,))
+    if not u:
+        raise UserError("사용자를 찾을 수 없습니다.")
+    if u["role"] != "FIELD":
+        raise UserError("수거팀 계정만 팀을 연결합니다.")
+    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
+        raise UserError("없는 수거팀입니다.")
+    with tx(con):
+        con.execute("UPDATE app_user SET crew_id=? WHERE id=?", (crew_id or None, uid))
+        audit(con, "user", uid, "CREW", {"crew_id": crew_id})
+
+
+def crew_request_ids(con, crew_id: str) -> set[str]:
+    """이 팀에 배정된 적이 있는 접수 (현재 배정 또는 지난 배정)."""
+    return {r["request_id"] for r in rows(con, """SELECT DISTINCT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
+        WHERE b.crew_id=?""", (crew_id,))}
+
+
+def request_in_crew(con, rid: str, crew_id: str) -> bool:
+    return bool(one(con, """SELECT 1 AS x FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id WHERE s.request_id=? AND b.crew_id=?""", (rid, crew_id)))
+
+
+def photo_request(con, photo_id: str) -> str | None:
+    r = one(con, "SELECT request_id FROM photo WHERE photo_id=?", (photo_id,))
+    return r["request_id"] if r else None
+
+
+def device_crew(con, data: bytes) -> str | None:
+    try:
+        head = P.Header.unpack(data)
+    except P.ProtocolError:
+        return None
+    r = one(con, "SELECT id FROM crew WHERE device_id=?", (str(uuid.UUID(bytes=head.device_id)),))
+    return r["id"] if r else None
+
+
+
+# ------------------------------------------------------------------ 관할 확인 (동별·구별 관할 불일치 경고, 막지는 않음)
+def jurisdiction_warnings(con, address: str) -> list[str]:
+    area = (get_setting(con, "jurisdiction", "동구") or "").strip()
+    if not area:
+        return []
+    a = re.sub(r"\(.*?\)", " ", address or "")
+    head = re.split(r"[가-힣A-Za-z0-9·.]+(?:대로|로|길)\s*\d", a)[0]  # 도로명 앞부분(시·구·동)만 본다
+    units = re.findall(r"([가-힣]+(?:구|군))(?=\s|$)", head)
+    if units and area not in units:
+        return [f"주소의 '{units[0]}'이(가) 관할({area})과 다릅니다. 관할 구역을 확인하세요."]
+    return []

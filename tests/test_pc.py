@@ -283,6 +283,32 @@ def main():
     S.close_day(con, day, "시험 마감")
     ok(S.day_summary(con, day)["closed"], "일일 마감 기록")
 
+    # 유사 품목 적용 (표에 없는 품목 → 근거·확인자와 함께 확정 단가 행에 연결)
+    fr = S.create_request(con, {**base, "name": "가상유사", "phone": "01000004545", "address": "가상시 동구 유사로 1",
+                                "items": [{"name": "안마의자", "unit": "EA", "unit_label": "개", "qty": 1}]})
+    g = S.get_request(con, fr["id"]); ln = g["state"]["lines"][0]
+    ok(g["state"]["fee"]["final"] is None, "표에 없는 품목 → 금액 확인 대기")
+    raises(lambda: S.link_similar(con, fr["id"], ln["line_id"], fee["장롱|120cm 이상 1쪽당"], "근거", "가상"), "부과단위", "부과단위가 다른 행은 적용 거부 (개 ↔ 쪽)")
+    raises(lambda: S.link_similar(con, fr["id"], ln["line_id"], fee["의자|회전식 의자"], "", "가상"), "근거", "적용 근거 없으면 거부")
+    raises(lambda: S.link_similar(con, fr["id"], ln["line_id"], fee["식탁|6인용 이하(대리석)"], "근거", "가상"), "확정된", "단가 미확정 행은 적용 거부")
+    lk = S.link_similar(con, fr["id"], ln["line_id"], fee["의자|회전식 의자"], "같은 크기·재질로 담당 확인(가상)", "가상 확인자")
+    g = S.get_request(con, fr["id"])
+    ok(g["state"]["fee"]["final"] == 3000 and g["state"]["lines"][0]["link"]["confirmed_by"] == "가상 확인자" and g["items"][0]["price_status"] == "PENDING",
+       "유사 품목 적용 → 계산 3,000원 확정, 원래 품목 행은 그대로, 근거·확인자 기록")
+    raises(lambda: S.unlink_similar(con, lk, ""), "사유", "해제 사유 필수")
+    S.unlink_similar(con, lk, "잘못 고름(가상)")
+    ok(S.get_request(con, fr["id"])["state"]["fee"]["final"] is None and S.list_audit(con, entity="request")[0]["action"] == "UNLINK_SIMILAR", "해제하면 다시 확인 대기, 이력 보존")
+    S.link_similar(con, fr["id"], ln["line_id"], fee["의자|회전식 의자"], "다시 확인(가상)", "가상 확인자")
+
+    # 관할 확인·배정 조정 사유
+    ok(S.jurisdiction_warnings(con, "광주광역시 북구 가상로 12") and not S.jurisdiction_warnings(con, "광주광역시 동구 가상로 12")
+       and not S.jurisdiction_warnings(con, "가상구길 5") and not S.jurisdiction_warnings(con, "동구 서구로 7"), "관할 밖 주소(북구) 경고, 동구·도로명 속 '구'는 경고 안 함")
+    wr = S.create_request(con, {**base, "name": "가상관할", "phone": "01000003434", "address": "가상광역시 북구 시험로 3", "items": [{"fee_rate_id": fee["의자|고정식 의자"], "qty": 1}]})
+    ok(wr["warnings"] and "북구" in wr["warnings"][0], "관할 밖 접수도 막지 않고 경고와 함께 등록")
+    raises(lambda: S.confirm_plan(con, "2026-11-08", {c2: [{"request_id": wr["id"]}]}, "", adjusted=True), "조정 사유", "추천을 바꾼 배정은 조정 사유 필수")
+    S.confirm_plan(con, "2026-11-08", {c2: [{"request_id": wr["id"]}]}, "주민 요청으로 다른 팀(가상)", adjusted=True)
+    ok(S.list_audit(con, entity="batch")[0]["detail"].find("주민 요청") > 0, "조정 사유를 배정 이력에 기록")
+
     # 통계·보고서
     st_ = S.stats(con, day, day2)
     ok(st_["totals"]["by_status"].get("DONE", 0) >= 1 and any(d["date"] == day and d["done"] >= 1 for d in st_["days"]) and st_["items"], f"기간 통계: 상태·날짜별·품목 집계 ({st_['totals']['requests']}건)")
@@ -307,14 +333,15 @@ def main():
         return b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1")
     sid, sid2, lid, pid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
     pic = b"\xff\xd8solo-photo"
-    solo_req = {"request_id": sid, "receipt_no": "DG-20261103-0001", "req_ver": 2, "name": "단독가상", "phone": "01000009191", "address": "가상시 동구 단독로 3",
+    solo_req = {"request_id": sid, "receipt_no": S.rows(con, "SELECT receipt_no FROM request ORDER BY received_at LIMIT 1")[0]["receipt_no"], "req_ver": 2, "name": "단독가상", "phone": "01000009191", "address": "가상시 동구 단독로 3",
                 "spot_note": "", "memo": "", "planned_date": day, "items": [{"line_id": lid, "fee_rate_id": fee["장롱|120cm 이상 1쪽당"], "name": "장롱", "spec": "120cm 이상 1쪽당",
                 "unit": "PIECE", "unit_label": "쪽", "qty": 1, "unit_price": 15000, "amount": 15000, "price_status": "CONFIRMED"}], "status": "ACTIVE",
                 "received_at": "2026-11-02T23:00:00Z", "updated_at": "2026-11-02T23:10:00Z", "versions": [{"req_ver": 1, "at": "2026-11-02T23:05:00Z", "reason": "주민 요청", "snapshot": {"name": "단독가상"}}]}
-    solo_c = {**solo_req, "request_id": sid2, "receipt_no": "DG-20261103-0002", "phone": "01000009292", "items": [], "status": "CANCELLED", "cancel_reason": "주민 취소", "versions": []}
+    solo_c = {**solo_req, "request_id": sid2, "receipt_no": "DG-29991231-0002", "phone": "01000009292", "items": [], "status": "CANCELLED", "cancel_reason": "주민 취소", "versions": []}
     sev = [{"event_id": str(uuid.uuid4()), "seq": i + 1, "request_id": sid, "assign_ver": 1, "base_req_ver": 2, "kind": k, "body": b, "ts": "2026-11-03T01:00:00Z"} for i, (k, b) in enumerate([
         ("CONTACT", {"result": "REACHED"}), ("ITEM_RESULT", {"line_id": lid, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
-        ("PHOTO_META", {"photo_id": pid, "phase": "AFTER", "sha256": hashlib.sha256(pic).hexdigest(), "bytes": len(pic)}), ("ATTEMPT", {"outcome": "DONE"})])]
+        ("PHOTO_META", {"photo_id": pid, "phase": "AFTER", "sha256": hashlib.sha256(pic).hexdigest(), "bytes": len(pic), "line_id": lid}),
+        ("FIELD_MEMO", {"text": "지하 주차장 입구에 배출(가상)"}), ("ATTEMPT", {"outcome": "DONE"})])]
     sev.append({"event_id": str(uuid.uuid4()), "seq": 9, "request_id": "", "assign_ver": 0, "base_req_ver": None, "kind": "UNLOAD",
                 "body": {"place": "가상 반입지", "at_time": "12:00", "volume_m3": 1.5, "work_date": day}, "ts": "2026-11-03T03:00:00Z"})
     dgb = make_dgb({"format": "dg.backup/1", "created_at": "2026-11-03T04:00:00Z", "state": {"mode": "SOLO", "requests": [solo_req, solo_c], "events": sev},
@@ -328,6 +355,8 @@ def main():
        and S.get_request(con, sid2)["status"] == "CANCELLED" and mv["unloads_applied"] == 1,
        "단독 → PC: 접수·수정 이력·현장 결과(완료)·사진·취소·하차가 PC 원본으로, 겹치는 접수번호는 S 표시")
     ok(S.import_solo(con, dgb, "solo-pass-1", c1).get("duplicate_file"), "같은 단독 백업 재가져오기 → 중복 없음")
+    g = S.get_request(con, sid)
+    ok(g["state"]["memos"] == ["지하 주차장 입구에 배출(가상)"] and g["photos"][0]["line_id"] == lid, "현장 메모와 품목에 묶은 사진이 PC 접수 상세로")
 
     # 사용자·역할·변경 이력
     sys.path.insert(0, str(ROOT / "pc" / "dgpc"))
@@ -355,6 +384,19 @@ def main():
        and not SV.allowed("INTAKE", "GET", "audit") and not SV.allowed("INTAKE", "POST", "devices/register"), "접수 담당자: 접수 가능, 사용자·설정·기기·이력 불가")
     ok(SV.allowed("FIELD", "POST", "import/result") and SV.allowed("FIELD", "POST", "unloads") and not SV.allowed("FIELD", "POST", "requests/x/cancel")
        and not SV.allowed("FIELD", "POST", "assign") and not SV.allowed("FIELD", "GET", "duplicates"), "수거팀: 결과·하차 가능, 접수 수정·배정 불가")
+    # 수거팀 계정 ↔ 팀: 자기 팀 배정만
+    raises(lambda: S.create_user(con, "crewx", "가상팀원", "FIELD", "field-pass-001", crew_id="nope"), "없는 수거팀", "없는 팀 연결 거부")
+    fu = S.create_user(con, "crew1", "가상팀원", "FIELD", "field-pass-001", crew_id=c1)
+    ok(S.check_login(con, "crew1", "field-pass-001")["crew_id"] == c1, "수거팀 계정 로그인 정보에 팀 포함")
+    mine = S.crew_request_ids(con, c1)
+    ok(r1["id"] in mine and not S.request_in_crew(con, r3["id"], c1), "팀에 배정된 접수만 범위에 포함 (미배정 건 제외)")
+    full, scoped = S.day_summary(con, day), S.day_summary(con, day, c2)
+    ok(scoped["total"] <= full["total"] and all(u["crew_id"] == c2 for u in scoped["unloads"]), "마감 요약도 팀 범위로 거름")
+    raises(lambda: S.set_user_crew(con, uid, c1), "수거팀 계정만", "수거팀이 아닌 계정에는 팀 연결 안 함")
+    S.set_user_crew(con, fu, c2)
+    ok(S.check_login(con, "crew1", "field-pass-001")["crew_id"] == c2, "팀 변경")
+    ok(SV.allowed("INTAKE", "POST", "links/x/void") and not SV.allowed("FIELD", "POST", "links/x/void") and not SV.allowed("FIELD", "POST", "requests/x/link"), "유사 품목 적용은 접수 담당자·관리자만")
+
     S.ACTOR.set("kim")
     S.cancel_request(con, sp[0]["id"], "주민 취소 요청(시험)")
     a = S.list_audit(con, entity="request", actor="kim")

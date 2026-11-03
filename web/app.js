@@ -523,18 +523,23 @@ async function screenStop(id) {
     const input = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden' });
     input.addEventListener('change', async () => {
       const file = input.files && input.files[0]; if (!file) return;
-      try { await savePhoto(stop, phase, file); toast('사진을 저장했습니다'); render(); }
+      try { await savePhoto(stop, phase, file, ui.photoLine && ui.photoLine.stop === id ? ui.photoLine.line : null); toast('사진을 저장했습니다'); render(); }
       catch (e) { toast(e.name === 'QuotaExceededError' ? ERR.STORAGE_LOW : ERR.PHOTO_SAVE_FAIL, 'bad'); }
     });
     return h('label', { class: 'btn big' }, phase === 'BEFORE' ? '📷 수거 전' : '📷 수거 후', input);
   };
+  // 사진을 특정 품목에 묶을 수 있다(선택). 기본은 접수 건 전체.
+  const lineName = (lid) => { const l = d.lines.find((x) => x.line_id === lid); return l ? l.name : ''; };
+  const photoFor = h('select', { 'aria-label': '사진을 묶을 품목', onchange: (e) => { ui.photoLine = { stop: id, line: e.target.value || null }; } },
+    h('option', { value: '' }, '사진 대상: 접수 건 전체'),
+    ...d.lines.map((l) => h('option', { value: l.line_id, selected: ui.photoLine && ui.photoLine.stop === id && ui.photoLine.line === l.line_id }, `사진 대상: ${l.name} ${l.spec || ''}`)));
   const thumbs = h('div', { class: 'thumbs' });
   for (const p of d.photos) {
     const img = h('img', { alt: p.phase === 'BEFORE' ? '수거 전' : '수거 후' });
-    thumbs.append(h('figure', {}, img, h('figcaption', {}, p.phase === 'BEFORE' ? '전' : '후')));
+    thumbs.append(h('figure', {}, img, h('figcaption', {}, (p.phase === 'BEFORE' ? '전' : '후') + (p.line_id ? ` · ${lineName(p.line_id)}` : ''))));
     S.getSecureBytes('ph:' + p.photo_id).then((b) => { if (b) { const u = URL.createObjectURL(new Blob([b], { type: 'image/jpeg' })); photoUrls.push(u); img.src = u; } });
   }
-  const photos = h('section', { class: 'card' }, h('h2', {}, `사진 ${d.photos.length}장`), h('div', { class: 'grid2' }, photoIn('BEFORE'), photoIn('AFTER')), thumbs,
+  const photos = h('section', { class: 'card' }, h('h2', {}, `사진 ${d.photos.length}장`), d.lines.length > 1 ? photoFor : null, h('div', { class: 'grid2' }, photoIn('BEFORE'), photoIn('AFTER')), thumbs,
     h('p', { class: 'small' }, '사진은 앱 안에만 암호화 저장되며 갤러리에 남지 않습니다.'));
 
   const msg = h('p', { class: 'msg' });
@@ -550,7 +555,7 @@ async function screenStop(id) {
       if (k === 'PARTIAL' && !d.lines.some((l) => l.qty_collected > 0)) return (msg.textContent = '수거한 품목이 없으면 미수거로 저장하세요.');
       if (k === 'NOT_COLLECTED' && d.lines.some((l) => l.qty_collected > 0)) return (msg.textContent = '수거한 품목이 있으면 일부 수거로 저장하세요.');
       await addEvent(stop, 'ATTEMPT', { outcome: k }); toast('저장했습니다'); render();
-    }, d.outcome === k ? 'opt on' : 'opt'))), msg);
+    }, d.outcome === k ? 'opt on' : 'opt'))), msg, fieldMemo(stop, d));
 
   const manage = isSolo() ? h('section', { class: 'card' }, h('h2', {}, '접수 관리'),
     h('p', { class: 'small' }, `원본 ${stop.req_ver}번째 버전 · 수정 ${(stop.versions || []).length}회`),
@@ -584,6 +589,14 @@ async function screenStop(id) {
     stepNav, info, contact, lines, fee, photos, outcome, manage, dock);
 }
 
+// 현장 메모: 짧게 남기고 고치지 않는다(새 메모를 더함). 결과 파일로 PC에 전달.
+function fieldMemo(stop, d) {
+  const ta = h('textarea', { rows: 2, placeholder: '현장 메모 (예: 현관 앞 아님, 지하주차장 입구에 배출)', 'aria-label': '현장 메모' });
+  return h('div', { class: 'memo-box' },
+    (d.memos || []).length ? h('ul', { class: 'small list' }, ...d.memos.map((m) => h('li', {}, m.text))) : null,
+    ta, btn('메모 남기기', async () => { const t = ta.value.trim(); if (!t) return; await addEvent(stop, 'FIELD_MEMO', { text: t.slice(0, 300) }); toast('메모를 남겼습니다'); render(); }, 'opt'));
+}
+
 // 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다
 function revisitForm(stop, d) {
   const date = h('input', { type: 'date', value: d.appt ? d.appt.date : todayKST(1) });
@@ -607,7 +620,7 @@ function revisitForm(stop, d) {
     }, 'primary big'));
 }
 
-async function savePhoto(stop, phase, file) {
+async function savePhoto(stop, phase, file, lineId = null) {
   const bmp = await createImageBitmap(file);
   const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas'); c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
@@ -616,7 +629,7 @@ async function savePhoto(stop, phase, file) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const photo_id = crypto.randomUUID();
   await S.putSecureBytes('ph:' + photo_id, bytes);
-  await addEvent(stop, 'PHOTO_META', { photo_id, phase, sha256: P.toHex(await P.sha256(bytes)), bytes: bytes.length, line_id: null });
+  await addEvent(stop, 'PHOTO_META', { photo_id, phase, sha256: P.toHex(await P.sha256(bytes)), bytes: bytes.length, line_id: lineId || null });
 }
 
 // ------------------------------------------------------------ 품목 고르기 (현장 추가·접수 등록 공용)
@@ -677,7 +690,7 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
       freeName.value = ''; freeQty = 1; drawFreeQty();
     }, 'big'));
   const search = h('section', { class: 'card' }, q, results, qtyBox, addBtn, h('p', { class: 'small' }, `수수료표: ${table.label}`));
-  return { search, free, focus: () => q.focus() };
+  return { search, free, focus: () => q.focus(), pick: (r, qty) => onPick(r, qty) };
 }
 
 // ------------------------------------------------------------ 현장 품목 추가
@@ -689,6 +702,9 @@ function screenAdd(id) {
   if (!table) return h('main', {}, h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost')), h('p', { class: 'msg' }, ERR.FEE_VERSION_MISSING));
   const picker = itemPicker(table, a, {
     onPick: async (r, qty) => {
+      // 같은 품목·규격을 이미 현장 추가했다면: 수량을 더할지(기존 행, 변경 기록 남김) 따로 둘지 고른다
+      const prev = deriveStop(stop, st.events).lines.find((l) => l.kind === 'FIELD' && l.fee_rate_id === r.id);
+      if (prev && !a.dupChoice) { a.dup = { r, qty, prev }; render(); return; }
       await addEvent(stop, 'FIELD_ITEM_ADD', { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label, unit_price: r.price, price_status: r.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING', qty });
       ui.add = null; go(`#/stop/${id}`);
     },
@@ -697,6 +713,19 @@ function screenAdd(id) {
       ui.add = null; go(`#/stop/${id}`);
     },
   });
+  if (a.dup) {
+    const { r, qty, prev } = a.dup;
+    return h('main', {},
+      h('header', { class: 'bar' }, btn('← 취소', () => { a.dup = null; render(); }, 'ghost'), h('strong', {}, '같은 품목이 있습니다')),
+      h('section', { class: 'card notice' }, h('p', {}, `이미 현장에서 추가한 품목입니다: ${prev.name} ${prev.spec} ${prev.qty_confirmed}${prev.unit_label}`),
+        h('p', { class: 'small' }, `이번에 고른 수량: ${qty}${r.unit_label}`)),
+      btn(`기존 행에 더하기 (${prev.qty_confirmed} → ${prev.qty_confirmed + qty}${r.unit_label})`, async () => {
+        await addEvent(stop, 'ITEM_RESULT', { line_id: prev.line_id, line_kind: 'FIELD', qty_confirmed: prev.qty_confirmed + qty, qty_collected: prev.qty_collected, reason: prev.reason || '' });
+        ui.add = null; toast('수량을 더했습니다 (변경 기록 남음)'); go(`#/stop/${id}`);
+      }, 'primary huge'),
+      btn('따로 한 줄 더 추가', async () => { a.dupChoice = true; a.dup = null; await picker.pick(r, qty); }, 'huge'),
+      h('p', { class: 'small' }, '어느 쪽이든 앞서 기록한 내용은 지워지지 않습니다.'));
+  }
   setTimeout(picker.focus, 50);
   return h('main', {},
     h('header', { class: 'bar' }, btn('← 취소', () => { ui.add = null; go(`#/stop/${id}`); }, 'ghost'), h('strong', {}, '현장 품목 추가')),

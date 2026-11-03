@@ -103,6 +103,11 @@ CREATE INDEX IF NOT EXISTS ix_payment_req ON payment(request_id);
 CREATE TABLE IF NOT EXISTS unload_log (
   id TEXT PRIMARY KEY, crew_id TEXT NOT NULL REFERENCES crew(id), work_date TEXT NOT NULL, at_time TEXT, place TEXT NOT NULL,
   volume_m3 REAL, weight_kg REAL, note TEXT, recorded_at TEXT NOT NULL, void_reason TEXT);
+CREATE TABLE IF NOT EXISTS item_link (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES request(id), line_id TEXT NOT NULL, fee_rate_id TEXT NOT NULL, fee_version_id TEXT NOT NULL,
+  unit_price INTEGER NOT NULL CHECK (unit_price > 0), reason TEXT NOT NULL, confirmed_by TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL,
+  void_reason TEXT, voided_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_item_link_req ON item_link(request_id);
 CREATE TABLE IF NOT EXISTS addr_point (
   sigungu TEXT NOT NULL DEFAULT '', road TEXT NOT NULL, main INTEGER NOT NULL, sub INTEGER NOT NULL DEFAULT 0, lat REAL NOT NULL, lon REAL NOT NULL,
   PRIMARY KEY (road, main, sub, sigungu));
@@ -183,6 +188,10 @@ def connect(create: bool = False):
     cols = {r[1] for r in con.execute("PRAGMA table_info(audit_log)").fetchall()}
     if "actor" not in cols:  # 이전 버전 DB에 작업자 열 추가
         con.execute("ALTER TABLE audit_log ADD COLUMN actor TEXT")
+    if "line_id" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:  # 사진을 품목 행에 묶기(선택)
+        con.execute("ALTER TABLE photo ADD COLUMN line_id TEXT")
+    if "crew_id" not in {r[1] for r in con.execute("PRAGMA table_info(app_user)").fetchall()}:  # 수거팀 계정 ↔ 팀
+        con.execute("ALTER TABLE app_user ADD COLUMN crew_id TEXT")
     if "purged_at" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:
         con.execute("ALTER TABLE photo ADD COLUMN purged_at TEXT")
     try:

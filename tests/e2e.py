@@ -211,6 +211,15 @@ def main():
         fee_text = page.locator(".fee").inner_text()
         ok("미확정" in fee_text and "1건" in fee_text, "목록에 없는 품목은 0원이 아니라 확인 대기, 최종 금액 미확정")
         ok("6,000원" in page.locator(".fee dd").nth(1).inner_text(), "회전식 의자 2개 = 현장 추가분 6,000원")
+        # 같은 품목을 다시 추가 → 더하기/따로 선택
+        page.get_by_role("button", name="+ 현장 품목 추가").click()
+        page.get_by_placeholder(re.compile("품목명")).fill("회전 의자")
+        page.locator(".btn.result").first.click()
+        page.get_by_role("button", name="추가", exact=True).click()
+        expect(page.get_by_text("이미 현장에서 추가한 품목입니다")).to_be_visible()
+        page.get_by_role("button", name=re.compile("^기존 행에 더하기")).click()
+        expect(page.locator(".line.field")).to_have_count(2)
+        ok("9,000원" in page.locator(".fee dd").nth(1).inner_text(), "같은 품목 재추가 → '기존 행에 더하기'로 2+1=3개 (행 늘지 않음, 변경 기록)")
 
         # 첫 원접수 품목은 1개만 수거하고 나머지는 사유 기록
         orig = page.locator(".line.orig").first
@@ -226,6 +235,10 @@ def main():
         expect(page.get_by_text("저장됨: 일부 수거")).to_be_visible()
         ok(page.locator(".line.field").last.locator(".row.left .val").inner_text().startswith("1"),
            "현장 추가 품목의 남은 대상 1 유지 (다른 품목 수거로 상쇄 안 됨)")
+        page.get_by_label("현장 메모").fill("지하주차장 입구에 배출")
+        page.get_by_role("button", name="메모 남기기").click()
+        expect(page.locator(".memo-box li", has_text="지하주차장 입구")).to_be_visible()
+        ok(True, "현장 메모 남기기")
         page.screenshot(path=SHOTS / "05_stop_top.png")
         page.locator(".fee").scroll_into_view_if_needed()
         page.screenshot(path=SHOTS / "06_stop_fee.png")
