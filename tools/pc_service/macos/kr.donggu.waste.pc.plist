@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent (logged-in operator account; Keychain holds the DB key).
+  Replace /Users/USERNAME/donggu-waste with the real repo path, then:
+    mkdir -p ~/donggu-waste/pc/state/logs
+    cp tools/pc_service/macos/kr.donggu.waste.pc.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/kr.donggu.waste.pc.plist
+  Stop/remove: launchctl bootout gui/$(id -u)/kr.donggu.waste.pc
+  Logs: pc/state/logs/service.log (console output); the server's own logs are in the same folder.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>kr.donggu.waste.pc</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/donggu-waste/.venv/bin/python</string>
+    <string>pc/pc_tool.py</string>
+    <string>serve</string>
+    <string>--port</string><string>8765</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/USERNAME/donggu-waste</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUTF8</key><string>1</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>/Users/USERNAME/donggu-waste/pc/state/logs/service.log</string>
+  <key>StandardErrorPath</key><string>/Users/USERNAME/donggu-waste/pc/state/logs/service.log</string>
+</dict>
+</plist>

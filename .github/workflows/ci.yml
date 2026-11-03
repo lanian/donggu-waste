@@ -1,0 +1,183 @@
+# 시험(CI)과 휴대폰 앱(web/) 배포.
+#   - main push · PR      : 시험만 (배포 안 함)
+#   - v* 태그 push        : 시험 → 버전·태그 검사 → github-pages 환경 승인 → Pages 배포
+#   - 수동 실행(workflow_dispatch, main 또는 v* 태그에서): 위와 같음
+# 업무 데이터는 저장소와 Pages에 없다. 절차와 승인 설정은 docs/배포·운영.md 참고.
+name: CI · Pages 배포
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['**.md', 'docs/**']   # 태그 push 에는 경로 거르기가 적용되지 않는다
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 같은 브랜치·PR 의 이전 시험은 취소. 배포 작업은 아래 deploy 의 별도 concurrency 로 순서대로 한 번씩.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '22'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PYTHONUTF8: '1'               # 시험 출력(한글·✓)을 Windows 콘솔에서도 UTF-8 로
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  version:
+    name: 앱 버전 검사 (app.js = sw.js = 태그)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      # 태그 실행이면 GITHUB_REF_TYPE=tag · GITHUB_REF_NAME=v… 를 읽어 태그까지 비교
+      - run: python tools/check_version.py
+
+  test:
+    name: 단위·로직 시험 (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: pc/requirements.txt }
+      - run: pip install -r pc/requirements.txt   # 해시 고정본 → 자동으로 --require-hashes
+      - run: npm ci
+      - name: 포함된 라이브러리가 고정 버전과 같은지
+        run: |
+          cmp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js
+          cmp node_modules/maplibre-gl/dist/maplibre-gl.mjs web/vendor/maplibre/maplibre-gl.mjs
+          cmp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs web/vendor/maplibre/maplibre-gl-worker.mjs
+          cmp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs
+      - name: 앱 내장 수수료표가 원본 JSON과 같은지
+        run: python tools/build_fee_js.py && git diff --exit-code web/fees-data.js
+      - run: npm test
+      - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)
+
+  e2e:
+    name: 화면 종단 시험 (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [e2e, e2e_pc]      # tests/e2e.py (휴대폰 화면), tests/e2e_pc.py (PC 화면)
+    steps:
+      - uses: actions/checkout@v4
+      - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
+        run: echo "DG_TEST_DIR=$RUNNER_TEMP/${{ matrix.suite }}" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: .github/requirements-e2e.txt }
+      - run: pip install -r .github/requirements-e2e.txt   # pc/requirements.txt 와 같은 버전 + Playwright (해시 고정)
+      - name: Playwright Chromium 설치
+        run: |
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk   # 화면 캡처의 한글 표시용
+      - name: 시험이 쓸 브라우저 지정 (CHROME)
+        # 시험은 CHROME 환경변수(기본 /usr/bin/google-chrome)로 브라우저를 고른다 → Playwright 가 받은 Chromium 으로
+        run: |
+          python - <<'EOF' >> "$GITHUB_ENV"
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              print("CHROME=" + p.chromium.executable_path)
+          EOF
+      - run: python tests/${{ matrix.suite }}.py
+      - name: 실패 시 화면 캡처 올리기
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.suite }}-${{ github.run_attempt }}
+          path: ${{ env.DG_TEST_DIR }}/shots/
+          retention-days: 14
+          if-no-files-found: warn
+        # 캡처는 가상 자료만 담는다. 시험 작업 폴더의 state/(DB·키)는 올리지 않는다.
+
+  pc-os:
+    name: PC 로직 시험 (${{ matrix.os }}, 참고용)
+    # 참고용: 실패해도 배포를 막지 않는다. 결과는 작업 요약(Summary)에 표시.
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: pc/requirements.txt }
+      - name: 의존성 설치 (바이너리 휠만, 소스 빌드 금지)
+        id: install
+        run: pip install --only-binary ":all:" -r pc/requirements.txt
+      - name: SQLCipher 동작 확인
+        id: sqlcipher
+        run: python -c "import sqlcipher3; c = sqlcipher3.connect(':memory:'); v = c.execute('PRAGMA cipher_version').fetchone(); assert v and v[0], 'SQLCipher 아님(평문 SQLite)'; print('SQLCipher', v[0])"
+      - name: PC 업무 로직 시험
+        run: python tests/test_pc.py
+      - name: 결과 요약
+        if: always()
+        run: |
+          {
+            echo "### PC 로직 시험 — ${{ matrix.os }}"
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "통과: 의존성 설치(바이너리 휠)·SQLCipher·tests/test_pc.py"
+            elif [ "${{ steps.install.outcome }}" != "success" ]; then
+              echo "**실패: pip 설치 단계.** 이 OS·Python ${{ env.PYTHON_VERSION }} 용 바이너리 휠이 없는 패키지가 있을 수 있습니다."
+              echo "sqlcipher3 휠이 없으면 docs/배포·운영.md \"SQLCipher 설치가 안 될 때\"를 따르세요."
+            elif [ "${{ steps.sqlcipher.outcome }}" != "success" ]; then
+              echo "**실패: SQLCipher 확인.** sqlcipher3 가 설치됐지만 암호화가 동작하지 않습니다."
+            else
+              echo "**실패: tests/test_pc.py.** 이 OS에서만 나는 문제인지 로그를 확인하세요 (배포는 막지 않음)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "${{ job.status }}" = "success" ] || echo "::warning::${{ matrix.os }} PC 로직 시험 실패 (참고용, 배포 계속)"
+
+  deploy:
+    name: 휴대폰 앱 배포 (GitHub Pages)
+    needs: [version, test, e2e]
+    # v* 태그 push, 또는 main·v* 태그에서 수동 실행할 때만. main push·PR 은 시험만.
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    # 저장소 관리자: Settings → Environments → github-pages 에서
+    #   Required reviewers(승인자) 지정, Deployment branches and tags 에 main 과 태그 규칙 v* 추가.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: web }
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      - name: 배포 기록
+        run: |
+          {
+            echo "### 휴대폰 앱 배포"
+            echo "- 기준: \`${{ github.ref_name }}\` (${{ github.sha }})"
+            echo "- 실행자: ${{ github.actor }}, 방식: ${{ github.event_name }}"
+            echo "- 주소: ${{ steps.deployment.outputs.page_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

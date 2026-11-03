@@ -4,7 +4,11 @@
   "type": "module",
   "scripts": {
     "test": "node tests/fees.test.mjs && node tests/interop.mjs",
-    "vendor": "cp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js && cp node_modules/maplibre-gl/dist/maplibre-gl.mjs node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl.css web/vendor/maplibre/ && cp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs"
+    "vendor": "cp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js && cp node_modules/maplibre-gl/dist/maplibre-gl.mjs node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl.css web/vendor/maplibre/ && cp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs",
+    "check:version": "python3 tools/check_version.py",
+    "test:pc": "python3 tests/test_pc.py",
+    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_pc.py",
+    "test:all": "npm run check:version && npm test && npm run test:pc && npm run test:e2e"
   },
   "devDependencies": {
     "jsqr": "1.4.0",

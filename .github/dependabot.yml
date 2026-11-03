@@ -1,0 +1,7 @@
+# GitHub Actions 버전 갱신 제안 (매주). Python·npm 고정본은 docs/배포·운영.md 절차로 사람이 갱신한다.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
