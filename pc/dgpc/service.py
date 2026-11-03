@@ -879,12 +879,12 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
         st = derive(con, r)
         if st["fee"]["pending_count"] and r["status"] != "CANCELLED":
-            pending_fee.append({"receipt_no": r["receipt_no"], "name": r["name"], "count": st["fee"]["pending_count"]})
+            pending_fee.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "count": st["fee"]["pending_count"]})
         if r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
-            revisit.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "remaining": st["remaining_total"],
+            revisit.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "remaining": st["remaining_total"],
                             "next_date": r["planned_date"] if r["planned_date"] != work_date else None, "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None})
         if r["id"] in assigned_ids and r["status"] == "ASSIGNED":
-            no_result.append({"receipt_no": r["receipt_no"], "name": r["name"]})
+            no_result.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"]})
     ids = {r["id"] for r in reqs}
     photos = [x for x in rows(con, """SELECT p.photo_id, p.request_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
         WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,)) if x["request_id"] in ids]
@@ -897,7 +897,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
             ps = payment_status(con, r["id"])
             if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING"):
-                unpaid.append({"receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"], "paid": ps["paid"]})
+                unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"], "paid": ps["paid"]})
     unloads = [u for u in list_unloads(con, work_date) if not crew_id or u["crew_id"] == crew_id]
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),

@@ -199,6 +199,7 @@ def main():
         page.locator(".btn.result").first.click()
         page.get_by_role("button", name="추가", exact=True).click()
         page.get_by_role("button", name="+ 현장 품목 추가").click()
+        expect(page.get_by_text("즐겨찾기·자주 쓴 품목")).to_be_visible()
         ok(page.get_by_text("즐겨찾기·자주 쓴 품목").is_visible() and "회전식 의자" in page.locator(".results").inner_text(), "검색 전 자주 쓴 품목 바로 표시")
         page.get_by_role("button", name="즐겨찾기").first.click()
         expect(page.get_by_role("button", name="즐겨찾기 해제")).to_have_count(1)
@@ -223,13 +224,16 @@ def main():
 
         # 첫 원접수 품목은 1개만 수거하고 나머지는 사유 기록
         orig = page.locator(".line.orig").first
-        orig.locator(".row").nth(2).locator(".btn.step").last.click()  # 실제 수거 +1
-        page.get_by_role("button", name="완료", exact=True).click()
-        ok("남은 대상이 있어" in page.locator("section .msg").last.inner_text(), "남은 대상이 있으면 완료 저장 막음")
-        page.get_by_role("button", name="모두 수거함").click()
+        orig.locator(".row").nth(2).locator(".btn.step").last.click()  # 실은 수량 +1
+        page.wait_for_timeout(700)
+        page.get_by_role("button", name="일부 수거", exact=True).click()
+        expect(page.locator("#st-result .msg.err")).to_contain_text("사유를 골라")
+        ok(page.locator("select.reason.need").count() >= 1, "못 실은 품목의 사유 없이 일부 수거 저장 막음 (사유 칸 강조)")
+        page.get_by_role("button", name="품목 수량을 모두 실음으로 채우기").click()
         # 안마기는 수거 못 함: 수거 0 → 사유
         fld = page.locator(".line.field").last
-        fld.locator(".row").nth(1).locator(".btn.step").first.click()  # 실제 수거 −1
+        fld.locator(".row").nth(1).locator(".btn.step").first.click()  # 실은 수량 −1
+        page.wait_for_timeout(700)
         fld.locator("select.reason").select_option("CANNOT_LOAD")
         page.get_by_role("button", name="일부 수거", exact=True).click()
         expect(page.get_by_text("저장됨: 일부 수거")).to_be_visible()
@@ -254,12 +258,12 @@ def main():
         page.locator(".pin", has_text=re.compile("^1$")).click()
         expect(page.locator(".who .name")).to_have_text(name)
         ok(True, "핀을 누르면 해당 접수 상세로 이동")
-        page.get_by_role("button", name="📍 위치 고치기").click()
+        page.get_by_role("button", name="위치 고치기").click()
         save = page.get_by_role("button", name="이 위치로 저장")
         expect(save).to_be_enabled(timeout=30000)
         page.locator(".mapbox canvas").drag_to(page.locator(".mapbox canvas"), source_position={"x": 150, "y": 150}, target_position={"x": 190, "y": 180})
         save.click()
-        expect(page.get_by_role("button", name="🗺 지도에서 보기")).to_be_visible()
+        expect(page.get_by_role("button", name="지도", exact=True)).to_be_visible()
         ok(True, "현장에서 배출 위치 고치기 (결과 파일로 PC에 전달되는 기록)")
 
         # 4) 앱 재시작 후 기록 유지 ------------------------------------------------
@@ -272,7 +276,7 @@ def main():
         page.goto(url + "#/unload")
         page.locator("label", has_text="부피").locator("input").fill("3.5")
         page.locator("label", has_text="반입지").locator("input").fill("가상 반입지")
-        page.get_by_role("button", name="하차 저장").click()
+        page.get_by_role("button", name="하차 기록", exact=True).click()
         expect(page.get_by_role("button", name="하차 기록 (1회)")).to_be_visible()
         ok(True, "휴대폰 하차 기록 저장 → 목록 화면에 횟수 표시")
 
@@ -452,33 +456,32 @@ def solo(pw, url, video):
 
     # 현장 처리
     page.get_by_role("button", name="통화 완료").click()
-    page.get_by_role("button", name="모두 수거함").click()
-    page.get_by_role("button", name="완료", exact=True).click()
-    expect(page.get_by_text("저장됨: 완료")).to_be_visible()
+    page.get_by_role("button", name="전부 실음 · 수거 완료").click()
+    expect(page.get_by_text("저장됨: 수거 완료")).to_be_visible()
     ok(True, "단독 모드 현장 처리: 연락·수거·완료 저장")
-    page.get_by_role("button", name="← 목록").click()
+    page.get_by_role("button", name="← 목록").first.click()
 
     # 위치 지정 (지도 가운데 핀, 주소 검색 없음)
     page.locator(".stop", has_text="가상일").click()
-    page.get_by_role("button", name="📍 위치 지정").click()
+    page.get_by_role("button", name="위치 지정", exact=True).click()
     save = page.get_by_role("button", name="이 위치로 저장")
     expect(save).to_be_enabled(timeout=30000)
-    page.get_by_role("button", name="📍 지금 내 위치로 이동").click()
+    page.get_by_role("button", name="지금 내 위치로 이동").click()
     page.wait_for_timeout(800)
     page.screenshot(path=SHOTS / "14_solo_pick.png")
     save.click()
-    page.get_by_role("button", name="🗺 지도에서 보기").click()
+    page.get_by_role("button", name="지도", exact=True).click()
     expect(page.locator(".pin.focus")).to_have_count(1, timeout=30000)
     ok(True, "단독 모드: 지도에서 배출 위치 지정 → 지도에 핀 표시")
     page.get_by_role("button", name="← 접수").click()
-    page.get_by_role("button", name="← 목록").click()
+    page.get_by_role("button", name="← 목록").first.click()
 
     # 취소 (사유 보존)
     page.locator(".stop", has_text="가상이").click()
     prompts["text"] = "주민이 직접 처리"
     page.get_by_role("button", name="접수 취소").click()
     expect(page.get_by_text("취소된 접수입니다. 사유: 주민이 직접 처리")).to_be_visible()
-    page.get_by_role("button", name="← 목록").click()
+    page.get_by_role("button", name="← 목록").first.click()
     page.get_by_role("button", name=re.compile("취소 1")).click()
     expect(page.locator(".stop")).to_have_count(1)
     ok(page.locator(".stop").count() == 1, "취소 건은 지우지 않고 취소 목록에 보존")
@@ -488,7 +491,7 @@ def solo(pw, url, video):
     page.get_by_role("button", name=re.compile("^하차 기록")).click()
     page.locator("label", has_text="부피").locator("input").fill("2.5")
     page.locator("label", has_text="반입지").locator("input").fill("가상 반입지")
-    page.get_by_role("button", name="하차 저장").click()
+    page.get_by_role("button", name="하차 기록", exact=True).click()
     expect(page.get_by_role("button", name="하차 기록 (1회)")).to_be_visible()
     page.goto(url + "#/settings")
     mline = page.locator(".line", has_text="6인용 이상(대리석)")
@@ -547,7 +550,8 @@ def solo(pw, url, video):
     page.get_by_role("button", name=re.compile("내일")).click()
     expect(page.locator(".stop")).to_have_count(1, timeout=15000)
     page.locator(".stop", has_text="가상일").click()
-    ok(page.get_by_text("저장됨: 완료").is_visible() and page.get_by_text("주민 요청: 동·호수 추가").is_visible(), "새 휴대폰 가정: 백업 복원 후 접수·수정 이력·현장 기록 유지")
+    expect(page.get_by_text("저장됨: 수거 완료")).to_be_visible()
+    ok(page.get_by_text("저장됨: 수거 완료").is_visible() and page.get_by_text("주민 요청: 동·호수 추가").is_visible(), "새 휴대폰 가정: 백업 복원 후 접수·수정 이력·현장 기록 유지")
     page.screenshot(path=SHOTS / "13_solo_stop.png")
     ok(not errors, "단독 모드 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
     ctx.close()

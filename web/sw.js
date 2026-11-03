@@ -1,6 +1,6 @@
 // 서비스 워커: 앱 파일만 저장해 오프라인으로 실행한다. 업무 자료는 다루지 않는다.
 // 새 버전은 자동 적용하지 않고, 앱 화면의 [업데이트]를 눌러야 바뀐다.
-const VERSION = '0.8.0';
+const VERSION = '0.9.0';
 const CACHE = 'dg-app-' + VERSION;
 const FILES = ['./', './index.html', './style.css', './app.js', './proto.js', './store.js', './fees.js', './fees-data.js', './backup.js', './map.js',
   './vendor/maplibre/maplibre-gl.mjs', './vendor/maplibre/maplibre-gl-worker.mjs', './vendor/maplibre/maplibre-gl.css',

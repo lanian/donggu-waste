@@ -545,7 +545,8 @@ class Handler(BaseHTTPRequestHandler):
         b = r[0]
         frames = json.loads(b["frames_json"])
         imgs = [qr_png_data_uri(f, "M")[0] for f in frames]
-        page = display_html(imgs, b["id"][:8], b["work_date"], b["assign_ver"], "", 3, b["crew"] or "").encode()
+        n = S.one(CON, "SELECT COUNT(*) AS n FROM assignment_stop WHERE batch_id=?", (b["batch_id"],))["n"] if b["batch_id"] else ""
+        page = display_html(imgs, b["id"][:8], b["work_date"], b["assign_ver"], n, 3, b["crew"] or "").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))

@@ -107,6 +107,6 @@ export function progressOf(lines, eventCount) {
 export const LABEL = {
   contact: { NOT_CONTACTED: '연락 전', REACHED: '통화 완료', NO_ANSWER: '부재', CALLBACK: '재연락 예정', WRONG_NUMBER: '번호 오류' },
   progress: { TODO: '방문 전', STARTED: '처리 중', PARTIAL: '일부 수거', DONE: '수거 완료' },
-  outcome: { DONE: '완료', PARTIAL: '일부 수거', NOT_COLLECTED: '미수거', ON_HOLD: '확인 대기' },
+  outcome: { DONE: '수거 완료', PARTIAL: '일부 수거', NOT_COLLECTED: '미수거', ON_HOLD: '보류' },
   reason: { '': '사유 선택', NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기', OTHER: '기타' },
 };

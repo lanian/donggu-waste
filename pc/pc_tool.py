@@ -72,7 +72,7 @@ body{{margin:0;font-family:system-ui,sans-serif;background:#fff;color:#111;displ
 header{{padding:12px;text-align:center}} img{{width:min(78vmin,640px);image-rendering:pixelated;margin:8px}}
 .n{{font-size:42px;font-weight:700}} .ctl button{{font-size:18px;padding:8px 16px;margin:4px}}
 </style>
-<header><div>{html.escape(crew)} 목록 {html.escape(short)} · {html.escape(work_date)} · 갱신본 {ver} · {count}건</div>
+<header><div>{html.escape(crew)} · {html.escape(work_date)}{f" · {ver}차 목록" if str(ver).isdigit() and int(ver) > 1 else ""}{f" · {count}곳" if count != "" else ""}</div>
 <div class="n" id="n"></div></header>
 <img id="q" alt="전송 QR">
 <div class="ctl"><button id="slow">느리게</button><button id="pause">일시정지</button><button id="fast">빠르게</button>
