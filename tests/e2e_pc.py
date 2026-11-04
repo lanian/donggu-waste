@@ -276,6 +276,7 @@ def run():
         intake("가상하나", "010-0000-5001", "가상시 동구 시험로 1", "3인용 소파", 1, click_map={"x": 300, "y": 180}, appt=("09:00", "11:00"))
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
         r1_url = page.url
+        r1_head = page.get_by_role("heading", name=re.compile("접수 DG-")).inner_text()
         page.screenshot(path=SHOTS / "pc_01_request.png", full_page=True)
         intake("가상둘", "01000005001", "가상시 동구 시험로 2", "장농", 2, click_map={"x": 420, "y": 260})
         expect(page.get_by_text(re.compile("비슷한 미완료 접수 1건"))).to_be_visible()
@@ -288,6 +289,8 @@ def run():
 
         # 수정 이력
         page.goto(r1_url)
+        # 같은 상세 화면(#/request/…)끼리는 주소 뒷부분만 바뀌므로, 앞 접수 화면이 아니라 이 접수가 그려졌는지 먼저 확인
+        expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_have_text(r1_head)
         settled(page)
         page.get_by_label("상세 배출 위치").fill("101동 현관 앞")
         expect(page.get_by_label("상세 배출 위치")).to_have_value("101동 현관 앞")
