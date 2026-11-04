@@ -660,6 +660,8 @@ async function importDlg() {
 // ------------------------------------------------------------ 접수 등록·수정
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
+let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
+const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
   const blank = { name: '', phone: '', address: '', spot_note: '', memo: '', planned_date: '', appt_start: '', appt_end: '', must_today: 0, urgent: 0, priority: 0, lat: null, lon: null,
@@ -827,15 +829,16 @@ async function screenRequest(id) {
     priority: +F.priority.value, lat: F.lat.value || null, lon: F.lon.value || null, geo_source: geoSource, dong: F.dong.value, channel: F.channel.value,
     ...(isNew ? { reduction_code: redSel.value, reduction_proof: redProof.value, reduction_checker: redWho.value || (redSel.value ? boot.me.display_name : '') } : {}),
     items: items.map((i) => ({ line_id: i.line_id, fee_rate_id: i.fee_rate_id || null, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty })) });
-  let dupAck = false;
+  // 중복 경고를 본 연락처·주소는 기억한다(화면 밖 변수): 그사이 화면이 다시 그려져도 [접수 등록]을 또 눌러야 하는 일이 없게
+  const dupKey = () => `${digitsOnly(F.phone.value)}|${F.address.value.trim()}`;
   const save = wrap(async () => {
     if (isNew) {
-      if (!dupAck) {
+      if (dupAckKey !== dupKey()) {
         await checkDup();
-        if (dupBox.childNodes.length) { dupAck = true; msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
+        if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
       }
       const res = await post('requests', data());
-      intakeDraft = null;
+      intakeDraft = null; dupAckKey = null;
       toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
     } else {
       const res = await post('requests/' + id, { ...data(), reason: reason.value });
