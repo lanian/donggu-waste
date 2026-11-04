@@ -377,6 +377,12 @@ def run():
         page.locator("input[type=file]").nth(0).set_input_files(str(f2))
         page.get_by_role("button", name="가져오기").nth(0).click()
         expect(page.get_by_text("현장 접수 만듦")).to_be_visible()
+        page.locator(".conf-tabs .qchip", has_text="충돌").click()
+        expect(page.locator("#conflicts tr", has_text="정정 요청")).to_have_count(0)
+        page.locator(".conf-tabs .qchip", has_text="현장 요청").click()
+        expect(page.locator(".conf-tabs .qchip.on")).to_contain_text("현장 요청")
+        expect(page.locator("#conflicts tr", has_text="정정 요청")).to_have_count(1)
+        ok(True, "충돌함 탭: 현장 요청 / 충돌을 나눠 보기")
         row = page.locator("#conflicts tr", has_text="정정 요청")
         expect(row).to_contain_text("뒷문 옆 화단")
         old_spot = s2.get("spot_note") or "(없음)"

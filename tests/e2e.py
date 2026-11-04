@@ -628,6 +628,13 @@ def pc_field(pw, url):
     page.get_by_role("button", name="접수 저장").click()
     expect(page.locator(".who .name")).to_have_text("가상현장", timeout=15000)
     ok(page.get_by_text(re.compile("이 휴대폰에서 받은 현장 접수입니다\\(임시번호 현장-")).is_visible(), "현장 접수 저장 → 바로 그 지점 화면(임시번호, PC 반영 전 안내)")
+    # 아직 보내지 않은 휴대폰 접수는 바로 고침(정정 요청 아님)
+    page.get_by_role("button", name="접수 고치기 (보내기 전)").click()
+    expect(page.locator("h1", has_text="접수 고치기")).to_be_visible()
+    page.get_by_label("상세 배출 위치").fill("대문 옆 화단")
+    page.get_by_role("button", name="고친 내용 저장").click()
+    expect(page.locator(".who .spot")).to_contain_text("대문 옆 화단")
+    ok(page.get_by_role("button", name="정정 요청").is_disabled(), "보내기 전 휴대폰 접수: [접수 고치기]로 바로 고침(정정 요청은 꺼짐)")
     page.get_by_role("button", name="전부 실음 · 수거 완료").click()
     expect(page.get_by_text("저장됨: 수거 완료")).to_be_visible()
     page.goto(url + "#/home")
@@ -644,6 +651,9 @@ def pc_field(pw, url):
     page.get_by_label("요청 사유 (필수)").fill("주민이 새 번호를 알려 줌")
     page.get_by_role("button", name="정정 요청 남기기").click()
     expect(page.get_by_text(re.compile("정정 요청 · 연락처 → 010-0000-9898"))).to_be_visible()
+    page.get_by_role("button", name=re.compile("^새 번호로 전화")).click()
+    page.wait_for_function("() => window.__dgOpened.length && window.__dgOpened[window.__dgOpened.length - 1] === 'tel:01000009898'")
+    ok(True, "정정 요청한 새 연락처로 바로 전화(전화 앱에 새 번호만)")
     ok(page.locator(".who .phone").inner_text() != "010-0000-9898" and page.get_by_text("보내기 전 (결과 보내기 때 함께)").is_visible(),
        "정정 요청은 이 휴대폰 목록을 바꾸지 않고 '보내기 전' 요청으로 표시")
     # 취소 요청: 다른 지점
@@ -671,11 +681,12 @@ def pc_field(pw, url):
     f.write_bytes(__import__("base64").b64decode(got["b64"]))
     imp = py("import-result", str(f))
     ok('"field_intakes": 1' in imp and '"review": 2' in imp, "PC 가져오기: 현장 접수 1건 → PC 원본 접수, 정정·취소 요청 2건 → 확인 대상 " + imp.splitlines()[0])
-    rq = pc_sql("SELECT receipt_no, channel, origin_device, status, field_checked_at FROM request WHERE name='가상현장'")
+    rq = pc_sql("SELECT receipt_no, channel, origin_device, status, field_checked_at, spot_note FROM request WHERE name='가상현장'")
     items = pc_sql("SELECT i.name, i.amount, i.price_status FROM request_item i JOIN request r ON r.id=i.request_id WHERE r.name='가상현장' ORDER BY i.name")
     ok(len(rq) == 1 and rq[0]["channel"] == "현장" and rq[0]["origin_device"] and rq[0]["status"] == "DONE" and rq[0]["field_checked_at"] is None
        and any(i["price_status"] == "PENDING" and i["amount"] is None for i in items) and any(i["price_status"] == "CONFIRMED" and i["amount"] for i in items),
        f"PC 원본 {rq[0]['receipt_no'] if rq else '-'}: 경로 '현장', 수거 완료, 사무실 확인 전, 표에 없는 품목은 확인 대기")
+    ok(rq[0]["spot_note"] == "대문 옆 화단", "보내기 전에 고친 내용이 PC 원본으로")
     cf = pc_sql("SELECT kind, conflict_reason FROM result_event WHERE apply_status='CONFLICT' AND kind IN ('CORRECTION','CANCEL_REQUEST')")
     ok({c["kind"] for c in cf} == {"CORRECTION", "CANCEL_REQUEST"} and pc_sql("SELECT phone FROM request WHERE name='가상새집'")[0]["phone"] == "01000009999",
        "정정·취소 요청은 PC 충돌함(확인 대상)으로, 원본은 확인 전까지 그대로")

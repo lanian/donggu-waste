@@ -1237,16 +1237,23 @@ async function screenResults() {
     }, msg), 'primary'), msg);
   };
   const conf = h('div', { class: 'card', id: 'conflicts' });
+  // 휴대폰 현장 요청(현장 접수 확인·정정·취소)과 진짜 충돌(오래된 목록·다른 팀 등)을 나눠 본다
+  const REQ_KINDS = ['FIELD_INTAKE', 'CORRECTION', 'CANCEL_REQUEST'];
+  let confTab = 'ALL';
   const loadConf = wrap(async () => {
-    const list = await api('conflicts');
-    conf.replaceChildren(h('div', { class: 'panel-h' }, h('h2', {}, `충돌함 ${list.length}건`), h('span', { class: 'muted small' }, '사유를 보고 반영 또는 거부 (거부해도 원 기록은 남음)')),
+    const all = await api('conflicts');
+    const nReq = all.filter((c) => REQ_KINDS.includes(c.kind)).length;
+    const list = all.filter((c) => confTab === 'ALL' || (confTab === 'REQ') === REQ_KINDS.includes(c.kind));
+    const tabs = h('div', { class: 'quick conf-tabs' }, ...[['ALL', '전체', all.length], ['REQ', '현장 요청', nReq], ['CONFLICT', '충돌', all.length - nReq]].map(([k, t, n]) =>
+      h('button', { type: 'button', class: 'qchip' + (confTab === k ? ' on' : ''), 'aria-pressed': confTab === k ? 'true' : 'false', onclick: () => { confTab = k; loadConf(); } }, t, h('b', {}, n))));
+    conf.replaceChildren(h('div', { class: 'panel-h' }, h('h2', {}, `충돌함 ${all.length}건`), h('span', { class: 'muted small' }, '사유를 보고 반영 또는 거부 (거부해도 원 기록은 남음)')), tabs,
       list.length ? grid(['접수', '기록 종류', '기록 내용', '휴대폰 시각', '충돌 사유', '처리'], list.map((c) => {
         const why = h('input', { placeholder: '판단 사유', class: 'w-m', 'aria-label': '판단 사유' });
         return [h('span', {}, c.request_id ? h('a', { href: `#/request/${c.request_id}` }, c.receipt_no || c.request_id.slice(0, 8)) : '-', ' ', c.name || '', h('br'), c.request_status ? statusChip(c.request_status) : null),
           EVENT_KIND[c.kind] || c.kind, c.kind === 'CORRECTION' ? correctionBody(c) : eventBody(c.kind, c.body_json), kst(c.device_ts), c.conflict_reason,
           h('span', { class: 'row' }, why, btn('반영', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'APPLY', reason: why.value }); toast('반영했습니다'); loadConf(); }), 'small'),
             btn('거부', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'REJECT', reason: why.value }); toast('거부로 기록했습니다'); loadConf(); }), 'small danger'))];
-      }), { cls: 'conflicts' }) : h('p', { class: 'empty' }, '확인할 충돌이 없습니다.'));
+      }), { cls: 'conflicts' }) : h('p', { class: 'empty' }, confTab === 'REQ' ? '확인할 현장 요청이 없습니다.' : '확인할 충돌이 없습니다.'));
   });
   loadConf();
   const showReport = (r, isPhoto) => rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),

@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.11';
+export const APP_VERSION = '0.12.12';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -185,6 +185,13 @@ const allStops = () => (isSolo() ? st.requests : pcStops());
 // PC 연결 방식에서 보낸 변경 요청(정정·취소): PC 확인 전까지는 원본을 바꾸지 않고 표시만 한다
 const changeReqs = (id) => st.events.filter((e) => e.request_id === id && (e.kind === 'CORRECTION' || e.kind === 'CANCEL_REQUEST'));
 const cancelAsked = (id) => !isSolo() && changeReqs(id).some((e) => e.kind === 'CANCEL_REQUEST');
+// 이 휴대폰에서 받은 접수 중 아직 결과 파일로 내보내지 않은 것(내보낸 적 있으면 PC가 받았을 수 있어 고치지 않음)
+function fieldEditable(id) {
+  const stop = (st.fieldStops || []).find((x) => x.request_id === id);
+  const ev = st.events.find((e) => e.kind === 'FIELD_INTAKE' && e.request_id === id);
+  if (!stop || !ev || ev.seq <= st.releasedSeq || (st.exports || []).some((x) => ev.seq >= x.from && ev.seq <= x.to)) return null;
+  return { stop, ev };
+}
 const findStop = (id) => allStops().find((s) => s.request_id === id);
 // 수수료표: 앱에 내장된 표를 쓰고, PC 목록은 버전만 알려 준다. 버전이 다르면 계산하지 않는다.
 // PC가 승인한 개정(확인 필요 행의 확정 단가 등)이 있으면 내장 표에 덧씌운다.
@@ -1170,10 +1177,16 @@ function pcManage(stop, purged) {
   };
   return h('section', { class: 'card' }, h('h2', {}, '접수 변경 요청'),
     h('p', { class: 'small' }, 'PC가 원본입니다. 주민에게 들은 바뀐 연락처·주소·날짜나 취소를 요청으로 보내면, 사무실이 확인해 반영하고 다음 목록에 나옵니다.'),
+    fieldEditable(id) ? h('div', {}, h('p', { class: 'small' }, '아직 PC로 보내지 않은 접수라 바로 고칠 수 있습니다.'),
+      btn('접수 고치기 (보내기 전)', () => { ui.form = null; go(`#/intake/${id}`); }, 'primary big')) : null,
     h('div', { class: 'grid2' },
-      btn('정정 요청', () => { ui.fix = null; go(`#/fix/${id}`); }, 'opt', { disabled: purged || stop.status === 'CANCELLED' }),
+      btn('정정 요청', () => { ui.fix = null; go(`#/fix/${id}`); }, 'opt', { disabled: purged || stop.status === 'CANCELLED' || !!fieldEditable(id) }),
       btn('취소 요청', cancelReq, 'opt', { disabled: stop.status === 'CANCELLED' || cancelAsked(id) })),
-    reqs.length ? h('ul', { class: 'small list' }, ...reqs.map((e) => h('li', {}, text(e), h('br'), h('span', { class: 'muted' }, state(e))))) : null);
+    reqs.length ? h('ul', { class: 'small list' }, ...reqs.map((e) => {
+      const np = e.kind === 'CORRECTION' && e.body.fields && !Array.isArray(e.body.fields) ? e.body.fields.phone : null;
+      return h('li', {}, text(e), h('br'), h('span', { class: 'muted' }, state(e)),
+        np ? btn(`새 번호로 전화 ${fmtPhone(np)}`, async () => { await addEvent(stop, 'DIAL_INTENT', { to: 'CORRECTION' }); ui.afterCall = id; handoff(); openExternal('tel:' + np); }, 'opt call-new') : null);
+    })) : null);
 }
 function screenFix(id) {
   const stop = findStop(id);
@@ -1651,7 +1664,9 @@ let registeredNow = true;  // 화면 그릴 때 갱신(접수 화면의 미등�
 function screenIntake(id) {
   // PC 연결 방식: 새 현장 접수만(PC 원본은 고치지 않음 — 바꿀 내용은 지점 화면의 [정정 요청])
   const onField = !isSolo();
-  const editing = id && !onField ? findStop(id) : null;
+  // PC 연결 방식에서 고치기는 '아직 보내지 않은 이 휴대폰의 접수'만(보낸 뒤에는 정정 요청)
+  const fieldEdit = id && onField ? fieldEditable(id) : null;
+  const editing = id ? (onField ? (fieldEdit && fieldEdit.stop) : findStop(id)) : null;
   if (id && !editing) { go('#/home'); return h('main'); }
   const table = (onField && feeTable()) || BUILTIN_FEES;
   const locked = new Set(editing ? st.events.filter((e) => e.request_id === id && e.kind === 'ITEM_RESULT').map((e) => e.body.line_id) : []);
@@ -1722,7 +1737,7 @@ function screenIntake(id) {
   drawItems();
   const msg = h('p', { class: 'msg' });
   const dupBox = h('div', {});
-  const saveLabel = editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록';
+  const saveLabel = fieldEdit ? '고친 내용 저장' : editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록';
   const save = btn(saveLabel, async () => {
     const phone = digits(f.phone);
     if (!f.name.trim()) return (msg.textContent = '이름을 적어 주세요.');
@@ -1738,7 +1753,7 @@ function screenIntake(id) {
       document.querySelector('label.fld input[placeholder^="예: 광주 동구"]')?.scrollIntoView({ block: 'center' });
       return;
     }
-    if (editing && !f.reason.trim()) return (msg.textContent = '수정 사유를 적어 주세요.');
+    if (editing && !fieldEdit && !f.reason.trim()) return (msg.textContent = '수정 사유를 적어 주세요.');
     if (!editing && !f.dupAck) {
       const dups = allStops().filter((r) => r.status !== 'CANCELLED' && !r.pii_purged && deriveStop(r, st.events).progress !== 'DONE' && (digits(r.phone) === phone || normAddr(r.address) === normAddr(f.address)));
       if (dups.length) {
@@ -1756,6 +1771,15 @@ function screenIntake(id) {
     if (dong) st.recentDongs = [dong, ...(st.recentDongs || []).filter((x) => x !== dong)].slice(0, 12);
     const data = { name: f.name.trim(), phone, address: f.address.trim(), dong, spot_note: f.spot_note.trim(), memo: f.memo.trim(), planned_date: f.planned_date, eta: f.eta, items: f.items,
       ...(f.lat != null && f.lon != null ? { lat: f.lat, lon: f.lon, geo_source: 'ADDR' } : {}) };
+    if (fieldEdit) {
+      // 보내기 전의 휴대폰 접수 고치기: PC는 아직 모르므로 보낼 기록(FIELD_INTAKE)과 목록을 함께 바꾼다
+      const ch = FIELD_CHANNELS.includes(f.channel) ? f.channel : (editing.channel || '현장');
+      Object.assign(editing, data, { channel: ch, appt: data.eta ? [data.eta, null] : null, updated_at: now });
+      fieldEdit.ev.body = { ...fieldEdit.ev.body, ...withWorker({}), channel: ch, ...data,
+        items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) };
+      await commit(); ui.form = null; toast('접수를 고쳤습니다(보내기 전)'); go(`#/stop/${id}`);
+      return;
+    }
     if (onField) {
       // 현장 접수: 임시번호로 이 휴대폰 목록에 넣고, 결과 보내기 때 PC로 보내 PC 원본 접수가 된다(금액은 PC 표로 다시 계산)
       const rd = todayKST();
@@ -1790,7 +1814,7 @@ function screenIntake(id) {
     }
   }, 'primary huge');
   const view = h('main', {},
-    h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
+    h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
     onField && !registeredNow ? h('section', { class: 'card notice warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
       btn('기기 등록', () => go('#/register'), 'ghost')) : null,
     onField ? h('section', { class: 'card notice' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
@@ -1824,7 +1848,7 @@ function screenIntake(id) {
       h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
     h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox,
       btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'primary big')),
-    editing ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
+    editing && !fieldEdit ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
   if (f.address) setTimeout(() => addrCheck(true), 0);
   return view;
@@ -2362,7 +2386,7 @@ async function render() {
     let [, route, arg] = (location.hash || '#/home').split('/');
     if (!st.mode && route !== 'mode') route = 'mode';
     if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
-    if (!isSolo() && route === 'intake' && arg) route = 'home';  // PC 연결 방식: 새 현장 접수만, 고치기는 정정 요청
+    if (!isSolo() && route === 'intake' && arg && !fieldEditable(arg)) route = 'home';  // PC 연결 방식: 보내기 전 휴대폰 접수만 고침, 그 밖은 정정 요청
     if (isSolo() && route === 'fix') route = 'home';
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
