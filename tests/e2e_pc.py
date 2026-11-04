@@ -313,6 +313,9 @@ def run():
         ok(page.get_by_text(re.compile("직선거리 추정\\(도로 아님\\)")).is_visible() and page.get_by_text(re.compile("좌표가 없음")).is_visible(),
            "노선 계산: 직선거리 추정 표시, 위치 없는 건은 미배정 사유와 함께 표시")
         ok(page.locator(".stopline").filter(has_text="도착 ").count() == 2, "위치가 있는 2건 방문 순서·도착 예상 시각 추천")
+        expect(page.locator(".day-load")).to_contain_text(re.compile(r"3건 · 적재 추정 [\d.]+m³ / 고른 팀 [\d.]+m³"))
+        ok(page.locator(".stopline .stop-items").count() == 2 and page.locator(".day-load").get_by_text(re.compile("무게 추정")).is_visible(),
+           "하루 물량 점검(건수·적재·무게·작업 시간 ↔ 팀 용량)과 지점별 품목 표시")
         page.wait_for_timeout(2500)
         page.screenshot(path=SHOTS / "pc_03_dispatch.png")
         page.get_by_role("button", name="1번 아래로").first.click()

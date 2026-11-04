@@ -157,11 +157,17 @@ def save_crew(con, data: dict) -> str:
     for k in ("shift_start", "shift_end"):
         if not re.fullmatch(r"\d\d:\d\d", data.get(k) or "09:00"):
             raise UserError("근무 시간은 HH:MM 형식으로 적어 주세요.")
+    try:
+        kg = float(data.get("capacity_kg") or 0)
+    except (TypeError, ValueError):
+        raise UserError("최대 적재 중량은 숫자(kg)로 적어 주세요.")
+    if not 0 <= kg <= 30000:
+        raise UserError("최대 적재 중량은 0~30000kg 사이로 적어 주세요 (0 = 따지지 않음).")
     with tx(con):
-        con.execute("""INSERT INTO crew (id, name, device_id, capacity_m3, shift_start, shift_end, active) VALUES (?,?,?,?,?,?,?)
+        con.execute("""INSERT INTO crew (id, name, device_id, capacity_m3, capacity_kg, shift_start, shift_end, active) VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_id=excluded.device_id, capacity_m3=excluded.capacity_m3,
-            shift_start=excluded.shift_start, shift_end=excluded.shift_end, active=excluded.active""",
-                    (cid, name, dev, float(data.get("capacity_m3") or 8), data.get("shift_start") or "09:00",
+            capacity_kg=excluded.capacity_kg, shift_start=excluded.shift_start, shift_end=excluded.shift_end, active=excluded.active""",
+                    (cid, name, dev, float(data.get("capacity_m3") or 8), kg, data.get("shift_start") or "09:00",
                      data.get("shift_end") or "17:00", 1 if data.get("active", True) else 0))
         audit(con, "crew", cid, "SAVE", {"name": name, "device_id": dev})
     return cid
@@ -195,6 +201,9 @@ def settings(con) -> dict:
         "jurisdiction": get_setting(con, "jurisdiction", "동구"),
         "unload_min": get_setting(con, "unload_min", 20),
         "max_unloads": get_setting(con, "max_unloads", 2),
+        "unload_hours": get_setting(con, "unload_hours", None),
+        "lunch": get_setting(con, "lunch", None),
+        "base_first": get_setting(con, "base_first", True),
         "backup_dir": get_setting(con, "backup_dir", ""),
         "capacity": _area().capacity_settings(con),
         "intake_notices": get_setting(con, "intake_notices", []),
@@ -277,6 +286,30 @@ def save_settings(con, data: dict):
         for k, lo, hi in (("unload_min", 0, 180), ("max_unloads", 0, 5)):
             if k in data:
                 set_setting(con, k, min(hi, max(lo, int(data[k]))))
+        if "base_first" in data:
+            set_setting(con, "base_first", bool(data["base_first"]))
+        if "unload_hours" in data:  # 반입지가 받는 시간 (비우면 따지지 않음)
+            u = data["unload_hours"] or {}
+            a, b = (u.get("start") or "").strip(), (u.get("end") or "").strip()
+            if not a and not b:
+                set_setting(con, "unload_hours", None)
+            else:
+                if not (re.fullmatch(r"\d\d:\d\d", a) and re.fullmatch(r"\d\d:\d\d", b) and a < b):
+                    raise UserError("반입지 받는 시간은 시작·끝을 HH:MM으로, 시작이 끝보다 앞서게 적어 주세요.")
+                set_setting(con, "unload_hours", {"start": a, "end": b})
+        if "lunch" in data:  # 쉬는(점심) 시간: start~end 사이 어딘가에 minutes 분
+            u = data["lunch"] or {}
+            a, b = (u.get("start") or "").strip(), (u.get("end") or "").strip()
+            m = int(u.get("minutes") or 0) if str(u.get("minutes") or "").strip().isdigit() else 0
+            if not a and not b:
+                set_setting(con, "lunch", None)
+            else:
+                if not (re.fullmatch(r"\d\d:\d\d", a) and re.fullmatch(r"\d\d:\d\d", b) and a < b):
+                    raise UserError("쉬는 시간 창은 시작·끝을 HH:MM으로, 시작이 끝보다 앞서게 적어 주세요.")
+                span = (int(b[:2]) * 60 + int(b[3:])) - (int(a[:2]) * 60 + int(a[3:]))
+                if not 10 <= m <= span:
+                    raise UserError("쉬는 시간(분)은 10분 이상, 시간 창 길이 이하로 적어 주세요.")
+                set_setting(con, "lunch", {"start": a, "end": b, "minutes": m})
         if "jurisdiction" in data:
             set_setting(con, "jurisdiction", (data["jurisdiction"] or "").strip()[:20])
         if "photo_retention_days" in data:
@@ -1794,6 +1827,36 @@ def add_unload(con, data: dict) -> str:
 def list_unloads(con, work_date: str) -> list[dict]:
     return rows(con, """SELECT u.*, c.name AS crew_name FROM unload_log u JOIN crew c ON c.id=u.crew_id
         WHERE u.work_date=? AND u.void_reason IS NULL ORDER BY u.at_time""", (work_date,))
+
+
+def load_check(con, start: str = "", end: str = "") -> dict:
+    """적재 추정 ↔ 하차 기록(반입지 계근표·부피) 비교. 날마다: 그날 예정이던 수거 완료·일부 수거 건의 '수거한 수량'으로 낸 추정치와
+    그날 하차 기록 합. 재방문 건은 전에 수거한 수량까지 들어가는 근사치다(보정값을 고칠지 판단하는 참고용). 개인정보 없음."""
+    from dgpc import routing
+    if not end:
+        end = today_kst()
+    if not start:
+        start = (dt.date.fromisoformat(end) - dt.timedelta(days=29)).isoformat()
+    ov = volume_overrides(con)
+    ul = rows(con, """SELECT work_date, SUM(COALESCE(volume_m3,0)) AS m3, SUM(COALESCE(weight_kg,0)) AS kg, COUNT(*) AS n,
+        SUM(weight_kg IS NOT NULL) AS kn, SUM(volume_m3 IS NOT NULL) AS vn FROM unload_log
+        WHERE void_reason IS NULL AND work_date BETWEEN ? AND ? GROUP BY work_date ORDER BY work_date""", (start, end))
+    days = []
+    for u in ul:
+        em3 = ekg = 0.0
+        for r in rows(con, "SELECT * FROM request WHERE planned_date=? AND status IN ('DONE','PARTIAL')", (u["work_date"],)):
+            for l in derive(con, r)["lines"]:
+                it = {"name": l["name"], "spec": l["spec"], "qty": l["qty_collected"], "fee_rate_id": l.get("fee_rate_id")}
+                if l["qty_collected"]:
+                    em3 += routing.volume_of(it, ov); ekg += routing.weight_of(it)
+        days.append({"date": u["work_date"], "unloads": u["n"], "est_m3": round(em3, 1), "est_kg": int(ekg),
+                     "rec_m3": round(u["m3"], 1) if u["vn"] else None, "rec_kg": int(u["kg"]) if u["kn"] else None})
+    def ratio(rec, est):
+        pairs = [(d[rec], d[est]) for d in days if d[rec] is not None and d[est]]
+        return round(100 * sum(a for a, _ in pairs) / sum(b for _, b in pairs)) if pairs else None
+    return {"start": start, "end": end, "days": days, "m3_pct": ratio("rec_m3", "est_m3"), "kg_pct": ratio("rec_kg", "est_kg"),
+            "est_m3": round(sum(d["est_m3"] for d in days), 1), "est_kg": sum(d["est_kg"] for d in days),
+            "rec_m3": round(sum(d["rec_m3"] or 0 for d in days), 1), "rec_kg": sum(d["rec_kg"] or 0 for d in days)}
 
 
 def volume_overrides(con) -> dict:

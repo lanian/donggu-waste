@@ -276,6 +276,7 @@ def migrate(con):
             raise
     migrate_v11(con)
     migrate_v12(con)
+    migrate_v12_load(con)
     if not con.execute("SELECT 1 FROM day_close_log LIMIT 1").fetchone():  # 이전 마감 기록(날짜별 1행) → 1회차
         for wd, at, sj, note in con.execute("SELECT work_date, closed_at, summary_json, note FROM day_close").fetchall():
             con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note) VALUES (?,?,1,?,NULL,?,?)",
@@ -321,6 +322,12 @@ def migrate_v12(con):
     for col, decl in (("origin_device", "TEXT"), ("field_checked_at", "TEXT"), ("field_checked_by", "TEXT")):
         if col not in _cols(con, "request"):
             con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
+
+
+def migrate_v12_load(con):
+    """v0.12.15: 차량 최대 적재 중량(kg, 0 = 따지지 않음). 여러 번 실행해도 같다."""
+    if "capacity_kg" not in _cols(con, "crew"):
+        con.execute("ALTER TABLE crew ADD COLUMN capacity_kg REAL NOT NULL DEFAULT 0")
 
 
 def levy_year(received_at: str | None) -> str:

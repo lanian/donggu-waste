@@ -10,9 +10,10 @@ import * as B from './backup.js';
 import * as M from './map.js';
 import * as NAV from './nav.js';
 import * as J from './juso.js';
+import * as L from './load.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.14';
+export const APP_VERSION = '0.12.15';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -431,6 +432,7 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
         ...changes.map((c) => h('em', { class: 'chip new' }, F.DIFF_LABEL[c] || c)),
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
         dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
+        ...(cancelled || d.progress === 'DONE' ? [] : L.tagsOf(s.items).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
         !solo && s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
         !solo && s.field ? h('em', { class: 'chip new' }, `${s.channel || '현장'} 접수`) : null,
         !solo && cancelAsked(s.request_id) ? h('em', { class: 'chip warn' }, '취소 요청') : null,
@@ -440,16 +442,33 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
     h('span', { class: 'eta' }, s.eta || ''));
 }
 // 노선 시간표: 동이 바뀌는 곳에 동 이름 머리글
-function routeItems(list, renderOne) {
+function routeItems(list, renderOne, heads = {}) {
   const anyDong = list.some((x) => dongOf(x.s));
   const out = [];
   let prev = null;
   for (const x of list) {
     const dg = dongOf(x.s);
+    if (heads[x.s.request_id]) out.push(heads[x.s.request_id]);
     if (anyDong && !ui.dong && dg !== prev) out.push(h('li', { class: 'dong-head' }, h('span', {}, dg || '동 미지정')));
     prev = dg;
     out.push(renderOne(x));
   }
+  return out;
+}
+// 운행(반입지 하차 사이)마다 머리글: 실을 양(추정)과 큰 짐·유리 위치. 하차가 없고 알릴 것도 없으면 생략.
+function tripHeads(stops) {
+  const live = stops.filter((x) => !x.s.removed && x.s.status !== 'CANCELLED');
+  const trips = L.tripsOf(live.map((x) => ({ seq: x.s.seq, id: x.s.request_id, items: x.s.items, unload_after: x.s.unload_after })));
+  const out = {};
+  const multi = trips.length > 1;
+  trips.forEach((t) => {
+    const adv = L.tripAdvice(t);
+    if (!multi && !adv.length) return;
+    out[t.fromId] = h('li', { class: 'trip-head' },
+      h('strong', {}, multi ? `${t.no}회차 · ${t.from}~${t.to}번` : `싣기 안내 · ${t.from}~${t.to}번`),
+      h('span', { class: 'small' }, ` 약 ${t.m3}m³ · ${t.kg.toLocaleString()}kg (추정)`),
+      ...adv.map((a) => h('span', { class: 'small adv' }, a)));
+  });
   return out;
 }
 
@@ -573,7 +592,8 @@ async function screenHome() {
       s.unload_after && !ui.stopQ && !(ui.reorder && canReorder) ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
         h('span', { class: 'u-body' }, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`)),
         navBtn('길안내', null, unloadLoc(s.unload_after), NAV.navLabel('UNLOAD'), 'u-nav')) : null);
-    out.push(h('ul', { class: 'stops route' }, ui.reorder && canReorder ? list.map(one) : routeItems(list, one)));
+    const showTrips = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && !ui.reorder;
+    out.push(h('ul', { class: 'stops route' }, ui.reorder && canReorder ? list.map(one) : routeItems(list, one, showTrips ? tripHeads(stops) : {})));
     out.push(moreBtns);
   }
   if (later.length) out.push(h('section', { class: 'card' }, h('h2', {}, `다른 날 현장 접수 ${later.length}건`),
@@ -956,6 +976,13 @@ async function evidence(stop, d) {
   return v;
 }
 
+// 싣기 안내: 품목별 적재 기준표의 취급 표시(2인·세워서·유리 등)와 짐 양(추정)
+function loadGuide(items) {
+  const l = L.loadOf(items);
+  if (!l.tags.length && l.m3 < 1) return null;
+  return h('div', { class: 'load-guide' }, h('p', {}, h('strong', {}, '싣기'), ` 약 ${l.m3}m³ · ${l.kg.toLocaleString()}kg (추정)`),
+    l.tags.length ? h('ul', {}, ...l.tags.map((t) => h('li', {}, h('em', { class: `chip load ld-${t}` }, L.TAGS[t].label), ' ', L.TAGS[t].hint))) : null);
+}
 async function screenStop(id) {
   const stop = findStop(id);
   if (!stop) { go('#/home'); return h('main'); }
@@ -989,6 +1016,7 @@ async function screenStop(id) {
     stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
     stop.revisit ? h('p', { class: 'notice' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
     stop.appt ? h('p', { class: 'memo' }, `방문 약속: ${stop.appt[0] || ''}~${stop.appt[1] || ''}`) : null,
+    loadGuide(d.lines.map((l) => ({ name: l.name, spec: l.spec, qty: l.remaining ?? l.qty_confirmed }))),
     // 현장 동작: 도착 · 문자 · 길안내
     h('div', { class: 'grid2 field-acts' },
       btn(d.arrive ? `도착 ${hhmm(d.arrive.ts)} ✓` : '📍 도착', () => arrive(stop), 'opt arrive' + (d.arrive ? ' on' : ''), { 'aria-label': d.arrive ? `도착 기록됨 ${hhmm(d.arrive.ts)}, 다시 기록` : '도착' }),

@@ -173,6 +173,11 @@ def main():
             page.get_by_role("button", name="오늘 순서 보기").click()
             expect(page.locator(".stop")).to_have_count(20)
             ok(page.locator(".stop").count() == 20, "오늘 순서 20건 표시")
+            ok(page.locator(".stop").filter(has=page.locator(".chip.load")).count() == 16 and page.locator(".trip-head").count() == 1
+               and "싣기 안내" in page.locator(".trip-head").inner_text() and "앞쪽 바닥" in page.locator(".trip-head").inner_text(),
+               "품목별 취급 표시(16곳) · 싣기 안내 머리글(큰 짐 자리 남겨 두기)")
+            page.locator(".trip-head").scroll_into_view_if_needed()
+            page.screenshot(path=SHOTS / "04b_trip.png")
             page.screenshot(path=SHOTS / "04_list.png")
             ok(page.get_by_role("button", name="🗺 지도로 보기").count() == 0 and page.locator("nav.tabbar .t-map").count() == 1, "지도는 아래 탭 하나로 (중복 단추 없음)")
             ok(page.get_by_role("progressbar").first.get_attribute("aria-label") == "완료 0/20", "진행 막대 aria-label '완료 0/20'")

@@ -92,7 +92,7 @@ def login_succeeded(username: str):
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
                        "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
-                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv"},
+                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv", "load-check"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
                         "fee-revisions", "geocode", "links", "refunds", "recon", "stats", "pilot"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
@@ -557,7 +557,11 @@ class Handler(BaseHTTPRequestHandler):
                 ids = list(dict.fromkeys(S.fee_usage(c, 20) + list(ov)))
                 return self.send_json([{"fee_rate_id": i, "name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "unit_label": S.FEE_ROWS[i]["unit_label"],
                                         "estimate": routing.volume_of({"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}),
+                                        "kg": routing.weight_of({"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}),
+                                        "tags": [routing.TAG_LABEL[t] for t in routing.tags_of([{"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}])],
                                         "override": ov.get(i)} for i in ids if i in S.FEE_ROWS])
+            if p == "load-check":
+                return self.send_json(S.load_check(c, qs.get("start") or "", qs.get("end") or ""))
             if p == "fee-usage":
                 return self.send_json(S.fee_usage(c))
             if p == "qrtests":
@@ -800,7 +804,8 @@ class Handler(BaseHTTPRequestHandler):
                            travel_cache=routing.TravelCache(c) if method == "KAKAO" else None,
                            service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
                            volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
-                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref)
+                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
+                           unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
         if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만)
             mi = res.get("matrix_info") or {}
@@ -808,7 +813,8 @@ class Handler(BaseHTTPRequestHandler):
                 S.audit(c, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "cache": mi.get("cache_hits", 0), "estimated": mi.get("fallback_pairs", 0)})
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
-                                     "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"])} for r in reqs}
+                                     "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]),
+                                     "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])]} for r in reqs}
         return res
 
     def bulk(self, d: dict) -> dict:
@@ -855,6 +861,9 @@ class Handler(BaseHTTPRequestHandler):
         for s in d["stops"]:
             done_note = {"DONE": "수거 완료", "PARTIAL": "일부 수거 (남은 품목)", "NOT_COLLECTED": "미수거 (재방문)", "ON_HOLD": "보류"}.get(s.get("status"), "")
             items = (f"<b>{e(done_note)}</b><br>" if done_note else "") + "<br>".join(e(f'{i["name"]} {i["spec"]} {i["qty"]}{i["unit_label"]}' + (" (재방문 남은 수량)" if s.get("revisit") else "")) for i in s["items"])
+            tg = routing.tags_of(s["items"])
+            if tg:
+                items += f'<br><small class="tags">취급: {e(" · ".join(routing.TAG_LABEL[t] for t in tg))}</small>'
             amt = sum((i.get("amount") or 0) for i in s["items"])
             pend = any(i.get("price_status") != "CONFIRMED" for i in s["items"])
             appt = f'{s["appt"][0] or ""}~{s["appt"][1] or ""}' if s.get("appt") else ""

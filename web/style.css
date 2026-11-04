@@ -509,3 +509,12 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .check-item h2 { display: flex; align-items: center; gap: 8px; } .check-item h2 .chip { margin-left: auto; }
 .check-item.r-OK { border-left: 4px solid var(--brand); } .check-item.r-FAIL { border-left: 4px solid var(--bad, #c0392b); }
 .check-btns { margin: 8px 0; } .check-pre { white-space: pre-wrap; font-size: .8rem; max-height: 50vh; overflow: auto; user-select: text; }
+/* 적재 기준: 취급 표시·운행 머리글·싣기 안내 */
+.chip.load { background: var(--field-bg); color: var(--field-ink); }
+.chip.load.ld-EQUIP, .chip.load.ld-TWO { background: var(--bad-bg); color: var(--bad-ink); }
+.chip.load.ld-FRAGILE { background: var(--warn-bg); color: var(--warn); }
+.stops.route > li.trip-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 10px 0 2px var(--gutter); padding: 8px 12px; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--field-ink); }
+.stops.route > li.trip-head::before { display: none; }
+.stops.route > li.trip-head .adv { flex-basis: 100%; font-weight: 600; }
+.load-guide { margin: 8px 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--field-ink); }
+.load-guide p { margin: 0 0 4px; } .load-guide ul { margin: 0; padding: 0; list-style: none; } .load-guide li { margin: 4px 0; }

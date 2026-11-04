@@ -281,6 +281,9 @@ def main():
     sm = S.day_summary(con, day)
     ok(sm["by_status"] == {"CANCELLED": 1, "RECEIVED": 1, "DONE": 1}, f"마감 요약 {day}: 완료 1·취소 1·미배정 1 {sm['by_status']}")
     ok(sm["unload_total"] == {"volume_m3": 10.0, "weight_kg": 800.0}, "마감: 하차 합계 10m³ · 800kg (PC 입력 5.5 + 휴대폰 기록 4.5)")
+    lc = S.load_check(con, day, day)
+    ok(len(lc["days"]) == 1 and lc["days"][0]["rec_m3"] == 10.0 and lc["days"][0]["rec_kg"] == 800 and lc["days"][0]["est_m3"] > 0
+       and lc["kg_pct"] == round(100 * 800 / lc["days"][0]["est_kg"]), f"추정 ↔ 하차 기록 비교: 추정 {lc['days'][0]['est_m3']}m³·{lc['days'][0]['est_kg']}kg ↔ 기록 10m³·800kg (중량 {lc['kg_pct']}%)")
     ok(any(x["status"] == "AMOUNT_PENDING" for x in sm["payments"]), "마감: 금액 확인 대기 수납 건 표시")
     sm2 = S.day_summary(con, day2)
     ok([x["receipt_no"] for x in sm2["no_result"]] == [g1["receipt_no"]], f"마감 {day2}: 재배정했으나 결과 미회수 건 표시")
@@ -1650,6 +1653,88 @@ def v12_pilot():
     print(f"\n통과 {passed}개 (시범 운영 비교 포함)")
 
 
+def v12_load():
+    """품목별 적재 기준(부피·무게·작업 시간·취급 표시)과 노선 계산: 무게 한도, 큰 짐 먼저, 필수 건 대안, 반입지 시간·쉬는 시간."""
+    print("\n— v0.12 적재 기준·노선 —")
+    H = routing.handling_of
+    rows = list(S.FEE_ROWS.values())
+    ok(all(H(r)["rule"] for r in rows), f"수수료표 {len(rows)}행 모두 품목별 적재 기준이 있음 (기본값으로 빠지는 행 없음)")
+    tv = H({"name": "TV 받침대", "spec": "모든 규격"})
+    ok(tv["m3"] == 0.3 and "BASE" not in tv["tags"], "'TV 받침대'를 침대로 잘못 읽지 않음 (이전: 1.5m³)")
+    big, small = H({"name": "냉장고 (업소용 제외)", "spec": "800ℓ 이상"}), H({"name": "냉장고 (업소용 제외)", "spec": "300ℓ 미만"})
+    ok(big["m3"] > small["m3"] * 3 and big["kg"] > small["kg"] * 3 and "UPRIGHT" in big["tags"], "규격별 부피·무게: 냉장고 800ℓ 이상 ≫ 300ℓ 미만, 세워서 싣기")
+    ok(H({"name": "흙, 깨진 유리, 사기", "spec": "20ℓ 당"})["m3"] == 0.02 and H({"name": "목재류", "spec": "50ℓ(1 마대) 당"})["m3"] == 0.05,
+       "마대·리터 단위 품목은 그 부피(20ℓ = 0.02m³, 50ℓ = 0.05m³)")
+    ok(H({"name": "책상 (책장, 책꽂이 별도)", "spec": "양수, 대형"})["rule"].startswith("책상") and H({"name": "책상의자", "spec": ""})["rule"] == "의자",
+       "이름에 다른 품목 낱말이 섞여도 바른 규칙 (책상(책장 별도)·책상의자)")
+    ok(routing.tags_of([{"name": "피아노", "spec": "업라이트", "qty": 1}, {"name": "의자", "spec": "", "qty": 2}]) == ["EQUIP", "BASE"],
+       "취급 표시 합치기: 피아노 → 4인·장비(2인은 생략)·먼저·바닥")
+    ok(routing.work_min([{"name": "피아노", "spec": "그랜드", "qty": 1}]) > routing.work_min([{"name": "의자", "spec": "", "qty": 3}]),
+       "작업 시간: 그랜드 피아노 1대 > 의자 3개 (품목 수가 아니라 품목별)")
+    js = (ROOT / "web" / "fees-data.js").read_text(encoding="utf8")
+    ok("export const ITEM_HANDLING = " + json.dumps(routing.HANDLING, ensure_ascii=False) + ";" in js,
+       "휴대폰 내장 적재 기준이 data/item_handling.json 과 같음 (tools/build_fee_js.py 로 생성)")
+
+    dep = {"lat": 35.1462, "lon": 126.9233}
+    crew = lambda **k: {"id": k.get("id", "c"), "name": k.get("id", "c"), "capacity_m3": k.get("m3", 8), "capacity_kg": k.get("kg", 0),
+                        "shift_start": k.get("s", "09:00"), "shift_end": k.get("e", "17:00")}
+    stone = [{"id": f"s{i}", "lat": 35.14 + 0.003 * i, "lon": 126.92, "items": [{"name": "침대(돌, 옥, 흙)", "spec": "2인용", "qty": 1}]} for i in range(4)]
+    no_kg = routing.plan(stone, [crew()], dep, time_limit_s=1)
+    with_kg = routing.plan(stone, [crew(kg=1000)], dep, time_limit_s=1)
+    ok(len(no_kg["routes"][0]["stops"]) == 4 and len(with_kg["routes"][0]["stops"]) == 3 and with_kg["routes"][0]["end_load_kg"] <= 1000 and with_kg["uses_weight"],
+       f"차량 최대 적재 중량 1,000kg → 돌침대(약 280kg) 4개 중 3개만 (부피로는 4개 다 들어감)")
+    wk = routing.plan(stone, [crew(kg=1000)], dep, time_limit_s=2, unload_site={"lat": 35.16, "lon": 126.95, "label": "가상 반입지"})
+    rt = wk["routes"][0]
+    ok(len(rt["stops"]) == 4 and rt["unloads"] >= 1 and all(x["load_kg"] <= 1000 for x in rt["stops"]) and any(x.get("unload_kg") for x in rt["stops"]),
+       f"반입지가 있으면 무게가 찰 때도 들러 비우고 4곳 모두 (하차 {rt['unloads']}회)")
+    sm = wk["summary"]
+    ok(sm["requests"] == 4 and sm["kg"] == 1120 and sm["tags"].get("EQUIP") == 4 and any("4인·장비" in w for w in sm["warnings"]),
+       "하루 물량 점검: 무게 합 1,120kg · 4인·장비 품목 알림")
+
+    # 큰 짐 먼저: 한 줄로 늘어선 곳(가는 길·오는 길 이동시간이 같음)이면 장롱(먼저·바닥)을 빈 차에 싣는 순서를 고른다
+    mix = [{"id": "w", "lat": 35.162, "lon": 126.9233, "items": [{"name": "장롱", "spec": "120cm 이상 1쪽당", "qty": 2}]}] + \
+          [{"id": f"b{i}", "lat": 35.150 + 0.004 * i, "lon": 126.9233, "items": [{"name": "목재류", "spec": "50ℓ(1 마대) 당", "qty": 30}]} for i in range(3)]
+    def before(res):
+        return next(round(x["load_m3"] - x["m3"], 2) for x in res["routes"][0]["stops"] if x["request_id"] == "w")
+    on, off = routing.plan(mix, [crew()], dep, time_limit_s=1), routing.plan(mix, [crew()], dep, time_limit_s=1, base_first=False)
+    ok(before(on) == 0 and before(off) > 3.2 and on["routes"][0]["end"] <= off["routes"][0]["end"] and all("tags" in x for x in on["routes"][0]["stops"]),
+       f"큰 짐 먼저 선호: 장롱을 빈 차에 먼저 (선호 끄면 마대 {before(off)}m³ 위에) · 끝나는 시각 같음 {on['routes'][0]['end']}")
+
+    # 오늘 필수가 다 안 들어가면 전체 실패 대신 넣을 수 있는 것은 넣고 못 넣은 필수를 알림
+    must = [{"id": f"m{i}", "lat": 35.14 + 0.004 * i, "lon": 126.92, "must_today": True, "items": [{"name": "장롱", "spec": "120cm 이상 1쪽당", "qty": 2}]} for i in range(4)]
+    rm = routing.plan(must, [crew(m=6)], dep, time_limit_s=1)
+    miss = [u for u in rm["unassigned"] if u.get("must_today")]
+    ok(rm["must_relaxed"] and not rm.get("infeasible") and len(rm["routes"][0]["stops"]) == 2 and len(miss) == 2 and "오늘 필수였지만" in miss[0]["reason"],
+       "오늘 필수 4건(각 2.8m³)이 6m³ 차량에 다 안 들어감 → 2건은 노선에, 2건은 '오늘 필수였지만 넣지 못함'")
+
+    # 쉬는 시간·반입지 받는 시간
+    pts = [{"id": f"p{i}", "lat": 35.14 + 0.002 * (i % 4), "lon": 126.92 + 0.002 * (i // 4), "items": [{"name": "의자", "spec": "", "qty": 1}]} for i in range(12)]
+    lr = routing.plan(pts, [crew()], dep, time_limit_s=1, lunch={"start": "11:30", "end": "13:00", "minutes": 60})
+    lu = lr["routes"][0]["lunch"]
+    gap = lu and not any(lu["start"] < x["eta"] < routing.hhmm(routing.to_min(lu["start"], 0) + 60) for x in lr["routes"][0]["stops"])
+    ok(lu and "11:30" <= lu["start"] <= "12:00" and gap and len(lr["routes"][0]["stops"]) == 12, f"쉬는 시간 {lu and lu['start']}부터 60분: 그동안 방문 없음")
+    late = routing.plan(stone, [crew(kg=1000)], dep, time_limit_s=1, unload_site={"lat": 35.16, "lon": 126.95, "label": "가상 반입지"},
+                        unload_hours={"start": "13:00", "end": "16:00"})
+    ue = [x["unload_after"]["eta"] for x in late["routes"][0]["stops"] if x.get("unload_after")]
+    ok(ue and all("13:00" <= e <= "15:40" for e in ue), f"반입지 받는 시간 13:00~16:00 → 하차 도착 {', '.join(ue)}")
+
+    # 설정·팀 저장
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-load-")
+    con = store.connect(create=True)
+    raises(lambda: S.save_settings(con, {"lunch": {"start": "12:00", "end": "13:00", "minutes": 90}}), "쉬는 시간", "쉬는 시간이 창보다 길면 거부")
+    raises(lambda: S.save_settings(con, {"unload_hours": {"start": "17:00", "end": "09:00"}}), "반입지", "반입지 받는 시간 순서 검사")
+    S.save_settings(con, {"lunch": {"start": "11:30", "end": "13:30", "minutes": 60}, "unload_hours": {"start": "09:00", "end": "17:00"}, "base_first": False})
+    st = S.settings(con)
+    ok(st["lunch"] == {"start": "11:30", "end": "13:30", "minutes": 60} and st["unload_hours"]["end"] == "17:00" and st["base_first"] is False, "노선 설정 저장: 쉬는 시간·반입지 받는 시간·큰 짐 먼저 끔")
+    S.save_settings(con, {"lunch": {"start": "", "end": ""}})
+    ok(S.settings(con)["lunch"] is None, "쉬는 시간 비우면 따지지 않음")
+    raises(lambda: S.save_crew(con, {"name": "1팀", "capacity_kg": -5}), "중량", "최대 적재 중량 범위 검사")
+    cid = S.save_crew(con, {"name": "1팀", "capacity_m3": 8, "capacity_kg": 1000})
+    ok(next(c for c in S.list_crews(con) if c["id"] == cid)["capacity_kg"] == 1000, "팀 최대 적재 중량 저장")
+    con.close()
+    print(f"\n통과 {passed}개 (적재 기준·노선 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -1657,3 +1742,4 @@ if __name__ == "__main__":
     v11_external()
     v12_field()
     v12_pilot()
+    v12_load()

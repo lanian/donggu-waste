@@ -545,3 +545,7 @@ nav.side a .ic { display: none; }
 /* 시범 운영 비교: 기존 방식 수치 입력 */
 .pilot-base label.f { grid-template-columns: minmax(160px, 1fr) auto; }
 table.pilot td:first-child { font-weight: 600; }
+/* 하루 물량 점검·적재 비교 */
+.day-load p { margin: 4px 0; } .day-load .notice { margin: 6px 0; }
+.stop-items { color: var(--chip-ink); }
+.load-check { margin-top: 12px; } .load-check h3 { margin: 8px 0 4px; font-size: 1rem; }

@@ -1057,6 +1057,21 @@ function photoImg(pid) {
 }
 
 // ------------------------------------------------------------ 배정·노선
+// 품목별 취급 표시(적재 기준표): 사람·장비가 더 필요한 것은 주의, 싣는 방법은 안내
+const LOAD_TAG_CLS = { EQUIP: 'warn', TWO: 'warn', FRAGILE: 'warn', BASE: 'info', UPRIGHT: 'info', DRAIN: 'info' };
+// 하루 물량 점검: 고른 접수 합(적재·무게·작업 시간) ↔ 고른 팀이 하루에 감당할 양, 취급 표시별 곳 수, 경고
+function daySummaryCard(res) {
+  const m = res.summary;
+  if (!m) return null;
+  const TL = res.tag_labels || {};
+  return h('div', { class: 'card day-load' }, h('h2', {}, '하루 물량 점검'),
+    h('p', {}, `${m.requests}건 · 적재 추정 ${m.m3}m³ / 고른 팀 ${m.cap_m3}m³${m.trips_per_crew > 1 ? ` (팀마다 ${m.trips_per_crew}회 싣기, 하차 포함)` : ''}`
+      + ` · 무게 추정 ${m.kg.toLocaleString()}kg${m.cap_kg ? ` / ${m.cap_kg.toLocaleString()}kg` : ''} · 현장 작업 약 ${m.work_min}분 / 근무 ${m.shift_min}분`),
+    Object.keys(m.tags || {}).length ? h('p', { class: 'row' }, ...Object.entries(m.tags).map(([t, n]) => chip(`${TL[t] || t} ${n}곳`, LOAD_TAG_CLS[t] || ''))) : null,
+    res.must_relaxed ? h('div', { class: 'notice warn small' }, '오늘 필수 건이 모두 들어가지 않아, 넣을 수 있는 만큼 넣고 나머지를 미배정에 "오늘 필수였지만 넣지 못함"으로 표시했습니다. 팀을 더하거나 다른 건을 미루고 다시 계산하세요.') : null,
+    ...(m.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)),
+    h('p', { class: 'muted small' }, '부피·무게·작업 시간은 품목별 적재 기준표의 추정치입니다(설정 → 수거팀·차량 → 적재량 보정에서 실측과 비교).'));
+}
 // 카카오맵 웹 길찾기 링크(지점마다): 좌표와 "N번 수거지"만 담는다. 이름·주소는 넣지 않는다. (휴대폰 web/nav.js와 같은 형식)
 function kakaoLink(q, n) {
   if (!q || !NAV.hasCoord(q)) return null;
@@ -1073,7 +1088,7 @@ async function screenDispatch() {
   const crewHint = h('span', { class: 'muted small' });
   const syncCalc = () => { const none = ![...s.crews].some((id) => crews.some((c) => c.id === id)); calcBtn.disabled = none; crewHint.textContent = none ? '팀을 하나 이상 고르세요.' : ''; };
   const crewBox = h('div', { class: 'row crewpick' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); syncCalc(); } }),
-    `${c.name} (${c.capacity_m3}m³, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
+    `${c.name} (${c.capacity_m3}m³${c.capacity_kg ? ` · ${Number(c.capacity_kg).toLocaleString()}kg` : ''}, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
   const msg = h('p', { class: 'msg' });
   const planMsg = h('p', { class: 'msg' });
   const out = h('div');
@@ -1082,7 +1097,8 @@ async function screenDispatch() {
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '노선을 계산하는 중입니다 (몇 초 걸립니다)'));
     let res;
     try { res = await post('route', { date: s.date, crew_ids: [...s.crews].filter((id) => crews.some((c) => c.id === id)) }); } finally { syncCalc(); }
-    s.plan = { res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads })),
+    s.plan = { res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
+      lunch: r.lunch, capacity_m3: r.capacity_m3, capacity_kg: r.capacity_kg, end_load_m3: r.end_load_m3, end_load_kg: r.end_load_kg })),
       unassigned: res.unassigned.map((u) => ({ ...u })) };
     draw();
   }, msg);
@@ -1092,13 +1108,19 @@ async function screenDispatch() {
     const p = s.plan;
     if (!p) { out.replaceChildren(h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.'))); return; }
     const R = p.res.requests;
+    const TL = p.res.tag_labels || {};
+    const tagChips = (x) => (x.tags || []).map((t) => chip(TL[t] || t, LOAD_TAG_CLS[t] || ''));
+    const loadTxt = (x) => x.load_m3 == null ? '' : ` · 누적 적재(추정) ${x.load_m3}m³${p.res.uses_weight && x.load_kg != null ? ` · ${x.load_kg.toLocaleString()}kg` : ''}`;
     const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
     const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); p.adjusted = true; draw(); };
     const toCrew = (ri, i, target) => { p.adjusted = true; clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
-    const cols = p.routes.map((rt, ri) => h('div', { class: `card route c${(ri % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null),
+    const cols = p.routes.map((rt, ri) => h('div', { class: `card route c${(ri % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null,
+        rt.lunch ? chip(`쉬는 시간 ${rt.lunch.start}부터 ${rt.lunch.minutes}분`) : null),
       rt.unloadStale ? h('div', { class: 'notice warn small' }, '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
       ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
-        h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${x.load_m3 != null ? ` · 누적 적재(추정) ${x.load_m3}m³` : ''}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
+        h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${loadTxt(x)}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
+          (R[x.request_id].items || []).length ? h('span', { class: 'stop-items small' }, h('br'), R[x.request_id].items.join(', ')) : null, h('br'),
+          ...tagChips(x),
           R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null,
           R[x.request_id].dong ? chip(R[x.request_id].dong) : null,
           R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null,
@@ -1106,7 +1128,8 @@ async function screenDispatch() {
         h('span', { class: 'ctl' }, btn('▲', () => move(ri, i, -1), 'small', { 'aria-label': `${i + 1}번 위로`, disabled: i === 0 }), btn('▼', () => move(ri, i, 1), 'small', { 'aria-label': `${i + 1}번 아래로`, disabled: i === rt.stops.length - 1 }),
           h('select', { class: 'small', 'aria-label': '다른 팀으로 이동', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기')))),
         x.unload_after ? h('div', { class: 'stopline unload' }, h('span', { class: 's' }, '⇩'), h('span', { class: 't' }, `${x.unload_after.label} 하차`, h('br'),
-          h('span', { class: 'muted' }, `도착 ${x.unload_after.eta} · 약 ${x.unload_after.volume_m3}m³ 비움 · ${x.unload_after.minutes}분`))) : null])));
+          h('span', { class: 'muted' }, `도착 ${x.unload_after.eta} · 약 ${x.unload_after.volume_m3}m³${p.res.uses_weight && x.unload_kg ? ` · ${x.unload_kg.toLocaleString()}kg` : ''} 비움 · ${x.unload_after.minutes}분`))) : null]),
+      rt.stops.length && rt.end_load_m3 ? h('p', { class: 'muted small' }, `마지막에 실려 있는 양(추정) ${rt.end_load_m3}m³${p.res.uses_weight ? ` · ${(rt.end_load_kg || 0).toLocaleString()}kg` : ''}`) : null));
     const noLoc = p.unassigned.filter((u) => R[u.request_id] && R[u.request_id].lat == null).length;
     const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`),
       noLoc ? h('div', { class: 'row' }, btn(`위치 없는 ${noLoc}건 주소 자료로 찾기`, wrap(async () => { const g = await post('geocode/missing', { date: s.date }); toast(`찾음 ${g.found}건 · 못 찾음 ${g.missing}건. 노선을 다시 계산합니다.`); calc(); }, msg), 'small'),
@@ -1133,6 +1156,7 @@ async function screenDispatch() {
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
     const note = p.res.matrix_source === 'KAKAO' ? p.res.matrix_note : `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`;
     out.replaceChildren(h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
+      daySummaryCard(p.res),
       h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
         ['반입지 경유', `${p.routes.reduce((a, rt) => a + (rt.unloads || 0), 0)}회`, ''], ['마지막 예상 종료', lastEnd || '—', '']].map(([k, v, c]) => h('div', { class: 'kpi ' + c }, h('span', { class: 'k' }, k), h('b', { class: 'v' }, v)))),
       h('div', { class: 'dispatch-grid' }, h('div', { class: 'mapcol' }, h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '지도'), h('span', { class: 'legend small' }, ...p.routes.map((rt, ri) => h('span', { class: `lg route c${(ri % 4) + 1}` }, rt.crew_name)))), mapBox,
@@ -1549,11 +1573,22 @@ function volumeCard() {
   const msg = h('span', { class: 'msg' });
   api('volumes').then((list) => tbody.replaceChildren(...(list.length ? list.map((v) => {
     const inp = h('input', { type: 'number', step: '0.1', min: 0, value: v.override ?? '', placeholder: '보정값', style: 'width:90px' });
-    return h('tr', {}, h('td', {}, `${v.name} ${v.spec}`), h('td', {}, `${v.estimate} m³/${v.unit_label}`), h('td', {}, inp, ' m³'),
+    return h('tr', {}, h('td', {}, `${v.name} ${v.spec}`), h('td', {}, `${v.estimate} m³/${v.unit_label}`), h('td', {}, v.kg != null ? `${v.kg} kg` : ''),
+      h('td', {}, ...(v.tags || []).map((t) => chip(t))), h('td', {}, inp, ' m³'),
       h('td', {}, btn('저장', wrap(async () => { await post('volumes', { fee_rate_id: v.fee_rate_id, m3: inp.value === '' ? null : +inp.value }); toast(inp.value === '' ? '보정값을 지웠습니다(추정치 사용)' : '보정값을 저장했습니다'); }, msg), 'small')));
-  }) : [h('tr', {}, h('td', { colspan: 4, class: 'muted' }, '접수에 쓰인 품목이 생기면 여기에 나타납니다.'))]))).catch(() => {});
-  return h('div', { class: 'card' }, h('h2', {}, '적재량 보정'), h('p', { class: 'muted' }, '자주 쓰는 품목의 1단위 부피입니다. 추정치는 그대로 두고, 실측한 값이 있으면 보정값에 적으세요(비우면 추정치 사용).'),
-    h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '추정치', '보정값', ''].map((t) => h('th', {}, t)))), tbody), msg);
+  }) : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '접수에 쓰인 품목이 생기면 여기에 나타납니다.'))]))).catch(() => {});
+  const chk = h('div', { class: 'load-check' });
+  api('load-check').then((r) => {
+    if (!r.days.length) { chk.replaceChildren(h('p', { class: 'muted small' }, '최근 30일 하차 기록이 없어 추정치와 비교할 수 없습니다. 반입지 계근표 중량·부피를 하차 기록에 남기면 여기서 비교합니다.')); return; }
+    const pct = (v) => (v == null ? '—' : `${v}%`);
+    chk.replaceChildren(h('h3', {}, `추정치 ↔ 하차 기록 (${r.start} ~ ${r.end})`),
+      h('p', {}, `추정 ${r.est_m3}m³ · ${r.est_kg.toLocaleString()}kg ↔ 하차 기록 ${r.rec_m3}m³ · ${r.rec_kg.toLocaleString()}kg  (부피 ${pct(r.m3_pct)} · 중량 ${pct(r.kg_pct)})`),
+      h('p', { class: 'muted small' }, '100%에서 많이 벗어나면(예: 70% 미만, 130% 넘음) 자주 쓰는 품목의 보정값을 고치세요. 재방문 건이 섞이면 근사치입니다.'),
+      h('table', {}, h('thead', {}, h('tr', {}, ...['날짜', '하차', '추정 m³', '기록 m³', '추정 kg', '기록 kg'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, ...r.days.map((d) => h('tr', {}, ...[d.date, `${d.unloads}회`, d.est_m3, d.rec_m3 ?? '—', d.est_kg.toLocaleString(), d.rec_kg == null ? '—' : d.rec_kg.toLocaleString()].map((v) => h('td', {}, String(v))))))));
+  }).catch(() => {});
+  return h('div', { class: 'card' }, h('h2', {}, '적재량 보정'), h('p', { class: 'muted' }, '자주 쓰는 품목의 1단위 부피·무게와 취급 표시(품목별 적재 기준표의 추정치)입니다. 추정치는 그대로 두고, 실측한 부피가 있으면 보정값에 적으세요(비우면 추정치 사용).'),
+    h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '부피 추정', '무게 추정', '취급', '부피 보정값', ''].map((t) => h('th', {}, t)))), tbody), msg, chk);
 }
 
 // 하차 기록: 반입지에서 내린 양(부피·중량)을 팀별로 기록
@@ -1635,15 +1670,17 @@ function settingsDevices() {
 }
 function settingsCrews() {
   const crewMsg = h('p', { class: 'msg' });
-  const crewRows = [...boot.crews, { id: '', name: '', device_id: '', capacity_m3: 8, shift_start: '09:00', shift_end: '17:00', active: 1 }].map((c) => {
+  const crewRows = [...boot.crews, { id: '', name: '', device_id: '', capacity_m3: 8, capacity_kg: 0, shift_start: '09:00', shift_end: '17:00', active: 1 }].map((c) => {
     const f = { name: h('input', { value: c.name, placeholder: '새 팀 이름', 'aria-label': c.name ? `${c.name} 이름` : '새 팀 이름' }), device_id: h('select', { 'aria-label': '연결 휴대폰' }, h('option', { value: '' }, '(없음)'), ...boot.devices.filter((d) => d.status === 'ACTIVE').map((d) => h('option', { value: d.id, selected: d.id === c.device_id }, `${d.id.slice(0, 8)} ${d.label || ''}`))),
-      capacity_m3: h('input', { type: 'number', step: '0.5', value: c.capacity_m3, class: 'w-xs', 'aria-label': '적재(m³)' }), shift_start: h('input', { type: 'time', value: c.shift_start, 'aria-label': '근무 시작' }), shift_end: h('input', { type: 'time', value: c.shift_end, 'aria-label': '근무 끝' }), active: h('input', { type: 'checkbox', checked: c.active, 'aria-label': '사용' }) };
+      capacity_m3: h('input', { type: 'number', step: '0.5', value: c.capacity_m3, class: 'w-xs', 'aria-label': '적재(m³)' }),
+      capacity_kg: h('input', { type: 'number', step: '50', min: 0, value: c.capacity_kg || '', placeholder: '0', class: 'w-xs', 'aria-label': '최대 적재 중량(kg)', title: '비우거나 0이면 무게는 따지지 않음' }), shift_start: h('input', { type: 'time', value: c.shift_start, 'aria-label': '근무 시작' }), shift_end: h('input', { type: 'time', value: c.shift_end, 'aria-label': '근무 끝' }), active: h('input', { type: 'checkbox', checked: c.active, 'aria-label': '사용' }) };
     return h('tr', {}, ...Object.values(f).map((x) => h('td', {}, x)), h('td', {}, btn(c.id ? '저장' : '추가', wrap(async () => {
-      await post('crews', { id: c.id || null, name: f.name.value, device_id: f.device_id.value, capacity_m3: f.capacity_m3.value, shift_start: f.shift_start.value, shift_end: f.shift_end.value, active: f.active.checked });
+      await post('crews', { id: c.id || null, name: f.name.value, device_id: f.device_id.value, capacity_m3: f.capacity_m3.value, capacity_kg: f.capacity_kg.value || 0, shift_start: f.shift_start.value, shift_end: f.shift_end.value, active: f.active.checked });
       toast('저장했습니다'); boot = null; render();
     }, crewMsg), 'small primary')));
   });
-  return [h('div', { class: 'card' }, h('h2', {}, '수거팀·차량'), h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['팀', '연결 휴대폰', '적재(m³)', '근무 시작', '근무 끝', '사용', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...crewRows))), crewMsg),
+  return [h('div', { class: 'card' }, h('h2', {}, '수거팀·차량'), h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['팀', '연결 휴대폰', '적재(m³)', '최대 중량(kg)', '근무 시작', '근무 끝', '사용', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...crewRows))),
+      h('p', { class: 'small muted' }, '최대 중량은 차량 등록증의 최대 적재량입니다(1톤 차량이면 1000). 비우면 무게는 따지지 않고 부피만 봅니다.'), crewMsg),
     volumeCard()];
 }
 function settingsBasic() {
@@ -1656,6 +1693,11 @@ function settingsBasic() {
   const jur = h('input', { value: st.jurisdiction || '', placeholder: '예: 동구', class: 'w-s', 'aria-label': '관할 구역' });
   const elat = h('input', { value: es.lat ?? '', placeholder: '위도', class: 'w-s', 'aria-label': '종료지 위도' }), elon = h('input', { value: es.lon ?? '', placeholder: '경도', class: 'w-s', 'aria-label': '종료지 경도' }), elabel = h('input', { value: es.label || '', placeholder: '종료지 이름', 'aria-label': '종료지 이름' });
   const ulat = h('input', { value: us.lat ?? '', placeholder: '위도', class: 'w-s', 'aria-label': '반입지 위도' }), ulon = h('input', { value: us.lon ?? '', placeholder: '경도', class: 'w-s', 'aria-label': '반입지 경도' }), ulabel = h('input', { value: us.label || '', placeholder: '반입지 이름', 'aria-label': '반입지 이름' });
+  const uh = st.unload_hours || {}, lu = st.lunch || {};
+  const uhs = h('input', { type: 'time', value: uh.start || '', 'aria-label': '반입지 받는 시간 시작' }), uhe = h('input', { type: 'time', value: uh.end || '', 'aria-label': '반입지 받는 시간 끝' });
+  const lus = h('input', { type: 'time', value: lu.start || '', 'aria-label': '쉬는 시간 창 시작' }), lue = h('input', { type: 'time', value: lu.end || '', 'aria-label': '쉬는 시간 창 끝' });
+  const lum = h('input', { type: 'number', value: lu.minutes || 60, min: 10, class: 'w-xs', 'aria-label': '쉬는 시간(분)' });
+  const bfirst = h('input', { type: 'checkbox', checked: st.base_first !== false, 'aria-label': '큰 짐 먼저 싣기 선호' });
   const umin = h('input', { type: 'number', value: st.unload_min, class: 'w-xs', 'aria-label': '하차 시간(분)' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, class: 'w-xs', 'aria-label': '차량당 최대 하차 횟수' });
   const ft = (label, ...el) => h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, label), h('div', { class: 'ft-v' }, ...el));
   const contact = h('input', { value: st.contact_info, class: 'fill', 'aria-label': '문의처' });
@@ -1663,11 +1705,15 @@ function settingsBasic() {
   const title = h('input', { value: st.monthly_report_title, class: 'fill', 'aria-label': '월보 제목' });
   return [h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'ftable' },
       ft('차고지', dlat, dlon, dlabel), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
-      ft('반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'), ft('종료지', elat, elon, elabel, h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
+      ft('반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'),
+      ft('반입지 받는 시간', uhs, '~', uhe, h('span', { class: 'muted small' }, '비우면 따지지 않음')),
+      ft('쉬는 시간', lus, '~', lue, '사이에', lum, '분', h('span', { class: 'muted small' }, '예: 11:30~13:30 사이 60분. 비우면 넣지 않음')),
+      ft('적재 순서', h('label', { class: 'row' }, bfirst, '큰 짐(장롱·침대·대형 냉장고 등)은 차가 비어 있을 때 싣는 순서를 선호'), h('span', { class: 'muted small' }, '이동시간이 비슷하면 큰 짐을 먼저')), ft('종료지', elat, elon, elabel, h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
       ft('관할 구역', jur, h('span', { class: 'muted small' }, '주소의 구 이름이 다르면 접수할 때 경고 (막지는 않음)'))),
     h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
     h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
-      unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value }); toast('저장했습니다'); boot = null; render(); }, routeMsg), 'primary')), routeMsg),
+      unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value,
+      unload_hours: { start: uhs.value, end: uhe.value }, lunch: { start: lus.value, end: lue.value, minutes: lum.value }, base_first: bfirst.checked }); toast('저장했습니다'); boot = null; render(); }, routeMsg), 'primary')), routeMsg),
     h('div', { class: 'card' }, h('h2', {}, '접수증·월보 문구'), h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('월보 제목', title)),
       h('p', { class: 'small muted' }, '문의처·배출 장소 안내는 접수증(신청인 보관용)에, 월보 제목은 통계 → [월보 출력]에 쓰입니다.'),
       h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { contact_info: contact.value, disposal_guide: guide.value, monthly_report_title: title.value }); toast('저장했습니다'); boot = null; render(); }, infoMsg), 'primary')), infoMsg),
