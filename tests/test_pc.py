@@ -381,7 +381,6 @@ def main():
     ok(g["state"]["memos"] == ["지하 주차장 입구에 배출(가상)"] and g["photos"][0]["line_id"] == lid, "현장 메모와 품목에 묶은 사진이 PC 접수 상세로")
 
     # 사용자·역할·변경 이력
-    sys.path.insert(0, str(ROOT / "pc" / "dgpc"))
     from dgpc import server as SV
     S.set_setting(con, "login", {"salt": "00" * 16, "hash": S._pw_hash("legacy-pass-123", b"\x00" * 16)})
     con.commit()
@@ -533,7 +532,7 @@ def main():
     con.close()
     rr = store.restore_from(Path(b["file"]), "backup-pass-for-test-01")
     con = store.connect()
-    ok(rr["kept"] and Path(rr["kept"]).exists() and S.get_setting(con, "after_backup") is None and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n_before,
+    ok(rr["kept"] and Path(rr["kept"]).exists() and not S.one(con, "SELECT 1 AS x FROM meta WHERE key='after_backup'") and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n_before,
        "복원: 백업 시점으로 되돌리고 기존 DB는 옆에 보관")
     ok(S.check_login(con, "admin", "legacy-pass-123") is not None, "복원 뒤 현재 DB 키로 열리고 계정 유지")
     print(f"\n통과 {passed}개")
@@ -662,9 +661,10 @@ def v10():
        and carry[t["as"]]["kind"] == "결과 없음" and carry[t["un"]]["kind"] == "미배정",
        "마감 화면 이월 대상: 미배정·결과 없음·재방문 약속 없는 미수거 → 다음 업무일(휴무일·주말·가상2동 화목 → 11/17)")
     S.ACTOR.set("kim")
-    _today = S.today_kst; S.today_kst = lambda: "2026-12-31"  # 마감은 지난 날만: 시험 날짜(11-12)를 지난 것으로
+    from dgpc import close as CL  # 마감은 지난 날만: 시험 날짜(11-12)를 지난 것으로 (close 모듈의 '오늘'만 바꿈)
+    _today = CL.today_kst; CL.today_kst = lambda: "2026-12-31"
     cl = S.close_day(con, day, "가상 마감")
-    S.today_kst = _today
+    CL.today_kst = _today
     g_as = S.get_request(con, t["as"])
     ok(len(cl["carried"]) == 3 and g_as["planned_date"] == "2026-11-17" and g_as["status"] == "RECEIVED" and g_as["versions"][0]["reason"].startswith("마감 이월")
        and not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (t["as"],)) and S.get_request(con, t["done"])["planned_date"] == day,
@@ -692,9 +692,9 @@ def v10():
     ok(upd["after_close"] and len(edits) == 2 and {e["entity"] for e in edits} == {"request", "payment"} and edits[0]["receipt_no"],
        "마감 후 수정 2건(접수 수정·수납)이 '마감 후 수정'으로 표시·마감 화면 목록에")
     # 다시 마감: 회차가 쌓임
-    _today = S.today_kst; S.today_kst = lambda: "2026-12-31"  # 마감은 지난 날만: 시험 날짜(11-12)를 지난 것으로
+    _today = CL.today_kst; CL.today_kst = lambda: "2026-12-31"  # 마감은 지난 날만
     S.close_day(con, day, "다시 마감")
-    S.today_kst = _today
+    CL.today_kst = _today
     hist = S.day_summary(con, day)["closes"]
     ok([h["seq"] for h in hist] == [1, 2] and hist[0]["status"] == "APPROVED" and hist[1]["status"] == "RECORDED" and hist[0]["carried"] == 3 and hist[1]["carried"] == 0,
        "다시 마감 → 새 회차(덮어쓰지 않음), 새 회차는 다시 팀장 확인 필요")
@@ -1299,7 +1299,7 @@ def v11_external():
     import urllib.error
     import urllib.parse
     import urllib.request
-    from dgpc import area as A, external as X, finance as FN, geo, privacy as PV
+    from dgpc import area as A, external as X, finance as FN, geo
     os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-ext-")
     con = store.connect(create=True)
     S.ensure_pc_keys(con)
@@ -1893,14 +1893,13 @@ def v12_review():
 def v13():
     """v0.13 PC 서버: 무결성·동시성·재전송 방지·성능(요약 열·색인)·잠금 정책·이전 단계·운영 API."""
     print("\n— v0.13 PC 서버 —")
-    import io
     import socket
     import threading
     import urllib.error
     import urllib.request
     import zlib
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from dgpc import backup as BK, finance as FN, ops as OPS, privacy as PV, server as SV
+    from dgpc import finance as FN, ops as OPS, privacy as PV, server as SV
     os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-v13-")
     con = store.connect(create=True)
     S.ensure_pc_keys(con)
@@ -2352,6 +2351,64 @@ def v13():
     con.close()
     print(f"\n통과 {passed}개 (v0.13 포함)")
 
+def v13_refactor():
+    """v0.13 구조 정리(행동 그대로): 경로 표 = 정리 전 권한, 설정 등록표, PC·휴대폰 공통 규칙(시험 벡터·표시 이름)."""
+    print("\n— v0.13 구조 정리 —")
+    from dgpc import server as SV, settings as SR
+    # 경로 표(역할 × 경로)가 정리 전 server.allowed() 결과와 같은지 (tests/data/route_matrix_v013.json: 정리 전에 떠 둔 표)
+    snap = json.loads((ROOT / "tests" / "data" / "route_matrix_v013.json").read_text(encoding="utf-8"))["routes"]
+    cur = {(r.method, r.pattern): r for r in SV.ROUTES}
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표의 경로 {len(cur)}개 = 정리 전 경로(빠지거나 늘어난 것 없음)")
+    diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
+    ok(not diff, f"역할 × 경로 권한이 정리 전과 같음 (다른 곳: {diff[:5]})")
+    sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
+    ok(all(SV.allowed(role, x["method"], sample(x["path"])) == (role in x["roles"]) for x in snap for role in ("ADMIN", "INTAKE", "FIELD", "LEAD")),
+       "server.allowed() 가 경로 표에서 나온 판단과 같음(4역할 × 경로)")
+    ok(all(cur[(x["method"], x["path"])].must_change_ok == x["must_change_ok"] for x in snap), "임시 비밀번호 상태에서 쓸 수 있는 경로(me·password·bootstrap·prefs) 그대로")
+    ok(all(SV.match(x["method"], sample(x["path"]))[0] is cur[(x["method"], x["path"])] for x in snap),
+       "견본 주소가 모두 자기 경로로 맞춰짐(앞 경로에 가려지는 것 없음)")
+    ok(all(r.lock == ("read" if r.method == "GET" else r.lock) for r in SV.ROUTES) and
+       {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
+                                                             "external/test", "route", "backup", "backup/auto", "backup/retention", "privacy/purge",
+                                                             "photo-purge", "refunds/sync", "integrity/full"},
+       "잠금 정책: GET = 조회 전용 연결, 잠금 밖 검증 POST 15개 = none, 나머지 POST = write")
+    ok(not SV.allowed("FIELD", "GET", "nothing-here") and SV.allowed("ADMIN", "GET", "nothing-here") and SV.allowed("INTAKE", "GET", "requests/a/b/c"),
+       "경로 표에 없는 주소: 관리자·같은 첫 마디를 쓸 수 있는 역할은 404, 그 밖은 403")
+    # 설정 등록표
+    con = store.connect()
+    def err(fn):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            return type(e).__name__
+        return None
+    ok(err(lambda: S.get_setting(con, "no_such_key")) == "KeyError" and err(lambda: S.set_setting(con, "no_such_key", 1)) == "KeyError",
+       "등록되지 않은 설정 키 읽기·쓰기 → KeyError")
+    ok(err(lambda: S.set_setting(con, "unload_min", "많이")) == "ValueError", "등록표 형식 검사: 숫자 설정에 글 저장 거부(ValueError)")
+    st = S.settings(con)
+    ok({k for k, v in SR.SETTINGS.items() if v.expose} <= set(st) and {"capacity", "reductions", "external", "fee_version", "backup_auto", "pay_methods",
+                                                                         "reduction_round_units", "pii_retention_years"} <= set(st),
+       "설정 묶음 = 등록표(expose) + 모듈이 더한 값(수용량·감면·외부 키·수수료표·백업·수납 방법)")
+    ok(not any(SR.SETTINGS[k].secret and k in st for k in SR.SETTINGS), "비밀 설정(외부 승인키)은 설정 묶음에 그대로 나가지 않음")
+    # PC·휴대폰 공통 계산 규칙: data/derive_vectors.json (tests/fees.test.mjs 도 같은 파일로 휴대폰 deriveStop·applyReduction 을 확인)
+    from dgpc import derive as D
+    vec = json.loads((ROOT / "data" / "derive_vectors.json").read_text(encoding="utf-8"))["vectors"]
+    for v in vec:
+        d = D.derive_pure(v["items"], [{"kind": e["kind"], "body_json": json.dumps(e["body"]), "device_ts": f"2026-11-12T00:00:{i:02d}Z"}
+                                       for i, e in enumerate(v["events"])], [])
+        fs = D.fee_summary({"reduction_code": "X" if v["reduction_rate"] else None, "reduction_rate": v["reduction_rate"]}, d["fee"]["final"])
+        x = v["expect"]
+        ok([{k: l[k] for k in ("line_id", "kind", "price", "qty_confirmed", "qty_collected", "remaining")} for l in d["lines"]] == x["lines"]
+           and {k: d["fee"][k] for k in x["fee"]} == x["fee"] and d["contact"] == x["contact"] and d["outcome"] == x["outcome"]
+           and {"rate": fs["reduction_rate"], "reduction": fs["reduction"], "levied": fs["levied"]} == x["reduction"], f"공통 벡터: {v['name']}")
+    labels = json.loads((ROOT / "data" / "labels.json").read_text(encoding="utf-8"))
+    from dgpc import reports as RP
+    ok(RP.STATUS_LABEL == labels["status"] and S.STATUS_LABEL["DONE"] == "수거 완료", "CSV 상태 이름 = data/labels.json (PC 화면·휴대폰과 같은 표)")
+    import subprocess
+    gen = [subprocess.run([sys.executable, str(ROOT / "tools" / t), "--check"], capture_output=True, text=True).returncode
+           for t in ("build_fee_js.py", "build_labels.py", "gen_settings_doc.py", "gen_routes_doc.py")]
+    ok(gen == [0, 0, 0, 0], f"만든 파일이 원본과 같음: fees-data.js·labels-data.js·docs/settings.md·docs/routes.md {gen}")
+
 
 if __name__ == "__main__":
     main()
@@ -2363,3 +2420,5 @@ if __name__ == "__main__":
     v12_load()
     v12_review()
     v13()
+    v13_refactor()
+    print(f"\n통과 {passed}개 (구조 정리 포함)")

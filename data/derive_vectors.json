@@ -1,0 +1,994 @@
+{
+ "about": "PC(pc/dgpc/derive.py derive_pure·fee_summary)와 휴대폰(web/fees.js deriveStop·applyReduction)이 함께 따르는 계산 규칙의 공통 시험 벡터. 입력(접수 품목 + 현장 기록 + 감면율) → 기대값(줄별 수량·금액·감면·부과 금액). tests/test_pc.py 와 tests/fees.test.mjs 가 같은 파일로 확인한다. 감면액 끝수는 1원 단위(휴대폰은 10원 단위 설정을 받지 않는다).",
+ "vectors": [
+  {
+   "name": "기본: 확정 단가 2줄, 기록 없음",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "장롱",
+     "spec": "120cm 이상 1쪽당",
+     "unit": "PIECE",
+     "unit_label": "쪽",
+     "qty": 2,
+     "unit_price": 15000,
+     "amount": 30000,
+     "price_status": "CONFIRMED"
+    },
+    {
+     "line_id": "b",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 3,
+     "unit_price": 2000,
+     "amount": 6000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 15000,
+      "qty_confirmed": 2,
+      "qty_collected": 0,
+      "remaining": 2
+     },
+     {
+      "line_id": "b",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 3,
+      "qty_collected": 0,
+      "remaining": 3
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 36000,
+     "confirmed_subtotal": 36000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 36000,
+     "qty_by_unit": {
+      "쪽": 2,
+      "개": 3
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 36000
+    }
+   }
+  },
+  {
+   "name": "단가 확인 필요 줄 → 최종 금액 미확정",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    },
+    {
+     "line_id": "b",
+     "fee_rate_id": null,
+     "name": "식탁",
+     "spec": "6인용 이상(대리석)",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 15000,
+     "amount": 0,
+     "price_status": "PENDING"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "b",
+      "kind": "RECEIVED",
+      "price": null,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 2000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 1,
+     "final": null,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": null,
+     "levied": null
+    }
+   }
+  },
+  {
+   "name": "현장 추가 품목(확정 단가) → 현장 추가 금액·최종 금액에 포함",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "F1",
+      "name": "선풍기",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "대",
+      "unit_price": 3000,
+      "price_status": "CONFIRMED",
+      "qty": 2
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "F1",
+      "kind": "FIELD",
+      "price": 3000,
+      "qty_confirmed": 2,
+      "qty_collected": 0,
+      "remaining": 2
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 8000,
+     "field_added": 6000,
+     "diff": 6000,
+     "pending_count": 0,
+     "final": 8000,
+     "qty_by_unit": {
+      "개": 1,
+      "대": 2
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 8000
+    }
+   }
+  },
+  {
+   "name": "현장 추가 품목(확인 필요) → 미확정",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "F1",
+      "name": "식탁",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "개",
+      "unit_price": 15000,
+      "price_status": "PENDING",
+      "qty": 1
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "F1",
+      "kind": "FIELD",
+      "price": null,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 2000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 1,
+     "final": null,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": null,
+     "levied": null
+    }
+   }
+  },
+  {
+   "name": "같은 줄 현장 추가 두 번 → 한 줄",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "F1",
+      "name": "선풍기",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "대",
+      "unit_price": 3000,
+      "price_status": "CONFIRMED",
+      "qty": 1
+     }
+    },
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "F1",
+      "name": "선풍기",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "대",
+      "unit_price": 3000,
+      "price_status": "CONFIRMED",
+      "qty": 5
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "F1",
+      "kind": "FIELD",
+      "price": 3000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 5000,
+     "field_added": 3000,
+     "diff": 3000,
+     "pending_count": 0,
+     "final": 5000,
+     "qty_by_unit": {
+      "개": 1,
+      "대": 1
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 5000
+    }
+   }
+  },
+  {
+   "name": "일부 수거 → 남은 수량",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 3,
+     "unit_price": 2000,
+     "amount": 6000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "ITEM_RESULT",
+     "body": {
+      "line_id": "a",
+      "qty_confirmed": 3,
+      "qty_collected": 1,
+      "reason": "NOT_PUT_OUT"
+     }
+    },
+    {
+     "kind": "ATTEMPT",
+     "body": {
+      "outcome": "PARTIAL"
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 3,
+      "qty_collected": 1,
+      "remaining": 2
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": "PARTIAL",
+    "fee": {
+     "received": 6000,
+     "confirmed_subtotal": 6000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 6000,
+     "qty_by_unit": {
+      "개": 3
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 6000
+    }
+   }
+  },
+  {
+   "name": "현장 확인 수량이 늘면 금액도 확인 수량 기준(접수 금액은 그대로)",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "고정식 의자",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "ITEM_RESULT",
+     "body": {
+      "line_id": "a",
+      "qty_confirmed": 4,
+      "qty_collected": 4
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 4,
+      "qty_collected": 4,
+      "remaining": 0
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 8000,
+     "field_added": 0,
+     "diff": 6000,
+     "pending_count": 0,
+     "final": 8000,
+     "qty_by_unit": {
+      "개": 4
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 8000
+    }
+   }
+  },
+  {
+   "name": "단위가 다른 수량은 합산하지 않음",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "장롱",
+     "spec": "1쪽",
+     "unit": "PIECE",
+     "unit_label": "쪽",
+     "qty": 2,
+     "unit_price": 15000,
+     "amount": 30000,
+     "price_status": "CONFIRMED"
+    },
+    {
+     "line_id": "b",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 3,
+     "unit_price": 2000,
+     "amount": 6000,
+     "price_status": "CONFIRMED"
+    },
+    {
+     "line_id": "c",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "회전",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 3000,
+     "amount": 3000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 15000,
+      "qty_confirmed": 2,
+      "qty_collected": 0,
+      "remaining": 2
+     },
+     {
+      "line_id": "b",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 3,
+      "qty_collected": 0,
+      "remaining": 3
+     },
+     {
+      "line_id": "c",
+      "kind": "RECEIVED",
+      "price": 3000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 39000,
+     "confirmed_subtotal": 39000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 39000,
+     "qty_by_unit": {
+      "쪽": 2,
+      "개": 4
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 39000
+    }
+   }
+  },
+  {
+   "name": "연락·결과 기록: 마지막 값이 현재 값",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "CONTACT",
+     "body": {
+      "result": "NO_ANSWER"
+     }
+    },
+    {
+     "kind": "CONTACT",
+     "body": {
+      "result": "REACHED"
+     }
+    },
+    {
+     "kind": "ITEM_RESULT",
+     "body": {
+      "line_id": "a",
+      "qty_confirmed": 1,
+      "qty_collected": 1
+     }
+    },
+    {
+     "kind": "ATTEMPT",
+     "body": {
+      "outcome": "DONE"
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 1,
+      "remaining": 0
+     }
+    ],
+    "contact": "REACHED",
+    "outcome": "DONE",
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 2000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 2000,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 2000
+    }
+   }
+  },
+  {
+   "name": "감면 50%: 감면액 원 미만 버림",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "품목",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 3015,
+     "amount": 3015,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 50,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 3015,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 3015,
+     "confirmed_subtotal": 3015,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 3015,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": 1507,
+     "levied": 1508
+    }
+   }
+  },
+  {
+   "name": "감면 100%: 부과 금액 0",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 3,
+     "unit_price": 2000,
+     "amount": 6000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 100,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 3,
+      "qty_collected": 0,
+      "remaining": 3
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 6000,
+     "confirmed_subtotal": 6000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 6000,
+     "qty_by_unit": {
+      "개": 3
+     }
+    },
+    "reduction": {
+     "rate": 100,
+     "reduction": 6000,
+     "levied": 0
+    }
+   }
+  },
+  {
+   "name": "감면 30%: 12,345원 → 감면 3,703원",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "품목",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 12345,
+     "amount": 12345,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 30,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 12345,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 12345,
+     "confirmed_subtotal": 12345,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 12345,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 30,
+     "reduction": 3703,
+     "levied": 8642
+    }
+   }
+  },
+  {
+   "name": "감면 + 현장 추가 품목: 늘어난 계산 금액 전체에 같은 감면율",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "F1",
+      "name": "책상",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "개",
+      "unit_price": 5000,
+      "price_status": "CONFIRMED",
+      "qty": 1
+     }
+    }
+   ],
+   "reduction_rate": 50,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "F1",
+      "kind": "FIELD",
+      "price": 5000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 7000,
+     "field_added": 5000,
+     "diff": 5000,
+     "pending_count": 0,
+     "final": 7000,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": 3500,
+     "levied": 3500
+    }
+   }
+  },
+  {
+   "name": "감면 + 미확정 → 감면액·부과 금액 미확정",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "식탁",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 15000,
+     "amount": 0,
+     "price_status": "PENDING"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 50,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": null,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 0,
+     "confirmed_subtotal": 0,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 1,
+     "final": null,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": null,
+     "levied": null
+    }
+   }
+  },
+  {
+   "name": "모르는 기록 종류는 금액·수량에 영향 없음",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 2,
+     "unit_price": 2000,
+     "amount": 4000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "DIAL_INTENT",
+     "body": {}
+    },
+    {
+     "kind": "NAV_INTENT",
+     "body": {
+      "app": "kakao"
+     }
+    },
+    {
+     "kind": "FIELD_MEMO",
+     "body": {
+      "text": "메모"
+     }
+    }
+   ],
+   "reduction_rate": 0,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 2,
+      "qty_collected": 0,
+      "remaining": 2
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 4000,
+     "confirmed_subtotal": 4000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 4000,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 0,
+     "reduction": 0,
+     "levied": 4000
+    }
+   }
+  }
+ ]
+}

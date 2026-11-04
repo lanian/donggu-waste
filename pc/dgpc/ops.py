@@ -17,7 +17,7 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 
-from dgpc import service as S
+from dgpc import area as A, backup as BK, finance as FN, privacy as PV, service as S, store
 
 # ------------------------------------------------------------------ 백그라운드 작업 실행기 (작업자 1개)
 JOB_KINDS = {"backup": "수동 백업", "backup_auto": "자동 백업(지금)", "backup_retention": "백업 보관 정리", "pii_purge": "개인정보 파기",
@@ -57,7 +57,6 @@ class JobRunner:
 
     def run_now(self, job: dict, fn):
         """작업 하나 실행(작업자 스레드에서, 시험에서는 직접)."""
-        from dgpc import privacy as PV
         job.update(status="RUNNING", started_at=S.now())
         tok, tok2 = S.ACTOR.set(job["actor"]), PV.CLIENT.set(job["client"])
         try:
@@ -89,7 +88,6 @@ JOBS = JobRunner()
 
 def job_fn(kind: str, con, lock, read_con_factory=None, **kw):
     """작업 종류 → 실행 함수. con = 쓰기 연결, lock = 서버 DB 잠금(묶음마다 잡음)."""
-    from dgpc import backup as BK, finance as FN, privacy as PV
     guard = lock if lock is not None else nullcontext()
 
     def prog(job):
@@ -156,7 +154,6 @@ def job_fn(kind: str, con, lock, read_con_factory=None, **kw):
 # ------------------------------------------------------------------ 예약 작업 (하루 1회·주 1회)
 def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None) -> dict:
     """서버 예약 작업이 하루 한 번 부른다(시험에서는 직접). 실패해도 다음 일은 계속한다."""
-    from dgpc import backup as BK, privacy as PV
     guard = lock if lock is not None else nullcontext()
     out: dict = {}
     tok = S.ACTOR.set("system")
@@ -174,7 +171,7 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
             except Exception as e:  # noqa: BLE001
                 out[name] = {"error": e.__class__.__name__}
         weekday = dt.date.fromisoformat(today or S.today_kst()).weekday()
-        last_full = (S.get_setting(con, "last_full_verify", None) or {}).get("at")
+        last_full = (S.get_setting(con, "last_full_verify") or {}).get("at")
         if weekday == 6 or not last_full or _age_days(last_full) >= 7:  # 일요일 또는 7일 넘게 전체 검사가 없었으면
             try:
                 out["verify_full"] = JOBS.run_now({"actor": "system", "client": "local", "kind": "verify_full", "progress": 0},
@@ -195,7 +192,6 @@ def _locked(guard, fn):
 
 
 def _verify_quick(con, lock, read_con_factory):
-    from dgpc import privacy as PV
     guard = lock if lock is not None else nullcontext()
     with guard:
         res = PV.verify_all(con, full=False)
@@ -214,12 +210,11 @@ def _age_days(iso: str | None) -> float | None:
 
 def ops_status(con) -> dict:
     """대시보드 경고용: 예약 작업(자동 파기·사진 정리·무결성 검사·백업)이 언제 마지막으로 돌았는지. 2일 넘으면 stale."""
-    from dgpc import backup as BK
     items = []
     for key, label, setting, limit in (("pii_purge", "개인정보 자동 파기", "last_pii_purge_run", 2), ("photo_purge", "사진 보관 기간 정리", "last_photo_purge_run", 2),
                                        ("daily", "하루 예약 작업", "last_daily_tasks", 2), ("verify_quick", "무결성 빠른 검사", "last_quick_verify", 2),
                                        ("verify_full", "무결성 전체 검사", "last_full_verify", 8)):
-        v = S.get_setting(con, setting, None) or {}
+        v = S.get_setting(con, setting) or {}
         age = _age_days(v.get("at"))
         items.append({"key": key, "label": label, "last_at": v.get("at"), "age_days": round(age, 1) if age is not None else None,
                       "stale": age is None or age > limit, **({"ok": v.get("ok")} if "ok" in v else {}), **({"count": v.get("count")} if "count" in v else {})})
@@ -263,7 +258,6 @@ def pending(con, today: str | None = None) -> dict:
 # ------------------------------------------------------------------ 운영 준비 점검
 def readiness(con) -> dict:
     """운영 시작 전 확인 목록: ok와 고칠 곳(fix: 화면 키)."""
-    from dgpc import backup as BK
     items = []
 
     def add(key, label, ok, fix, note=""):
@@ -274,9 +268,9 @@ def readiness(con) -> dict:
     devs = {d["id"]: d for d in S.rows(con, "SELECT id, status, confirmed_at FROM device")}
     bad = [c["name"] for c in crews if not (c["device_id"] and S.device_ready(devs.get(c["device_id"])))]
     add("devices", "휴대폰 지문 확인·팀 연결", crews and not bad, "settings/devices", ("연결·확인 필요: " + ", ".join(bad[:5])) if bad else "")
+    # 기본값을 None 으로 주어 읽는다 → 담당자가 저장한 적이 있는지(등록표 기본값은 동구청 부근)
     add("depot", "차고지 위치(기본값 아님)", S.get_setting(con, "depot", None) is not None, "settings/route")
-    add("unload_site", "반입지 위치", S.get_setting(con, "unload_site", None) is not None, "settings/route")
-    from dgpc import area as A
+    add("unload_site", "반입지 위치", S.get_setting(con, "unload_site") is not None, "settings/route")
     add("dongs", "행정동 등록", bool(A.list_dongs(con, active_only=True)), "settings/dongs")
     addr = S.one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
     add("address", "주소 자료 또는 행안부 주소 승인키", addr > 0 or bool(S.secret(con, "juso_search_key")), "settings/address", f"주소 자료 {addr:,}곳")
@@ -296,7 +290,6 @@ DIAG_TABLES = ("request", "request_item", "request_version", "result_event", "re
 
 
 def diag(con, state_dir: Path | None = None) -> dict:
-    from dgpc import store
     d = state_dir or store.state_dir()
     size = lambda p: p.stat().st_size if p.exists() else 0
     db = d / "pc.db"
@@ -310,11 +303,11 @@ def diag(con, state_dir: Path | None = None) -> dict:
     pages = con.execute("PRAGMA page_count").fetchone()[0]
     free = con.execute("PRAGMA freelist_count").fetchone()[0]
     psz = con.execute("PRAGMA page_size").fetchone()[0]
-    g = lambda k: (S.get_setting(con, k, None) or {})
+    g = lambda k: (S.get_setting(con, k) or {})
     return {"db_bytes": size(db), "wal_bytes": size(Path(str(db) + "-wal")), "photos": {"count": ph["n"], "bytes": ph["b"]},
             "free_bytes": free * psz, "page_bytes": pages * psz, "auto_vacuum": con.execute("PRAGMA auto_vacuum").fetchone()[0],
             "schema_version": con.execute("PRAGMA user_version").fetchone()[0], "tables": counts,
-            "last": {"backup": S.get_setting(con, "last_backup_at", None), "verify_quick": g("last_quick_verify").get("at"), "verify_full": g("last_full_verify").get("at"),
+            "last": {"backup": S.get_setting(con, "last_backup_at"), "verify_quick": g("last_quick_verify").get("at"), "verify_full": g("last_full_verify").get("at"),
                      "pii_purge": g("last_pii_purge_run").get("at"), "photo_purge": g("last_photo_purge_run").get("at"), "daily_tasks": g("last_daily_tasks").get("at"),
                      "refund_sync": g("last_refund_sync").get("at")}}
 

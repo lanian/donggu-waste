@@ -83,12 +83,17 @@ def main(argv=None) -> int:
     import re as _re
     pre = {f.removeprefix("./") for f in precache_files(web / "sw.js")}
     used = set()
-    for src in [web / "index.html", *web.glob("*.js")]:
+    # 화면 모듈(web/screens/*.js)까지: 상대 경로는 그 파일 기준으로 풀어 web/ 기준 경로로 비교한다
+    for src in [web / "index.html", *web.glob("*.js"), *web.glob("screens/*.js")]:
         if src.name == "sw.js":
             continue
         t = src.read_text(encoding="utf8")
         for m in _re.finditer(r"""(?:import\s[^'"]*?from\s*|import\(\s*|src=|href=)['"](\./)?([\w./-]+\.(?:m?js|css|webmanifest|svg|png))['"]""", t):
-            used.add(m.group(2))
+            target = (src.parent / m.group(2)).resolve()
+            try:
+                used.add(target.relative_to(web.resolve()).as_posix())
+            except ValueError:
+                used.add(m.group(2))
     lack = sorted(u for u in used if u not in pre and not u.startswith(("http", "/")) and (web / u).exists())
     if lack:
         errors.append("앱이 쓰지만 sw.js 미리 저장 목록에 없는 파일(오프라인에서 멈춤): " + ", ".join(lack))

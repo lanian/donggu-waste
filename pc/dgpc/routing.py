@@ -30,6 +30,8 @@ from pathlib import Path
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+from dgpc import external as X
+
 # 품목별 적재 기준(1단위당 부피 m³·무게 kg·작업 분·취급 표시): data/item_handling.json 을 PC·휴대폰이 함께 쓴다.
 # 추정치다. 담당자가 실측한 부피 보정값(fee_rate_id 별)이 있으면 부피는 그것을 쓴다.
 HANDLING = json.loads((Path(__file__).resolve().parent.parent.parent / "data" / "item_handling.json").read_text(encoding="utf8"))
@@ -183,7 +185,6 @@ def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache
     """N×N 분 단위 행렬. 출발지마다 다중 목적지 API(30곳씩, 반경 10km 안)로 한 행씩 채우고, 반경 밖은 1:1 길찾기로 묻는다.
     캐시에 있는 쌍은 묻지 않는다. 호출 수·전체 시간 한도를 넘거나 인증 실패·연결 실패가 나면 더 묻지 않고,
     못 구한 쌍은 직선거리 추정으로 채운다. 돌려주는 info: api_calls, cache_hits, road_pairs, fallback_pairs, error"""
-    from dgpc import external as X
     uniq: list[str] = []
     pos: dict[str, tuple[float, float]] = {}
     for p in points:

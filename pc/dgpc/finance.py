@@ -9,14 +9,14 @@
 from __future__ import annotations
 
 import csv
-import datetime as dt
 import hashlib
 import io
 import json
 import re
 import uuid
 
-from dgpc import service as S
+from dgpc import core as C, derive as D, geo, payments as PAY, settings as SR
+from dgpc.derive import fee_summary  # noqa: F401 — 감면 계산(순수)은 derive 로 옮김. FN.fee_summary 이름은 그대로
 
 DEFAULT_REDUCTIONS = [
     {"code": "BASIC", "label": "기초생활수급자", "rate": 100, "note": "조례 확인 필요", "active": True},
@@ -34,7 +34,12 @@ RECON_LABEL = {"MATCH": "일치", "AMOUNT_DIFF": "금액 다름", "UNMATCHED": "
 
 # ------------------------------------------------------------------ 감면
 def reductions(con) -> list[dict]:
-    return S.get_setting(con, "reductions", None) or [dict(x) for x in DEFAULT_REDUCTIONS]
+    return C.get_setting(con, "reductions") or [dict(x) for x in DEFAULT_REDUCTIONS]
+
+
+@SR.contribute("reductions")
+def _settings_part(con) -> dict:
+    return {"reductions": reductions(con), "reduction_proofs": list(PROOF_METHODS)}
 
 
 def save_reductions(con, items: list[dict]):
@@ -46,43 +51,33 @@ def save_reductions(con, items: list[dict]):
             continue
         code = (x.get("code") or "").strip().upper() or re.sub(r"[^A-Z0-9]", "", label.upper()) or f"R{len(out) + 1}"
         if not re.fullmatch(r"[A-Z0-9_]{1,20}", code):
-            raise S.UserError("감면 코드는 영문 대문자·숫자 20자 이내로 적어 주세요.")
+            raise C.UserError("감면 코드는 영문 대문자·숫자 20자 이내로 적어 주세요.")
         if code in seen:
-            raise S.UserError(f"같은 감면 코드가 두 번 있습니다({code}).")
+            raise C.UserError(f"같은 감면 코드가 두 번 있습니다({code}).")
         try:
             rate = int(x.get("rate"))
         except (TypeError, ValueError):
-            raise S.UserError(f"{label}: 감면율을 숫자(%)로 적어 주세요.")
+            raise C.UserError(f"{label}: 감면율을 숫자(%)로 적어 주세요.")
         if not 1 <= rate <= 100:
-            raise S.UserError(f"{label}: 감면율은 1~100% 사이입니다.")
+            raise C.UserError(f"{label}: 감면율은 1~100% 사이입니다.")
         seen.add(code)
         out.append({"code": code, "label": label, "rate": rate, "note": (x.get("note") or "").strip()[:60], "active": bool(x.get("active", True))})
-    S.set_setting(con, "reductions", out)
+    C.set_setting(con, "reductions", out)
     return out
-
-
-def fee_summary(r: dict, final: int | None, unit: int = 1) -> dict:
-    """계산 금액 → 감면액 → 부과 금액. 감면액은 unit(1원·10원) 미만 버림(설정 reduction_round_unit, 기본 1원)."""
-    rate = int(r.get("reduction_rate") or 0) if r.get("reduction_code") else 0
-    if final is None:
-        return {"calculated": None, "reduction_rate": rate, "reduction": None, "levied": None, "reduction_label": r.get("reduction_label")}
-    unit = unit if unit in (1, 10) else 1
-    red = (final * rate // 100) // unit * unit
-    return {"calculated": final, "reduction_rate": rate, "reduction": red, "levied": final - red, "reduction_label": r.get("reduction_label") if rate else None}
 
 
 def _check_reduction(con, code: str, proof: str, checker: str) -> dict:
     item = next((x for x in reductions(con) if x["code"] == code), None)
     if not item:
-        raise S.UserError("감면 사유를 골라 주세요.")
+        raise C.UserError("감면 사유를 골라 주세요.")
     if not item.get("active", True):
-        raise S.UserError("사용하지 않는 감면 사유입니다.")
+        raise C.UserError("사용하지 않는 감면 사유입니다.")
     if proof not in PROOF_METHODS:
-        raise S.UserError("증빙 확인 방법을 골라 주세요 (" + ", ".join(PROOF_METHODS) + ").")
+        raise C.UserError("증빙 확인 방법을 골라 주세요 (" + ", ".join(PROOF_METHODS) + ").")
     if not (checker or "").strip():
-        raise S.UserError("증빙을 확인한 사람(확인자)을 적어 주세요.")
+        raise C.UserError("증빙을 확인한 사람(확인자)을 적어 주세요.")
     if re.search(r"\d{6}\s*-?\s*\d{7}", checker):
-        raise S.UserError("주민등록번호 같은 식별번호는 적지 마세요.")
+        raise C.UserError("주민등록번호 같은 식별번호는 적지 마세요.")
     return item
 
 
@@ -93,34 +88,34 @@ def apply_reduction_fields(con, data: dict) -> dict | None:
         return None
     item = _check_reduction(con, code, data.get("reduction_proof") or "", data.get("reduction_checker") or "")
     return {"reduction_code": code, "reduction_rate": item["rate"], "reduction_label": item["label"], "reduction_proof": data.get("reduction_proof"),
-            "reduction_checker": (data.get("reduction_checker") or "").strip()[:30], "reduction_at": S.now()}
+            "reduction_checker": (data.get("reduction_checker") or "").strip()[:30], "reduction_at": C.now()}
 
 
 def set_reduction(con, rid: str, data: dict) -> dict:
-    r = S.one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    r = C.one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not r:
-        raise S.UserError("접수를 찾을 수 없습니다.")
-    flag = S._after_close(con, rid)
+        raise C.UserError("접수를 찾을 수 없습니다.")
+    flag = C._after_close(con, rid)
     why = (data.get("reason") or "").strip()
     if flag and not why:
-        raise S.UserError(f"마감한 날({flag['after_close']})의 접수입니다. 감면 변경 사유를 적어 주세요.")
+        raise C.UserError(f"마감한 날({flag['after_close']})의 접수입니다. 감면 변경 사유를 적어 주세요.")
     vals = apply_reduction_fields(con, data)
     if not vals and not r["reduction_code"]:
-        raise S.UserError("감면 사유를 골라 주세요.")
-    with S.tx(con):
+        raise C.UserError("감면 사유를 골라 주세요.")
+    with C.tx(con):
         if data.get("req_ver") not in (None, ""):  # 화면이 연 버전과 같을 때만(다르면 409)
-            S.check_req_ver(con, rid, data.get("req_ver"))
+            C.check_req_ver(con, rid, data.get("req_ver"))
         if vals:
             con.execute("""UPDATE request SET reduction_code=?, reduction_rate=?, reduction_label=?, reduction_proof=?, reduction_checker=?, reduction_at=? WHERE id=?""",
                         (*vals.values(), rid))
         else:
             con.execute("UPDATE request SET reduction_code=NULL, reduction_rate=NULL, reduction_label=NULL, reduction_proof=NULL, reduction_checker=NULL, reduction_at=? WHERE id=?",
-                        (S.now(), rid))
-        con.execute("UPDATE request SET updated_at=? WHERE id=?", (S.now(), rid))  # 목록 전송 뒤 바뀌면 '재전송 필요'
-        S.audit(con, "request", rid, "REDUCTION" if vals else "REDUCTION_CLEAR",
+                        (C.now(), rid))
+        con.execute("UPDATE request SET updated_at=? WHERE id=?", (C.now(), rid))  # 목록 전송 뒤 바뀌면 '재전송 필요'
+        C.audit(con, "request", rid, "REDUCTION" if vals else "REDUCTION_CLEAR",
                 {**({"code": vals["reduction_code"], "rate": vals["reduction_rate"], "proof": vals["reduction_proof"], "checker": vals["reduction_checker"]} if vals else {}),
                  **({"reason": why[:200]} if why else {}), **flag})
-    return S.payment_status(con, rid)
+    return D.payment_status(con, rid)
 
 
 # ------------------------------------------------------------------ 세입 일계표·월계표
@@ -131,11 +126,11 @@ def _period(d: str, unit: str) -> str:
 def revenue(con, start: str, end: str, unit: str = "day") -> dict:
     for d in (start, end):
         if not re.fullmatch(r"\d{4}-\d\d-\d\d", d or ""):
-            raise S.UserError("기간을 날짜로 골라 주세요.")
+            raise C.UserError("기간을 날짜로 골라 주세요.")
     if start > end:
-        raise S.UserError("시작일이 끝일보다 늦습니다.")
+        raise C.UserError("시작일이 끝일보다 늦습니다.")
     unit = "month" if unit == "month" else "day"
-    pays = S.rows(con, """SELECT p.*, r.dong, r.levy_no, r.receipt_no FROM payment p JOIN request r ON r.id=p.request_id
+    pays = C.rows(con, """SELECT p.*, r.dong, r.levy_no, r.receipt_no FROM payment p JOIN request r ON r.id=p.request_id
         WHERE p.void_reason IS NULL AND p.paid_on BETWEEN ? AND ? ORDER BY p.paid_on, p.recorded_at""", (start, end))
     by_method: dict[tuple, dict] = {}
     by_dong: dict[tuple, dict] = {}
@@ -170,11 +165,11 @@ def revenue(con, start: str, end: str, unit: str = "day") -> dict:
 def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "method") -> bytes:
     """세외수입 담당자용 CSV(엑셀 BOM). 이름·연락처·주소 없음."""
     buf = io.StringIO()
-    w = S.safe_csv_writer(buf)
+    w = C.safe_csv_writer(buf)
     per = "월" if unit == "month" else "납부일"
     if kind == "detail":
         w.writerow(["납부일", "부과번호", "접수번호", "행정동", "구분", "납부 방법", "금액(원)", "영수번호·거래번호", "기록 출처", "기록 시각"])
-        for p in S.rows(con, """SELECT p.*, r.dong, r.levy_no, r.receipt_no FROM payment p JOIN request r ON r.id=p.request_id
+        for p in C.rows(con, """SELECT p.*, r.dong, r.levy_no, r.receipt_no FROM payment p JOIN request r ON r.id=p.request_id
                 WHERE p.void_reason IS NULL AND p.paid_on BETWEEN ? AND ? ORDER BY p.paid_on, r.levy_no""", (start, end)):
             w.writerow([p["paid_on"], p["levy_no"] or "", p["receipt_no"], p["dong"] or "", "납부" if p["kind"] == "PAY" else "환불", p["method"],
                         p["amount"] if p["kind"] == "PAY" else -p["amount"], p["receipt_ref"] or "", p["source"] or "수기", p["recorded_at"]])
@@ -186,35 +181,34 @@ def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "metho
             w.writerow([x["period"], (x[key] or "(동 미지정)") if key == "dong" else x[key], x["pay_n"], x["pay"], x["refund_n"], x["refund"], x["net"]])
         t = rep["totals"]
         w.writerow(["합계", "", t["pay_n"], t["pay"], t["refund_n"], t["refund"], t["net"]])
-    with S.tx(con):
-        S.audit(con, "report", "revenue", "EXPORT", {"start": start, "end": end, "unit": unit, "kind": kind})
+    with C.tx(con):
+        C.audit(con, "report", "revenue", "EXPORT", {"start": start, "end": end, "unit": unit, "kind": kind})
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
 # ------------------------------------------------------------------ 대사 (세외수입 납부 자료 CSV: 부과번호·금액·납부일)
 def recon_template() -> bytes:
     buf = io.StringIO()
-    w = S.safe_csv_writer(buf)
+    w = C.safe_csv_writer(buf)
     w.writerow(["부과번호", "금액", "납부일", "영수번호", "납부방법"])
     w.writerow(["2026-00-00001", "12000", "2026-11-03", "가상-0001", "가상계좌"])
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
 def parse_recon(con, raw: bytes) -> dict:
-    from dgpc import geo
     text = geo.decode(raw)
     rd = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
     if not rd:
-        raise S.UserError("빈 파일입니다.")
+        raise C.UserError("빈 파일입니다.")
     head = [c.strip().replace(" ", "") for c in rd[0]]
     def col(*names):
         return next((head.index(n) for n in names if n in head), None)
     ci = {"levy": col("부과번호", "고지번호"), "amount": col("금액", "납부금액", "수납금액"), "date": col("납부일", "수납일", "납부일자"),
           "ref": col("영수번호", "거래번호", "수납번호"), "method": col("납부방법", "수납방법")}
     if ci["levy"] is None or ci["amount"] is None or ci["date"] is None:
-        raise S.UserError("머리줄에 '부과번호, 금액, 납부일' 열이 있어야 합니다. [서식 내려받기]를 참고하세요.")
+        raise C.UserError("머리줄에 '부과번호, 금액, 납부일' 열이 있어야 합니다. [서식 내려받기]를 참고하세요.")
     if len(rd) > 5001:
-        raise S.UserError("한 번에 5,000행까지 넣을 수 있습니다.")
+        raise C.UserError("한 번에 5,000행까지 넣을 수 있습니다.")
     get = lambda r, k: (r[ci[k]].strip() if ci[k] is not None and ci[k] < len(r) else "")
     out, seen = [], {}
     for n, r in enumerate(rd[1:], start=2):
@@ -230,7 +224,7 @@ def parse_recon(con, raw: bytes) -> dict:
         if not levy or amount is None or amount <= 0 or not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
             row.update(status="BAD", note="부과번호·금액·납부일 형식 확인")
             out.append(row); continue
-        q = S.one(con, "SELECT * FROM request WHERE levy_no=?", (levy,))
+        q = C.one(con, "SELECT * FROM request WHERE levy_no=?", (levy,))
         if not q:
             row.update(status="UNMATCHED", note="PC에 없는 부과번호")
             out.append(row); continue
@@ -239,11 +233,11 @@ def parse_recon(con, raw: bytes) -> dict:
             row.update(status="DUPLICATE", note=f"파일 {seen[levy]}행과 같은 부과번호")
             out.append(row); continue
         seen[levy] = n
-        dup = S.one(con, """SELECT 1 AS x FROM payment WHERE request_id=? AND void_reason IS NULL AND kind='PAY' AND source='대사'
+        dup = C.one(con, """SELECT 1 AS x FROM payment WHERE request_id=? AND void_reason IS NULL AND kind='PAY' AND source='대사'
             AND ((receipt_ref IS NOT NULL AND receipt_ref!='' AND receipt_ref=?)
                  OR (amount=? AND paid_on=? AND (?='' OR receipt_ref IS NULL OR receipt_ref='')))""", (q["id"], ref, amount, date, ref))
         # 영수번호가 서로 다르면 금액·날짜가 같아도 다른 납부로 본다(같은 날 같은 금액을 두 번 낸 경우)
-        ps = S.payment_status(con, q["id"])
+        ps = D.payment_status(con, q["id"])
         row.update(levied=ps["levied"], paid=ps["paid"])
         if dup:
             row.update(status="ALREADY", note="같은 납부를 이미 반영함")
@@ -266,29 +260,29 @@ def import_recon(con, raw: bytes, preview: bool = True) -> dict:
     """미리보기(일치·불일치 목록) → 확인 뒤 일치 행만 납부(출처 '대사')로 기록. 같은 파일은 한 번만."""
     res = parse_recon(con, raw)
     sha = hashlib.sha256(raw).hexdigest()
-    prev = S.one(con, "SELECT at, matched FROM recon_import WHERE sha256=?", (sha,))
+    prev = C.one(con, "SELECT at, matched FROM recon_import WHERE sha256=?", (sha,))
     res["already_imported"] = prev
     if preview:
         return res
     if prev:
-        raise S.UserError(f"이미 반영한 파일입니다({S._kst_date(prev['at'])}, {prev['matched']}건).")
+        raise C.UserError(f"이미 반영한 파일입니다({C._kst_date(prev['at'])}, {prev['matched']}건).")
     matched = [x for x in res["rows"] if x["status"] == "MATCH"]
-    with S.tx(con):
+    with C.tx(con):
         for x in matched:
             pid = str(uuid.uuid4())
-            method = x["method"] if x["method"] in S.PAY_METHODS else "가상계좌"
+            method = x["method"] if x["method"] in PAY.PAY_METHODS else "가상계좌"
             con.execute("""INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, receipt_ref, source)
-                VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], "", S.now(), x["ref"] or None))
-            S.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사"})
+                VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], "", C.now(), x["ref"] or None))
+            C.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사"})
         iid = str(uuid.uuid4())
         con.execute("INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json) VALUES (?,?,?,?,?,?,?)",
-                    (iid, sha, S.now(), S.ACTOR.get(), res["total"], len(matched), json.dumps(res["counts"], ensure_ascii=False)))
-        S.audit(con, "revenue", iid, "RECON", {"rows": res["total"], "matched": len(matched), **res["counts"]})
+                    (iid, sha, C.now(), C.ACTOR.get(), res["total"], len(matched), json.dumps(res["counts"], ensure_ascii=False)))
+        C.audit(con, "revenue", iid, "RECON", {"rows": res["total"], "matched": len(matched), **res["counts"]})
     return {**res, "recorded": len(matched)}
 
 
 def recon_history(con) -> list[dict]:
-    out = S.rows(con, "SELECT at, actor, rows, matched, summary_json FROM recon_import ORDER BY at DESC LIMIT 50")
+    out = C.rows(con, "SELECT at, actor, rows, matched, summary_json FROM recon_import ORDER BY at DESC LIMIT 50")
     for r in out:
         r["counts"] = json.loads(r.pop("summary_json"))
     return out
@@ -297,7 +291,7 @@ def recon_history(con) -> list[dict]:
 # ------------------------------------------------------------------ 환불
 def _partial_due(con, r: dict, ps: dict) -> int:
     """일부 수거: 실제로 실은 수량 기준 부과 금액보다 더 낸 돈(재방문 없이 끝낼 때 돌려줄 차액)."""
-    st = S.derive(con, r)
+    st = D.derive(con, r)
     if any(l["price"] is None and l["qty_collected"] for l in st["lines"]):
         return 0
     collected = sum(l["price"] * l["qty_collected"] for l in st["lines"] if l["price"] is not None)
@@ -308,31 +302,31 @@ def _partial_due(con, r: dict, ps: dict) -> int:
 def sync_refunds(con, rids=None, progress=None) -> dict:
     """환불 필요(취소 뒤 납부 남음)·과납 건에 자동 환불 건(신청 전)을 만들고, 해소된 자동 건은 '해소'로 닫는다.
     rids: 바뀐 접수만(쓰기 경로의 트랜잭션 끝에서 자동). None = 전체 점검(야간 예약 작업·관리자 단추에서만)."""
-    if S.is_readonly(con):
+    if C.is_readonly(con):
         return {"created": 0, "closed": 0}
     made = closed = 0
     if rids is None:
-        rids = sorted({x["request_id"] for x in S.rows(con, "SELECT DISTINCT request_id FROM payment WHERE void_reason IS NULL")}
-                      | {x["request_id"] for x in S.rows(con, "SELECT DISTINCT request_id FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED')")})
+        rids = sorted({x["request_id"] for x in C.rows(con, "SELECT DISTINCT request_id FROM payment WHERE void_reason IS NULL")}
+                      | {x["request_id"] for x in C.rows(con, "SELECT DISTINCT request_id FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED')")})
     else:
         rids = [r for r in dict.fromkeys(rids) if r]
     if not rids:
         return {"created": 0, "closed": 0}
-    with S.tx(con):
-        unit = S.reduction_round_unit(con)
-        for ch in S._chunks(rids):
+    with C.tx(con):
+        unit = D.reduction_round_unit(con)
+        for ch in C._chunks(rids):
             q = ",".join("?" * len(ch))
             open_by: dict[str, list] = {}
-            for c in S.rows(con, f"SELECT * FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED') AND request_id IN ({q})", ch):
+            for c in C.rows(con, f"SELECT * FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED') AND request_id IN ({q})", ch):
                 open_by.setdefault(c["request_id"], []).append(c)
-            has_pay = {x["request_id"] for x in S.rows(con, f"SELECT DISTINCT request_id FROM payment WHERE request_id IN ({q})", ch)}
+            has_pay = {x["request_id"] for x in C.rows(con, f"SELECT DISTINCT request_id FROM payment WHERE request_id IN ({q})", ch)}
             todo = [r for r in ch if r in has_pay or r in open_by]
             if not todo:
                 continue
-            reqs = {r["id"]: r for r in S.rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(todo))})", todo)}
-            pre = S.prefetch(con, list(reqs), ("items", "events", "links", "payments", "partial"))
+            reqs = {r["id"]: r for r in C.rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(todo))})", todo)}
+            pre = D.prefetch(con, list(reqs), ("items", "events", "links", "payments", "partial"))
             for rid, r in reqs.items():
-                ps = S.payment_core(r, S.derive(con, r, pre)["fee"]["final"], pre["payments"][rid], pre["partial"][rid], unit)
+                ps = D.payment_core(r, D.derive(con, r, pre)["fee"]["final"], pre["payments"][rid], pre["partial"][rid], unit)
                 need, cause = 0, None
                 if ps["status"] == "REFUND_NEEDED":
                     need, cause = ps["paid"], "CANCELLED"
@@ -342,7 +336,7 @@ def sync_refunds(con, rids=None, progress=None) -> dict:
                 autos = [c for c in cases if c["auto"] and c["status"] == "DRAFT"]
                 if need > 0 and not cases:
                     con.execute("INSERT INTO refund_case (id, request_id, cause, amount, status, auto, created_at) VALUES (?,?,?,?,'DRAFT',1,?)",
-                                (str(uuid.uuid4()), rid, cause, need, S.now()))
+                                (str(uuid.uuid4()), rid, cause, need, C.now()))
                     made += 1
                 elif need > 0:
                     for c in autos:
@@ -359,10 +353,10 @@ def sync_refunds(con, rids=None, progress=None) -> dict:
 
 def partial_candidates(con) -> list[dict]:
     out = []
-    for r in S.rows(con, "SELECT * FROM request WHERE status='PARTIAL' AND EXISTS (SELECT 1 FROM payment p WHERE p.request_id=request.id AND p.void_reason IS NULL)"):
-        if S.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=? AND status IN ('DRAFT','REQUESTED','APPROVED')", (r["id"],)):
+    for r in C.rows(con, "SELECT * FROM request WHERE status='PARTIAL' AND EXISTS (SELECT 1 FROM payment p WHERE p.request_id=request.id AND p.void_reason IS NULL)"):
+        if C.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=? AND status IN ('DRAFT','REQUESTED','APPROVED')", (r["id"],)):
             continue
-        ps = S.payment_status(con, r["id"])
+        ps = D.payment_status(con, r["id"])
         due = _partial_due(con, r, ps)
         if due > 0:
             out.append({"request_id": r["id"], "receipt_no": r["receipt_no"], "levy_no": r["levy_no"], "dong": r["dong"], "paid": ps["paid"], "levied": ps["levied"], "due": due})
@@ -376,9 +370,9 @@ def list_refunds(con, status: str = "") -> dict:
         sql += " WHERE f.status IN ('DRAFT','REQUESTED','APPROVED')"
     elif status:
         sql += " WHERE f.status=?"; args.append(status)
-    out = S.rows(con, sql + " ORDER BY f.created_at DESC LIMIT 1000", args)
+    out = C.rows(con, sql + " ORDER BY f.created_at DESC LIMIT 1000", args)
     counts = {k: 0 for k in REFUND_STATUS}
-    for c in S.rows(con, "SELECT status, COUNT(*) AS n FROM refund_case GROUP BY status"):
+    for c in C.rows(con, "SELECT status, COUNT(*) AS n FROM refund_case GROUP BY status"):
         counts[c["status"]] = c["n"]
     return {"rows": out, "counts": counts, "partial": partial_candidates(con)}
 
@@ -387,93 +381,96 @@ def request_refund(con, data: dict) -> str:
     """환불 신청: 자동 건(case_id)을 신청하거나, 접수에 새로 신청(일부 수거 차액·기타)."""
     note = (data.get("note") or "").strip()[:200]
     if data.get("case_id"):
-        c = S.one(con, "SELECT * FROM refund_case WHERE id=?", (data["case_id"],))
+        c = C.one(con, "SELECT * FROM refund_case WHERE id=?", (data["case_id"],))
         if not c or c["status"] != "DRAFT":
-            raise S.UserError("신청할 환불 건이 없습니다.")
+            raise C.UserError("신청할 환불 건이 없습니다.")
         amt = int(data.get("amount") or c["amount"])
         if not 0 < amt <= c["amount"]:
-            raise S.UserError(f"환불 금액은 1원 이상 {c['amount']:,}원 이하입니다.")
-        with S.tx(con):
+            raise C.UserError(f"환불 금액은 1원 이상 {c['amount']:,}원 이하입니다.")
+        with C.tx(con):
             con.execute("UPDATE refund_case SET status='REQUESTED', amount=?, requested_by=?, requested_at=?, note=? WHERE id=?",
-                        (amt, S.ACTOR.get(), S.now(), note, c["id"]))
-            S.audit(con, "refund", c["id"], "REQUEST", {"request": c["request_id"], "amount": amt, "cause": c["cause"]})
+                        (amt, C.ACTOR.get(), C.now(), note, c["id"]))
+            C.audit(con, "refund", c["id"], "REQUEST", {"request": c["request_id"], "amount": amt, "cause": c["cause"]})
         return c["id"]
     rid = data.get("request_id") or ""
-    r = S.one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    r = C.one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not r:
-        raise S.UserError("접수를 찾을 수 없습니다.")
+        raise C.UserError("접수를 찾을 수 없습니다.")
     cause = data.get("cause") or "MANUAL"
     if cause not in ("PARTIAL", "MANUAL"):
-        raise S.UserError("환불 사유를 골라 주세요.")
-    if S.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=? AND status IN ('DRAFT','REQUESTED','APPROVED')", (rid,)):
-        raise S.UserError("이미 진행 중인 환불 건이 있습니다. 환불 목록에서 확인하세요.")
-    ps = S.payment_status(con, rid)
+        raise C.UserError("환불 사유를 골라 주세요.")
+    if C.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=? AND status IN ('DRAFT','REQUESTED','APPROVED')", (rid,)):
+        raise C.UserError("이미 진행 중인 환불 건이 있습니다. 환불 목록에서 확인하세요.")
+    ps = D.payment_status(con, rid)
     try:
         amt = int(data.get("amount") or 0)
     except (TypeError, ValueError):
         amt = 0
     if amt <= 0 or amt > ps["paid"]:
-        raise S.UserError(f"환불 금액은 1원 이상, 납부 확인 금액({ps['paid']:,}원) 이하로 적어 주세요.")
+        raise C.UserError(f"환불 금액은 1원 이상, 납부 확인 금액({ps['paid']:,}원) 이하로 적어 주세요.")
     if cause == "MANUAL" and not note:
-        raise S.UserError("환불 사유(메모)를 적어 주세요.")
+        raise C.UserError("환불 사유(메모)를 적어 주세요.")
     cid = str(uuid.uuid4())
-    with S.tx(con):
+    with C.tx(con):
         con.execute("""INSERT INTO refund_case (id, request_id, cause, amount, status, auto, created_at, requested_by, requested_at, note)
-            VALUES (?,?,?,?,'REQUESTED',0,?,?,?,?)""", (cid, rid, cause, amt, S.now(), S.ACTOR.get(), S.now(), note))
-        S.audit(con, "refund", cid, "REQUEST", {"request": rid, "amount": amt, "cause": cause})
+            VALUES (?,?,?,?,'REQUESTED',0,?,?,?,?)""", (cid, rid, cause, amt, C.now(), C.ACTOR.get(), C.now(), note))
+        C.audit(con, "refund", cid, "REQUEST", {"request": rid, "amount": amt, "cause": cause})
     return cid
 
 
 def approve_refund(con, cid: str, approve: bool, note: str = ""):
-    c = S.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
+    c = C.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
     if not c or c["status"] != "REQUESTED":
-        raise S.UserError("결재할 환불 신청이 없습니다.")
-    if c["requested_by"] == S.ACTOR.get():
-        raise S.UserError("신청한 사람은 결재할 수 없습니다. 팀장(검토자)·관리자 중 다른 사람이 결재하세요.")
+        raise C.UserError("결재할 환불 신청이 없습니다.")
+    if c["requested_by"] == C.ACTOR.get():
+        raise C.UserError("신청한 사람은 결재할 수 없습니다. 팀장(검토자)·관리자 중 다른 사람이 결재하세요.")
     if not approve and not (note or "").strip():
-        raise S.UserError("반려 사유를 적어 주세요.")
-    with S.tx(con):
+        raise C.UserError("반려 사유를 적어 주세요.")
+    with C.tx(con):
         con.execute("UPDATE refund_case SET status=?, approved_by=?, approved_at=?, approve_note=? WHERE id=?",
-                    ("APPROVED" if approve else "REJECTED", S.ACTOR.get(), S.now(), (note or "").strip()[:200], cid))
-        S.audit(con, "refund", cid, "APPROVE" if approve else "REJECT", {"request": c["request_id"], "amount": c["amount"]})
+                    ("APPROVED" if approve else "REJECTED", C.ACTOR.get(), C.now(), (note or "").strip()[:200], cid))
+        C.audit(con, "refund", cid, "APPROVE" if approve else "REJECT", {"request": c["request_id"], "amount": c["amount"]})
 
 
 def pay_refund(con, cid: str, data: dict) -> dict:
     """지급 기록: 지급일·방법. 계좌번호는 받지 않는다(계좌 확인 여부와 끝 4자리만)."""
-    c = S.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
+    c = C.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
     if not c or c["status"] != "APPROVED":
-        raise S.UserError("결재가 끝난 환불 건만 지급 기록을 남길 수 있습니다.")
-    paid_on = data.get("paid_on") or S.today_kst()
+        raise C.UserError("결재가 끝난 환불 건만 지급 기록을 남길 수 있습니다.")
+    paid_on = data.get("paid_on") or C.today_kst()
     method = data.get("method") or ""
     if not re.fullmatch(r"\d{4}-\d\d-\d\d", paid_on):
-        raise S.UserError("지급일을 날짜로 골라 주세요.")
+        raise C.UserError("지급일을 날짜로 골라 주세요.")
     if method not in REFUND_METHODS:
-        raise S.UserError("지급 방법을 골라 주세요.")
+        raise C.UserError("지급 방법을 골라 주세요.")
     checked = bool(data.get("account_checked"))
     last4 = (data.get("account_last4") or "").strip()
     if last4 and not re.fullmatch(r"\d{4}", last4):
-        raise S.UserError("계좌 끝 4자리만 숫자로 적어 주세요 (전체 계좌번호는 저장하지 않습니다).")
+        raise C.UserError("계좌 끝 4자리만 숫자로 적어 주세요 (전체 계좌번호는 저장하지 않습니다).")
     if method == "계좌 이체" and not checked:
-        raise S.UserError("계좌 이체는 예금주·계좌를 확인했는지 '계좌 확인함'을 표시해 주세요.")
-    left = S.payment_status(con, c["request_id"])["paid"]
+        raise C.UserError("계좌 이체는 예금주·계좌를 확인했는지 '계좌 확인함'을 표시해 주세요.")
+    left = D.payment_status(con, c["request_id"])["paid"]
     if c["amount"] > left:  # 결재 뒤 원 납부가 정정됐을 수 있다: 남은 납부액보다 많이 돌려주지 않는다
-        raise S.UserError(f"남은 납부 확인 금액({left:,}원)이 결재된 환불액({c['amount']:,}원)보다 적습니다(수납 기록이 바뀜). 이 환불 건을 취소하고 다시 신청하세요.")
+        raise C.UserError(f"남은 납부 확인 금액({left:,}원)이 결재된 환불액({c['amount']:,}원)보다 적습니다(수납 기록이 바뀜). 이 환불 건을 취소하고 다시 신청하세요.")
     pid = str(uuid.uuid4())
-    with S.tx(con):
+    with C.tx(con):
         con.execute("""INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, source) VALUES (?,?,?,?,?,?,?,?,'환불 결재')""",
-                    (pid, c["request_id"], "REFUND", c["amount"], method, paid_on, "환불 결재 지급", S.now()))
+                    (pid, c["request_id"], "REFUND", c["amount"], method, paid_on, "환불 결재 지급", C.now()))
         con.execute("""UPDATE refund_case SET status='PAID', paid_on=?, pay_method=?, account_checked=?, account_last4=?, paid_by=?, paid_at=?, payment_id=? WHERE id=?""",
-                    (paid_on, method, 1 if checked else 0, last4 or None, S.ACTOR.get(), S.now(), pid, cid))
-        S.audit(con, "refund", cid, "PAY", {"request": c["request_id"], "amount": c["amount"], "method": method, "account_checked": checked})
-    return S.payment_status(con, c["request_id"])
+                    (paid_on, method, 1 if checked else 0, last4 or None, C.ACTOR.get(), C.now(), pid, cid))
+        C.audit(con, "refund", cid, "PAY", {"request": c["request_id"], "amount": c["amount"], "method": method, "account_checked": checked})
+    return D.payment_status(con, c["request_id"])
 
 
 def cancel_refund(con, cid: str, reason: str):
-    c = S.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
+    c = C.one(con, "SELECT * FROM refund_case WHERE id=?", (cid,))
     if not c or c["status"] not in ("DRAFT", "REQUESTED", "APPROVED"):
-        raise S.UserError("취소할 환불 건이 없습니다.")
+        raise C.UserError("취소할 환불 건이 없습니다.")
     if not (reason or "").strip():
-        raise S.UserError("취소 사유를 적어 주세요.")
-    with S.tx(con):
+        raise C.UserError("취소 사유를 적어 주세요.")
+    with C.tx(con):
         con.execute("UPDATE refund_case SET status='VOID', void_reason=? WHERE id=?", (reason.strip()[:200], cid))
-        S.audit(con, "refund", cid, "VOID", {"request": c["request_id"], "reason": reason.strip()[:200]})
+        C.audit(con, "refund", cid, "VOID", {"request": c["request_id"], "reason": reason.strip()[:200]})
+
+
+C.on_dirty("refunds", sync_refunds)

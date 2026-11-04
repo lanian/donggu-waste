@@ -3,8 +3,12 @@
 // 새 버전은 자동 적용하지 않고, 앱 화면의 [업데이트]를 눌러야 바뀐다.
 const VERSION = '0.13.0';
 const CACHE = 'dg-app-' + VERSION;
-const FILES = ['./', './index.html', './style.css', './app.js', './proto.js', './store.js', './fees.js', './fees-data.js', './load.js', './backup.js', './map.js',
-  './field.js', './bio.js', './nav.js', './juso.js',
+const FILES = ['./', './index.html', './style.css', './app.js', './proto.js', './store.js', './fees.js', './fees-data.js', './labels-data.js', './load.js', './backup.js', './map.js',
+  './field.js', './bio.js', './nav.js', './juso.js', './core.js', './widgets.js',
+  // 화면 모듈 (web/screens/*.js): 새 화면 파일을 만들면 여기에도 넣는다(빠지면 오프라인에서 멈춤 — tools/check_version.py 가 확인)
+  './screens/add.js', './screens/backupview.js', './screens/check.js', './screens/export.js', './screens/help.js', './screens/home.js',
+  './screens/intake.js', './screens/lock.js', './screens/mapview.js', './screens/mode.js', './screens/register.js', './screens/resultqr.js',
+  './screens/scan.js', './screens/settings.js', './screens/solo.js', './screens/stop.js', './screens/stoplist.js', './screens/unload.js',
   './vendor/maplibre/maplibre-gl.mjs', './vendor/maplibre/maplibre-gl-worker.mjs', './vendor/maplibre/maplibre-gl.css',
   './vendor/jsQR.js', './vendor/qrcode.mjs', './manifest.webmanifest', './icons/icon.svg', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 

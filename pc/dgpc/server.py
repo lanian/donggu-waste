@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
+import base64
+import dataclasses
+import datetime as dt
+import html as _h
 import ipaddress
 import json
 import logging
@@ -27,21 +29,23 @@ import threading
 import time
 import traceback
 import urllib.parse
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
 import contextlib
 import queue
 
-from . import area as A, backup as BK, finance as FN, ops as OPS, privacy as PV, routing, service as S, store
+from . import area as A, backup as BK, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
-WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
+WEB_ALLOWED = {"fees.js", "fees-data.js", "labels-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
-UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css", "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
+UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/pc.css": "pc.css",
+            # 화면 모듈(pc/ui/screens/*.js): 폴더에 있는 파일만, 이름 그대로
+            **{f"/screens/{f.name}": f"screens/{f.name}" for f in sorted((UI / "screens").glob("*.js"))}, "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
             # 화면 글꼴: Pretendard GOV(범정부 디자인 시스템 권장, SIL OFL) 일부 글자 묶음. 이 PC 안에서만 내려줌(외부 글꼴 서버 없음)
             **{f"/fonts/PretendardGOV-{w}.subset.woff2": f"fonts/PretendardGOV-{w}.subset.woff2" for w in ("Regular", "SemiBold", "Bold")}}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -178,43 +182,86 @@ def login_succeeded(username: str):
     FAILS.pop(_fail_key(username), None)
 
 
-# 역할별 허용 API (운영 관리자는 전부)
+# ------------------------------------------------------------------ 역할과 API 경로 표
+# 역할 묶음 (운영 관리자는 모든 경로를 쓴다)
 #  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감 기록
-#  FIELD(수거팀): 조회, 결과·사진 가져오기, 하차 기록, QR 실측
-#  LEAD(팀장·검토자): 모든 조회(변경 이력 포함) + 마감 확인. 사용자·설정 관리와 업무 변경은 못 함
-PERM = {
-    "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
-                       "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
-                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv", "load-check",
-                       "jobs", "imports", "pending", "readiness", "assign", "ops-status"},
-               "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
-                        "fee-revisions", "geocode", "links", "refunds", "recon", "stats", "pilot", "imports"}},
-    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table", "jobs", "imports"},
-              "POST": {"import", "unloads", "qrtest", "password", "imports"}},
-}
+#  FIELD(수거팀): 조회(자기 팀 범위), 결과·사진 가져오기, 하차 기록, QR 실측
+#  LEAD(팀장·검토자): 모든 조회(변경 이력 포함) + 마감 확인·환불 결재. 사용자·설정 관리와 업무 변경은 못 함
+ALL = frozenset({"ADMIN", "INTAKE", "FIELD", "LEAD"})
+VIEW = frozenset({"ADMIN", "INTAKE", "LEAD"})     # 사무실 조회 (수거팀 제외)
+WORK = frozenset({"ADMIN", "INTAKE"})             # 업무 변경
+CREW = frozenset({"ADMIN", "INTAKE", "FIELD"})    # 현장 결과·하차·QR 실측
+REVIEW = frozenset({"ADMIN", "LEAD"})             # 검토·결재·이력·개인정보 점검
+ADMIN = frozenset({"ADMIN"})
+LOCKS = {"read": "조회 전용 연결(잠금 없음, 쓰기 필요 시 잠금 잡고 다시)", "write": "DB 잠금 + 쓰기 연결", "none": "처리 함수가 스스로(잠금 밖 검증·계산, 반영만 잠금)"}
 
 
-LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr", "juso-search", "juso-coord", "diag"}
-ADMIN_ONLY = {("GET", "diag"), ("POST", "refunds/sync")}
-LEAD_POST = {"password", "close/approve", "access/check", "stats/print"}
-APPROVE_RE = re.compile(r"^refunds/[^/]+/(approve|reject)$")
+@dataclasses.dataclass(frozen=True)
+class Route:
+    method: str
+    pattern: str                 # "requests/{id}/cancel": {id} 는 '/' 없는 한 마디
+    roles: frozenset
+    lock: str                    # LOCKS 키
+    fn: Callable
+    must_change_ok: bool         # 임시 비밀번호 상태(비밀번호 변경 전)에도 쓸 수 있는지
+    access: str                  # 접속기록 동작(privacy.ACCESS_ACTIONS 키). 빈 값 = 경로에서는 남기지 않음
+    access_fn: Callable | None   # fn(handler, out, qs, *params) -> (대상, 건수, 메모) | None
+    regex: re.Pattern
+
+
+ROUTES: list[Route] = []
+
+
+def endpoint(method: str, pattern: str, roles, lock: str | None = None, must_change_ok: bool = False, access=None):
+    """API 경로 등록. 정의한 순서대로 맞춰 본다(먼저 쓴 것이 이김). lock 을 안 주면 GET=read, POST=write.
+    access=(동작, fn): 응답 보내기 전에 접속기록(건수·메모만, 내용 없음)."""
+    lock = lock or ("read" if method == "GET" else "write")
+    assert lock in LOCKS, lock
+    rx = re.compile("^" + "/".join("([^/]*)" if seg == "{id}" else re.escape(seg) for seg in pattern.split("/")) + "$")
+
+    def deco(fn):
+        assert not any(r.method == method and r.pattern == pattern for r in ROUTES), (method, pattern)
+        ROUTES.append(Route(method, pattern, frozenset(roles), lock, fn, must_change_ok, access[0] if access else "", access[1] if access else None, rx))
+        return fn
+    return deco
+
+
+def match(method: str, p: str):
+    for r in ROUTES:
+        if r.method == method:
+            m = r.regex.match(p)
+            if m:
+                return r, m.groups()
+    return None, ()
 
 
 def allowed(role: str, method: str, p: str) -> bool:
-    if role == "ADMIN" or p in ("prefs", "me"):
+    """경로 표의 roles 로 판단. 표에 없는 주소는 관리자, 또는 같은 방법·같은 첫 마디의 경로를 쓸 수 있는 역할만 통과(→ 404 없음)."""
+    r, _ = match(method, p)
+    if r is not None:
+        return role in r.roles
+    if role == "ADMIN":
         return True
-    if (method, p) in ADMIN_ONLY:
-        return False
     head = p.split("/")[0]
-    if role == "LEAD":
-        return (method == "GET" and head not in LEAD_GET_DENY) or (method == "POST" and (p in LEAD_POST or bool(APPROVE_RE.match(p))))
-    if p == "close/approve" or APPROVE_RE.match(p):  # 마감 확인·환불 결재는 팀장(검토자)·관리자만
-        return False
-    if role == "FIELD" and method == "POST" and (head == "requests" or p.startswith("import/solo")):
-        return False  # 수거팀 계정은 접수를 만들 수 없다(단독 휴대폰 자료 옮기기도 접수를 만든다)
-    if role == "INTAKE" and method == "POST" and p == "fee-revisions":  # 개정안 작성은 관리자, 승인은 다른 담당자도 가능
-        return False
-    return head in PERM.get(role, {}).get(method, set())
+    return any(role in x.roles for x in ROUTES if x.method == method and x.pattern.split("/")[0] == head)
+
+
+@dataclasses.dataclass
+class Raw:
+    """처리 함수가 돌려주는 JSON 아닌 응답(파일 내려받기·글·사진) 또는 상태 코드가 있는 JSON."""
+    body: bytes | None = None
+    ctype: str = ""
+    status: int = 200
+    headers: dict | None = None
+    json: object = None
+
+
+def csv_file(body: bytes, filename: str) -> Raw:
+    return Raw(body, "text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def json_status(obj, status: int) -> Raw:
+    return Raw(json=obj, status=status)
 
 
 # ------------------------------------------------------------------ 서버 로그 (state/logs/server.log, 5MB × 10개 돌려 쓰기)
@@ -497,29 +544,16 @@ class Handler(BaseHTTPRequestHandler):
             SESSIONS.pop(tok, None)
             return self.send_json({"ok": True}, extra={"Set-Cookie": "dg_s=; Max-Age=0" + self.cookie_flags()})
         sess = SESSIONS[tok]
+        r, params = match(method, p)
         if not allowed(sess["role"], method, p):
             return self.send_json({"error": "이 작업은 권한이 없습니다."}, 403)
-        if sess.get("must_change") and p not in ("me", "password", "bootstrap", "prefs"):
+        if sess.get("must_change") and not (r is not None and r.must_change_ok):
             return self.send_json({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
         self.user = sess
         S.ACTOR.set(sess["username"])
-        if method == "GET":
-            # 조회는 DB 잠금 없이 조회 전용 연결(WAL)로. 접속기록·이력은 잠금 안에서 쓰기 연결로 넘어간다.
-            try:
-                with read_con() as rc:
-                    self.c = rc
-                    return self.api_authed(method, p, qs)
-            except Exception as e:  # noqa: BLE001 — 조회 중 쓰기가 필요했던 경우(드묾): 잠금 잡고 쓰기 연결로 다시
-                if not _is_ro_error(e):
-                    raise
-            with LOCK:
-                self.c = CON
-                return self.api_authed(method, p, qs)
-        if self.api_unlocked(p, qs) is not False:  # 처리함(응답 보냄)
-            return None
-        with LOCK:
-            self.c = CON
-            return self.api_authed(method, p, qs)
+        if r is None:
+            return self.send_json({"error": "없음"}, 404)
+        return self.dispatch(r, params, qs)
 
     def login(self):
         """로그인: scrypt 확인은 DB 잠금 밖(조회 전용 연결)에서, 마지막 로그인 시각·이력만 잠금 안에서."""
@@ -560,444 +594,855 @@ class Handler(BaseHTTPRequestHandler):
                               self.client_address[0] if LAN else "local")
         return {"job_id": jid, "status": "QUEUED", "kind": kind}
 
-    def api_unlocked(self, p, qs):
-        """DB 잠금을 오래 잡지 않을 POST: 파일 검증·복호·외부 호출·노선 계산은 잠금 밖, 반영만 잠금 안. 해당 없으면 False."""
-        if p in ("import/result", "import/photos"):
-            body = self.body()
-            with read_con() as rc:
-                if self.crew_scope() is not None and S.device_crew(rc, body) != self.crew_scope():
-                    raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
-                prep = S.prepare_result(rc, body) if p == "import/result" else S.prepare_photos(rc, body)
-            with LOCK:
-                if p == "import/result":
-                    return self.send_json(S.import_result(CON, body, "QR" if qs.get("channel") == "QR" else "MAIL", prepared=prep))
-                return self.send_json(S.import_photos(CON, body, prepared=prep))
-        if p == "import/solo":
-            import base64 as _b64
-            pw = _b64.b64decode(self.headers.get("X-DG-Pass") or "").decode("utf-8", "replace")
-            body = self.body()
-            opened = S.prepare_solo(body, pw)  # PBKDF2 60만 회: 잠금 밖
-            if qs.get("preview") == "1":
-                with read_con() as rc:
-                    return self.send_json(S.import_solo(rc, body, pw, qs.get("crew") or None, preview=True, opened=opened))
-            with LOCK:
-                return self.send_json(S.import_solo(CON, body, pw, qs.get("crew") or None, opened=opened))
-        if p == "requests/import" and qs.get("preview") == "1":
-            with read_con() as rc:
-                return self.send_json(S.import_requests(rc, self.body(), preview=True))
-        if p == "recon" and qs.get("preview") == "1":
-            with read_con() as rc:
-                return self.send_json(FN.import_recon(rc, self.body(), preview=True))
-        if p == "addr-import":
-            cols = None
-            if qs.get("columns"):
-                from dgpc import geo
-                cols = geo.parse_columns_arg(qs["columns"])
-            body = self.body()
-            parsed = S.parse_addr_points(body, qs.get("region", ""), cols)  # 큰 파일 읽기: 잠금 밖
-            if qs.get("preview") == "1":
-                with read_con() as rc:
-                    return self.send_json(S.import_addr_points(rc, body, qs.get("region", ""), cols, preview=True, parsed=parsed))
-            with LOCK:
-                return self.send_json(S.import_addr_points(CON, body, qs.get("region", ""), cols, parsed=parsed))
-        if p == "external/test":  # 외부 서비스 시험: 잠금 밖
-            with read_con() as rc:
-                return self.send_json(S.external_test(rc, self.json_body().get("service", "")))
-        if p == "route":
-            out = self.route_plan(self.json_body())
-            with read_con() as rc:
-                PV.record_access(rc, "LIST", "", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")
-            return self.send_json(out)
-        # 오래 걸리는 관리 작업 → 백그라운드 작업 번호
-        if p == "backup":
-            pw = self.json_body().get("passphrase", "")
-            if len(pw or "") < 12:
-                raise S.UserError("백업 비밀번호는 12자 이상으로 정해 주세요.")
-            return self.send_json(self.job("backup", passphrase=pw))
-        if p == "backup/auto":
-            return self.send_json(self.job("backup_auto"))
-        if p == "backup/retention":
-            return self.send_json(self.job("backup_retention"))
-        if p == "privacy/purge":
-            return self.send_json(self.job("pii_purge"))
-        if p == "photo-purge":
-            return self.send_json(self.job("photo_purge"))
-        if p == "refunds/sync":
-            return self.send_json(self.job("refund_sync"))
-        if p == "integrity/full":
-            return self.send_json(self.job("verify_full"))
-        return False
-
     def login_ok(self, u):
         t = secrets.token_urlsafe(32)
         SESSIONS[t] = {"exp": time.time() + IDLE_S, "created": time.time(), "user_id": u["id"], "username": u["username"], "role": u["role"],
                        "display_name": u["display_name"], "must_change": u.get("must_change", False), "crew_id": u.get("crew_id")}
         return self.send_json({"ok": True}, extra={"Set-Cookie": f"dg_s={t}" + self.cookie_flags()})
 
-    def api_authed(self, method, p, qs):
+    # ---------------------------------------------------------- API 처리 함수 (경로 표: endpoint)
+    # 처리 함수는 fn(self, qs, *경로 마디) → dict/list(JSON 200) | Raw(파일·상태 코드) | None(이미 보냄).
+    # self.c: read → 조회 전용 연결, write → 쓰기 연결(잠금 안), none → None(함수가 read_con()/LOCK 을 스스로).
+    def dispatch(self, r: Route, params: tuple, qs: dict):
+        if r.lock == "read":
+            # 조회는 DB 잠금 없이 조회 전용 연결(WAL)로. 접속기록·이력은 잠금 안에서 쓰기 연결로 넘어간다.
+            try:
+                with read_con() as rc:
+                    self.c = rc
+                    return self.reply(r, r.fn(self, qs, *params), qs, params)
+            except Exception as e:  # noqa: BLE001 — 조회 중 쓰기가 필요했던 경우(드묾): 잠금 잡고 쓰기 연결로 다시
+                if not _is_ro_error(e):
+                    raise
+            with LOCK:
+                self.c = CON
+                return self.reply(r, r.fn(self, qs, *params), qs, params)
+        if r.lock == "write":
+            with LOCK:
+                self.c = CON
+                return self.reply(r, r.fn(self, qs, *params), qs, params)
+        return self.reply(r, r.fn(self, qs, *params), qs, params)
+
+    def reply(self, r: Route, out, qs: dict, params: tuple):
+        if r.access_fn is not None:
+            rec = r.access_fn(self, out, qs, *params)
+            if rec:
+                if self.c is not None:
+                    PV.record_access(self.c, r.access, *rec)
+                else:
+                    with read_con() as rc:
+                        PV.record_access(rc, r.access, *rec)
+        if out is None:
+            return None
+        if isinstance(out, Raw):
+            if out.body is None:
+                return self.send_json(out.json, out.status)
+            return self.send_bytes(out.body, out.ctype, out.status, out.headers)
+        return self.send_json(out)
+
+    # ---- 조회 (GET)
+    @endpoint("GET", "bootstrap", ALL, must_change_ok=True)
+    def ep_bootstrap(self, qs):
+        """화면 시작 자료: 설정·팀·기기·오늘·나·수수료표·동·코드 목록."""
         c = self.c
-        parts = p.split("/")
-        if method == "GET":
-            if p == "bootstrap":
-                return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
-                                       "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
-                                       "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
-                                       "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
-                                       "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__,
-                                       "quick_filters": list(S.QUICK), "reduction_round_units": list(S.ROUND_UNITS), "api": 13})
-            if p == "calendar":
-                start = qs.get("start") or S.today_kst()
-                dong = qs.get("dong") or None
-                ex = qs.get("exclude") or None
-                out = {"days": A.calendar(c, start, min(31, int(qs.get("days") or 14)), dong, ex),
-                       "earliest": A.earliest_available(c, start, dong, ex)}
-                if qs.get("date"):
-                    out["warnings"] = A.capacity_warnings(c, qs["date"], dong, ex)
-                return self.send_json(out)
-            if p == "dong-detect":
-                return self.send_json({**A.detect_dong(c, qs.get("address", "")), "warnings": S.address_warnings(c, qs.get("address", ""))})
-            if p == "dongs":
-                return self.send_json(A.list_dongs(c))
-            if p == "holidays":
-                return self.send_json(A.list_holidays(c, qs.get("start", ""), qs.get("end", "")))
-            if p == "requests/import-template":
-                return self.send_bytes(S.import_template(), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-intake-template.csv"'})
-            if p == "audit.csv":
-                return self.send_bytes(S.audit_csv(c, qs), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-audit.csv"'})
-            if p == "stats":
-                return self.send_json(S.stats(c, qs.get("start", ""), qs.get("end", ""), qs.get("basis") or "planned"))
-            if p == "pilot":
-                ps = S.pilot_settings(c)
-                st_, en_ = qs.get("start") or ps["start"], qs.get("end") or ps["end"]
-                return self.send_json({"settings": ps, "base_keys": S.PILOT_BASE,
-                                       "report": S.pilot_report(c, st_, en_, qs.get("crew")) if st_ and en_ and st_ <= en_ else None})
-            if p == "pilot.csv":
-                body = S.pilot_csv(c, qs.get("start") or None, qs.get("end") or None, qs.get("crew"))
-                return self.send_bytes(body, "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-pilot.csv"'})
-            if p == "stats.csv":
-                kind = qs.get("kind") if qs.get("kind") in ("days", "dongs", "items", "categories", "months", "reductions", "channels") else "requests"
-                body = S.stats_csv(c, qs.get("start", ""), qs.get("end", ""), kind, qs.get("basis") or "planned")
-                fn = f'donggu-{kind}-{qs.get("start")}_{qs.get("end")}.csv'
-                return self.send_bytes(body, "text/csv; charset=utf-8", extra={"Content-Disposition": f'attachment; filename="{fn}"'})
-            if p == "geocode":
-                return self.send_json(S.geocode(c, qs.get("address", "")) or {"none": True})
-            if p == "addr-search":
-                return self.send_json(S.addr_search(c, qs.get("q", "")))
-            if p == "juso-search":  # 행안부 주소 검색(서버가 대신 물음). 검색어는 로그·접속기록에 남기지 않는다
-                return self.send_json(S.juso_search(c, qs.get("q", ""), qs.get("name", "")))
-            if p == "juso-coord":
-                return self.send_json(S.juso_coord(c, {k: qs.get(k, "") for k in ("admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno")}))
-            if p == "privacy":
-                return self.send_json({"preview": PV.purge_preview(c), "log": PV.purge_log(c), "retention_years": PV.retention_years(c),
-                                       "access_retention_years": PV.access_retention_years(c), "backup": BK.status(c)})
-            if p == "access":
-                return self.send_json(PV.access_page(c, qs))
-            if p == "access.csv":
-                return self.send_bytes(PV.access_csv(c, qs), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-access.csv"'})
-            if p == "access/status":
-                return self.send_json({**PV.check_status(c), "checks": PV.list_checks(c)})
-            if p == "integrity":  # 빠른 검사(검사점부터 새 행만). 전체 검사는 POST integrity/full (백그라운드 작업)
-                res = PV.verify_all(c, full=False)
-                S.audit(c, "access", "verify", "VERIFY", {"ok": res["ok"], "incremental": True})
-                return self.send_json(res)
-            if parts[0] == "jobs" and len(parts) == 2:
-                j = OPS.JOBS.get(parts[1])
-                if not j or (j["actor"] != self.user["username"] and self.user["role"] != "ADMIN"):
-                    return self.send_json({"error": "작업을 찾을 수 없습니다."}, 404)
-                return self.send_json(j)
-            if p == "imports/recent":
-                return self.send_json(OPS.recent_imports(c, int(qs.get("limit") or 30), self.crew_scope()))
-            if p == "pending":
-                return self.send_json(OPS.pending(c))
-            if p == "readiness":
-                return self.send_json(OPS.readiness(c))
-            if p == "ops-status":
-                return self.send_json(OPS.ops_status(c))
-            if p == "diag":
-                return self.send_json({**OPS.diag(c), "scheduler_tick": STATE["scheduler_tick"], "started_at": STATE["started_at"],
-                                       "sessions": len(SESSIONS), "jobs_queued": OPS.JOBS.q.qsize()})
-            if p == "assign/current":
-                return self.send_json(S.current_assignment(c, qs.get("date") or S.today_kst()))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "notice":
-                self.require_crew_request(parts[1])
-                return self.send_bytes(S.notice_text(c, parts[1]).encode("utf-8"), "text/plain; charset=utf-8")
-            if p == "backup-status":
-                return self.send_json(BK.status(c))
-            if p == "revenue":
-                return self.send_json(FN.revenue(c, qs.get("start", ""), qs.get("end", ""), qs.get("unit", "day")))
-            if p == "revenue.csv":
-                unit, kind = qs.get("unit", "day"), qs.get("kind", "method")
-                return self.send_bytes(FN.revenue_csv(c, qs.get("start", ""), qs.get("end", ""), unit, kind), "text/csv; charset=utf-8",
-                                       extra={"Content-Disposition": f'attachment; filename="donggu-revenue-{kind}.csv"'})
-            if p == "recon-template":
-                return self.send_bytes(FN.recon_template(), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-recon-template.csv"'})
-            if p == "recon-history":
-                return self.send_json(FN.recon_history(c))
-            if p == "refunds":
-                return self.send_json(FN.list_refunds(c, qs.get("status", "")))
-            if p == "addr-stats":
-                return self.send_json(S.addr_stats(c))
-            if p == "fee-table":
-                return self.send_json({"state": S.fee_state(c), "review_rows": S.review_rows(), "revisions": S.list_fee_revisions(c),
-                                       "source": {"label": S.FEE_TABLE["label"], "checked_on": S.FEE_TABLE["source_checked_on"], "rows": len(S.FEE_ROWS)}})
-            if p == "me":
-                return self.send_json(self.me())
-            if p == "users":
-                return self.send_json(S.list_users(c))
-            if p == "backups":
-                return self.send_json({"dir": str(S.backup_dir(c)), "files": S.list_backups(c)})
-            if p == "photo-purge":
-                cand = S.purge_candidates(c)
-                return self.send_json({"count": len(cand), "bytes": sum(x["bytes"] or 0 for x in cand), "days": S.settings(c)["photo_retention_days"]})
-            if p == "audit":
-                return self.send_json(S.audit_page(c, qs))
-            if p == "requests":
-                # 수거팀 계정: 자기 팀에 배정된 접수만
-                scope = S.crew_request_ids(c, self.crew_scope()) if self.crew_scope() is not None else None
-                res = S.search_requests(c, qs, scope)
-                PV.record_access(c, "LIST", "", len(res["rows"]), f"전체 {res['total']}건 · " + PV.filter_summary(qs))  # 건수·조건만 (내용 없음)
-                return self.send_json(res)
-            if parts[0] == "requests" and len(parts) == 2:
-                self.require_crew_request(parts[1])
-                out = S.get_request(c, parts[1])
-                PV.record_access(c, "VIEW", parts[1], 1, "접수 상세")
-                return self.send_json(out)
-            if p == "duplicates":
-                out = S.find_duplicates(c, qs.get("phone", ""), qs.get("address", ""), qs.get("exclude") or None)
-                if out:
-                    PV.record_access(c, "SEARCH", "", len(out), "중복 후보 조회")
-                return self.send_json(out)
-            if p == "batches":
-                out = S.list_batches(c, qs["date"])
-                if self.crew_scope() is not None:
-                    out = [b for b in out if b["crew_id"] == self.crew_scope()]
-                if out:  # 배정 목록(이름·주소 포함): 건수만 접속기록
-                    PV.record_access(c, "LIST", "", sum(b.get("count") or len(b.get("stops") or []) for b in out), f"배정 목록 {qs['date']}")
-                return self.send_json(out)
-            if p == "conflicts":
-                out = S.list_conflicts(c)
-                if out:  # 현장 접수·정정 요청 원문(개인정보)이 들어 있다
-                    PV.record_access(c, "LIST", "", len(out), "충돌함·현장 요청")
-                return self.send_json(out)
-            if p == "field-intakes":
-                out = S.field_intakes(c)
-                if out:
-                    PV.record_access(c, "SEARCH", "", len(out), "현장 접수 확인 목록")
-                return self.send_json(out)
-            if p == "close":
-                out = S.day_summary(c, qs["date"], self.crew_scope())
-                PV.record_access(c, "LIST", "", len(out.get("no_result") or []) + len(out.get("revisit") or []), f"마감 점검 {qs['date']}")
-                return self.send_json(out)
-            if p == "registration-qr":
-                from pc_tool import qr_png_data_uri
-                return self.send_json({"image": qr_png_data_uri(S.registration_text(c), "M")[0]})
-            if p == "unloads":
-                return self.send_json([u for u in S.list_unloads(c, qs["date"]) if self.crew_scope() is None or u["crew_id"] == self.crew_scope()])
-            if p == "volumes":
-                ov = S.volume_overrides(c)
-                ids = list(dict.fromkeys(S.fee_usage(c, 20) + list(ov)))
-                return self.send_json([{"fee_rate_id": i, "name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "unit_label": S.FEE_ROWS[i]["unit_label"],
-                                        "estimate": routing.volume_of({"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}),
-                                        "kg": routing.weight_of({"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}),
-                                        "tags": [routing.TAG_LABEL[t] for t in routing.tags_of([{"name": S.FEE_ROWS[i]["name"], "spec": S.FEE_ROWS[i]["spec"], "qty": 1}])],
-                                        "override": ov.get(i)} for i in ids if i in S.FEE_ROWS])
-            if p == "load-check":
-                return self.send_json(S.load_check(c, qs.get("start") or "", qs.get("end") or ""))
-            if p == "fee-usage":
-                return self.send_json(S.fee_usage(c))
-            if p == "qrtests":
-                return self.send_json(S.list_qr_tests(c))
-            if parts[0] == "photo" and len(parts) == 2:
-                self.require_crew_request(S.photo_request(c, parts[1]) or "")
-                b = S.photo_bytes(c, parts[1])
-                if b:
-                    PV.record_access(c, "PHOTO", S.photo_request(c, parts[1]) or "", 1, "현장 사진")
-                return self.send_bytes(b, "image/jpeg") if b else self.send_json({"error": "없음"}, 404)
-        if method == "POST":
-            if p == "requests":
-                d = self.json_body()
-                return self.send_json(self.idem(p, lambda: S.create_request(c, d)))
-            if p == "requests/bulk":
-                return self.send_json(self.bulk(self.json_body()))
-            if p == "requests/export":
-                d = self.json_body()
-                pii = bool(d.get("include_pii"))
-                if pii and self.user["role"] not in ("ADMIN", "INTAKE"):
-                    return self.send_json({"error": "개인정보가 든 목록은 접수 담당자·관리자만 내보낼 수 있습니다."}, 403)
-                return self.send_bytes(S.export_requests(c, d.get("ids"), pii), "text/csv; charset=utf-8",
-                                       extra={"Content-Disposition": 'attachment; filename="donggu-selected.csv"'})
-            if p == "requests/print":
-                data = S.print_requests(c, self.json_body().get("ids"))
-                t = secrets.token_urlsafe(12)
-                for k in [k for k, v in PRINTS.items() if v["exp"] < time.time()]:
-                    PRINTS.pop(k, None)
-                PRINTS[t] = {"exp": time.time() + 120, "data": data, "user": self.user["user_id"]}
-                return self.send_json({"token": t})
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "reduction":
-                return self.send_json(FN.set_reduction(c, parts[1], self.json_body()))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "receipt-print":
-                return self.send_json({"token": self.put_print(self.receipt_html(parts[1]))})
-            if p == "requests/labels":
-                return self.send_json({"token": self.put_print(self.labels_html(self.json_body().get("ids")))})
-            if p == "stats/print":
-                d = self.json_body()
-                return self.send_json({"token": self.put_print(self.monthly_html(d.get("start", ""), d.get("end", ""), d.get("basis") or "planned"))})
-            if p == "access/check":
-                return self.send_json(PV.record_check(c, self.json_body().get("note", "")))
-            if p == "recon":
-                return self.send_json(FN.import_recon(c, self.body(), preview=qs.get("preview") == "1"))
-            if p == "refunds/request":
-                return self.send_json(self.idem(p, lambda: {"id": FN.request_refund(c, self.json_body())}))
-            if parts[0] == "refunds" and len(parts) == 3 and parts[2] in ("approve", "reject"):
-                FN.approve_refund(c, parts[1], parts[2] == "approve", self.json_body().get("note", ""))
-                return self.send_json({"ok": True})
-            if parts[0] == "refunds" and len(parts) == 3 and parts[2] == "pay":
-                return self.send_json(FN.pay_refund(c, parts[1], self.json_body()))
-            if parts[0] == "refunds" and len(parts) == 3 and parts[2] == "void":
-                FN.cancel_refund(c, parts[1], self.json_body().get("reason", ""))
-                return self.send_json({"ok": True})
-            if p == "backup-key":
-                pem, info = BK.generate_key(c, self.json_body().get("password", ""))
-                return self.send_json({"pem": pem.decode(), **info})
-            if p == "backups/verify-auto":
-                d = self.json_body()
-                return self.send_json(BK.verify_auto(c, d.get("name", ""), (d.get("key") or "").encode(), d.get("password", "")))
-            if p == "requests/import":
-                return self.send_json(S.import_requests(c, self.body(), preview=qs.get("preview") == "1", skip_duplicates=qs.get("skip_dup") == "1"))
-            if parts[0] == "requests" and len(parts) == 2:
-                d = self.json_body()
-                return self.send_json(S.update_request(c, parts[1], d, d.get("reason", "")))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "field-check":
-                return self.send_json(S.check_field_intake(c, parts[1]))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "cancel":
-                d = self.json_body()
-                return self.send_json(S.cancel_request(c, parts[1], d.get("reason", ""), d.get("code") or None, d.get("req_ver")))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "contacts":
-                return self.send_json(self.idem(p, lambda: {"id": S.add_contact(c, parts[1], self.json_body())}))
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "location":
-                d = self.json_body()
-                S.set_location(c, parts[1], d["lat"], d["lon"])
-                return self.send_json({"ok": True})
-            if p == "assign":
-                d = self.json_body()
-                return self.send_json(S.confirm_plan(c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted"))))
-            if p == "assign/edit":  # 확정 배정 부분 수정(넣기·빼기·순서·팀 옮기기)
-                d = self.json_body()
-                return self.send_json(S.edit_assignment(c, d.get("date", ""), d.get("op", ""), d))
-            if parts[0] == "imports" and len(parts) == 3 and parts[2] == "confirm":
-                return self.send_json(OPS.confirm_import(c, parts[1]))
-            if p == "conflicts/bulk":
-                d = self.json_body()
-                return self.send_json(S.resolve_conflicts_bulk(c, d.get("action", ""), d.get("reason", ""), d.get("request_id") or "", d.get("import_id") or ""))
-            if p == "bundles":
-                b = S.make_bundle(c, self.json_body()["batch_id"])
-                return self.send_json({k: b[k] for k in ("bundle_id", "bytes", "count", "work_date", "assign_ver")} | {"frames": len(b["frames"])})
-            if parts[0] == "bundles" and len(parts) == 3 and parts[2] == "receipt":
-                S.confirm_receipt(c, parts[1], self.json_body().get("code", ""))
-                return self.send_json({"ok": True})
-            if parts[0] == "conflicts" and len(parts) == 2:
-                d = self.json_body()
-                S.resolve_conflict(c, parts[1], d.get("action", ""), d.get("reason", ""))
-                return self.send_json({"ok": True})
-            if p == "pilot":
-                return self.send_json(S.save_pilot(c, self.json_body()))
-            if p == "close":
-                d = self.json_body()
-                return self.send_json(self.idem(p, lambda: S.close_day(c, d.get("date", ""), d.get("note", ""), d.get("close_secs"))))
-            if p == "close/approve":
-                d = self.json_body()
-                return self.send_json(S.approve_close(c, d.get("date", ""), d.get("note", "")))
-            if p == "dongs":
-                return self.send_json({"id": A.save_dong(c, self.json_body())})
-            if parts[0] == "dongs" and len(parts) == 3 and parts[2] == "delete":
-                A.delete_dong(c, parts[1])
-                return self.send_json({"ok": True})
-            if p == "holidays":
-                d = self.json_body()
-                A.add_holiday(c, d.get("day", ""), d.get("label", ""))
-                return self.send_json({"ok": True})
-            if parts[0] == "holidays" and len(parts) == 3 and parts[2] == "delete":
-                A.delete_holiday(c, parts[1])
-                return self.send_json({"ok": True})
-            if p == "crews":
-                return self.send_json({"id": S.save_crew(c, self.json_body())})
-            if p == "devices/register":
-                d = self.json_body()
-                return self.send_json(S.register_device(c, d.get("code", ""), d.get("label", "")))
-            if parts[0] == "devices" and len(parts) == 3 and parts[2] == "confirm":
-                S.confirm_device(c, parts[1])
-                return self.send_json({"ok": True})
-            if parts[0] == "devices" and len(parts) == 3 and parts[2] == "status":
-                S.set_device_status(c, parts[1], self.json_body().get("status", ""))
-                return self.send_json({"ok": True})
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "link":
-                d = self.json_body()
-                return self.send_json({"id": S.link_similar(c, parts[1], d.get("line_id", ""), d.get("fee_rate_id", ""), d.get("reason", ""), d.get("confirmed_by", ""))})
-            if parts[0] == "links" and len(parts) == 3 and parts[2] == "void":
-                S.unlink_similar(c, parts[1], self.json_body().get("reason", ""))
-                return self.send_json({"ok": True})
-            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "payments":
-                return self.send_json(self.idem(p, lambda: S.add_payment(c, parts[1], self.json_body())))
-            if parts[0] == "payments" and len(parts) == 3 and parts[2] == "void":
-                return self.send_json(S.void_payment(c, parts[1], self.json_body().get("reason", "")))
-            if p == "unloads":
-                d = self.json_body()
-                if self.crew_scope() is not None and d.get("crew_id") != self.crew_scope():
-                    raise S.UserError("내 팀의 하차만 기록할 수 있습니다.")
-                return self.send_json(self.idem(p, lambda: {"id": S.add_unload(c, d)}))
-            if p == "volumes":
-                d = self.json_body()
-                S.save_volume_override(c, d.get("fee_rate_id", ""), d.get("m3"))
-                return self.send_json({"ok": True})
-            if p == "qrtest":
-                d = self.json_body()
-                return self.send_json(S.make_qr_test(c, d.get("device_id", ""), int(d.get("count", 20)), d.get("addr", "mixed"),
-                                                     int(d.get("chunk", 700)), d.get("ec", "M"), int(d.get("fps", 3))))
-            if parts[0] == "qrtest" and len(parts) == 3 and parts[2] == "result":
-                d = self.json_body()
-                return self.send_json(S.record_qr_test(c, parts[1], d.get("elapsed_s") or 0, d.get("reads") or 0, d.get("check", ""), d.get("note", "")))
-            if p == "users":
-                d = self.json_body()
-                return self.send_json({"id": S.create_user(c, d.get("username", ""), d.get("display_name", ""), d.get("role", ""),
-                                                           d.get("password", ""), must_change=True, crew_id=d.get("crew_id") or None)})
-            if parts[0] == "users" and len(parts) == 3 and parts[2] == "crew":
-                S.set_user_crew(c, parts[1], self.json_body().get("crew_id") or None)
-                for v in SESSIONS.values():
-                    if v["user_id"] == parts[1]:
-                        v["crew_id"] = self.json_body().get("crew_id") or None
-                return self.send_json({"ok": True})
-            if parts[0] == "users" and len(parts) == 3 and parts[2] == "active":
-                S.set_user_active(c, parts[1], bool(self.json_body().get("active")), self.user["user_id"])
-                if not self.json_body_cache.get("active"):
-                    for k in [k for k, v in SESSIONS.items() if v["user_id"] == parts[1]]:
-                        SESSIONS.pop(k, None)
-                return self.send_json({"ok": True})
-            if parts[0] == "users" and len(parts) == 3 and parts[2] == "password":
-                S.set_password(c, parts[1], self.json_body().get("password", ""), must_change=True)
-                for k in [k for k, v in SESSIONS.items() if v["user_id"] == parts[1]]:
-                    SESSIONS.pop(k, None)
-                return self.send_json({"ok": True})
-            if p == "geocode/missing":
-                return self.send_json(S.geocode_missing(c, self.json_body().get("date", "")))
-            if p == "fee-revisions":
-                return self.send_json({"id": S.save_fee_draft(c, self.json_body())})
-            if parts[0] == "fee-revisions" and len(parts) == 3 and parts[2] in ("approve", "reject"):
-                S.approve_fee_revision(c, parts[1], parts[2] == "approve", self.json_body().get("reason", ""))
-                return self.send_json({"ok": True})
-            if p == "backups/verify":
-                d = self.json_body()
-                return self.send_json(S.verify_backup(c, d.get("name", ""), d.get("passphrase", "")))
-            if p == "prefs":  # 본인 화면 설정(테마·글자 크기)
-                return self.send_json(S.save_prefs(c, self.user["user_id"], self.json_body()))
-            if p == "password":  # 본인 비밀번호 변경
-                d = self.json_body()
-                S.set_password(c, self.user["user_id"], d.get("password", ""), old=d.get("old", ""))
-                self.user["must_change"] = False
-                return self.send_json({"ok": True})
-            if p == "settings":
-                S.save_settings(c, self.json_body())
-                return self.send_json(S.settings(c))
-        return self.send_json({"error": "없음"}, 404)
+        return {"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
+                "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
+                "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
+                "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
+                "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__,
+                "quick_filters": list(S.QUICK), "reduction_round_units": list(S.ROUND_UNITS), "api": 13}
+
+    @endpoint("GET", "calendar", VIEW)
+    def ep_calendar(self, qs):
+        """수거 가능일 달력(수용량·휴무일)."""
+        start = qs.get("start") or S.today_kst()
+        dong = qs.get("dong") or None
+        ex = qs.get("exclude") or None
+        out = {"days": A.calendar(self.c, start, min(31, int(qs.get("days") or 14)), dong, ex),
+               "earliest": A.earliest_available(self.c, start, dong, ex)}
+        if qs.get("date"):
+            out["warnings"] = A.capacity_warnings(self.c, qs["date"], dong, ex)
+        return out
+
+    @endpoint("GET", "dong-detect", VIEW)
+    def ep_dong_detect(self, qs):
+        """주소로 행정동 찾기 + 주소 경고."""
+        return {**A.detect_dong(self.c, qs.get("address", "")), "warnings": S.address_warnings(self.c, qs.get("address", ""))}
+
+    @endpoint("GET", "dongs", VIEW)
+    def ep_dongs(self, qs):
+        """행정동 목록."""
+        return A.list_dongs(self.c)
+
+    @endpoint("GET", "holidays", VIEW)
+    def ep_holidays(self, qs):
+        """휴무일 목록."""
+        return A.list_holidays(self.c, qs.get("start", ""), qs.get("end", ""))
+
+    @endpoint("GET", "requests/import-template", ALL)
+    def ep_import_template(self, qs):
+        """접수 일괄 등록 CSV 서식."""
+        return csv_file(S.import_template(), "donggu-intake-template.csv")
+
+    @endpoint("GET", "audit.csv", REVIEW)
+    def ep_audit_csv(self, qs):
+        """변경 이력 CSV."""
+        return csv_file(S.audit_csv(self.c, qs), "donggu-audit.csv")
+
+    @endpoint("GET", "stats", VIEW)
+    def ep_stats(self, qs):
+        """통계."""
+        return S.stats(self.c, qs.get("start", ""), qs.get("end", ""), qs.get("basis") or "planned")
+
+    @endpoint("GET", "pilot", VIEW)
+    def ep_pilot(self, qs):
+        """시범 운영 비교 설정·보고."""
+        ps = S.pilot_settings(self.c)
+        st_, en_ = qs.get("start") or ps["start"], qs.get("end") or ps["end"]
+        return {"settings": ps, "base_keys": S.PILOT_BASE,
+                "report": S.pilot_report(self.c, st_, en_, qs.get("crew")) if st_ and en_ and st_ <= en_ else None}
+
+    @endpoint("GET", "pilot.csv", VIEW)
+    def ep_pilot_csv(self, qs):
+        """시범 운영 비교 CSV."""
+        return csv_file(S.pilot_csv(self.c, qs.get("start") or None, qs.get("end") or None, qs.get("crew")), "donggu-pilot.csv")
+
+    @endpoint("GET", "stats.csv", VIEW)
+    def ep_stats_csv(self, qs):
+        """통계 CSV(종류별)."""
+        kind = qs.get("kind") if qs.get("kind") in ("days", "dongs", "items", "categories", "months", "reductions", "channels") else "requests"
+        body = S.stats_csv(self.c, qs.get("start", ""), qs.get("end", ""), kind, qs.get("basis") or "planned")
+        return csv_file(body, f'donggu-{kind}-{qs.get("start")}_{qs.get("end")}.csv')
+
+    @endpoint("GET", "geocode", VIEW)
+    def ep_geocode(self, qs):
+        """주소 자료로 좌표 찾기."""
+        return S.geocode(self.c, qs.get("address", "")) or {"none": True}
+
+    @endpoint("GET", "addr-search", VIEW)
+    def ep_addr_search(self, qs):
+        """PC 주소 자료 검색."""
+        return S.addr_search(self.c, qs.get("q", ""))
+
+    @endpoint("GET", "juso-search", WORK)
+    def ep_juso_search(self, qs):
+        """행안부 주소 검색(서버가 대신 물음). 검색어는 로그·접속기록에 남기지 않는다."""
+        return S.juso_search(self.c, qs.get("q", ""), qs.get("name", ""))
+
+    @endpoint("GET", "juso-coord", WORK)
+    def ep_juso_coord(self, qs):
+        """행안부 검색 결과의 출입구 좌표."""
+        return S.juso_coord(self.c, {k: qs.get(k, "") for k in ("admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno")})
+
+    @endpoint("GET", "privacy", REVIEW)
+    def ep_privacy(self, qs):
+        """개인정보 파기 미리보기·이력·보유기간·백업 상태."""
+        c = self.c
+        return {"preview": PV.purge_preview(c), "log": PV.purge_log(c), "retention_years": PV.retention_years(c),
+                "access_retention_years": PV.access_retention_years(c), "backup": BK.status(c)}
+
+    @endpoint("GET", "access", REVIEW)
+    def ep_access(self, qs):
+        """접속기록 조회."""
+        return PV.access_page(self.c, qs)
+
+    @endpoint("GET", "access.csv", REVIEW)
+    def ep_access_csv(self, qs):
+        """접속기록 CSV."""
+        return csv_file(PV.access_csv(self.c, qs), "donggu-access.csv")
+
+    @endpoint("GET", "access/status", REVIEW)
+    def ep_access_status(self, qs):
+        """접속기록 월 점검 상태."""
+        return {**PV.check_status(self.c), "checks": PV.list_checks(self.c)}
+
+    @endpoint("GET", "integrity", REVIEW)
+    def ep_integrity(self, qs):
+        """무결성 빠른 검사(검사점부터 새 행만). 전체 검사는 POST integrity/full (백그라운드 작업)."""
+        res = PV.verify_all(self.c, full=False)
+        S.audit(self.c, "access", "verify", "VERIFY", {"ok": res["ok"], "incremental": True})
+        return res
+
+    @endpoint("GET", "jobs/{id}", ALL)
+    def ep_job(self, qs, jid):
+        """백그라운드 작업 상태(본인 작업만, 관리자는 전부)."""
+        j = OPS.JOBS.get(jid)
+        if not j or (j["actor"] != self.user["username"] and self.user["role"] != "ADMIN"):
+            return json_status({"error": "작업을 찾을 수 없습니다."}, 404)
+        return j
+
+    @endpoint("GET", "imports/recent", ALL)
+    def ep_imports_recent(self, qs):
+        """최근 가져오기(수거팀은 자기 팀 휴대폰만)."""
+        return OPS.recent_imports(self.c, int(qs.get("limit") or 30), self.crew_scope())
+
+    @endpoint("GET", "pending", VIEW)
+    def ep_pending(self, qs):
+        """처리할 일(대시보드)."""
+        return OPS.pending(self.c)
+
+    @endpoint("GET", "readiness", VIEW)
+    def ep_readiness(self, qs):
+        """운영 준비 점검."""
+        return OPS.readiness(self.c)
+
+    @endpoint("GET", "ops-status", VIEW)
+    def ep_ops_status(self, qs):
+        """예약 작업 마지막 실행."""
+        return OPS.ops_status(self.c)
+
+    @endpoint("GET", "diag", ADMIN)
+    def ep_diag(self, qs):
+        """진단(DB 크기·표 건수·예약 작업)."""
+        return {**OPS.diag(self.c), "scheduler_tick": STATE["scheduler_tick"], "started_at": STATE["started_at"],
+                "sessions": len(SESSIONS), "jobs_queued": OPS.JOBS.q.qsize()}
+
+    @endpoint("GET", "assign/current", VIEW)
+    def ep_assign_current(self, qs):
+        """그날 확정 배정."""
+        return S.current_assignment(self.c, qs.get("date") or S.today_kst())
+
+    @endpoint("GET", "requests/{id}/notice", ALL)
+    def ep_request_notice(self, qs, rid):
+        """주민 안내 글(이름·연락처·주소 없음)."""
+        self.require_crew_request(rid)
+        return Raw(S.notice_text(self.c, rid).encode("utf-8"), "text/plain; charset=utf-8")
+
+    @endpoint("GET", "backup-status", REVIEW)
+    def ep_backup_status(self, qs):
+        """자동 백업 상태."""
+        return BK.status(self.c)
+
+    @endpoint("GET", "revenue", VIEW)
+    def ep_revenue(self, qs):
+        """세입 일계표·월계표."""
+        return FN.revenue(self.c, qs.get("start", ""), qs.get("end", ""), qs.get("unit", "day"))
+
+    @endpoint("GET", "revenue.csv", VIEW)
+    def ep_revenue_csv(self, qs):
+        """세입 CSV."""
+        unit, kind = qs.get("unit", "day"), qs.get("kind", "method")
+        return csv_file(FN.revenue_csv(self.c, qs.get("start", ""), qs.get("end", ""), unit, kind), f"donggu-revenue-{kind}.csv")
+
+    @endpoint("GET", "recon-template", VIEW)
+    def ep_recon_template(self, qs):
+        """대사(납부 자료) CSV 서식."""
+        return csv_file(FN.recon_template(), "donggu-recon-template.csv")
+
+    @endpoint("GET", "recon-history", VIEW)
+    def ep_recon_history(self, qs):
+        """대사 가져오기 이력."""
+        return FN.recon_history(self.c)
+
+    @endpoint("GET", "refunds", VIEW)
+    def ep_refunds(self, qs):
+        """환불 목록."""
+        return FN.list_refunds(self.c, qs.get("status", ""))
+
+    @endpoint("GET", "addr-stats", REVIEW)
+    def ep_addr_stats(self, qs):
+        """주소 자료 건수."""
+        return S.addr_stats(self.c)
+
+    @endpoint("GET", "fee-table", ALL)
+    def ep_fee_table(self, qs):
+        """운영 수수료표 상태·검토 행·개정 목록."""
+        return {"state": S.fee_state(self.c), "review_rows": S.review_rows(), "revisions": S.list_fee_revisions(self.c),
+                "source": {"label": S.FEE_TABLE["label"], "checked_on": S.FEE_TABLE["source_checked_on"], "rows": len(S.FEE_ROWS)}}
+
+    @endpoint("GET", "me", ALL, must_change_ok=True)
+    def ep_me(self, qs):
+        """나(사용자·역할·화면 설정)."""
+        return self.me()
+
+    @endpoint("GET", "users", REVIEW)
+    def ep_users(self, qs):
+        """사용자 목록."""
+        return S.list_users(self.c)
+
+    @endpoint("GET", "backups", ADMIN)
+    def ep_backups(self, qs):
+        """백업 파일 목록."""
+        return {"dir": str(S.backup_dir(self.c)), "files": S.list_backups(self.c)}
+
+    @endpoint("GET", "photo-purge", ADMIN)
+    def ep_photo_purge_preview(self, qs):
+        """사진 정리 대상 미리보기."""
+        cand = S.purge_candidates(self.c)
+        return {"count": len(cand), "bytes": sum(x["bytes"] or 0 for x in cand), "days": S.get_setting(self.c, "photo_retention_days")}
+
+    @endpoint("GET", "audit", REVIEW)
+    def ep_audit(self, qs):
+        """변경 이력 조회."""
+        return S.audit_page(self.c, qs)
+
+    @endpoint("GET", "requests", ALL,
+              access=("LIST", lambda h, out, qs: ("", len(out["rows"]), f"전체 {out['total']}건 · " + PV.filter_summary(qs))))  # 건수·조건만 (내용 없음)
+    def ep_requests(self, qs):
+        """접수 검색(수거팀 계정: 자기 팀에 배정된 접수만)."""
+        scope = S.crew_request_ids(self.c, self.crew_scope()) if self.crew_scope() is not None else None
+        return S.search_requests(self.c, qs, scope)
+
+    @endpoint("GET", "requests/{id}", ALL, access=("VIEW", lambda h, out, qs, rid: (rid, 1, "접수 상세")))
+    def ep_request(self, qs, rid):
+        """접수 상세."""
+        self.require_crew_request(rid)
+        return S.get_request(self.c, rid)
+
+    @endpoint("GET", "duplicates", VIEW, access=("SEARCH", lambda h, out, qs: ("", len(out), "중복 후보 조회") if out else None))
+    def ep_duplicates(self, qs):
+        """중복 후보(전화·주소)."""
+        return S.find_duplicates(self.c, qs.get("phone", ""), qs.get("address", ""), qs.get("exclude") or None)
+
+    @endpoint("GET", "batches", ALL, access=("LIST", lambda h, out, qs: (
+        "", sum(b.get("count") or len(b.get("stops") or []) for b in out), f"배정 목록 {qs['date']}") if out else None))  # 이름·주소 포함: 건수만
+    def ep_batches(self, qs):
+        """그날 배정 목록(수거팀은 자기 팀만)."""
+        out = S.list_batches(self.c, qs["date"])
+        if self.crew_scope() is not None:
+            out = [b for b in out if b["crew_id"] == self.crew_scope()]
+        return out
+
+    @endpoint("GET", "conflicts", VIEW, access=("LIST", lambda h, out, qs: ("", len(out), "충돌함·현장 요청") if out else None))
+    def ep_conflicts(self, qs):
+        """충돌함(현장 접수·정정 요청 원문 = 개인정보 포함)."""
+        return S.list_conflicts(self.c)
+
+    @endpoint("GET", "field-intakes", VIEW, access=("SEARCH", lambda h, out, qs: ("", len(out), "현장 접수 확인 목록") if out else None))
+    def ep_field_intakes(self, qs):
+        """현장 접수 확인 목록."""
+        return S.field_intakes(self.c)
+
+    @endpoint("GET", "close", ALL, access=("LIST", lambda h, out, qs: (
+        "", len(out.get("no_result") or []) + len(out.get("revisit") or []), f"마감 점검 {qs['date']}")))
+    def ep_close(self, qs):
+        """마감 점검 요약(수거팀은 자기 팀 범위)."""
+        return S.day_summary(self.c, qs["date"], self.crew_scope())
+
+    @endpoint("GET", "registration-qr", ADMIN)
+    def ep_registration_qr(self, qs):
+        """기기 등록 QR 이미지."""
+        from pc_tool import qr_png_data_uri
+        return {"image": qr_png_data_uri(S.registration_text(self.c), "M")[0]}
+
+    @endpoint("GET", "unloads", ALL)
+    def ep_unloads(self, qs):
+        """그날 하차 기록(수거팀은 자기 팀만)."""
+        return [u for u in S.list_unloads(self.c, qs["date"]) if self.crew_scope() is None or u["crew_id"] == self.crew_scope()]
+
+    @endpoint("GET", "volumes", VIEW)
+    def ep_volumes(self, qs):
+        """자주 쓴 품목의 부피·무게 추정과 보정값."""
+        ov = S.volume_overrides(self.c)
+        ids = list(dict.fromkeys(S.fee_usage(self.c, 20) + list(ov)))
+        rows = []
+        for i in ids:
+            if i not in S.FEE_ROWS:
+                continue
+            fr = S.FEE_ROWS[i]
+            one = {"name": fr["name"], "spec": fr["spec"], "qty": 1}
+            rows.append({"fee_rate_id": i, "name": fr["name"], "spec": fr["spec"], "unit_label": fr["unit_label"],
+                         "estimate": routing.volume_of(one), "kg": routing.weight_of(one),
+                         "tags": [routing.TAG_LABEL[t] for t in routing.tags_of([one])], "override": ov.get(i)})
+        return rows
+
+    @endpoint("GET", "load-check", VIEW)
+    def ep_load_check(self, qs):
+        """적재 점검(기간)."""
+        return S.load_check(self.c, qs.get("start") or "", qs.get("end") or "")
+
+    @endpoint("GET", "fee-usage", ALL)
+    def ep_fee_usage(self, qs):
+        """자주 쓴 품목."""
+        return S.fee_usage(self.c)
+
+    @endpoint("GET", "qrtests", ALL)
+    def ep_qrtests(self, qs):
+        """QR 실측 목록."""
+        return S.list_qr_tests(self.c)
+
+    @endpoint("GET", "photo/{id}", ALL, access=("PHOTO", lambda h, out, qs, pid: (S.photo_request(h.c, pid) or "", 1, "현장 사진") if out.body else None))
+    def ep_photo(self, qs, pid):
+        """현장 사진(수거팀은 자기 팀 접수만)."""
+        self.require_crew_request(S.photo_request(self.c, pid) or "")
+        b = S.photo_bytes(self.c, pid)
+        return Raw(b, "image/jpeg") if b else json_status({"error": "없음"}, 404)
+
+    # ---- 잠금 밖에서 검증·계산하는 POST (lock="none"): 파일 검증·복호·외부 호출·노선 계산은 잠금 밖, 반영만 잠금 안
+    def _import_package(self, qs, kind: str):
+        body = self.body()
+        with read_con() as rc:
+            if self.crew_scope() is not None and S.device_crew(rc, body) != self.crew_scope():
+                raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
+            prep = S.prepare_result(rc, body) if kind == "result" else S.prepare_photos(rc, body)
+        with LOCK:
+            if kind == "result":
+                return S.import_result(CON, body, "QR" if qs.get("channel") == "QR" else "MAIL", prepared=prep)
+            return S.import_photos(CON, body, prepared=prep)
+
+    @endpoint("POST", "import/result", CREW, lock="none")
+    def ep_import_result(self, qs):
+        """휴대폰 결과 파일 가져오기(수거팀은 자기 팀 휴대폰 파일만)."""
+        return self._import_package(qs, "result")
+
+    @endpoint("POST", "import/photos", CREW, lock="none")
+    def ep_import_photos(self, qs):
+        """휴대폰 사진 묶음 가져오기."""
+        return self._import_package(qs, "photos")
+
+    @endpoint("POST", "import/solo", WORK, lock="none")
+    def ep_import_solo(self, qs):
+        """단독 휴대폰 백업 옮기기(접수를 만든다). PBKDF2 60만 회는 잠금 밖."""
+        pw = base64.b64decode(self.headers.get("X-DG-Pass") or "").decode("utf-8", "replace")
+        body = self.body()
+        opened = S.prepare_solo(body, pw)
+        if qs.get("preview") == "1":
+            with read_con() as rc:
+                return S.import_solo(rc, body, pw, qs.get("crew") or None, preview=True, opened=opened)
+        with LOCK:
+            return S.import_solo(CON, body, pw, qs.get("crew") or None, opened=opened)
+
+    @endpoint("POST", "requests/import", WORK, lock="none")
+    def ep_requests_import(self, qs):
+        """접수 CSV 일괄 등록(preview=1 은 조회 전용 연결에서 미리보기)."""
+        if qs.get("preview") == "1":
+            with read_con() as rc:
+                return S.import_requests(rc, self.body(), preview=True)
+        with LOCK:
+            return S.import_requests(CON, self.body(), preview=False, skip_duplicates=qs.get("skip_dup") == "1")
+
+    @endpoint("POST", "recon", WORK, lock="none")
+    def ep_recon(self, qs):
+        """세외수입 납부 자료 대사(preview=1 은 미리보기)."""
+        if qs.get("preview") == "1":
+            with read_con() as rc:
+                return FN.import_recon(rc, self.body(), preview=True)
+        with LOCK:
+            return FN.import_recon(CON, self.body(), preview=False)
+
+    @endpoint("POST", "addr-import", ADMIN, lock="none")
+    def ep_addr_import(self, qs):
+        """주소 자료 가져오기(큰 파일 읽기는 잠금 밖)."""
+        cols = geo.parse_columns_arg(qs["columns"]) if qs.get("columns") else None
+        body = self.body()
+        parsed = S.parse_addr_points(body, qs.get("region", ""), cols)
+        if qs.get("preview") == "1":
+            with read_con() as rc:
+                return S.import_addr_points(rc, body, qs.get("region", ""), cols, preview=True, parsed=parsed)
+        with LOCK:
+            return S.import_addr_points(CON, body, qs.get("region", ""), cols, parsed=parsed)
+
+    @endpoint("POST", "external/test", ADMIN, lock="none")
+    def ep_external_test(self, qs):
+        """외부 서비스 연결 시험(잠금 밖)."""
+        with read_con() as rc:
+            return S.external_test(rc, self.json_body().get("service", ""))
+
+    @endpoint("POST", "route", WORK, lock="none",
+              access=("LIST", lambda h, out, qs: ("", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")))
+    def ep_route(self, qs):
+        """노선 계산(OR-Tools·카카오 길찾기는 잠금 밖)."""
+        return self.route_plan(self.json_body())
+
+    # 오래 걸리는 관리 작업 → 백그라운드 작업 번호
+    @endpoint("POST", "backup", ADMIN, lock="none")
+    def ep_backup(self, qs):
+        """수동 백업(백그라운드 작업)."""
+        pw = self.json_body().get("passphrase", "")
+        if len(pw or "") < 12:
+            raise S.UserError("백업 비밀번호는 12자 이상으로 정해 주세요.")
+        return self.job("backup", passphrase=pw)
+
+    @endpoint("POST", "backup/auto", ADMIN, lock="none")
+    def ep_backup_auto(self, qs):
+        """자동 백업 지금 실행(백그라운드 작업)."""
+        return self.job("backup_auto")
+
+    @endpoint("POST", "backup/retention", ADMIN, lock="none")
+    def ep_backup_retention(self, qs):
+        """백업 보관 정리(백그라운드 작업)."""
+        return self.job("backup_retention")
+
+    @endpoint("POST", "privacy/purge", ADMIN, lock="none")
+    def ep_privacy_purge(self, qs):
+        """개인정보 파기(백그라운드 작업)."""
+        return self.job("pii_purge")
+
+    @endpoint("POST", "photo-purge", ADMIN, lock="none")
+    def ep_photo_purge(self, qs):
+        """사진 보관 기간 정리(백그라운드 작업)."""
+        return self.job("photo_purge")
+
+    @endpoint("POST", "refunds/sync", ADMIN, lock="none")
+    def ep_refunds_sync(self, qs):
+        """자동 환불 건 맞추기(백그라운드 작업)."""
+        return self.job("refund_sync")
+
+    @endpoint("POST", "integrity/full", ADMIN, lock="none")
+    def ep_integrity_full(self, qs):
+        """무결성 전체 검사(백그라운드 작업)."""
+        return self.job("verify_full")
+
+    # ---- 쓰기 (POST, DB 잠금 안)
+    @endpoint("POST", "requests", WORK)
+    def ep_request_create(self, qs):
+        """접수 등록(client_req_id 로 한 번만)."""
+        d = self.json_body()
+        return self.idem("requests", lambda: S.create_request(self.c, d))
+
+    @endpoint("POST", "requests/bulk", WORK)
+    def ep_requests_bulk(self, qs):
+        """일괄 처리: 예정일 변경·취소·동 지정."""
+        return self.bulk(self.json_body())
+
+    @endpoint("POST", "requests/export", WORK)
+    def ep_requests_export(self, qs):
+        """고른 접수 CSV(개인정보 포함은 접수 담당자·관리자만)."""
+        d = self.json_body()
+        pii = bool(d.get("include_pii"))
+        if pii and self.user["role"] not in ("ADMIN", "INTAKE"):
+            return json_status({"error": "개인정보가 든 목록은 접수 담당자·관리자만 내보낼 수 있습니다."}, 403)
+        return csv_file(S.export_requests(self.c, d.get("ids"), pii), "donggu-selected.csv")
+
+    @endpoint("POST", "requests/print", WORK)
+    def ep_requests_print(self, qs):
+        """고른 접수 인쇄(잠깐 쓰는 인쇄 번호)."""
+        data = S.print_requests(self.c, self.json_body().get("ids"))
+        t = secrets.token_urlsafe(12)
+        for k in [k for k, v in PRINTS.items() if v["exp"] < time.time()]:
+            PRINTS.pop(k, None)
+        PRINTS[t] = {"exp": time.time() + 120, "data": data, "user": self.user["user_id"]}
+        return {"token": t}
+
+    @endpoint("POST", "requests/{id}/reduction", WORK)
+    def ep_request_reduction(self, qs, rid):
+        """감면 지정·해제."""
+        return FN.set_reduction(self.c, rid, self.json_body())
+
+    @endpoint("POST", "requests/{id}/receipt-print", WORK)
+    def ep_receipt_print(self, qs, rid):
+        """접수증 인쇄."""
+        return {"token": self.put_print(self.receipt_html(rid))}
+
+    @endpoint("POST", "requests/labels", WORK)
+    def ep_labels(self, qs):
+        """배출 표지 인쇄."""
+        return {"token": self.put_print(self.labels_html(self.json_body().get("ids")))}
+
+    @endpoint("POST", "stats/print", VIEW)
+    def ep_stats_print(self, qs):
+        """월보 인쇄."""
+        d = self.json_body()
+        return {"token": self.put_print(self.monthly_html(d.get("start", ""), d.get("end", ""), d.get("basis") or "planned"))}
+
+    @endpoint("POST", "access/check", REVIEW)
+    def ep_access_check(self, qs):
+        """접속기록 월 점검 기록."""
+        return PV.record_check(self.c, self.json_body().get("note", ""))
+
+    @endpoint("POST", "refunds/request", WORK)
+    def ep_refund_request(self, qs):
+        """환불 신청."""
+        return self.idem("refunds/request", lambda: {"id": FN.request_refund(self.c, self.json_body())})
+
+    @endpoint("POST", "refunds/{id}/approve", REVIEW)
+    def ep_refund_approve(self, qs, cid):
+        """환불 결재(승인)."""
+        FN.approve_refund(self.c, cid, True, self.json_body().get("note", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "refunds/{id}/reject", REVIEW)
+    def ep_refund_reject(self, qs, cid):
+        """환불 결재(반려)."""
+        FN.approve_refund(self.c, cid, False, self.json_body().get("note", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "refunds/{id}/pay", WORK)
+    def ep_refund_pay(self, qs, cid):
+        """환불 지급 기록."""
+        return FN.pay_refund(self.c, cid, self.json_body())
+
+    @endpoint("POST", "refunds/{id}/void", WORK)
+    def ep_refund_void(self, qs, cid):
+        """환불 취소."""
+        FN.cancel_refund(self.c, cid, self.json_body().get("reason", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "backup-key", ADMIN)
+    def ep_backup_key(self, qs):
+        """자동 백업 키 쌍 만들기(개인키는 한 번만 내려줌)."""
+        pem, info = BK.generate_key(self.c, self.json_body().get("password", ""))
+        return {"pem": pem.decode(), **info}
+
+    @endpoint("POST", "backups/verify-auto", ADMIN)
+    def ep_backup_verify_auto(self, qs):
+        """자동 백업 파일 열어 확인."""
+        d = self.json_body()
+        return BK.verify_auto(self.c, d.get("name", ""), (d.get("key") or "").encode(), d.get("password", ""))
+
+    @endpoint("POST", "requests/{id}", WORK)
+    def ep_request_update(self, qs, rid):
+        """접수 수정(이전 내용은 버전으로)."""
+        d = self.json_body()
+        return S.update_request(self.c, rid, d, d.get("reason", ""))
+
+    @endpoint("POST", "requests/{id}/field-check", WORK)
+    def ep_field_check(self, qs, rid):
+        """현장 접수 확인."""
+        return S.check_field_intake(self.c, rid)
+
+    @endpoint("POST", "requests/{id}/cancel", WORK)
+    def ep_request_cancel(self, qs, rid):
+        """접수 취소(사유 코드)."""
+        d = self.json_body()
+        return S.cancel_request(self.c, rid, d.get("reason", ""), d.get("code") or None, d.get("req_ver"))
+
+    @endpoint("POST", "requests/{id}/contacts", WORK)
+    def ep_request_contact(self, qs, rid):
+        """민원·통화 기록."""
+        return self.idem(f"requests/{rid}/contacts", lambda: {"id": S.add_contact(self.c, rid, self.json_body())})
+
+    @endpoint("POST", "requests/{id}/location", WORK)
+    def ep_request_location(self, qs, rid):
+        """위치 직접 지정."""
+        d = self.json_body()
+        S.set_location(self.c, rid, d["lat"], d["lon"])
+        return {"ok": True}
+
+    @endpoint("POST", "assign", WORK)
+    def ep_assign(self, qs):
+        """배정 확정."""
+        d = self.json_body()
+        return S.confirm_plan(self.c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted")))
+
+    @endpoint("POST", "assign/edit", WORK)
+    def ep_assign_edit(self, qs):
+        """확정 배정 부분 수정(넣기·빼기·순서·팀 옮기기)."""
+        d = self.json_body()
+        return S.edit_assignment(self.c, d.get("date", ""), d.get("op", ""), d)
+
+    @endpoint("POST", "imports/{id}/confirm", CREW)
+    def ep_import_confirm(self, qs, iid):
+        """휴대폰 반영 확인."""
+        return OPS.confirm_import(self.c, iid)
+
+    @endpoint("POST", "conflicts/bulk", WORK)
+    def ep_conflicts_bulk(self, qs):
+        """충돌 일괄 처리(접수별·가져오기별)."""
+        d = self.json_body()
+        return S.resolve_conflicts_bulk(self.c, d.get("action", ""), d.get("reason", ""), d.get("request_id") or "", d.get("import_id") or "")
+
+    @endpoint("POST", "bundles", WORK)
+    def ep_bundle(self, qs):
+        """휴대폰 목록 묶음 만들기."""
+        b = S.make_bundle(self.c, self.json_body()["batch_id"])
+        return {k: b[k] for k in ("bundle_id", "bytes", "count", "work_date", "assign_ver")} | {"frames": len(b["frames"])}
+
+    @endpoint("POST", "bundles/{id}/receipt", WORK)
+    def ep_bundle_receipt(self, qs, bid):
+        """휴대폰 수신 확인 코드."""
+        S.confirm_receipt(self.c, bid, self.json_body().get("code", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "conflicts/{id}", WORK)
+    def ep_conflict(self, qs, eid):
+        """충돌 하나 처리."""
+        d = self.json_body()
+        S.resolve_conflict(self.c, eid, d.get("action", ""), d.get("reason", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "pilot", WORK)
+    def ep_pilot_save(self, qs):
+        """시범 운영 비교 설정 저장."""
+        return S.save_pilot(self.c, self.json_body())
+
+    @endpoint("POST", "close", WORK)
+    def ep_close_day(self, qs):
+        """마감 기록(담당자)."""
+        d = self.json_body()
+        return self.idem("close", lambda: S.close_day(self.c, d.get("date", ""), d.get("note", ""), d.get("close_secs")))
+
+    @endpoint("POST", "close/approve", REVIEW)
+    def ep_close_approve(self, qs):
+        """마감 확인(팀장)."""
+        d = self.json_body()
+        return S.approve_close(self.c, d.get("date", ""), d.get("note", ""))
+
+    @endpoint("POST", "dongs", ADMIN)
+    def ep_dong_save(self, qs):
+        """행정동 저장."""
+        return {"id": A.save_dong(self.c, self.json_body())}
+
+    @endpoint("POST", "dongs/{id}/delete", ADMIN)
+    def ep_dong_delete(self, qs, did):
+        """행정동 지우기."""
+        A.delete_dong(self.c, did)
+        return {"ok": True}
+
+    @endpoint("POST", "holidays", ADMIN)
+    def ep_holiday_add(self, qs):
+        """휴무일 추가."""
+        d = self.json_body()
+        A.add_holiday(self.c, d.get("day", ""), d.get("label", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "holidays/{id}/delete", ADMIN)
+    def ep_holiday_delete(self, qs, day):
+        """휴무일 지우기."""
+        A.delete_holiday(self.c, day)
+        return {"ok": True}
+
+    @endpoint("POST", "crews", ADMIN)
+    def ep_crew_save(self, qs):
+        """수거팀 저장."""
+        return {"id": S.save_crew(self.c, self.json_body())}
+
+    @endpoint("POST", "devices/register", ADMIN)
+    def ep_device_register(self, qs):
+        """휴대폰 등록(지문 확인 대기)."""
+        d = self.json_body()
+        return S.register_device(self.c, d.get("code", ""), d.get("label", ""))
+
+    @endpoint("POST", "devices/{id}/confirm", ADMIN)
+    def ep_device_confirm(self, qs, dev):
+        """휴대폰 지문 확인."""
+        S.confirm_device(self.c, dev)
+        return {"ok": True}
+
+    @endpoint("POST", "devices/{id}/status", ADMIN)
+    def ep_device_status(self, qs, dev):
+        """휴대폰 상태(분실·중지)."""
+        S.set_device_status(self.c, dev, self.json_body().get("status", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "requests/{id}/link", WORK)
+    def ep_link(self, qs, rid):
+        """유사 품목 연결."""
+        d = self.json_body()
+        return {"id": S.link_similar(self.c, rid, d.get("line_id", ""), d.get("fee_rate_id", ""), d.get("reason", ""), d.get("confirmed_by", ""))}
+
+    @endpoint("POST", "links/{id}/void", WORK)
+    def ep_link_void(self, qs, lid):
+        """유사 품목 연결 취소."""
+        S.unlink_similar(self.c, lid, self.json_body().get("reason", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "requests/{id}/payments", WORK)
+    def ep_payment(self, qs, rid):
+        """수납·환불 기록."""
+        return self.idem(f"requests/{rid}/payments", lambda: S.add_payment(self.c, rid, self.json_body()))
+
+    @endpoint("POST", "payments/{id}/void", WORK)
+    def ep_payment_void(self, qs, pid):
+        """수납 기록 취소."""
+        return S.void_payment(self.c, pid, self.json_body().get("reason", ""))
+
+    @endpoint("POST", "unloads", CREW)
+    def ep_unload(self, qs):
+        """하차 기록(수거팀은 자기 팀만)."""
+        d = self.json_body()
+        if self.crew_scope() is not None and d.get("crew_id") != self.crew_scope():
+            raise S.UserError("내 팀의 하차만 기록할 수 있습니다.")
+        return self.idem("unloads", lambda: {"id": S.add_unload(self.c, d)})
+
+    @endpoint("POST", "volumes", ADMIN)
+    def ep_volume_save(self, qs):
+        """품목 부피 보정 저장."""
+        d = self.json_body()
+        S.save_volume_override(self.c, d.get("fee_rate_id", ""), d.get("m3"))
+        return {"ok": True}
+
+    @endpoint("POST", "qrtest", CREW)
+    def ep_qrtest(self, qs):
+        """QR 실측 시험 만들기."""
+        d = self.json_body()
+        return S.make_qr_test(self.c, d.get("device_id", ""), int(d.get("count", 20)), d.get("addr", "mixed"),
+                              int(d.get("chunk", 700)), d.get("ec", "M"), int(d.get("fps", 3)))
+
+    @endpoint("POST", "qrtest/{id}/result", CREW)
+    def ep_qrtest_result(self, qs, tid):
+        """QR 실측 결과 기록."""
+        d = self.json_body()
+        return S.record_qr_test(self.c, tid, d.get("elapsed_s") or 0, d.get("reads") or 0, d.get("check", ""), d.get("note", ""))
+
+    @endpoint("POST", "users", ADMIN)
+    def ep_user_create(self, qs):
+        """사용자 만들기(임시 비밀번호)."""
+        d = self.json_body()
+        return {"id": S.create_user(self.c, d.get("username", ""), d.get("display_name", ""), d.get("role", ""),
+                                    d.get("password", ""), must_change=True, crew_id=d.get("crew_id") or None)}
+
+    @endpoint("POST", "users/{id}/crew", ADMIN)
+    def ep_user_crew(self, qs, uid):
+        """수거팀 계정의 팀 연결(열린 세션에도 바로 반영)."""
+        S.set_user_crew(self.c, uid, self.json_body().get("crew_id") or None)
+        for v in SESSIONS.values():
+            if v["user_id"] == uid:
+                v["crew_id"] = self.json_body().get("crew_id") or None
+        return {"ok": True}
+
+    @endpoint("POST", "users/{id}/active", ADMIN)
+    def ep_user_active(self, qs, uid):
+        """사용자 사용·중지(중지하면 세션 끊음)."""
+        S.set_user_active(self.c, uid, bool(self.json_body().get("active")), self.user["user_id"])
+        if not self.json_body_cache.get("active"):
+            for k in [k for k, v in SESSIONS.items() if v["user_id"] == uid]:
+                SESSIONS.pop(k, None)
+        return {"ok": True}
+
+    @endpoint("POST", "users/{id}/password", ADMIN)
+    def ep_user_password(self, qs, uid):
+        """임시 비밀번호 다시 정하기(세션 끊음)."""
+        S.set_password(self.c, uid, self.json_body().get("password", ""), must_change=True)
+        for k in [k for k, v in SESSIONS.items() if v["user_id"] == uid]:
+            SESSIONS.pop(k, None)
+        return {"ok": True}
+
+    @endpoint("POST", "geocode/missing", WORK)
+    def ep_geocode_missing(self, qs):
+        """좌표 없는 접수에 주소 자료로 좌표 채우기."""
+        return S.geocode_missing(self.c, self.json_body().get("date", ""))
+
+    @endpoint("POST", "fee-revisions", ADMIN)
+    def ep_fee_draft(self, qs):
+        """수수료표 개정안 작성(관리자)."""
+        return {"id": S.save_fee_draft(self.c, self.json_body())}
+
+    @endpoint("POST", "fee-revisions/{id}/approve", WORK)
+    def ep_fee_approve(self, qs, rev):
+        """수수료표 개정 승인(작성자 아닌 담당자)."""
+        S.approve_fee_revision(self.c, rev, True, self.json_body().get("reason", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "fee-revisions/{id}/reject", WORK)
+    def ep_fee_reject(self, qs, rev):
+        """수수료표 개정 반려."""
+        S.approve_fee_revision(self.c, rev, False, self.json_body().get("reason", ""))
+        return {"ok": True}
+
+    @endpoint("POST", "backups/verify", ADMIN)
+    def ep_backup_verify(self, qs):
+        """수동 백업 파일 열어 확인."""
+        d = self.json_body()
+        return S.verify_backup(self.c, d.get("name", ""), d.get("passphrase", ""))
+
+    @endpoint("POST", "prefs", ALL, must_change_ok=True)
+    def ep_prefs(self, qs):
+        """본인 화면 설정(테마·글자 크기)."""
+        return S.save_prefs(self.c, self.user["user_id"], self.json_body())
+
+    @endpoint("POST", "password", ALL, must_change_ok=True)
+    def ep_password(self, qs):
+        """본인 비밀번호 변경."""
+        d = self.json_body()
+        S.set_password(self.c, self.user["user_id"], d.get("password", ""), old=d.get("old", ""))
+        self.user["must_change"] = False
+        return {"ok": True}
+
+    @endpoint("POST", "settings", ADMIN)
+    def ep_settings(self, qs):
+        """설정 저장 → 새 설정 묶음."""
+        S.save_settings(self.c, self.json_body())
+        return S.settings(self.c)
 
     def route_plan(self, d):
         """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이동시간 캐시·이력 저장만 다시 잠금 안."""
@@ -1087,7 +1532,6 @@ class Handler(BaseHTTPRequestHandler):
         self.raw_page(display_html(imgs, t["id"][:8], "실측", 0, pr["count"], pr["fps"], label).encode())
 
     def print_page(self, batch_short: str):
-        import html as _h
         b = S.one(CON, "SELECT id FROM assignment_batch WHERE id LIKE ?", (batch_short + "%",))
         if not b or len(batch_short) < 8:
             return self.send_json({"error": "없음"}, 404)
@@ -1122,7 +1566,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def print_requests_page(self, d: dict):
         """고른 접수 목록 인쇄(개인정보 포함 → 파쇄 안내). 건마다 출력 기록은 service.print_requests 가 남겼다."""
-        import html as _h
         e = _h.escape
         trs = []
         for i, r in enumerate(d["rows"], 1):
@@ -1152,14 +1595,12 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _doc(title: str, body: str, cls: str = "") -> str:
-        import html as _h
         return (f'<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{_h.escape(title)}</title>'
                 f'<link rel="stylesheet" href="/doc.css"><script src="/print.js" defer></script></head><body class="{cls}">'
                 f'<div class="tools"><button type="button" id="print">인쇄</button></div>{body}</body></html>')
 
     def receipt_html(self, rid: str) -> str:
         """접수증(신청인 보관용): 접수번호·부과번호·품목·금액(계산→감면→부과)·배출일·배출 장소 안내·문의처."""
-        import html as _h
         e = _h.escape
         c = CON
         r = S.get_request(c, rid)
@@ -1184,7 +1625,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def labels_html(self, ids) -> str:
         """배출 표지(물건 부착용, A4 한 장에 6개): 접수번호·동·배출일·품목·수량, 큰 글씨, 접수번호만 담은 QR."""
-        import html as _h
         from pc_tool import qr_png_data_uri
         e = _h.escape
         c = CON
@@ -1215,7 +1655,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def monthly_html(self, start: str, end: str, basis: str) -> str:
         """월보(통계 인쇄): 개인정보 없음. 제목은 설정에서 바꿈."""
-        import html as _h
         e = _h.escape
         c = CON
         d = S.stats(c, start, end, basis)
@@ -1278,8 +1717,7 @@ class BufferedTravelCache(routing.TravelCache):
 
 
 def dt_now() -> str:
-    import datetime as _dt
-    return _dt.datetime.now(S.KST).strftime("%Y-%m-%d %H:%M")
+    return dt.datetime.now(S.KST).strftime("%Y-%m-%d %H:%M")
 
 
 class Server(ThreadingHTTPServer):
@@ -1315,7 +1753,7 @@ def scheduler(stop: threading.Event, every_s: int = 30):
             with LOCK:
                 flush_login_fails(CON)
                 is_due = BK.due(CON)
-                last = (S.get_setting(CON, "last_daily_tasks", None) or {}).get("at")
+                last = (S.get_setting(CON, "last_daily_tasks") or {}).get("at")
             if is_due:  # 잠금은 DB를 쓰는 짧은 동안만(파일 봉인·복사는 잠금 밖) → 백업 중에도 화면 요청이 기다리지 않음
                 r = BK.make_auto(CON, "SCHEDULE", lock=LOCK)
                 LOG.info("자동 백업 %s", "성공" if r["ok"] else "실패: " + scrub(r.get("error", "")))

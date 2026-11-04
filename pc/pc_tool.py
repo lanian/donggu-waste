@@ -34,14 +34,12 @@ import io
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import qrcode
 from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import dgproto as P  # noqa: E402
 from dgpc import service as S, store  # noqa: E402
 from sample_data import make_daylist  # noqa: E402
 

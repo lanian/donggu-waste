@@ -346,10 +346,10 @@ def _m2_v13(con):
         at TEXT NOT NULL, PRIMARY KEY (user, endpoint, key))""")
     for st in V13_INDEXES:
         con.execute(st)
-    from dgpc import service as _S  # 요약 열 채우기(접수 전체, 묶음으로)
+    from dgpc import derive as _D  # 요약 열 채우기(접수 전체, 묶음으로). store 는 core 아래 계층이라 여기서만 늦게 불러온다
     ids = [r[0] for r in con.execute("SELECT id FROM request").fetchall()]
     for i in range(0, len(ids), 500):
-        _S.refresh_request_summary(con, ids[i:i + 500])
+        _D.refresh_request_summary(con, ids[i:i + 500])
 
 
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13)]

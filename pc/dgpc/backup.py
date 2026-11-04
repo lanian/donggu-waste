@@ -26,48 +26,105 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from dgpc import service as S, store
+from dgpc import core as C, settings as SR, store
 
 MAGIC = b"DGAB1"
-DEFAULTS = {"backup_auto": True, "backup_time": "18:00", "backup_dest2": "", "backup_keep_daily": 14, "backup_keep_monthly": 3, "backup_retention_days": 90}
+CONF_KEYS = ("backup_auto", "backup_time", "backup_dest2", "backup_keep_daily", "backup_keep_monthly", "backup_retention_days")  # 기본값은 settings.py
 _NAME_RE = re.compile(r"donggu-(?:backup|auto)-(\d{8})-(\d{6})(?:-\d+)?\.(dgbak|dgabk)$")
 
 
 def conf(con) -> dict:
-    return {k: S.get_setting(con, k, v) for k, v in DEFAULTS.items()}
+    return {k: C.get_setting(con, k) for k in CONF_KEYS}
+
+
+@SR.contribute("backup")
+def _settings_part(con) -> dict:
+    return conf(con)
 
 
 def save_settings(con, data: dict):
     """호출하는 쪽이 트랜잭션을 연다."""
     if "backup_auto" in data:
-        S.set_setting(con, "backup_auto", bool(data["backup_auto"]))
+        C.set_setting(con, "backup_auto", bool(data["backup_auto"]))
     if "backup_time" in data:
         t = (data["backup_time"] or "").strip()
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
-            raise S.UserError("자동 백업 시각은 HH:MM 형식입니다.")
-        S.set_setting(con, "backup_time", t)
+            raise C.UserError("자동 백업 시각은 HH:MM 형식입니다.")
+        C.set_setting(con, "backup_time", t)
     if "backup_dest2" in data:
         b = (data["backup_dest2"] or "").strip()
         if b and not Path(b).is_absolute():
-            raise S.UserError("두 번째 보관 위치는 전체 경로로 적어 주세요 (예: \\\\서버\\백업, E:\\동구백업).")
-        old = S.get_setting(con, "backup_dest2", "") or ""
+            raise C.UserError("두 번째 보관 위치는 전체 경로로 적어 주세요 (예: \\\\서버\\백업, E:\\동구백업).")
+        old = C.get_setting(con, "backup_dest2") or ""
         if b != old:  # 백업 사본이 어디로 가는지 바뀜 → 경로를 이력에 남긴다
-            S.audit(con, "backup", "dest2", "DEST2", {"from": old[:200], "to": b[:200]})
-        S.set_setting(con, "backup_dest2", b)
+            C.audit(con, "backup", "dest2", "DEST2", {"from": old[:200], "to": b[:200]})
+        C.set_setting(con, "backup_dest2", b)
     for k, lo, hi, what in (("backup_keep_daily", 1, 365, "일별 보관 개수"), ("backup_keep_monthly", 0, 120, "월별 보관 개수"), ("backup_retention_days", 7, 3650, "백업 보관 일수")):
         if k in data:
             try:
                 n = int(data[k])
             except (TypeError, ValueError):
-                raise S.UserError(f"{what}를 숫자로 적어 주세요.")
+                raise C.UserError(f"{what}를 숫자로 적어 주세요.")
             if not lo <= n <= hi:
-                raise S.UserError(f"{what}는 {lo}~{hi} 사이입니다.")
-            S.set_setting(con, k, n)
+                raise C.UserError(f"{what}는 {lo}~{hi} 사이입니다.")
+            C.set_setting(con, k, n)
+
+
+# ------------------------------------------------------------------ 수동 백업 (비밀번호로 암호화한 .dgbak)
+def backup_dir(con) -> Path:
+    b = C.get_setting(con, "backup_dir")
+    return Path(b) if b else store.state_dir() / "backups"
+
+
+def make_backup(con, passphrase: str) -> dict:
+    dest = backup_dir(con) / f"donggu-backup-{dt.datetime.now(C.KST).strftime('%Y%m%d-%H%M%S')}.dgbak"
+    try:
+        store.backup_to(con, dest, passphrase)
+    except ValueError as e:
+        raise C.UserError(str(e))
+    h = _sha(dest)  # 큰 백업도 메모리에 다 올리지 않고 조각으로 해시
+    with C.tx(con):
+        C.audit(con, "backup", dest.name, "BACKUP", {"file": dest.name, "bytes": dest.stat().st_size, "sha256": h[:16]})
+        C.set_setting(con, "last_backup_at", C.now())
+    return {"file": str(dest), "name": dest.name, "bytes": dest.stat().st_size, "sha256": h}
+
+
+def list_backups(con) -> list[dict]:
+    d = backup_dir(con)
+    if not d.exists():
+        return []
+    files = sorted([*d.glob("*.dgbak"), *d.glob("*.dgabk")], key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{"name": f.name, "bytes": f.stat().st_size, "auto": f.suffix == ".dgabk",
+             "at": dt.datetime.fromtimestamp(f.stat().st_mtime, C.KST).strftime("%Y-%m-%d %H:%M")} for f in files]
+
+
+BACKUP_NAME_RE = re.compile(r"^donggu-(?:backup|auto)-\d{8}-\d{6}(?:-\d{1,3})?\.(?:dgbak|dgabk)$")
+
+
+def backup_path(con, name: str, ext: str) -> Path:
+    """백업 파일 이름 검사(정한 이름 형식만) + 실제 경로가 백업 폴더 바로 안인지 확인."""
+    if not isinstance(name, str) or not BACKUP_NAME_RE.fullmatch(name) or not name.endswith(ext):
+        raise C.UserError("백업 파일 이름이 올바르지 않습니다.")
+    d = backup_dir(con).resolve()
+    p = (d / name).resolve()
+    if p.parent != d:
+        raise C.UserError("백업 파일 이름이 올바르지 않습니다.")
+    return p
+
+
+def verify_backup(con, name: str, passphrase: str) -> dict:
+    path = backup_path(con, name, ".dgbak")
+    try:
+        bcon, n = store.open_backup(path, passphrase)
+    except ValueError as e:
+        raise C.UserError(str(e))
+    bcon.close()
+    return {"ok": True, "requests": n}
 
 
 # ------------------------------------------------------------------ 키
 def key_info(con) -> dict | None:
-    return S.get_setting(con, "backup_pubkey", None)
+    return C.get_setting(con, "backup_pubkey")
 
 
 def _fpr(pub: bytes) -> str:
@@ -77,15 +134,15 @@ def _fpr(pub: bytes) -> str:
 def generate_key(con, password: str) -> tuple[bytes, dict]:
     """새 백업 키 쌍. 개인키는 비밀번호로 암호화한 PEM으로 돌려주고 PC에는 저장하지 않는다."""
     if len(password or "") < 12:
-        raise S.UserError("개인키 보호 비밀번호는 12자 이상으로 정해 주세요 (DB 키와 다르게).")
+        raise C.UserError("개인키 보호 비밀번호는 12자 이상으로 정해 주세요 (DB 키와 다르게).")
     priv = X25519PrivateKey.generate()
     pub = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     pem = priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(password.encode()))
-    info = {"pub": pub.hex(), "fpr": _fpr(pub), "created_at": S.now(), "created_by": S.ACTOR.get()}
-    with S.tx(con):
+    info = {"pub": pub.hex(), "fpr": _fpr(pub), "created_at": C.now(), "created_by": C.ACTOR.get()}
+    with C.tx(con):
         old = key_info(con)
-        S.set_setting(con, "backup_pubkey", info)
-        S.audit(con, "backup", info["fpr"], "KEYGEN", {"fpr": info["fpr"], **({"replaced": old["fpr"]} if old else {})})
+        C.set_setting(con, "backup_pubkey", info)
+        C.audit(con, "backup", info["fpr"], "KEYGEN", {"fpr": info["fpr"], **({"replaced": old["fpr"]} if old else {})})
     return pem, info
 
 
@@ -93,9 +150,9 @@ def load_private(pem: bytes, password: str) -> X25519PrivateKey:
     try:
         k = serialization.load_pem_private_key(pem, (password or "").encode())
     except (ValueError, TypeError):
-        raise S.UserError("개인키 파일을 열 수 없습니다. 개인키 보호 비밀번호를 확인하세요.")
+        raise C.UserError("개인키 파일을 열 수 없습니다. 개인키 보호 비밀번호를 확인하세요.")
     if not isinstance(k, X25519PrivateKey):
-        raise S.UserError("백업 개인키 파일이 아닙니다.")
+        raise C.UserError("백업 개인키 파일이 아닙니다.")
     return k
 
 
@@ -116,17 +173,17 @@ def seal_secret(pub_hex: str, secret: bytes) -> bytes:
 def open_header(raw: bytes, priv: X25519PrivateKey) -> tuple[str, int]:
     """파일 머리 → (DB 비밀값, DB 바이트 시작 위치)."""
     if raw[:5] != MAGIC or len(raw) < 61:
-        raise S.UserError("자동 백업 파일(.dgabk)이 아닙니다.")
+        raise C.UserError("자동 백업 파일(.dgabk)이 아닙니다.")
     fpr, eph_pub, nonce = raw[5:13].hex(), raw[13:45], raw[45:57]
     (n,) = struct.unpack(">H", raw[57:59])
     recip = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     if _fpr(recip) != fpr:
-        raise S.UserError(f"이 백업은 다른 백업 키(지문 {fpr})로 만들었습니다. 그 개인키 파일이 필요합니다.")
+        raise C.UserError(f"이 백업은 다른 백업 키(지문 {fpr})로 만들었습니다. 그 개인키 파일이 필요합니다.")
     key = _derive(priv.exchange(X25519PublicKey.from_public_bytes(eph_pub)), eph_pub, recip)
     try:
         secret = AESGCM(key).decrypt(nonce, raw[59:59 + n], MAGIC + eph_pub)
     except Exception:
-        raise S.UserError("백업 파일이 손상되었거나 변조되었습니다.")
+        raise C.UserError("백업 파일이 손상되었거나 변조되었습니다.")
     return secret.decode(), 59 + n
 
 
@@ -151,8 +208,8 @@ def _sha(p: Path) -> str:
 
 
 def status(con) -> dict:
-    st = S.get_setting(con, "backup_status", {}) or {}
-    last = S.get_setting(con, "last_backup_at", None)
+    st = C.get_setting(con, "backup_status") or {}
+    last = C.get_setting(con, "last_backup_at")
     age_h = None
     if last:
         age_h = round((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() / 3600, 1)
@@ -163,7 +220,7 @@ def status(con) -> dict:
 
 def mark_backup(con, ok: bool = True):
     if ok:
-        S.set_setting(con, "last_backup_at", S.now())
+        C.set_setting(con, "last_backup_at", C.now())
 
 
 def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
@@ -176,14 +233,14 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
     with guard:
         c = conf(con)
         k = key_info(con)
-        bdir = S.backup_dir(con)
-    res = {"at": S.now(), "reason": reason, "ok": False}
+        bdir = backup_dir(con)
+    res = {"at": C.now(), "reason": reason, "ok": False}
     try:
         if not k:
-            raise S.UserError("백업 키가 없어 자동 백업을 하지 않았습니다. 설정 → 백업에서 백업 키를 만드세요.")
+            raise C.UserError("백업 키가 없어 자동 백업을 하지 않았습니다. 설정 → 백업에서 백업 키를 만드세요.")
         d = bdir
         d.mkdir(parents=True, exist_ok=True)
-        stamp = dt.datetime.now(S.KST).strftime("%Y%m%d-%H%M%S")
+        stamp = dt.datetime.now(C.KST).strftime("%Y%m%d-%H%M%S")
         dest = d / f"donggu-auto-{stamp}.dgabk"
         n = 1
         while dest.exists():
@@ -218,16 +275,16 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
             except OSError as e:
                 res["dest2"] = {"ok": False, "path": c["backup_dest2"], "error": f"복사 실패({e.__class__.__name__})"}
         res["deleted"] = apply_retention(con, c, bdir)
-    except S.UserError as e:
+    except C.UserError as e:
         res["error"] = str(e)
     except Exception as e:  # 디스크·권한 문제 등: 내용(경로 외)은 남기지 않는다
         res["error"] = f"자동 백업 실패({e.__class__.__name__})"
-    with guard, S.tx(con):
-        S.set_setting(con, "backup_status", res)
+    with guard, C.tx(con):
+        C.set_setting(con, "backup_status", res)
         if res["ok"]:
             mark_backup(con)
-            S.set_setting(con, "auto_backup_day", S.today_kst())
-        S.audit(con, "backup", res.get("file") or "-", "AUTO_BACKUP", {"ok": res["ok"], "reason": reason, **({"file": res["file"], "bytes": res["bytes"], "sha256": res["sha256"][:16]} if res["ok"] else {"error": res.get("error", "")[:120]}),
+            C.set_setting(con, "auto_backup_day", C.today_kst())
+        C.audit(con, "backup", res.get("file") or "-", "AUTO_BACKUP", {"ok": res["ok"], "reason": reason, **({"file": res["file"], "bytes": res["bytes"], "sha256": res["sha256"][:16]} if res["ok"] else {"error": res.get("error", "")[:120]}),
                                                                        **({"dest2_ok": res["dest2"]["ok"]} if res.get("dest2") else {}), **({"deleted": len(res["deleted"])} if res.get("deleted") else {})})
     return res
 
@@ -236,8 +293,8 @@ def due(con, now_kst: dt.datetime | None = None) -> bool:
     c = conf(con)
     if not c["backup_auto"] or not key_info(con):
         return False
-    t = now_kst or dt.datetime.now(S.KST)
-    if S.get_setting(con, "auto_backup_day", None) == t.date().isoformat():
+    t = now_kst or dt.datetime.now(C.KST)
+    if C.get_setting(con, "auto_backup_day") == t.date().isoformat():
         return False
     return t.strftime("%H:%M") >= c["backup_time"]
 
@@ -246,13 +303,13 @@ def due(con, now_kst: dt.datetime | None = None) -> bool:
 def _when(f: Path) -> dt.datetime:
     m = _NAME_RE.search(f.name)
     if m:
-        return dt.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=S.KST)
-    return dt.datetime.fromtimestamp(f.stat().st_mtime, S.KST)
+        return dt.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=C.KST)
+    return dt.datetime.fromtimestamp(f.stat().st_mtime, C.KST)
 
 
 def plan_retention(files: list[Path], keep_daily: int, keep_monthly: int, max_days: int, now: dt.datetime | None = None) -> list[Path]:
     """지울 파일 목록. 수동(.dgbak)은 기간만, 자동(.dgabk)은 하루 1개 최근 N일 + 달마다 1개 최근 M개월, 둘 다 기간 초과는 지움."""
-    now = now or dt.datetime.now(S.KST)
+    now = now or dt.datetime.now(C.KST)
     limit = now - dt.timedelta(days=max_days)
     drop, autos = [], []
     for f in files:
@@ -278,7 +335,7 @@ def plan_retention(files: list[Path], keep_daily: int, keep_monthly: int, max_da
 def apply_retention(con, c: dict | None = None, bdir: Path | None = None) -> list[str]:
     c = c or conf(con)
     out = []
-    for d in [bdir or S.backup_dir(con)] + ([Path(c["backup_dest2"])] if c["backup_dest2"] else []):
+    for d in [bdir or backup_dir(con)] + ([Path(c["backup_dest2"])] if c["backup_dest2"] else []):
         if not d.exists():
             continue
         files = sorted([*d.glob("donggu-backup-*.dgbak"), *d.glob("donggu-auto-*.dgabk")])
@@ -296,22 +353,22 @@ def apply_retention(con, c: dict | None = None, bdir: Path | None = None) -> lis
 def run_retention(con) -> list[str]:
     gone = apply_retention(con)
     if gone:
-        with S.tx(con):
-            S.audit(con, "backup", "retention", "PURGE", {"count": len(gone), "days": conf(con)["backup_retention_days"]})
+        with C.tx(con):
+            C.audit(con, "backup", "retention", "PURGE", {"count": len(gone), "days": conf(con)["backup_retention_days"]})
     return gone
 
 
 def verify_auto(con, name: str, pem: bytes, password: str) -> dict:
-    src = S.backup_path(con, name, ".dgabk")
+    src = backup_path(con, name, ".dgabk")
     if not src.exists():
-        raise S.UserError("백업 파일이 없습니다.")
-    tmp = S.backup_dir(con) / f".verify-{secrets.token_hex(6)}.db"
+        raise C.UserError("백업 파일이 없습니다.")
+    tmp = backup_dir(con) / f".verify-{secrets.token_hex(6)}.db"
     try:
         secret = decrypt_to(src.read_bytes(), pem, password, tmp)
         try:
             bcon, n = store.open_backup(tmp, secret)
         except ValueError as e:
-            raise S.UserError(str(e))
+            raise C.UserError(str(e))
         bcon.close()
     finally:
         if tmp.exists():

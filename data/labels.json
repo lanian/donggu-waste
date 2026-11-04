@@ -1,0 +1,9 @@
+{
+  "about": "PC(파이썬·화면)와 휴대폰이 함께 쓰는 표시 이름. 바꾸면 python3 tools/build_labels.py 로 web/labels-data.js 를 다시 만든다.",
+  "status": {"RECEIVED": "접수", "ASSIGNED": "배정", "IN_PROGRESS": "처리 중", "PARTIAL": "일부 수거", "DONE": "수거 완료", "NOT_COLLECTED": "미수거",
+             "ON_HOLD": "보류", "CANCELLED": "취소"},
+  "contact": {"NOT_CONTACTED": "연락 전", "REACHED": "통화 완료", "NO_ANSWER": "부재", "CALLBACK": "재연락 예정", "WRONG_NUMBER": "번호 오류"},
+  "reason": {"NOT_PUT_OUT": "배출 안 됨", "DIFFERENT": "접수와 다름", "CANNOT_LOAD": "적재 불가", "POSTPONED": "주민 요청 연기",
+             "NO_STICKER": "스티커·필증 없음·불일치", "FEE_REFUSED": "추가 금액 거부", "OTHER": "기타"},
+  "sticker": {"OK": "확인", "MISSING": "없음", "MISMATCH": "번호 불일치"}
+}
