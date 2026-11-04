@@ -13,7 +13,7 @@ import * as J from './juso.js';
 import * as L from './load.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.17';
+export const APP_VERSION = '0.13.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -129,8 +129,9 @@ const ERR = {
   QR_OLD_DATE: '지금 목록보다 지난 날짜의 목록입니다. 받지 않았습니다. PC 담당자에게 오늘 목록 QR을 띄워 달라고 하세요.',
   BAD_VERSION: '앱 업데이트가 필요합니다. 앱을 닫았다 다시 열고 위에 뜨는 [업데이트]를 누르세요.',
   QR_NOT_REGISTRATION: '기기 등록용 QR이 아닙니다.',
-  UNSENT_PREVIOUS: '이전 날짜 결과를 먼저 보내고 확인 코드를 입력해 주세요.',
+  UNSENT_PREVIOUS: '이전 날짜 결과가 아직 PC에 반영되지 않아 새 날짜 목록을 받지 않았습니다. 결과를 보내고 결과 반영 코드(D-)를 넣거나, PC가 결과를 가져온 뒤 만든 목록을 받아 주세요.',
   STORAGE_LOW: '저장 공간이 부족합니다. 결과를 먼저 보내 주세요.',
+  STORAGE_LOW_PHOTO: '저장 공간이 부족해 사진을 아직 저장하지 못했습니다. 사진은 지우지 않고 대기 중입니다 — 앱을 닫지 말고, 결과·사진을 보내 휴대폰 공간을 비운 뒤 첫 화면의 [사진 다시 저장]을 누르세요.',
   PHOTO_SAVE_FAIL: '사진이 저장되지 않았습니다. 다시 찍어 주세요.',
   FEE_VERSION_MISSING: 'PC와 앱의 수수료표 버전이 다릅니다. 앱을 업데이트하거나 담당자에게 문의하세요.',
 };
@@ -177,7 +178,8 @@ try {
 async function afterUnlock() {
   try { sessionChan && sessionChan.postMessage({ type: 'active', id: WIN_ID }); } catch {}
   await loadState();
-  S.persist().then((ok) => { st && (st.storagePersisted = !!ok); }).catch(() => {});
+  // 자료 보존(persist) 요청 결과를 상태에 남긴다: 거절되면 첫 화면에 알림(바뀌었을 때만 저장)
+  S.persist().then((ok) => { if (st && st.storagePersisted !== !!ok) { st.storagePersisted = !!ok; commit(); if (location.hash === '#/home') render(); } }).catch(() => {});
   if (!location.hash || location.hash === '#/') go('#/home');
   await render();
   if (pendingPhotos.length) await flushPhotos();
@@ -247,7 +249,7 @@ function saveBanner(msg) {
 function commit() {
   const snapshot = JSON.parse(JSON.stringify(st));
   saving = saving.then(() => S.putSecure('state', snapshot)).then(() => {
-    if (saveFailed) { saveFailed = false; saveBanner(''); toast('다시 저장됩니다'); }
+    if (saveFailed) { saveFailed = false; saveBanner(''); toast('다시 저장됩니다'); if (reloadWanted) setTimeout(reloadWhenSafe, 0); }
     return true;
   }).catch((e) => {
     saveFailed = true;
@@ -259,12 +261,13 @@ function commit() {
 // 모든 기록에 지금 작업자(설정의 이름 중 고른 사람)를 남긴다
 const withWorker = (body) => (st.worker ? { ...body, worker: st.worker } : body);
 async function addEvent(stop, kind, body) {
+  if (!st) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
   st.seq += 1;
   st.events.push({
     event_id: crypto.randomUUID(), seq: st.seq, request_id: stop.request_id,
     assign_ver: stop.assign_ver ?? (st.daylist ? st.daylist.assign_ver : 1), base_req_ver: stop.req_ver, kind, body: withWorker(body), ts: new Date().toISOString(),
   });
-  await commit();
+  return commit();
 }
 const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 // 전화: 전화 앱에 번호만 넘긴다(자동 발신 없음). 돌아오면 연락 결과를 묻는다.
@@ -294,10 +297,26 @@ const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
 
 // ------------------------------------------------------------ 잠금
 let lockMs = 10 * 60000; // 잠금 해제 동안 설정값(5·10·15분)
-async function lockNow() {
-  stopCamera(); S.lock(); st = null; wantWake(false);
-  for (const done of [...openSheets]) done(null);
-  await render();
+// 잠그기 전에: 모아 둔 수량(stepper)·저장 중인 기록·저장 중인 사진이 모두 끝나야 데이터 키를 버린다.
+// (키를 먼저 버리면 뒤따르는 암호화 저장이 '잠겨 있습니다'로 실패해 메모리에만 있던 기록·사진이 사라진다)
+let locking = null;
+async function settleWrites() {
+  for (let i = 0; i < 10; i++) {
+    const s0 = saving, p0 = photoFlushing;
+    try { await flushSteps(); } catch {}
+    try { await s0; } catch {}
+    if (p0) { try { await p0; } catch {} }
+    if (s0 === saving && p0 === photoFlushing && !stepFlush.size) return;
+  }
+}
+function lockNow() {
+  if (locking) return locking;
+  locking = (async () => {
+    try { if (S.isUnlocked() && st) await settleWrites(); } catch {}
+    stopCamera(); S.lock(); st = null; wantWake(false);
+    for (const done of [...openSheets]) done(null);
+  })().finally(() => { locking = null; });
+  return locking.then(() => render());
 }
 ['pointerdown', 'keydown'].forEach((t) => addEventListener(t, () => { lastActive = Date.now(); }, { passive: true }));
 setInterval(() => {
@@ -357,16 +376,33 @@ function camInput(phase) {
   document.body.append(input);
   return (camInputs[phase] = input);
 }
-async function flushPhotos() {
+// 사진 저장은 한 번에 하나의 흐름만(photoFlushing). 잠금은 이 흐름이 끝날 때까지 기다린다.
+// 잠김·저장 공간 부족으로 실패하면 사진을 대기열에 그대로 두고(버리지 않음) 잠금 해제·공간 확보 뒤 다시 저장한다.
+let photoFlushing = null;
+const isQuota = (e) => !!e && (e.name === 'QuotaExceededError' || e.code === 'STORAGE_LOW' || (e.inner && e.inner.name === 'QuotaExceededError'));
+function flushPhotos() {
+  if (photoFlushing) return photoFlushing.then(() => (pendingPhotos.length && S.isUnlocked() && st && !locking ? flushPhotos() : 0));
+  photoFlushing = flushPhotosNow().finally(() => { photoFlushing = null; });
+  return photoFlushing;
+}
+async function flushPhotosNow() {
   let n = 0;
-  while (pendingPhotos.length && S.isUnlocked() && st) {
+  while (pendingPhotos.length && S.isUnlocked() && st && !locking) {
     const p = pendingPhotos[0];
     const stop = findStop(p.stopId);
     if (!stop) { pendingPhotos.shift(); toast('사진을 붙일 접수를 찾지 못했습니다. 다시 찍어 주세요.', 'bad'); continue; }
     try { await savePhoto(stop, p.phase, p.file, p.lineId, p); pendingPhotos.shift(); n++; }
-    catch (e) { toast(e && e.name === 'QuotaExceededError' ? ERR.STORAGE_LOW : ERR.PHOTO_SAVE_FAIL, 'bad'); pendingPhotos.shift(); }
+    catch (e) {
+      if (e && e.code === 'LOCKED') break;  // 잠금 해제 뒤 afterUnlock에서 다시
+      if (isQuota(e)) { toast(ERR.STORAGE_LOW_PHOTO, 'bad'); break; }  // 대기열에 남김
+      p.fails = (p.fails || 0) + 1;
+      if (p.fails < 3) continue;  // 일시 오류는 몇 번 더
+      pendingPhotos.shift(); toast(ERR.PHOTO_SAVE_FAIL, 'bad');  // 읽을 수 없는 그림 파일 등
+    }
   }
-  if (n) { toast(n > 1 ? `사진 ${n}장을 저장했습니다` : '사진을 저장했습니다'); await render(); }
+  if (n) toast(n > 1 ? `사진 ${n}장을 저장했습니다` : '사진을 저장했습니다');
+  if (n && S.isUnlocked() && st && !locking) await render();
+  if (reloadWanted && !pendingPhotos.length) setTimeout(reloadWhenSafe, 0);
 }
 
 function screenSetup() {
@@ -518,9 +554,39 @@ async function batteryInfo() {
     return await Promise.race([navigator.getBattery(), new Promise((r) => setTimeout(() => r(null), 300))]);
   } catch { return null; }
 }
-// 홈 위 알림: 미전송(PC), 배터리, 보관 기간(단독)
+// 처음 설정(기기 등록 뒤 또는 단독 방식): 작업자 · 길안내 앱 · 지도 받기 · 현장 점검. 끝난 것 ✓, 모두 끝나면(또는 [닫기]) 숨김.
+function setupSteps() {
+  const chk = st.deviceCheck || {};
+  return [
+    ['worker', '작업자', '이 휴대폰을 쓰는 사람 이름', (st.workers || []).length > 0, '#/settings'],
+    ['nav', '길안내 앱', '카카오맵·T맵·네이버지도·기본 지도 중 고르기', !!st.navAppSet, '#/settings'],
+    ['map', '지도 받기', '인터넷이 약한 곳에 대비해 동구 지도 미리 받기', !st.mapEnabled || !!st.mapPrefetchedAt, '#/settings'],
+    ['check', '현장 점검', '길안내·카메라·전화가 이 휴대폰에서 되는지', CHECKS.every(([k]) => chk[k] && chk[k].result), '#/check'],
+  ];
+}
+function setupCard() {
+  if (st.setupHidden) return null;
+  const steps = setupSteps();
+  const done = steps.filter((x) => x[3]).length;
+  if (done === steps.length) return null;
+  return h('section', { class: 'card setup-card', 'aria-label': '처음 설정' },
+    h('h2', {}, `처음 설정 ${done}/${steps.length}`),
+    h('ul', { class: 'setup-list' }, ...steps.map(([k, t, hint, ok, href]) => h('li', { class: 'setup-' + k + (ok ? ' done' : '') },
+      h('span', { class: 'tick', 'aria-hidden': 'true' }, ok ? '✓' : '○'),
+      h('a', { href, 'aria-label': `${t}${ok ? ' (끝남)' : ''}` }, h('strong', {}, t), h('span', { class: 'small' }, ' ' + hint))))),
+    btn('나중에 (닫기)', async () => { st.setupHidden = true; await commit(); render(); }, 'ghost link'));
+}
+// 홈 위 알림: 미전송(PC), 배터리, 보관 기간(단독), 자료 보존 거절, 저장 대기 사진
 async function homeBanners() {
   const out = [];
+  if (pendingPhotos.length) out.push(h('section', { class: 'card notice pending-photo', role: 'alert' },
+    h('p', {}, h('strong', {}, `저장 대기 사진 ${pendingPhotos.length}장`), ' — 아직 암호화 저장되지 않았습니다. 앱을 닫지 마세요.'),
+    btn('사진 다시 저장', async () => { await flushPhotos(); render(); }, 'primary big')));
+  if (st.storagePersisted === false && !st.persistHintOff) out.push(h('section', { class: 'card notice persist-banner', role: 'status' },
+    h('p', {}, h('strong', {}, '자료 보존이 허락되지 않았습니다.'), ' 휴대폰 저장 공간이 모자라면 브라우저가 이 앱의 자료(보내지 않은 기록·사진)를 지울 수 있습니다.'),
+    h('p', { class: 'small' }, '앱을 홈 화면에 설치하고, 결과를 자주 보내 주세요. 설치 뒤 [다시 요청]을 누르면 허락될 수 있습니다.'),
+    h('div', { class: 'grid2' }, btn('다시 요청', async () => { const ok = await S.persist(); st.storagePersisted = !!ok; await commit(); toast(ok ? '자료 보존이 허락되었습니다' : '아직 허락되지 않았습니다. 앱을 설치한 뒤 다시 눌러 보세요.', ok ? '' : 'bad'); render(); }, 'big'),
+      btn('알겠습니다', async () => { st.persistHintOff = true; await commit(); render(); }, 'ghost'))));
   if (!runningAsApp() && installEvt && !st.installHintOff) out.push(h('section', { class: 'card notice install-hint' },
     h('p', {}, '지금은 브라우저에서 실행 중입니다. 앱으로 설치하면 홈 화면 아이콘으로 바로 엽니다(자료는 그대로).'),
     h('div', { class: 'grid2' }, btn('앱 설치', doInstall, 'primary'), btn('다음에', async () => { st.installHintOff = true; await commit(); render(); }, 'ghost'))));
@@ -578,8 +644,21 @@ async function screenHome() {
     : h('section', { class: 'actions' },
       btn('오늘 목록 받기', () => go('#/scan'), 'primary huge', { disabled: !registered }),
       btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (stale ? 'warn' : '')), intakeBtn);
-  const out = [top, workerBar(), ...(await homeBanners())];
+  ui.scanAck = false;
+  const otherDay = !!dl && dl.work_date !== todayKST();
+  const out = [top, workerBar()];
+  // 지난(또는 다음) 날짜 목록: 오늘 할 일로 보이지 않게 맨 위 큰 띠, '지금 갈 곳'·진행 띠는 숨김
+  if (otherDay) out.push(h('section', { class: 'card day-banner' + (dl.work_date < todayKST() ? ' past' : ''), role: 'alert' },
+    h('h2', {}, dl.work_date < todayKST() ? `${mdOf(dl.work_date)} 목록입니다 — 결과를 보내고 오늘 목록을 받으세요` : `${mdOf(dl.work_date)} 목록입니다 — 그날 업무용 목록입니다`),
+    dl.work_date < todayKST() ? h('div', { class: 'grid2' }, btn(n ? `결과 보내기 ${n}건` : '결과 보내기', () => go('#/export'), 'primary big'), btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered })) : null));
+  out.push(...(await homeBanners()));
+  const rcpt = st.lastReceipt;
+  if (rcpt && !rcpt.told && dl && rcpt.work_date === dl.work_date) out.push(h('section', { class: 'card notice receipt-card', role: 'status' },
+    h('p', {}, h('strong', {}, '수신 코드 '), h('span', { class: 'code-kind' }, 'R-'), h('span', { class: 'rc-code' }, `${rcpt.code.slice(0, 4)} ${rcpt.code.slice(4)}`), ' — PC 담당자에게 알려 주세요'),
+    h('div', { class: 'grid2' }, btn('수신 코드 다시 보기', () => { ui.receipt = null; go('#/received'); }, 'big'),
+      btn('PC에 알렸음', async () => { st.lastReceipt = { ...rcpt, told: true }; await commit(); render(); }, 'ghost'))));
   if (!registered) out.push(h('section', { class: 'card notice' }, h('p', {}, '먼저 관리자와 함께 기기 등록을 해 주세요.'), btn('기기 등록', () => go('#/register'), 'primary')));
+  else out.push(setupCard());
   out.push(actions);
   const wd = pcWorkDate();
   const every = pcStops();
@@ -596,7 +675,7 @@ async function screenHome() {
     const fieldN = today.filter((s) => s.field).length;
     out.push(h('p', { class: 'meta' }, (dl ? `${dl.work_date} ${dl.crew}` + (dl.assign_ver > 1 ? ` · 목록 ${dl.assign_ver}차` : '') : `${wd} · PC 목록 없음`) + (changed ? ` · 바뀐 곳 ${changed}` : '')
       + (fieldN ? ` · 현장 접수 ${fieldN}` : '') + (reordered ? ' · 순서 바꿈(이 휴대폰만)' : '')));
-    out.push(daySummary(stops.filter((x) => !x.s.removed)));
+    if (!otherDay) out.push(daySummary(stops.filter((x) => !x.s.removed)));
     out.push(h('div', { class: 'tabs', role: 'group', 'aria-label': '목록 거르기' },
       ...[['ALL', `전체 ${stops.length}`], ['REMAIN', `남음 ${remain.length}`], ['HOLD', `재방문·보류 ${hold.length}`]].map(([k, t]) =>
         btn(t, () => { ui.filter = k; render(); }, ui.filter === k ? 'tab on' : 'tab'))));
@@ -604,7 +683,7 @@ async function screenHome() {
     out.push(stopSearch(stops.length));
     const list = filterDong(filterQ({ ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter]));
     if (!list.length) out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 곳이 없습니다.` : '해당하는 곳이 없습니다.'));
-    const nowId = (stops.find((x) => x.d.progress !== 'DONE' && !x.d.outcome && !x.s.removed) || {}).s?.request_id;  // 지금 갈 곳
+    const nowId = otherDay ? null : (stops.find((x) => x.d.progress !== 'DONE' && !x.d.outcome && !x.s.removed) || {}).s?.request_id;  // 지금 갈 곳 (오늘 목록만)
     // 방문 순서 바꾸기(이 휴대폰만): 골목 사정 등으로 순서를 바꿔 다닐 때. PC 노선·배정은 그대로이고, 새 목록을 받으면 PC 순서로 돌아간다.
     const canReorder = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && stops.length > 1;
     if (canReorder) out.push(h('div', { class: 'row reorder-bar' },
@@ -753,7 +832,33 @@ async function loadCollector() {
   return new P.Collector(saved);
 }
 
+// 지난 날짜 목록의 결과가 아직 PC에 반영되지 않았으면, QR을 다 읽고 나서 거절하지 말고 카메라를 켜기 전에 먼저 알린다.
+function prevDayOwed() {
+  const dl = st.daylist;
+  if (!dl || dl.work_date >= todayKST()) return null;
+  const u = unsent();
+  if (!u.length) return null;
+  const sent = new Set();
+  for (const x of st.exports || []) if (!x.confirmed) for (const e of u) if (e.seq >= x.from && e.seq <= x.to) sent.add(e.seq);
+  return { date: dl.work_date, count: u.length, waiting: sent.size, notSent: u.length - sent.size };
+}
+function screenScanOwed(o) {
+  return h('main', {},
+    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
+    h('section', { class: 'card notice owed-card', role: 'alert' },
+      h('h2', {}, `${mdOf(o.date)} 결과가 아직 PC에 반영되지 않았습니다`),
+      h('p', {}, o.notSent ? `보내지 않은 기록 ${o.notSent}건` + (o.waiting ? ` · 보냈지만 결과 반영 코드를 받지 않은 기록 ${o.waiting}건` : '')
+        : `보냈지만 결과 반영 코드를 받지 않은 기록 ${o.waiting}건`),
+      h('p', { class: 'small' }, o.notSent ? '먼저 [결과 보내기]로 PC에 보내 주세요. 새 날짜 목록은 이전 결과가 반영된 뒤에 받습니다.'
+        : 'PC 담당자에게 결과 반영 코드(D-)를 받아 [결과 보내기]에 넣거나, PC가 결과를 가져온 뒤 만든 새 목록을 받으면 저절로 확인됩니다.'),
+      btn(o.notSent ? '결과 보내기' : '결과 반영 코드 넣기', () => go('#/export'), 'primary huge'),
+      btn('PC가 이미 가져왔음 — 목록 QR 읽기', () => { ui.scanAck = true; render(); }, 'big'),
+      h('p', { class: 'small' }, 'PC가 결과를 가져왔다면 새 목록에 반영 정보가 함께 와서 코드 없이 확인됩니다. 아직이면 목록을 다 읽은 뒤에도 받지 않습니다.')));
+}
+const mdOf = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${Number(m[2])}월 ${Number(m[3])}일` : d || ''; };
 async function screenScan() {
+  const owed = prevDayOwed();
+  if (owed && !ui.scanAck) return screenScanOwed(owed);
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
   const col = await loadCollector();
   let current = Object.keys(col.bundles).sort((a, b) => col.bundles[b].firstSeen - col.bundles[a].firstSeen)[0];
@@ -792,6 +897,16 @@ async function screenScan() {
       if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.base_version === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
       const hash = P.toHex(await P.sha256(envBytes));
       const old = st.daylist;
+      // v0.13 결과 반영 정보(rel): PC가 이미 가져온 기록·사진을 코드 입력 없이 반영됨으로. 목록을 받지 않게 되더라도(지난 날짜 등)
+      // 서명된 PC 정보이므로 먼저 적용한다. rel이 말한 번호를 넘는 기록은 그대로 미전송으로 남는다.
+      const rel = P.normRel(pl.rel);
+      delete pl.rel;
+      const relDone = rel ? F.applyRelease(st, rel) : null;
+      if (relDone) {
+        const purged = purgeReleased();
+        await commit();
+        ui.relDone = { ...relDone, purged };
+      } else ui.relDone = null;
       if (hash === st.lastBundleHash) { msg.textContent = '이미 받은 목록입니다. 바뀐 내용이 없습니다.'; }
       else {
         if (old && old.work_date === pl.work_date && pl.assign_ver < old.assign_ver) throw Object.assign(new Error(''), { code: 'QR_STALE_VERSION' });
@@ -801,12 +916,14 @@ async function screenScan() {
         // 새 갱신본: 이름·주소·품목·순서만 바꾸고, 현장 기록(이벤트)은 그대로 둔다.
         let diff = null;
         if (old && old.work_date === pl.work_date) {
+          // 같은 날 갱신본: 이 휴대폰이 이미 기록한 지점을 PC가 재방문처럼 돌려보낸 부분은 이 휴대폰 기록 기준으로(기록이 낡은 것으로 보이지 않게)
+          F.carryOver(old, pl, st.events);
           diff = F.diffDaylist(old, pl);
           const ids = new Set(pl.stops.map((s) => s.request_id));
           const withEvents = new Set(st.events.map((e) => e.request_id));
           for (const s of old.stops) if (!ids.has(s.request_id) && withEvents.has(s.request_id)) pl.stops.push({ ...s, removed: true });
-          // 이미 개인정보를 지운 곳은 다시 받아도 지운 채로 둔다(보관 종료 확인 뒤에는 휴대폰에 다시 두지 않음)
-          for (const s of pl.stops) { const o = old.stops.find((x) => x.request_id === s.request_id); if (o && o.pii_purged && !s.pii_purged) F.purgeStopPII(s, o.pii_purged); if (o && o.since_seq != null) s.since_seq = o.since_seq; }
+          // 이미 개인정보를 지운 곳은 다시 받아도 지운 채로 둔다(결과 반영 확인 뒤에는 휴대폰에 다시 두지 않음)
+          for (const s of pl.stops) { const o = old.stops.find((x) => x.request_id === s.request_id); if (o && o.pii_purged && !s.pii_purged) F.purgeStopPII(s, o.pii_purged); }
           // 바뀐 표시는 그 지점을 열어 볼 때까지 남긴다(이전 표시 중 아직 안 본 것도 유지)
           const keep = Object.fromEntries(Object.entries(st.listChanges || {}).filter(([id]) => ids.has(id)));
           for (const [id, f] of Object.entries(diff.changes)) keep[id] = [...new Set([...(keep[id] || []), ...f])];
@@ -836,8 +953,11 @@ async function screenScan() {
       }
       col.drop(current); await S.putRaw('collect', col.bundles);
       const rc = opened.receipt;
-      ui.receipt = { code: rc.slice(0, 4) + ' ' + rc.slice(4), count: pl.stops.filter((s) => !s.removed).length, ver: pl.assign_ver, diff: ui.diffSummary || '' };
-      ui.diffSummary = '';
+      ui.receipt = { code: rc.slice(0, 4) + ' ' + rc.slice(4), count: pl.stops.filter((s) => !s.removed).length, ver: pl.assign_ver, diff: ui.diffSummary || '', rel: ui.relDone };
+      ui.diffSummary = ''; ui.relDone = null;
+      // 수신 코드는 PC 담당자가 받아 적을 때까지 첫 화면에 남긴다(다시 보기 단추). [PC에 알렸음]을 누르거나 다음 목록을 받으면 내린다.
+      st.lastReceipt = { code: rc, at: new Date().toISOString(), work_date: pl.work_date, ver: pl.assign_ver, count: ui.receipt.count, diff: ui.receipt.diff, told: false };
+      await commit();
       go('#/received');
     } catch (e) {
       msg.textContent = errMsg(e);
@@ -858,24 +978,32 @@ async function screenScan() {
   }).catch((e) => { msg.textContent = errMsg(e); }), 0);
   return h('main', {},
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
-    flowSteps(['QR 비추기', '조각 모으기', '수신 확인 코드'], current ? 1 : 0),
+    flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], current ? 1 : 0),
     h('section', { class: 'card cam-card' }, video, bar, count, miss, msg,
       h('p', { class: 'small' }, '다 받기 전에는 저장하지 않습니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.')),
     current ? btn('받던 조각 버리고 처음부터', async () => { col.drop(current); await S.putRaw('collect', col.bundles); render(); }, 'ghost link') : null);
 }
 
+// 수신 코드 표시: 앞 글자 R(휴대폰 → PC)은 따로 보여 주고, 코드(.fp)는 PC에 그대로 넣는 8자만
+const codeShow = (kind, code) => h('p', { class: 'code-show k-' + kind }, h('span', { class: 'code-kind', 'aria-label': F.CODE_KINDS[kind].label }, F.CODE_KINDS[kind].prefix + '-'), h('span', { class: 'fp' }, code));
+function relNote(rel) {
+  if (!rel || !(rel.events || rel.photos)) return null;
+  return h('p', { class: 'notice rel-note', role: 'status' }, 'PC 반영 정보도 함께 받았습니다: ' + [rel.events ? `결과 ${rel.events}건 반영 확인` : '', rel.photos ? `사진 ${rel.photos}장 회수 확인` : '', rel.purged ? `끝난 ${rel.purged}곳 개인정보 정리` : ''].filter(Boolean).join(' · ') + ' (코드 입력 필요 없음)');
+}
 function screenReceived() {
-  const r = ui.receipt;
+  const r = ui.receipt || (st.lastReceipt && !st.lastReceipt.told ? { code: st.lastReceipt.code.slice(0, 4) + ' ' + st.lastReceipt.code.slice(4), count: st.lastReceipt.count, ver: st.lastReceipt.ver, diff: '', again: true } : null);
   if (!r) { go('#/home'); return h('main'); }
   return h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '목록 받기 완료')),
-    flowSteps(['QR 비추기', '조각 모으기', '수신 확인 코드'], 2),
+    h('header', { class: 'bar' }, r.again ? btn('← 목록', () => go('#/home'), 'ghost') : null, h('h1', { class: 'bar-title' }, r.again ? '수신 코드 다시 보기' : '목록 받기 완료')),
+    flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], 2),
     h('section', { class: 'card center-card' },
       h('h2', {}, '목록을 받았습니다'),
       h('p', {}, `${r.count}건 · 목록 갱신본 ${r.ver}`),
       r.diff ? h('p', { class: 'notice diff-summary', role: 'status' }, `바뀐 내용: ${r.diff}`) : null,
-      h('p', {}, 'PC 담당자에게 아래 수신 확인 코드를 알려 주세요.'),
-      h('p', { class: 'fp' }, r.code)),
+      relNote(r.rel),
+      h('p', {}, 'PC 담당자에게 아래 수신 코드를 알려 주세요. (휴대폰 → PC)'),
+      codeShow('RECEIPT', r.code),
+      h('p', { class: 'small' }, 'PC가 받아 적을 때까지 첫 화면에 [수신 코드 다시 보기]로 남아 있습니다.')),
     footBar(btn('오늘 순서 보기', () => { ui.receipt = null; go('#/home'); }, 'primary huge')));
 }
 
@@ -1050,7 +1178,7 @@ async function screenStop(id) {
   const info = h('section', { class: 'card who' },
     seen ? h('p', { class: 'notice changed-note' }, '새 목록에서 바뀐 곳: ' + seen.map((c) => F.DIFF_LABEL[c] || c).join(', ')) : null,
     purged ? h('p', { class: 'name' }, '개인정보 정리됨') : h('p', { class: 'name' }, stop.name),
-    purged ? h('p', { class: 'small' }, '보관 종료가 확인되어 이 휴대폰에서 이름·연락처·주소를 지웠습니다. 수거 기록은 남아 있습니다.')
+    purged ? h('p', { class: 'small' }, '결과 반영이 확인되어 이 휴대폰에서 이름·연락처·주소를 지웠습니다. 수거 기록은 남아 있습니다.')
       : h('p', { class: 'phone' }, h('a', { href: 'tel:' + stop.phone, onclick: async (e) => { e.preventDefault(); await dial(stop); } }, fmtPhone(stop.phone))),
     purged ? null : h('p', { class: 'addr' }, stop.address),
     dongOf(stop) ? h('p', { class: 'dong-line' }, h('em', { class: 'chip dong' }, dongOf(stop))) : null,
@@ -1317,18 +1445,27 @@ function screenFix(id) {
 }
 
 // 현장 메모: 짧게 남기고 고치지 않는다(새 메모를 더함). 결과 파일로 PC에 전달.
+// 적는 중인 글은 화면을 다시 그려도(사진 저장·통화 뒤 등) 남는다: ui.memo[지점]에 두고, 남기면 비운다(메모리에만, 잠그면 사라짐).
 function fieldMemo(stop, d) {
+  const id = stop.request_id;
+  ui.memo = ui.memo || {};
   const ta = h('textarea', { rows: 2, placeholder: '현장 메모 (예: 현관 앞 아님, 지하주차장 입구에 배출)', 'aria-label': '현장 메모' });
+  ta.value = ui.memo[id] || '';
+  ta.addEventListener('input', () => { if (ta.value) ui.memo[id] = ta.value; else delete ui.memo[id]; });
   return h('div', { class: 'memo-box' },
     (d.memos || []).length ? h('ul', { class: 'small list' }, ...d.memos.map((m) => h('li', {}, m.text))) : null,
-    ta, btn('메모 남기기', async () => { const t = ta.value.trim(); if (!t) return; await addEvent(stop, 'FIELD_MEMO', { text: t.slice(0, 300) }); toast('메모를 남겼습니다'); render(); }, 'opt'));
+    ta, btn('메모 남기기', async () => { const t = ta.value.trim(); if (!t) return; await addEvent(stop, 'FIELD_MEMO', { text: t.slice(0, 300) }); delete ui.memo[id]; toast('메모를 남겼습니다'); render(); }, 'opt'));
 }
 
 // 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다
 function revisitForm(stop, d) {
-  const date = h('input', { type: 'date', value: d.appt ? d.appt.date : todayKST(1) });
-  const start = h('input', { type: 'time', value: d.appt ? d.appt.start || '' : '' });
-  const end = h('input', { type: 'time', value: d.appt ? d.appt.end || '' : '' });
+  const id = stop.request_id;
+  ui.revisit = ui.revisit || {};
+  const draft = ui.revisit[id] || {};  // 고르는 중인 날짜·시간(다시 그려도 유지)
+  const date = h('input', { type: 'date', value: draft.date ?? (d.appt ? d.appt.date : todayKST(1)) });
+  const start = h('input', { type: 'time', value: draft.start ?? (d.appt ? d.appt.start || '' : '') });
+  const end = h('input', { type: 'time', value: draft.end ?? (d.appt ? d.appt.end || '' : '') });
+  for (const [k, el] of [['date', date], ['start', start], ['end', end]]) for (const t of ['input', 'change']) el.addEventListener(t, () => { ui.revisit[id] = { ...(ui.revisit[id] || {}), [k]: el.value }; });
   // 다시 그려도(사진 저장 등) 펼친 상태를 유지
   return h('details', { class: 'revisit', open: ui.openAppt === stop.request_id, ontoggle: (e) => { ui.openAppt = e.target.open ? stop.request_id : false; } },
     h('summary', {}, d.appt ? '재방문 약속 바꾸기' : '재방문 약속 기록'),
@@ -1344,22 +1481,46 @@ function revisitForm(stop, d) {
         Object.assign(stop, { versions, req_ver: stop.req_ver + 1, planned_date: date.value, eta: start.value || '', appt: start.value ? [start.value, end.value || null] : null, seq: nextSeq(date.value, stop.request_id) });
         await commit();
       }
-      ui.openAppt = false; toast('재방문 약속을 저장했습니다'); render();
+      ui.openAppt = false; delete ui.revisit[id]; toast('재방문 약속을 저장했습니다'); render();
     }, 'primary big'));
 }
 
+// 사진 저장(거의 한 덩어리로): 줄인 사진 바이트·해시·사진 ID를 대기 항목(meta)에 먼저 만들어 두고, 다시 시도해도 같은 ID를 쓴다.
+// 순서: 1) 암호화 사진 저장(같은 ID면 덮어씀) 2) 잠금 여부를 다시 보고 같은 순간에 기록(PHOTO_META)을 메모리에 넣음 → 저장.
+// 1)과 2) 사이에 잠기면 'LOCKED'로 끝나고 항목은 대기열에 남는다(다음 잠금 해제 때 같은 ID로 이어서). 기록 없이 남은 사진은 같은 ID로 덮어써진다.
+const LOW_SPACE_MB = 50;  // 남은 공간이 이보다 적으면 알림
+let lowSpaceWarned = 0;
+async function storageLeft() {
+  try { if (!navigator.storage || !navigator.storage.estimate) return null; const e = await navigator.storage.estimate(); return e.quota ? e.quota - (e.usage || 0) : null; } catch { return null; }
+}
 async function savePhoto(stop, phase, file, lineId = null, meta = {}) {
-  const bmp = await createImageBitmap(file);
-  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
-  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.8));
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  const photo_id = crypto.randomUUID();
+  if (!meta.bytes) {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas'); c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.8));
+    meta.bytes = new Uint8Array(await blob.arrayBuffer());
+    meta.sha = P.toHex(await P.sha256(meta.bytes));
+    meta.photoId = meta.photoId || crypto.randomUUID();
+    meta.file = null;  // 원본 파일(위치 정보가 들어 있을 수 있음)은 더 붙잡지 않는다
+  }
+  const bytes = meta.bytes, photo_id = meta.photoId;
+  // 저장 공간: 사진 + 여유(기록 저장분)보다 적게 남았으면 저장하지 않고 대기열에 둔다
+  const left = await storageLeft();
+  if (left != null && left < bytes.length * 2 + 2 * 1048576) throw Object.assign(new Error(ERR.STORAGE_LOW), { code: 'STORAGE_LOW' });
+  if (left != null && left < LOW_SPACE_MB * 1048576 && Date.now() - lowSpaceWarned > 10 * 60000) {
+    lowSpaceWarned = Date.now();
+    toast(`저장 공간이 약 ${Math.max(0, Math.round(left / 1048576))}MB 남았습니다. 결과·사진을 보내고 정리하세요.`, 'bad');
+  }
+  if (!S.isUnlocked() || !st || locking) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
   await S.putSecureBytes('ph:' + photo_id, bytes);
+  if (!S.isUnlocked() || !st || locking) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
+  if (st.events.some((e) => e.kind === 'PHOTO_META' && e.body && e.body.photo_id === photo_id)) return;  // 이미 기록됨(다시 시도)
   // 찍은 시각(파일 선택 시각)과 파일 시각, 허용된 경우 위치·정확도. 사진 바이트에는 위치 정보(EXIF)를 남기지 않는다(캔버스로 다시 그림).
   const geo = st.geoEvidence !== false && meta.geo ? { lat: meta.geo.lat, lon: meta.geo.lon, acc: meta.geo.acc } : {};
-  await addEvent(stop, 'PHOTO_META', { photo_id, phase, sha256: P.toHex(await P.sha256(bytes)), bytes: bytes.length, line_id: lineId || null,
+  // 기록 저장이 실패해도(공간 부족) 기록은 메모리에 있고 화면 위 저장 실패 띠가 다음 저장까지 남는다 — 사진은 이미 저장됨
+  await addEvent(stop, 'PHOTO_META', { photo_id, phase, sha256: meta.sha, bytes: bytes.length, line_id: lineId || null,
     taken_at: meta.at || new Date().toISOString(), file_ts: meta.fileTs || null, ...geo });
 }
 
@@ -1567,8 +1728,8 @@ async function screenExport() {
       const { sealed, name } = await buildResult();
       const file = new File([sealed.bytes], name, { type: 'application/octet-stream' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 확인 코드를 아래에 입력하세요.'); }
-        catch (e) { say(e.name === 'AbortError' ? '보내기를 취소했습니다. 확인 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.' : '공유 실패: ' + e.message); }
+        try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 결과 반영 코드(D-)를 아래에 입력하세요.'); }
+        catch (e) { say(e.name === 'AbortError' ? '보내기를 취소했습니다. 결과 반영 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.' : '공유 실패: ' + e.message); }
       } else {
         const u = URL.createObjectURL(file);
         const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
@@ -1579,11 +1740,16 @@ async function screenExport() {
     make.disabled = false; render();
   }, 'primary huge', { disabled: !pending.length });
 
-  const codeIn = h('input', { type: 'text', placeholder: '확인 코드 8자리', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
-  const confirm = btn('확인 코드 입력', async () => {
-    const c = codeIn.value.replace(/\s/g, '').toUpperCase();
-    const ex = st.exports.find((x) => x.code === c);
-    if (!ex) return toast('맞는 확인 코드가 없습니다.', 'bad');
+  // PC → 휴대폰 코드 두 가지(결과 반영 코드 D-, 사진 회수 코드 P-)는 칸이 따로다. 다른 칸 코드나 수신 코드(R-)를 넣으면 알려 준다.
+  const knownCodes = () => ({ RESULT: st.exports.map((x) => x.code), PHOTO: (st.photoExports || []).map((x) => x.code), RECEIPT: st.lastReceipt ? [st.lastReceipt.code] : [] });
+  const codeBox = (kind, input) => h('div', { class: 'code-entry k-' + kind }, h('span', { class: 'code-kind', 'aria-hidden': 'true' }, F.CODE_KINDS[kind].prefix + '-'), input);
+  const codeIn = h('input', { type: 'text', placeholder: '결과 반영 코드 8자리', 'aria-label': '결과 반영 코드 (D-)', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
+  const codeMsg = h('p', { class: 'msg err', role: 'alert' });
+  const confirm = btn('결과 반영 코드 입력', async () => {
+    const r = F.checkCode(codeIn.value, 'RESULT', knownCodes());
+    codeMsg.textContent = r.error || '';
+    if (r.error) return toast(r.error, 'bad');
+    const ex = st.exports.find((x) => x.code === r.code);
     ex.confirmed = true; st.releasedSeq = Math.max(st.releasedSeq, ex.to);
     // 공유를 취소했거나 다시 만든 예전 결과 파일은 이 확인으로 보낸 범위에 들어가므로 '대체됨'으로 끝낸다
     for (const x of st.exports) if (!x.confirmed && x.to <= st.releasedSeq) { x.confirmed = true; x.superseded = true; }
@@ -1592,7 +1758,7 @@ async function screenExport() {
   }, 'primary huge');
 
   // 사진: 결과 파일과 따로, PC 공개키로 암호화한 사진 파일(.dgp)을 승인된 보안 매체로 옮긴다.
-  // PC가 해시를 대조하고 알려 주는 "사진 회수 확인 코드"를 넣은 사진만 이 휴대폰에서 지울 수 있다.
+  // PC가 해시를 대조하고 알려 주는 "사진 회수 코드"를 넣은 사진만 이 휴대폰에서 지울 수 있다.
   const recovered = new Set(st.recoveredPhotos || []);
   const allPhotos = [...photoMetas.map((e) => ({ ...e.body, request_id: e.request_id })), ...(st.keptPhotos || [])];
   const notRecovered = allPhotos.filter((p) => !recovered.has(p.photo_id));
@@ -1613,15 +1779,17 @@ async function screenExport() {
       await commit();
       const u = URL.createObjectURL(new File([sealed.bytes], name, { type: 'application/octet-stream' }));
       const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
-      pmsg.textContent = `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 확인 코드를 받으세요.`;
+      pmsg.textContent = `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 사진 회수 코드(P-)를 받으세요.`;
     } catch (e) { pmsg.textContent = '사진 파일을 만들지 못했습니다: ' + errMsg(e); }
     makePhotos.disabled = false;
   }, 'big', { disabled: !notRecovered.length });
-  const pcode = h('input', { type: 'text', placeholder: '사진 회수 확인 코드 8자리', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
-  const pconfirm = btn('사진 회수 확인', async () => {
-    const c = pcode.value.replace(/\s/g, '').toUpperCase();
-    const ex = (st.photoExports || []).find((x) => x.code === c);
-    if (!ex) return toast('맞는 사진 회수 확인 코드가 없습니다.', 'bad');
+  const pcode = h('input', { type: 'text', placeholder: '사진 회수 코드 8자리', 'aria-label': '사진 회수 코드 (P-)', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
+  const pcodeMsg = h('p', { class: 'msg err', role: 'alert' });
+  const pconfirm = btn('사진 회수 코드 입력', async () => {
+    const r = F.checkCode(pcode.value, 'PHOTO', knownCodes());
+    pcodeMsg.textContent = r.error || '';
+    if (r.error) return toast(r.error, 'bad');
+    const ex = (st.photoExports || []).find((x) => x.code === r.code);
     st.recoveredPhotos = [...new Set([...(st.recoveredPhotos || []), ...ex.ids])];
     await commit(); toast(`사진 ${ex.ids.length}장 회수가 확인되었습니다`); render();
   }, 'big');
@@ -1630,7 +1798,7 @@ async function screenExport() {
   const cleanup = btn('오늘 자료 정리', async () => {
     if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
     for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
-    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck'].map((k) => [k, st[k]]));
+    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff'].map((k) => [k, st[k]]));
     st = { ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
@@ -1638,12 +1806,12 @@ async function screenExport() {
   const waitingCode = st.exports.some((x) => !x.confirmed);
   const sentPhotos = new Set((st.photoExports || []).flatMap((x) => x.ids));
   const cur = (pending.length && !waitingCode) || (!st.exports.length && !allPhotos.length) ? 0 : waitingCode ? 1 : notRecovered.some((p) => !sentPhotos.has(p.photo_id)) ? 2 : notRecovered.length ? 3 : 4;
-  // 확인 코드 입력: 보낸 뒤 기다리는 코드가 있으면 맨 위에 크게
+  // 결과 반영 코드 입력: 보낸 뒤 기다리는 코드가 있으면 맨 위에 크게
   const codeCard = h('section', { class: 'card code-card' + (waitingCode ? ' ask' : '') },
-    h('h2', {}, h('span', { class: 'stepno' }, '2'), 'PC 확인 코드 입력'),
-    h('p', { class: 'small' }, 'PC 담당자가 결과를 가져온 뒤 알려 주는 보관 종료 확인 코드 8자리를 넣으세요. 넣어야 "보낸 것"으로 처리되고, 끝난 곳의 개인정보가 이 휴대폰에서 지워집니다.'),
-    codeIn, confirm,
-    h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.superseded ? '뒤 파일로 반영됨' : x.confirmed ? '반영 확인됨' : '확인 대기'}`))));
+    h('h2', {}, h('span', { class: 'stepno' }, '2'), '결과 반영 코드 입력 (PC → 휴대폰)'),
+    h('p', { class: 'small' }, 'PC 담당자가 결과를 가져온 뒤 알려 주는 결과 반영 코드(D-로 시작, 8자리)를 넣으세요. 넣어야 "보낸 것"으로 처리되고, 끝난 곳의 개인정보가 이 휴대폰에서 지워집니다. PC가 결과를 가져온 뒤 만든 새 목록을 받으면 코드 없이도 저절로 확인됩니다.'),
+    codeBox('RESULT', codeIn), codeMsg, confirm,
+    h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.superseded ? '뒤 파일로 반영됨' : x.via === 'list' ? '반영 확인됨(새 목록)' : x.confirmed ? '반영 확인됨' : '확인 대기'}`))));
   const sendCard = h('section', { class: 'card' },
     h('h2', {}, h('span', { class: 'stepno' }, '1'), pending.length ? `결과 보내기 · 미전송 ${pending.length}건` : '결과 보내기'),
     h('p', {}, '결과 파일에는 이름·연락처·주소·메모가 들어가지 않으며, PC에서만 열 수 있게 암호화됩니다. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(중간 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다.'),
@@ -1652,16 +1820,16 @@ async function screenExport() {
     showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg);
   return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '결과 보내기')),
-    flowSteps(['결과 파일', '확인 코드', '사진 파일', '사진 회수 코드', '정리'], cur),
+    flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], cur),
     waitingCode ? codeCard : null, sendCard, waitingCode ? null : codeCard,
     h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '3'), `사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`),
-      h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다.'),
-      makePhotos, pmsg, pcode, pconfirm),
+      h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다. PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣거나, PC가 사진을 가져온 뒤 만든 새 목록을 받으면 회수가 확인됩니다.'),
+      makePhotos, pmsg, codeBox('PHOTO', pcode), pcodeMsg, pconfirm),
     h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '5'), '정리'), cleanup,
       allConfirmed ? null : h('p', { class: 'small' }, '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.')),
     footBar(make));
 }
-// 보관 종료 확인 코드를 넣은 뒤: 결과가 끝났고(완료·일부·미수거) 그 기록이 모두 PC에 반영된 곳의 개인정보를 지운다.
+// 결과 반영 코드를 넣은 뒤(또는 새 목록의 반영 정보): 결과가 끝났고(완료·일부·미수거) 그 기록이 모두 PC에 반영된 곳의 개인정보를 지운다.
 // 수량·결과 같은 기록은 사진 회수까지 남긴다. 보류·처리 전인 곳은 그대로 둔다.
 function purgeReleased() {
   const at = new Date().toISOString();
@@ -1724,7 +1892,7 @@ async function screenHomeSolo() {
   };
   const out = [
     h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'mode-tag' }, '단독'), themeToggle(), btn('잠금', lockNow, 'ghost')),
-    workerBar(), ...(await homeBanners()),
+    workerBar(), ...(await homeBanners()), setupCard(),
     needBackup ? h('section', { class: 'card notice' },
       h('p', {}, `마지막 백업: ${ago(st.lastBackupAt)}. 휴대폰을 잃어버리거나 고장 나면 접수 원본이 사라집니다.`),
       btn('지금 백업', () => go('#/backup'), 'primary')) : null,
@@ -2064,10 +2232,18 @@ async function screenBackup() {
       const obj = await B.openBackup(new Uint8Array(await file.arrayBuffer()), rpw.value);
       const n = (obj.state.requests || []).length;
       if ((obj.state.mode || 'SOLO') !== st.mode) { rmsg.textContent = '다른 사용 방식(PC 연결/단독)의 백업입니다. 같은 방식에서만 복원할 수 있습니다.'; return; }
-      if (!(await ask(`${obj.created_at.slice(0, 16).replace('T', ' ')} 백업 (접수 ${n}건)으로 이 휴대폰 자료를 바꿉니다. 지금 휴대폰에만 있는 기록은 사라집니다.`, '복원하기', { title: '백업에서 복원' }))) { rmsg.textContent = ''; return; }
+      const when = obj.created_at.slice(0, 16).replace('T', ' ');
+      const text = isSolo() ? `${when} 백업 (접수 ${n}건)으로 이 휴대폰 자료를 바꿉니다. 지금 휴대폰에만 있는 기록은 사라집니다.`
+        : `${when} 백업 (기록 ${(obj.state.events || []).length}건)을 이 휴대폰 자료와 합칩니다. 지금 휴대폰의 기록·PC 반영 확인은 그대로 남고, 기록 번호는 이어서 씁니다(PC에 이미 보낸 번호를 다시 쓰지 않음).`;
+      if (!(await ask(text, '복원하기', { title: '백업에서 복원' }))) { rmsg.textContent = ''; return; }
+      // 저장 공간 부족 등으로 사진을 다 넣지 못하면 상태는 바꾸지 않는다(반쯤 복원된 상태로 두지 않음)
       for (const [pid, b] of Object.entries(obj.photos || {})) await S.putSecureBytes('ph:' + pid, B.unb64(b));
-      st = { ...emptyState(), ...obj.state, lastBackupAt: obj.created_at };
-      await commit(); toast(`복원했습니다 (접수 ${n}건)`); go('#/home');
+      await settleWrites();
+      const merged = F.mergeRestore(st, { ...emptyState(), ...obj.state, mode: obj.state.mode || st.mode });
+      st = { ...emptyState(), ...merged, lastBackupAt: obj.created_at };
+      const ok = await commit();
+      if (!ok) { rmsg.textContent = ERR.STORAGE_LOW; return; }
+      toast(isSolo() ? `복원했습니다 (접수 ${n}건)` : `복원했습니다 (기록 ${st.events.length}건 · 다음 기록 번호 ${st.seq + 1})`); go('#/home');
     } catch (e) { rmsg.textContent = errMsg(e); }
   }, 'big');
 
@@ -2229,11 +2405,11 @@ function screenResultQr() {
   setTimeout(show, 0);
   return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 결과 보내기', () => { clearTimeout(timer); ui.resultQr = null; go('#/export'); }, 'ghost'), h('h1', { class: 'bar-title' }, '결과 QR')),
-    flowSteps(['결과 파일', '확인 코드', '사진 파일', '사진 회수 코드', '정리'], 0),
+    flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], 0),
     h('section', { class: 'card center-card' },
       h('p', {}, 'PC [결과 가져오기] → [웹캠으로 읽기]를 누르고 이 화면을 웹캠에 비추세요. 화면 밝기를 최대로 하면 잘 읽힙니다.'),
       h('div', { class: 'qrbox' }, canvas), count,
-      h('p', { class: 'small' }, `${r.name} · 이름·연락처·주소는 들어 있지 않습니다. PC가 알려 주는 확인 코드를 [결과 보내기]에 입력하세요.`)),
+      h('p', { class: 'small' }, `${r.name} · 이름·연락처·주소는 들어 있지 않습니다. PC가 알려 주는 결과 반영 코드(D-)를 [결과 보내기]에 입력하세요.`)),
     footBar(h('div', { class: 'grid2' }, btn('느리게', () => { fps = Math.max(1, fps - 1); }, 'opt'), btn('빠르게', () => { fps = Math.min(8, fps + 1); }, 'opt'))));
 }
 
@@ -2321,6 +2497,7 @@ async function screenSettings() {
     try {
       const r = await M.prefetchTiles(M.bboxAround(pts), (n, t) => { pmsg.textContent = `받는 중 ${n} / ${t}`; });
       pmsg.textContent = r.fail === r.total ? '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.' : `${pts.length ? '오늘 지점 주변' : '동구 전체'} 지도 조각 ${r.total - r.fail}개를 받았습니다${r.fail ? ` (실패 ${r.fail})` : ''}.`;
+      if (r.fail < r.total && st) { st.mapPrefetchedAt = new Date().toISOString(); commit(); }
     } catch { pmsg.textContent = '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.'; }
     prefetch.disabled = false;
   }, 'big', { disabled: !st.mapEnabled });
@@ -2333,7 +2510,7 @@ async function screenSettings() {
   // 길안내 앱
   const navCard = h('section', { class: 'card' }, h('h2', {}, '길안내 앱'),
     h('div', { class: 'grid2', role: 'group', 'aria-label': '길안내 앱' }, ...Object.entries(NAV.NAV_APPS).map(([k, t]) =>
-      btn(t, () => set({ navApp: k }, `길안내는 ${t}로 엽니다`), (st.navApp || NAV.DEFAULT_NAV_APP) === k ? 'opt on' : 'opt'))),
+      btn(t, () => set({ navApp: k, navAppSet: true }, `길안내는 ${t}로 엽니다`), (st.navApp || NAV.DEFAULT_NAV_APP) === k ? 'opt on' : 'opt'))),
     h('p', { class: 'small' }, "지도 앱에는 목적지 좌표와 'N번 수거지'(반입지는 '반입지') 표시만 전달됩니다. 이름·연락처·주소는 넘기지 않습니다. 앱이 없으면 카카오맵·네이버지도는 웹 지도로, T맵은 기본 지도 앱으로 엽니다."));
 
   // 주소 검색 (행정안전부 도로명주소 API)
@@ -2365,6 +2542,8 @@ async function screenSettings() {
       h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
       choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
     await installCard(),
+    h('section', { class: 'card' }, h('h2', {}, '도움말'), h('p', { class: 'small' }, '한 지점에서 무엇을 어떤 순서로 하는지 한 장으로 봅니다.'),
+      btn('현장 처리 순서', () => go('#/help'), 'big')),
     h('section', { class: 'card' }, h('h2', {}, '현장 점검'), h('p', { class: 'small' }, '설치·지문·주소 검색·길안내·카메라가 이 휴대폰에서 되는지 눌러 보고, 결과를 담당자에게 보냅니다.'),
       btn(`현장 점검${st.deviceCheck && Object.keys(st.deviceCheck).length ? ` (${CHECKS.filter(([k]) => st.deviceCheck[k] && st.deviceCheck[k].result).length}/${CHECKS.length})` : ''}`, () => go('#/check'), 'big')),
     h('section', { class: 'card' }, h('dl', {},
@@ -2477,6 +2656,22 @@ async function installCard() {
       : h('p', {}, '브라우저 메뉴(⋮)에서 [앱 설치] 또는 [홈 화면에 추가]를 누르세요. 메뉴에 [앱 열기]만 보이면 이미 설치된 것입니다.'));
 }
 
+// ------------------------------------------------------------ 도움말: 현장 처리 순서 (한 장, 고정 글)
+const HELP = [
+  ['아침', ['[오늘 목록 받기] → PC 화면의 QR을 비춥니다.', '화면의 수신 코드(R-)를 PC 담당자에게 불러 줍니다.', '지난 날짜 목록이라는 띠가 보이면 어제 결과부터 보냅니다.']],
+  ['한 지점', ['📍 도착 → 전화·문자로 연락 결과를 고릅니다.', '품목마다 스티커·필증을 보고 현장 수량·실은 수량을 맞춥니다. 없는 품목은 [+ 현장 품목 추가].', '금액이 늘면 [추가 금액 안내 기록]으로 주민 안내 결과를 남깁니다.', '📷 수거 전·후 사진을 찍습니다(앱 안에만 암호화 저장).', '[전부 실음 · 수거 완료] 또는 일부 수거·미수거·보류. 못 실은 품목은 사유를 고릅니다.', '아래 [다음 N번 ▶]·[다음 길안내]로 넘어갑니다.']],
+  ['반입지', ['비울 때마다 [하차 기록]에 부피나 중량을 적습니다.']],
+  ['중간·끝', ['[결과 보내기]로 결과 파일을 업무 메일로 보내거나 PC 웹캠에 QR을 보여 줍니다.', 'PC가 알려 주는 결과 반영 코드(D-)를 넣습니다. PC가 결과를 가져온 뒤 만든 새 목록을 받으면 코드 없이도 확인됩니다.', '사진 파일은 보안 매체로 옮기고 사진 회수 코드(P-)를 넣습니다.', '모두 확인되면 [오늘 자료 정리].']],
+  ['주의', ['잠그거나 다른 앱에 다녀와도 기록은 남습니다. 사진 저장 중에는 앱을 닫지 마세요.', '주민 이름·연락처·주소는 메모·문자 문구에 적지 않습니다.', '업데이트 띠가 보이면 저장이 끝난 뒤 [업데이트]를 누릅니다.']],
+];
+function screenHelp() {
+  return h('main', { class: 'with-tabs help' },
+    h('header', { class: 'bar' }, btn('← 설정', () => go('#/settings'), 'ghost'), h('h1', { class: 'bar-title' }, '현장 처리 순서')),
+    ...HELP.map(([t, lines]) => h('section', { class: 'card' }, h('h2', {}, t), h('ol', { class: 'help-list' }, ...lines.map((x) => h('li', {}, x))))),
+    h('p', { class: 'small' }, '코드 세 가지: 수신 코드 R-(휴대폰 → PC) · 결과 반영 코드 D-(PC → 휴대폰) · 사진 회수 코드 P-(PC → 휴대폰).'),
+    tabBar('set'));
+}
+
 // ------------------------------------------------------------ 현장 점검 (실제 휴대폰에서 확인할 것)
 // 자동 시험(가상 브라우저)으로는 확인할 수 없는 것을 수거팀이 이 휴대폰에서 눌러 보고 결과를 남긴다.
 // 결과에는 개인정보가 없고(기기·브라우저 정보와 된다/안 된다/메모), [결과 복사]로 담당자에게 전달한다.
@@ -2570,6 +2765,8 @@ async function render() {
   photoUrls.forEach((u) => URL.revokeObjectURL(u)); photoUrls = [];
   if (liveMap) { try { liveMap.remove(); } catch {} liveMap = null; }
   let view;
+  // 모아 두었다 저장할 수량이 있으면 다시 그리기 전에 먼저 저장(다시 그린 화면이 옛 수량을 보이지 않게)
+  if (stepFlush.size && S.isUnlocked() && st) { try { await flushSteps(); } catch {} if (my !== renderSeq) return; }
   try {
   if (!storeReady && !(await Promise.race([storeWait.then(() => true), new Promise((r) => setTimeout(() => r(false), 2500))]))) {
     // 저장소가 아직 안 열림(다른 창이 붙잡고 있는 등): 멈춘 것처럼 두지 않고 안내하고, 열리면 저절로 계속한다
@@ -2586,7 +2783,7 @@ async function render() {
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
       'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings, unload: screenUnload,
-      check: screenCheck, mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
+      check: screenCheck, help: screenHelp, mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
   } catch (e) { view = errorScreen(e); }
@@ -2600,12 +2797,28 @@ async function render() {
 addEventListener('hashchange', render);
 
 // ------------------------------------------------------------ 서비스 워커 (업데이트는 사용자가 눌러야 적용)
+// 업데이트는 잠겨 있거나, 저장 중인 기록·수량·사진이 있으면 미룬다(새로 열면 메모리에만 있는 사진·기록이 사라짐).
+// 다른 창에서 업데이트해 이 창의 서비스 워커가 바뀐 경우(controllerchange)도 같은 조건이 풀릴 때까지 새로 열지 않는다.
+let reloadWanted = false;
+const writesPending = () => pendingPhotos.length > 0 || !!photoFlushing || stepFlush.size > 0 || saveFailed;
+async function reloadWhenSafe() {
+  reloadWanted = true;
+  if (S.isUnlocked() && st) { await settleWrites(); }
+  try { await saving; } catch {}
+  if (pendingPhotos.length || photoFlushing || stepFlush.size || saveFailed) return;  // 사진 저장·다시 저장이 끝나면 다시 부름
+  location.reload();
+}
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').then((reg) => {
     const offer = (w) => {
-      const bar = h('div', { class: 'update' }, '새 버전이 있습니다. ', btn('업데이트', async () => {
-        if (pendingPhotos.length) return toast('잠금을 풀어 방금 찍은 사진을 저장한 뒤 업데이트하세요.', 'bad');
-        await saving; w.postMessage('SKIP_WAITING');
+      if (document.querySelector('.update')) return;
+      const msg = h('span', {}, '새 버전이 있습니다. ');
+      const bar = h('div', { class: 'update', role: 'status' }, msg, btn('업데이트', async () => {
+        if (!S.isUnlocked()) return toast(pendingPhotos.length ? '잠금을 풀어 방금 찍은 사진을 저장한 뒤 업데이트하세요.' : '잠금을 푼 뒤 업데이트하세요.', 'bad');
+        msg.textContent = '저장을 마치는 중… ';
+        await settleWrites();
+        if (writesPending()) { msg.textContent = '새 버전이 있습니다. '; return toast(saveFailed ? '저장되지 않은 기록이 있어 지금은 업데이트하지 않습니다. 결과를 먼저 보내 주세요.' : '사진·기록 저장이 끝난 뒤 다시 눌러 주세요.', 'bad'); }
+        w.postMessage('SKIP_WAITING');
       }, 'primary'));
       document.body.append(bar);
     };
@@ -2618,7 +2831,7 @@ if ('serviceWorker' in navigator) {
   // 첫 설치 때는 새로고침하지 않는다(입력 중인 화면 보호). 사용자가 [업데이트]를 눌렀을 때만 새로고침.
   const hadController = !!navigator.serviceWorker.controller;
   let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', async () => { if (hadController && !reloaded) { reloaded = true; try { await saving; } catch {} location.reload(); } });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; reloadWhenSafe(); } });
 }
 
 // 저장소 열림 기다리기: 대개 바로 열린다. 다른 창(특히 이전 버전 앱 창)이 붙잡고 있으면 놓는 즉시 저절로 계속한다.

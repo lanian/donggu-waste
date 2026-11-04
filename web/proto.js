@@ -216,6 +216,16 @@ const fromSid = (s) => {
   const b = Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '=='), (c) => c.charCodeAt(0));
   return uuidStr(b);
 };
+// v0.13: 목록 맨 위 선택 키 "rel" = 결과 반영 정보 {"seq": 정수, "ph": [사진 ID…]} (pc/dgproto.py norm_rel 과 같은 검사).
+// 서명된 봉투 안에 있으므로 PC가 보낸 값이다. 형식이 틀리면 없는 것으로 본다(손으로 코드 입력하던 이전 동작).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function normRel(rel) {
+  if (!rel || typeof rel !== 'object' || Array.isArray(rel)) return null;
+  if (!Number.isInteger(rel.seq) || rel.seq < 0) return null;
+  const ph = rel.ph == null ? [] : rel.ph;
+  if (!Array.isArray(ph) || !ph.every((x) => typeof x === 'string' && UUID_RE.test(x))) return null;
+  return { seq: rel.seq, ph: [...new Set(ph.map((x) => x.toLowerCase()))] };
+}
 export function expandDaylist(p, feeTable) {
   if (!p || p.schema !== 'dg.daylist/2') return p;
   const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
@@ -243,5 +253,6 @@ export function expandDaylist(p, feeTable) {
   }));
   const fee_table = { version_id: p.fee };
   if (p.fb) Object.assign(fee_table, { base_version: p.fb, overrides: p.fo || {}, effective_from: p.fe || null });
-  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops };
+  const rel = normRel(p.rel);
+  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops, ...(rel ? { rel } : {}) };
 }

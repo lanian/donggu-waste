@@ -374,4 +374,152 @@ ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction ===
   ok(J.isKnownDong('충장동') && !J.isKnownDong('충정동') && J.isKnownDong('가상1동', ['가상1동']) && J.isKnownDong(''), '동 이름 오타 확인(동구 행정동·PC 목록의 동)');
 }
 
+// 20) v0.13 목록 묶음의 결과 반영 정보 "rel" (선택 키) — 양방향·이전 형식·서명된 봉투 ------------------------
+{
+  const PH1 = '0a0a0a0a-0000-4000-8000-000000000001', PH2 = '0a0a0a0a-0000-4000-8000-000000000002';
+  const pc20 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+row = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["unit"] == "EA")
+it = {"line_id": "00000000-0000-0000-0000-0000000000b1", "fee_rate_id": row["id"], "name": row["name"], "spec": row["spec"], "unit": row["unit"], "unit_label": row["unit_label"],
+      "qty": 1, "unit_price": row["price"], "amount": row["price"], "price_status": "CONFIRMED"}
+p = {"schema": "dg.daylist/1", "work_date": "2026-11-05", "crew": "가상", "assign_ver": 1, "fee_table": {"version_id": S.FEE_TABLE["version_id"]},
+     "stops": [{"seq": 1, "request_id": "00000000-0000-0000-0000-000000000021", "receipt_no": "DG-1", "req_ver": 1, "name": "가", "phone": "01000000000", "address": "가상로 1", "items": [it]}]}
+out = {"with": P.compact_daylist({**p, "rel": {"seq": 12, "ph": ["${PH1}", "${PH2.toUpperCase()}", "${PH1}"]}}, S.FEE_ROWS),
+       "without": P.compact_daylist(p, S.FEE_ROWS),
+       "bad": [("rel" in P.compact_daylist({**p, "rel": r}, S.FEE_ROWS)) for r in ({"seq": -1}, {"seq": "3"}, {"seq": True}, {"seq": 2, "ph": ["x"]}, {"seq": 2, "ph": "abc"}, None, [])],
+       "zero": P.compact_daylist({**p, "rel": {"seq": 0}}, S.FEE_ROWS).get("rel")}
+print(json.dumps(out, ensure_ascii=False))`));
+  ok(JSON.stringify(pc20.with.rel) === JSON.stringify({ seq: 12, ph: [PH1, PH2] }) && !('rel' in pc20.without) && pc20.bad.every((x) => x === false)
+     && JSON.stringify(pc20.zero) === JSON.stringify({ seq: 0, ph: [] }),
+     'PC 압축: "rel" {seq, ph[]} 실음(사진 ID 소문자·중복 제거), 없거나 형식이 틀리면 키 없음(이전 형식)');
+  const e20 = P.expandDaylist(pc20.with, BUILTIN_FEES), e20old = P.expandDaylist(pc20.without, BUILTIN_FEES);
+  ok(e20.rel.seq === 12 && e20.rel.ph.join() === `${PH1},${PH2}` && !('rel' in e20old) && e20old.stops.length === 1,
+     '휴대폰이 "rel"을 읽음, 이전 형식(rel 없음)은 rel 없이 그대로');
+  ok([{ seq: -1 }, { seq: 1.5 }, { seq: '3' }, { seq: 2, ph: ['x'] }, { seq: 2, ph: 'a' }, [], null].every((r) => !('rel' in P.expandDaylist({ ...pc20.without, rel: r }, BUILTIN_FEES))),
+     '휴대폰: 형식이 틀린 rel은 없는 것으로 봄(손으로 코드 입력하던 이전 동작)');
+  // 반대 방향: 휴대폰 쪽 v2(rel 포함)를 PC(Python)가 같은 뜻으로 읽고, 다시 압축해도 유지
+  const js20 = { ...pc20.without, rel: { seq: 7, ph: [PH2] } };
+  const py20 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+c = json.loads(${JSON.stringify(JSON.stringify(js20))})
+o = json.loads(${JSON.stringify(JSON.stringify(pc20.without))})
+e, eo = P.expand_daylist(c, S.FEE_ROWS), P.expand_daylist(o, S.FEE_ROWS)
+print(json.dumps({"rel": e.get("rel"), "old": "rel" in eo, "rt": P.compact_daylist(e, S.FEE_ROWS).get("rel")}))`));
+  ok(py20.rel.seq === 7 && py20.rel.ph.join() === PH2 && py20.old === false && py20.rt.seq === 7 && py20.rt.ph.join() === PH2,
+     'PC(Python) expand_daylist 도 "rel"을 같은 뜻으로 읽음, 왕복 유지, 이전 형식은 rel 없음');
+  // 실제 봉투: PC가 rel을 넣어 서명·암호화한 목록을 휴대폰이 열면 rel이 그대로 (서명 안에 있음)
+  const frames20 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import store, service as S
+c = store.connect()
+d = [x for x in S.list_devices(c) if x["id"].startswith("${devShort}")][0]["id"]
+b = [x for x in S.list_batches(c, "2026-11-03") if x["status"] == "ACTIVE"][0]
+pl, _ = S.build_daylist(c, b["id"])
+pl["rel"] = {"seq": 2, "ph": ["${PH1}"]}
+print(json.dumps(S.make_bundle(c, payload=pl, device_id=d)["frames"]))`));
+  const col20 = new P.Collector();
+  let k20; for (const f of frames20) k20 = col20.add(f).key;
+  const env20 = col20.assemble(k20);
+  const o20 = await P.openEnvelope(env20, pcSignPub, dev.kex.privateKey, deviceId);
+  ok(o20.payload.rel && o20.payload.rel.seq === 2 && P.expandDaylist(o20.payload, BUILTIN_FEES).rel.ph[0] === PH1, 'PC가 서명한 목록 봉투 안의 rel을 휴대폰이 그대로 받음');
+  const bad20 = env20.slice(); bad20[bad20.length - 70] ^= 1;
+  await throwsCode(() => P.openEnvelope(bad20, pcSignPub, dev.kex.privateKey, deviceId), 'AUTH_FAIL', 'rel이 든 봉투를 바꾸면 서명 검증 실패');
+}
+
+// 21) rel 적용: 결과 반영 코드·사진 회수 코드를 넣은 것과 같은 효과, rel이 말한 번호를 넘지 않음 ---------------------
+{
+  const evs = [1, 2, 3, 4, 5].map((n) => ({ event_id: 'e' + n, seq: n, request_id: 'r', kind: n === 2 ? 'PHOTO_META' : 'CONTACT', body: n === 2 ? { photo_id: 'p-known' } : { result: 'REACHED' } }));
+  const st21 = { seq: 5, releasedSeq: 0, events: evs, exports: [{ from: 1, to: 3, code: 'AAAA2222', confirmed: false }, { from: 4, to: 5, code: 'BBBB3333', confirmed: false }], recoveredPhotos: [], keptPhotos: [{ photo_id: 'p-kept' }] };
+  const r1 = F.applyRelease(st21, { seq: 3, ph: ['p-known', 'p-unknown'] });
+  ok(r1.events === 3 && r1.photos === 1 && st21.releasedSeq === 3 && st21.exports[0].confirmed && !st21.exports[1].confirmed && F.unsentInfo(st21.events, st21.releasedSeq).count === 2
+     && st21.recoveredPhotos.join() === 'p-known', 'rel.seq=3: 1~3번 반영됨(결과 파일 1 확인), 4·5번은 미전송 그대로, 아는 사진만 회수 확인');
+  F.applyRelease(st21, { seq: 2, ph: [] });
+  ok(st21.releasedSeq === 3 && F.applyRelease(st21, null) === null, '더 작은 rel은 되돌리지 않음, rel 없으면 아무것도 안 함');
+  const r3 = F.applyRelease(st21, { seq: 9, ph: ['p-kept'] });
+  ok(st21.releasedSeq === 9 && st21.seq === 9 && r3.events === 2 && st21.exports[1].confirmed && st21.recoveredPhotos.includes('p-kept'),
+     'PC가 아는 번호가 휴대폰 번호보다 크면(오래된 백업 복원 등) 다음 기록 번호도 그 뒤로 — PC에 있는 번호를 다시 쓰지 않음');
+}
+
+// 22) 백업 복원: seq = max(지금, 백업), PC 연결 방식은 반영 상태 유지·기록 합침 → 복원 뒤 새 기록을 PC가 충돌 없이 받음 ---------
+{
+  const sid = opened.payload.stops[1].request_id;
+  const mkEv = (n) => ({ event_id: crypto.randomUUID(), seq: n, request_id: sid, assign_ver: opened.payload.assign_ver, base_req_ver: 1, kind: 'CONTACT', body: { result: 'REACHED' }, ts: new Date().toISOString() });
+  const send = async (events, tag) => {
+    const head = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId, assignVer: opened.payload.assign_ver, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
+    const s = await P.seal({ schema: 'dg.result/1', work_date: opened.payload.work_date, events: events.map(({ ts, ...e }) => ({ ...e, device_ts: ts })), photos: [] }, head, pcKexPub, dev.sign.privateKey);
+    const f = join(WORK, `restore-${tag}.dgr`); writeFileSync(f, s.bytes); return f;
+  };
+  // 이 기기는 4) 에서 1·2번을 보냈다. 백업은 2번까지(모두 반영), 그 뒤 3·4번을 보내 PC가 가져감(반영 코드는 아직)
+  const e1 = { ...mkEv(1), event_id: result.events[0].event_id }, e2 = { ...mkEv(2), event_id: result.events[1].event_id };
+  const bak = { mode: 'PC', seq: 2, releasedSeq: 2, events: [e1, e2], exports: [{ from: 1, to: 2, code: sealed.receipt, confirmed: true }] };
+  const e3 = mkEv(3), e4 = mkEv(4);
+  const cur = { mode: 'PC', seq: 4, releasedSeq: 2, events: [e1, e2, e3, e4], exports: [...bak.exports, { from: 3, to: 4, code: 'CCCC4444', confirmed: false }] };
+  ok(py('import-result', await send([e3, e4], 'a')).includes('"applied": 2'), '복원 전: 3·4번 PC로 감');
+  // 예전 복원(백업으로 덮어씀)이면 다음 기록이 3번 → PC에 이미 있는 번호라 가져오기 실패
+  const naiveNext = { ...mkEv(bak.seq + 1) };
+  const naiveFile = await send([naiveNext], 'naive');
+  let naiveOut; try { naiveOut = py('import-result', naiveFile); } catch (e) { naiveOut = 'FAIL ' + (e.stdout || '') + (e.stderr || ''); }
+  const warnOf = (id) => pyEval(`from dgpc import store, service as S
+c = store.connect()
+r = S.one(c, "SELECT * FROM result_event WHERE event_id=?", ("${id}",))
+print((r or {}).get("warning") or "")`);
+  ok(/^FAIL/.test(naiveOut) || /순번/.test(warnOf(naiveNext.event_id)), '(비교) 백업으로 덮어쓰면 다음 기록이 PC에 있는 번호(3번)를 다시 씀 → PC가 순번 재사용 경고(이전 PC는 가져오기 실패)');
+  const m = F.mergeRestore(cur, bak);
+  ok(m.seq === 4 && m.releasedSeq === 2 && m.events.length === 4 && m.exports.length === 2, `합친 복원: seq ${m.seq}(= max), 반영 상태·기록 4건·결과 파일 2개 유지`);
+  const e5 = mkEv(m.seq + 1); m.seq += 1; m.events.push(e5);
+  const unsentNow = m.events.filter((e) => e.seq > m.releasedSeq);
+  const out22 = py('import-result', await send(unsentNow, 'b'));
+  ok(out22.includes('"applied": 1') && out22.includes('"skipped_duplicate": 2') && out22.includes('"conflict": 0') && !warnOf(e5.event_id),
+     '복원 → 새 기록(5번) → PC 가져오기: 충돌 0·순번 재사용 없음, 새 기록 1건 반영, 이미 받은 3·4번은 중복으로 건너뜀');
+  // 단독 방식: 백업으로 바꾸되 seq만 지킴. 같은 번호의 다른 기록은 뒤로 옮김
+  const solo = F.mergeRestore({ mode: 'SOLO', seq: 9, events: [] }, { mode: 'SOLO', seq: 3, events: [mkEv(1)], requests: [{ request_id: 'x' }] });
+  ok(solo.seq === 9 && solo.requests.length === 1 && solo.events.length === 1, '단독 방식 복원: 접수·기록은 백업 것, 기록 번호는 max(지금, 백업)');
+  const a = mkEv(5), b = { ...mkEv(5), event_id: 'other' };
+  const clash = F.mergeRestore({ mode: 'PC', seq: 5, releasedSeq: 4, events: [b] }, { mode: 'PC', seq: 5, releasedSeq: 4, events: [a] });
+  ok(clash.events.find((e) => e.event_id === a.event_id).seq === 5 && clash.events.find((e) => e.event_id === 'other').seq === 6 && clash.seq === 6,
+     '서로 다른 기록이 같은 번호면 백업 쪽을 그 번호에 두고 나머지는 뒤 번호로');
+}
+
+// 23) 같은 날 갱신본: 이 휴대폰 기록이 있는 지점을 PC가 재방문처럼 돌려보내도 기록이 그대로 보임 ------------------------------
+{
+  const it = (id, q) => ({ line_id: id, line_kind: 'RECEIVED', name: '의자', spec: '고정식', unit: 'EA', unit_label: '개', qty: q, qty_received: q, prior_collected: 0, unit_price: 2000, amount: 2000 * q, price_status: 'CONFIRMED', fee_rate_id: 'x' });
+  const old = { work_date: '2026-11-05', stops: [{ request_id: 'A', seq: 1, items: [it('a1', 2), it('a2', 1)] }, { request_id: 'B', seq: 2, items: [it('b1', 1)] }] };
+  const evs = [{ seq: 1, request_id: 'A', kind: 'ITEM_RESULT', body: { line_id: 'a1', qty_confirmed: 2, qty_collected: 2 } },
+    { seq: 2, request_id: 'A', kind: 'ITEM_RESULT', body: { line_id: 'a2', qty_confirmed: 1, qty_collected: 0, reason: 'NOT_PUT_OUT' } },
+    { seq: 3, request_id: 'A', kind: 'FIELD_ITEM_ADD', body: { line_id: 'f1', name: '안마기', spec: '', unit: 'EA', unit_label: '개', qty: 1, unit_price: null, price_status: 'PENDING' } },
+    { seq: 4, request_id: 'A', kind: 'ITEM_RESULT', body: { line_id: 'a1', qty_confirmed: 3, qty_collected: 2, reason: 'CANNOT_LOAD' } },
+    { seq: 5, request_id: 'A', kind: 'ATTEMPT', body: { outcome: 'PARTIAL' } }];
+  const before = deriveStop(old.stops[0], evs);
+  // PC 중간 반영 뒤 같은 날 목록: A는 재방문, 다 실은 a1 줄은 빠지고 a2는 prior_collected 0, B는 PC에서 재방문(이 휴대폰 기록 없음)
+  const pl = { work_date: '2026-11-05', stops: [{ request_id: 'A', seq: 1, revisit: true, items: [{ ...it('a1', 3), qty_received: 2, prior_collected: 2 }, { ...it('a2', 1) },
+    { ...it('f1', 1), line_kind: 'FIELD', qty_received: 0, amount: 0, unit_price: null, price_status: 'PENDING' }] }, { request_id: 'B', seq: 2, revisit: true, items: [it('b1', 1)] }] };
+  const n = F.carryOver(old, pl, evs);
+  const after = deriveStop(pl.stops[0], evs);
+  const diff = F.diffDaylist(old, pl);
+  ok(n === 1 && !pl.stops[0].revisit && pl.stops[0].items.length === 2 && after.progress === before.progress && after.outcome === 'PARTIAL' && after.lines.length === 3
+     && JSON.stringify(after.lines) === JSON.stringify(before.lines) && JSON.stringify(after.fee) === JSON.stringify(before.fee)
+     && !(diff.changes.A || []).includes('INFO') && pl.stops[1].revisit === true,
+     '같은 날 갱신본: 이 휴대폰이 기록한 지점은 재방문·줄 빠짐으로 바뀌지 않음(기록 그대로, 정보 변경 표시 없음), 기록 없는 지점은 PC 값 그대로');
+  // 이 휴대폰이 남긴 재방문 약속을 PC가 방문 약속·도착 예정으로 돌려보낸 것도 '변경'이 아님
+  const o2 = { work_date: 'd', stops: [{ request_id: 'C', seq: 1, eta: '09:00', appt: null, items: [it('c1', 1)] }] };
+  const p2 = { work_date: 'd', stops: [{ request_id: 'C', seq: 1, eta: '14:00', appt: ['14:00', '16:00'], items: [it('c1', 1)] }] };
+  F.carryOver(o2, p2, [{ seq: 9, request_id: 'C', kind: 'REVISIT_APPT', body: { date: '2026-11-06', start: '14:00', end: '16:00' } }]);
+  ok(p2.stops[0].appt === null && p2.stops[0].eta === '09:00' && !F.diffDaylist(o2, p2).changes.C, '이 휴대폰의 재방문 약속을 PC가 돌려보낸 방문 약속·시간은 변경으로 표시하지 않음');
+  const other = { work_date: '2026-11-06', stops: pl.stops.map((s) => ({ ...s })) };
+  ok(F.carryOver(old, other, evs) === 0, '다른 날짜 목록에는 적용하지 않음(재방문은 since_seq로 전날 기록과 나눔)');
+}
+
+// 24) 코드 세 가지: 수신 코드 R- · 결과 반영 코드 D- · 사진 회수 코드 P- — 칸이 맞는지 확인 ---------------------------------------------
+{
+  const known = { RESULT: ['ABCD2345'], PHOTO: ['PQRS6789'], RECEIPT: ['WXYZ2345'] };
+  ok(F.parseCode(' d-abcd 2345 ').prefix === 'D' && F.parseCode(' d-abcd 2345 ').code === 'ABCD2345' && F.parseCode('ABCD 2345').prefix === '' && F.parseCode('PPQRS6789').prefix === 'P',
+     '코드 정리: 공백·대소문자·앞 글자(D-/P-/R-) 떼기');
+  ok(F.checkCode('abcd2345', 'RESULT', known).code === 'ABCD2345' && F.checkCode('D-ABCD2345', 'RESULT', known).code === 'ABCD2345' && F.checkCode('P-PQRS6789', 'PHOTO', known).code === 'PQRS6789',
+     '맞는 칸에 넣은 코드는 받음 (앞 글자 있어도·없어도)');
+  ok(/사진 회수 코드/.test(F.checkCode('PQRS6789', 'RESULT', known).error) && /결과 반영 코드/.test(F.checkCode('ABCD2345', 'PHOTO', known).error)
+     && /수신 코드/.test(F.checkCode('WXYZ2345', 'RESULT', known).error) && /사진 회수 코드/.test(F.checkCode('P-ABCD2345', 'RESULT', known).error)
+     && /맞는 결과 반영 코드가 없습니다/.test(F.checkCode('ZZZZ2345', 'RESULT', known).error) && /8자리/.test(F.checkCode('ABC', 'RESULT', known).error),
+     '다른 칸 코드(사진↔결과)·수신 코드·다른 앞 글자·모르는 코드·형식 오류는 이유와 함께 거절');
+  ok(F.showCode('RESULT', 'ABCD2345') === 'D-ABCD 2345', '표시: D-ABCD 2345');
+}
+
 console.log(`\n통과 ${passed}개`);

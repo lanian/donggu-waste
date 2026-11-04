@@ -528,3 +528,29 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .veil body { background: var(--bg); }
 /* 아주 좁은 화면 + 아주 큰 글자: 아래 단추가 화면 밖으로 나가지 않게 */
 @media (max-width: 340px) { .dock { gap: 4px; padding-left: 6px; padding-right: 6px; } .dock .btn { white-space: normal; padding: 8px 4px; font-size: 0.9rem; line-height: 1.2; } }
+
+/* v0.13 코드 세 가지(R- 수신 · D- 결과 반영 · P- 사진 회수): 앞 글자를 코드 옆에 따로 보여 준다 */
+.code-show { display: flex; align-items: baseline; justify-content: center; gap: 6px; margin: 12px 0; flex-wrap: wrap; }
+.code-show .fp { display: inline-block; margin: 0; }
+.code-kind { font-weight: 850; color: var(--muted); letter-spacing: 1px; }
+.code-show .code-kind { font-size: 1.6rem; }
+.code-entry { display: flex; align-items: center; gap: 8px; max-width: 420px; margin: 10px auto; }
+.code-entry .code-kind { font-size: 1.4rem; min-width: 2.2em; text-align: right; }
+.code-entry .code-in { margin: 0; flex: 1; min-width: 0; }
+.receipt-card .rc-code { font-weight: 850; letter-spacing: 3px; }
+.rel-note { margin: 10px 0; }
+/* 지난 날짜 목록 띠 */
+.day-banner { background: var(--warn-bg); box-shadow: inset 0 0 0 3px var(--sticker); }
+.day-banner h2 { font-size: 1.333rem; line-height: 1.35; margin: 0 0 10px; }
+/* 처음 설정 */
+.setup-list { list-style: none; padding: 0; margin: 6px 0; }
+.setup-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+.setup-list li:first-child { border-top: 0; }
+.setup-list .tick { flex: none; width: 1.6em; height: 1.6em; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; border: 2px solid var(--line-strong); font-weight: 850; }
+.setup-list li.done .tick { background: var(--ok-bg); color: var(--ok-ink); border-color: var(--ok); }
+.setup-list li.done strong { color: var(--ok-ink); }
+.setup-list a { color: inherit; text-decoration: none; min-height: 44px; display: block; }
+/* 도움말 */
+.help .help-list { margin: 4px 0; padding-left: 1.4em; }
+.help .help-list li { margin: 6px 0; line-height: 1.5; }
+.code-entry .code-in::placeholder { letter-spacing: 0; font-size: 1rem; }

@@ -318,6 +318,30 @@ def _uid(s: str) -> str:
     return str(_uuid.UUID(bytes=_b64.urlsafe_b64decode(s + "==")))
 
 
+# v0.13: 목록 묶음 맨 위 선택 키 "rel" = 결과 반영 정보 {"seq": 정수, "ph": [photo_id, ...]}
+#   seq: PC가 이 기기에서 빠짐없이 가져온 기록의 마지막 번호(1..seq 전부). 휴대폰은 seq 이하 자기 기록을
+#        "결과 반영 코드"를 넣은 것과 똑같이 반영됨으로 처리하고, seq를 넘는 기록은 그대로 둔다.
+#   ph : PC가 해시를 대조해 회수한 이 기기 사진 ID(문자열 UUID). "사진 회수 코드"를 넣은 것과 같다.
+#   키가 없으면 이전 동작(코드를 손으로 입력). 형식 번호는 그대로 dg.daylist/2(이전 앱은 모르는 키를 무시).
+def norm_rel(rel) -> dict | None:
+    """rel 값을 검사해 {"seq": int, "ph": [str]}로 맞춘다. 형식이 틀리면 None(없는 것과 같음)."""
+    if not isinstance(rel, dict):
+        return None
+    seq = rel.get("seq")
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        return None
+    ph = rel.get("ph") or []
+    if not isinstance(ph, (list, tuple)):
+        return None
+    ids = []
+    for x in ph:
+        try:
+            ids.append(str(_uuid.UUID(str(x))))
+        except ValueError:
+            return None
+    return {"seq": seq, "ph": list(dict.fromkeys(ids))}
+
+
 def compact_daylist(p: dict, fee_rows: dict) -> dict:
     stops = []
     for s in p["stops"]:
@@ -367,6 +391,9 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
         stops.append(c)
     out = {"schema": "dg.daylist/2", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
            "fee": p["fee_table"]["version_id"], "s": stops}
+    rel = norm_rel(p.get("rel"))
+    if rel is not None:
+        out["rel"] = rel  # v0.13 결과 반영 정보(선택 키): 서명된 봉투 안에 들어가므로 휴대폰이 그대로 믿는다
     ft = p["fee_table"]
     if ft.get("base_version") and ft["base_version"] != ft["version_id"]:
         out["fb"] = ft["base_version"]          # 휴대폰 내장 표(원문) 버전
@@ -406,5 +433,9 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
     ft = {"version_id": p["fee"]}
     if p.get("fb"):
         ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))
-    return {"schema": "dg.daylist/1", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
-            "fee_table": ft, "stops": stops}
+    out = {"schema": "dg.daylist/1", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
+           "fee_table": ft, "stops": stops}
+    rel = norm_rel(p.get("rel"))
+    if rel is not None:
+        out["rel"] = rel
+    return out
