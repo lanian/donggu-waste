@@ -215,7 +215,8 @@ def db_key(create: bool = False) -> str:
     return getpass.getpass("DB 비밀번호: ")
 
 
-def connect(create: bool = False):
+def connect(create: bool = False, readonly: bool = False):
+    """업무 DB 열기. readonly=True: 화면 조회 전용 연결(쓰기 금지 PRAGMA query_only, 이전 단계 실행 안 함)."""
     if not ENCRYPTED and os.environ.get("DG_ALLOW_PLAIN_DB") != "1":
         sys.exit("SQLCipher 모듈(sqlcipher3)이 없어 실행을 멈춥니다. 'pip install -r pc/requirements.txt' 후 다시 실행하세요.")
     d = state_dir()
@@ -232,24 +233,203 @@ def connect(create: bool = False):
             con.execute("SELECT count(*) FROM sqlite_master").fetchone()
         except Exception:
             sys.exit("DB를 열 수 없습니다. DB 키(비밀번호)가 맞는지 확인하세요.")
+    con.execute("PRAGMA busy_timeout = 10000")
+    if readonly:
+        con.execute("PRAGMA query_only = ON")
+        READONLY.add(id(con))
+        return con
     con.execute("PRAGMA foreign_keys = ON")
+    if is_new:  # 새 DB: 사진·개인정보 파기 뒤 빈 공간을 조금씩 돌려줄 수 있게(PRAGMA incremental_vacuum)
+        con.execute("PRAGMA auto_vacuum = INCREMENTAL")
     con.execute("PRAGMA journal_mode = WAL")
-    con.executescript(SCHEMA)
-    cols = {r[1] for r in con.execute("PRAGMA table_info(audit_log)").fetchall()}
-    if "actor" not in cols:  # 이전 버전 DB에 작업자 열 추가
-        con.execute("ALTER TABLE audit_log ADD COLUMN actor TEXT")
-    if "line_id" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:  # 사진을 품목 행에 묶기(선택)
-        con.execute("ALTER TABLE photo ADD COLUMN line_id TEXT")
-    if "crew_id" not in {r[1] for r in con.execute("PRAGMA table_info(app_user)").fetchall()}:  # 수거팀 계정 ↔ 팀
-        con.execute("ALTER TABLE app_user ADD COLUMN crew_id TEXT")
-    if "purged_at" not in {r[1] for r in con.execute("PRAGMA table_info(photo)").fetchall()}:
-        con.execute("ALTER TABLE photo ADD COLUMN purged_at TEXT")
-    migrate(con)
+    run_migrations(con, path=None if is_new else path)
+    install_dirty_tracking(con)
     try:
         os.chmod(path, 0o600)
     except OSError:
         pass
     return con
+
+
+# ------------------------------------------------------------------ 이전 단계 (PRAGMA user_version)
+# 단계마다 BEGIN IMMEDIATE 한 트랜잭션(구조 변경 + 기존 자료 채우기)으로 실행한다. 중간에 멈추면 그 단계 전체가 되돌려지고
+# 다음에 열 때 그 단계부터 다시 한다. DB가 이 프로그램보다 새 버전이면 열지 않는다(옛 프로그램으로 새 DB를 망치지 않게).
+READONLY: set[int] = set()        # 조회 전용 연결(id)
+DIRTY_TRACKED: set[int] = set()   # 요약 열 갱신 대상을 모으는 임시 트리거가 있는 연결(id)
+_TEST_FAIL_STEP: int | None = None  # 시험용: 이 단계의 끝(기록 직전)에서 일부러 실패
+
+
+def _schema_statements(sql: str) -> list[str]:
+    body = "\n".join(ln for ln in sql.splitlines() if not ln.strip().startswith("--"))
+    return [s.strip() for s in body.split(";") if s.strip()]
+
+
+def _m1_legacy(con):
+    """v0.12까지의 구조(기존 이전 함수 모음, 여러 번 실행해도 같음)."""
+    for st in _schema_statements(SCHEMA):
+        con.execute(st)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(audit_log)").fetchall()}
+    if "actor" not in cols:  # 이전 버전 DB에 작업자 열 추가
+        con.execute("ALTER TABLE audit_log ADD COLUMN actor TEXT")
+    if "line_id" not in _cols(con, "photo"):  # 사진을 품목 행에 묶기(선택)
+        con.execute("ALTER TABLE photo ADD COLUMN line_id TEXT")
+    if "crew_id" not in _cols(con, "app_user"):  # 수거팀 계정 ↔ 팀
+        con.execute("ALTER TABLE app_user ADD COLUMN crew_id TEXT")
+    if "purged_at" not in _cols(con, "photo"):
+        con.execute("ALTER TABLE photo ADD COLUMN purged_at TEXT")
+    migrate(con)
+
+
+# v0.13 색인: 실제 조회문 기준 (주석의 함수에서 쓰는 WHERE·JOIN)
+V13_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS ix_photo_req ON photo(request_id)",                                   # get_request·day_summary·purge_photos
+    "CREATE INDEX IF NOT EXISTS ix_stop_req ON assignment_stop(request_id)",                           # request_in_crew·_export_row·stats 팀 이름
+    "CREATE INDEX IF NOT EXISTS ix_active_batch ON active_assignment(batch_id)",                       # confirm_plan 옛 배정 풀기
+    "CREATE INDEX IF NOT EXISTS ix_batch_date ON assignment_batch(work_date, status)",                 # day_summary·list_batches·pending
+    "CREATE INDEX IF NOT EXISTS ix_audit_eai ON audit_log(entity, action, id)",                        # list_audit(대상·작업 거름)·pilot_report CARRY/CREATE
+    "CREATE INDEX IF NOT EXISTS ix_audit_eid ON audit_log(entity_id)",                                 # 접수별 이력
+    "CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log(at)",                                         # 기간 거름
+    "CREATE INDEX IF NOT EXISTS ix_audit_after_close ON audit_log(after_close) WHERE after_close IS NOT NULL",  # _post_close_edits
+    "CREATE INDEX IF NOT EXISTS ix_payment_paid_on ON payment(paid_on) WHERE void_reason IS NULL",     # revenue·revenue_csv (void_reason IS NULL AND paid_on BETWEEN)
+    "CREATE INDEX IF NOT EXISTS ix_request_received ON request(received_at)",                          # 접수일 기준 조회·통계
+    "CREATE INDEX IF NOT EXISTS ix_request_completed ON request(completed_at)",                        # 완료일 기준 통계
+    "CREATE INDEX IF NOT EXISTS ix_request_cancelled ON request(cancelled_at) WHERE cancelled_at IS NOT NULL",  # 완료일 기준(취소일)·마감 환불
+    "CREATE INDEX IF NOT EXISTS ix_request_status_plan ON request(status, planned_date)",              # 빠른 조회 OVERDUE·pending·carry
+    "CREATE INDEX IF NOT EXISTS ix_request_pay ON request(pay_status)",                                # 수납 상태 거름
+    "CREATE INDEX IF NOT EXISTS ix_request_origin ON request(origin_device) WHERE origin_device IS NOT NULL",  # field_intakes
+    "CREATE INDEX IF NOT EXISTS ix_event_import ON result_event(import_id)",                           # 가져오기별 충돌 일괄 처리·최근 가져오기
+    "CREATE INDEX IF NOT EXISTS ix_event_dev_seq ON result_event(device_id, device_seq)",              # release_info(기기별 받은 순번)
+    "CREATE INDEX IF NOT EXISTS ix_event_conflict ON result_event(apply_status) WHERE apply_status='CONFLICT'",  # 충돌함
+    "CREATE INDEX IF NOT EXISTS ix_bundle_batch ON transfer_bundle(batch_id)",                         # list_batches·_cancel
+    "CREATE INDEX IF NOT EXISTS ix_bundle_date ON transfer_bundle(work_date)",                         # day_summary 미확인 전송
+    "CREATE INDEX IF NOT EXISTS ix_bundle_dev ON transfer_bundle(device_id, displayed_at)",            # 결과 미회수 팀·release 확인
+    "CREATE INDEX IF NOT EXISTS ix_unload_date ON unload_log(work_date)",                              # list_unloads·load_check·stats
+    "CREATE INDEX IF NOT EXISTS ix_access_actor ON access_log(actor, at)",                             # 접속기록 사용자 거름
+    "CREATE INDEX IF NOT EXISTS ix_access_action ON access_log(action, at)",                           # 접속기록 작업 거름
+    "CREATE INDEX IF NOT EXISTS ix_import_dev ON result_import(device_id, imported_at)",               # 결과 미회수 팀·최근 가져오기
+    "CREATE INDEX IF NOT EXISTS ix_close_date ON day_close_log(work_date, seq)",                       # close_info
+    "CREATE INDEX IF NOT EXISTS ix_refund_status ON refund_case(status)",                              # 환불 결재 대기
+    "CREATE INDEX IF NOT EXISTS ix_idem_at ON idem(at)",                                               # 하루 지난 재전송 기록 정리
+]
+
+
+def _m2_v13(con):
+    """v0.13: 접수 요약 열(목록·통계를 SQL로), 변경 이력 '마감 후 수정' 열, 결과 기록 순번 재사용 허용(휴대폰 복원),
+    재전송 방지(idem), 휴대폰 확인 코드 추적, 색인. 요약 열은 기존 자료로 채운다."""
+    for col, decl in (("fee_final", "INTEGER"), ("levied", "INTEGER"), ("paid_total", "INTEGER NOT NULL DEFAULT 0"), ("pay_status", "TEXT"),
+                      ("active_crew_id", "TEXT"), ("chosung", "TEXT")):
+        if col not in _cols(con, "request"):
+            con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
+    if "after_close" not in _cols(con, "audit_log"):
+        con.execute("ALTER TABLE audit_log ADD COLUMN after_close TEXT")
+        con.execute("UPDATE audit_log SET after_close=json_extract(detail, '$.after_close') WHERE detail LIKE '%after_close%' AND json_valid(detail)")
+    # 결과 기록: (기기, 순번) 고유 제약을 뺀다(휴대폰을 백업에서 되살리면 순번이 다시 쓰임). 같은 기록은 event_id로만 막는다.
+    sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='result_event'").fetchone()[0]
+    if "UNIQUE (device_id, device_seq)" in sql or "warning" not in _cols(con, "result_event"):
+        cols = ("event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind, body_json, apply_status, "
+                "conflict_reason, resolved_reason, resolved_at, device_ts")
+        con.execute("""CREATE TABLE result_event_v13 (
+          event_id TEXT PRIMARY KEY, import_id TEXT NOT NULL REFERENCES result_import(id),
+          device_id TEXT NOT NULL, device_seq INTEGER NOT NULL,
+          request_id TEXT NOT NULL, assign_ver INTEGER NOT NULL, base_req_ver INTEGER, kind TEXT NOT NULL,
+          body_json TEXT NOT NULL, apply_status TEXT NOT NULL CHECK (apply_status IN ('APPLIED','CONFLICT','REJECTED')),
+          conflict_reason TEXT, resolved_reason TEXT, resolved_at TEXT, device_ts TEXT, warning TEXT)""")
+        con.execute(f"INSERT INTO result_event_v13 ({cols}) SELECT {cols} FROM result_event")
+        con.execute("DROP TABLE result_event")
+        con.execute("ALTER TABLE result_event_v13 RENAME TO result_event")
+        con.execute("CREATE INDEX IF NOT EXISTS ix_event_req ON result_event(request_id)")
+    for table, col, decl in (("photo", "rel_acked_at", "TEXT"), ("transfer_bundle", "rel_seq", "INTEGER"), ("transfer_bundle", "rel_json", "TEXT"),
+                             ("result_import", "phone_confirmed_at", "TEXT"), ("photo_import", "phone_confirmed_at", "TEXT")):
+        if col not in _cols(con, table):
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    con.execute("""CREATE TABLE IF NOT EXISTS idem (key TEXT NOT NULL, user TEXT NOT NULL, endpoint TEXT NOT NULL, response_json TEXT NOT NULL,
+        at TEXT NOT NULL, PRIMARY KEY (user, endpoint, key))""")
+    for st in V13_INDEXES:
+        con.execute(st)
+    from dgpc import service as _S  # 요약 열 채우기(접수 전체, 묶음으로)
+    ids = [r[0] for r in con.execute("SELECT id FROM request").fetchall()]
+    for i in range(0, len(ids), 500):
+        _S.refresh_request_summary(con, ids[i:i + 500])
+
+
+MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13)]
+LATEST = MIGRATIONS[-1][0]
+
+
+def pre_migration_backup(con, path: Path, from_ver: int) -> Path | None:
+    """이전 단계 실행 전 DB 파일 복사(같은 DB 키로 암호화된 그대로). state/pre-migration/ 에 둔다."""
+    import datetime as _dt
+    import shutil
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:  # noqa: BLE001
+        pass
+    d = path.parent / "pre-migration"
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"pc-v{from_ver}-to-v{LATEST}-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+    n = 1
+    while dest.exists():
+        dest = d / f"pc-v{from_ver}-to-v{LATEST}-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{n}.db"; n += 1
+    shutil.copy2(path, dest)
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
+    return dest
+
+
+def run_migrations(con, path: Path | None = None) -> list[int]:
+    """남은 단계를 차례로 실행. path가 있으면(기존 DB) 실행 전 DB 파일을 복사해 둔다. 실행한 단계 번호 목록."""
+    cur = con.execute("PRAGMA user_version").fetchone()[0]
+    if cur > LATEST:
+        raise SystemExit(f"DB 구조 버전({cur})이 이 프로그램({LATEST})보다 새것입니다. 최신 PC 프로그램으로 여세요(자료 보호를 위해 멈춤).")
+    todo = [m for m in MIGRATIONS if m[0] > cur]
+    if not todo:
+        return []
+    if path is not None and path.exists() and con.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]:
+        pre_migration_backup(con, path, cur)
+    done = []
+    for n, _label, fn in todo:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            fn(con)
+            if _TEST_FAIL_STEP == n:
+                raise RuntimeError(f"시험용 실패(단계 {n})")
+            con.execute(f"PRAGMA user_version = {int(n)}")
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+        done.append(n)
+    return done
+
+
+# 접수 요약 열(수수료·수납 상태·현재 배정 팀·초성)을 바꿀 수 있는 쓰기를 모으는 임시(연결별) 트리거.
+# 트랜잭션 끝(service.tx)에서 모인 접수만 다시 계산한다(겹친 ID는 그때 하나로; 고유 제약을 두지 않음 — UPSERT 안 트리거와 충돌하지 않게). 요약 열 자체를 바꾸는 갱신은 다시 모으지 않는다.
+_DIRTY_SQL = [
+    "CREATE TEMP TABLE IF NOT EXISTS dirty_req (id TEXT)",
+    "CREATE TEMP TRIGGER IF NOT EXISTS dg_req_ins AFTER INSERT ON main.request BEGIN INSERT INTO dirty_req VALUES (NEW.id); END",
+    "CREATE TEMP TRIGGER IF NOT EXISTS dg_req_upd AFTER UPDATE OF name, address, status, reduction_code, reduction_rate ON main.request "
+    "BEGIN INSERT INTO dirty_req VALUES (NEW.id); END",
+]
+for _t, _ops, _col in (("request_item", ("INSERT", "UPDATE", "DELETE"), "request_id"), ("item_link", ("INSERT", "UPDATE"), "request_id"),
+                       ("payment", ("INSERT", "UPDATE"), "request_id"), ("active_assignment", ("INSERT", "UPDATE", "DELETE"), "request_id"),
+                       ("result_event", ("INSERT", "UPDATE"), "request_id")):
+    for _op in _ops:
+        _row = "OLD" if _op == "DELETE" else "NEW"
+        _DIRTY_SQL.append(f"CREATE TEMP TRIGGER IF NOT EXISTS dg_{_t}_{_op.lower()} AFTER {_op} ON main.{_t} WHEN {_row}.{_col} != '' "
+                          f"BEGIN INSERT INTO dirty_req VALUES ({_row}.{_col}); END")
+    if "UPDATE" in _ops and _t == "active_assignment":
+        _DIRTY_SQL.append("CREATE TEMP TRIGGER IF NOT EXISTS dg_active_assignment_upd_old AFTER UPDATE ON main.active_assignment "
+                          "BEGIN INSERT INTO dirty_req VALUES (OLD.request_id); END")
+_DIRTY_SQL.append("CREATE TEMP TRIGGER IF NOT EXISTS dg_refund_paid AFTER UPDATE OF status ON main.refund_case WHEN NEW.status='PAID' OR OLD.status='PAID' "
+                  "BEGIN INSERT INTO dirty_req VALUES (NEW.request_id); END")
+
+
+def install_dirty_tracking(con):
+    for st in _DIRTY_SQL:
+        con.execute(st)
+    DIRTY_TRACKED.add(id(con))
 
 
 def _cols(con, table) -> set[str]:
@@ -268,7 +448,7 @@ def migrate(con):
     sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='app_user'").fetchone()[0]
     if "'LEAD'" not in sql:  # 역할 목록(CHECK)에 팀장(LEAD) 추가: 표를 새로 만들어 옮긴다
         cols = "id, username, display_name, role, pw_salt, pw_hash, active, must_change, created_at, last_login_at, crew_id"
-        con.execute("BEGIN IMMEDIATE")
+        con.execute("SAVEPOINT app_user_v10")
         try:
             con.execute("""CREATE TABLE app_user_v10 (
               id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
@@ -277,9 +457,10 @@ def migrate(con):
             con.execute(f"INSERT INTO app_user_v10 ({cols}) SELECT {cols} FROM app_user")
             con.execute("DROP TABLE app_user")
             con.execute("ALTER TABLE app_user_v10 RENAME TO app_user")
-            con.execute("COMMIT")
+            con.execute("RELEASE app_user_v10")
         except BaseException:
-            con.execute("ROLLBACK")
+            con.execute("ROLLBACK TO app_user_v10")
+            con.execute("RELEASE app_user_v10")
             raise
     migrate_v11(con)
     migrate_v12(con)

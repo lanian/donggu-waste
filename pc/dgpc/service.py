@@ -75,15 +75,90 @@ def today_kst() -> str:
     return dt.datetime.now(KST).date().isoformat()
 
 
+class StaleError(UserError):
+    """다른 곳에서 먼저 바뀐 자료(낙관적 동시성). 서버는 409로 돌려준다."""
+
+    def __init__(self, msg: str, **info):
+        super().__init__(msg)
+        self.info = info
+
+
+_SP = __import__("itertools").count(1)
+
+
 @contextlib.contextmanager
 def tx(con):
+    """쓰기 트랜잭션. 이미 트랜잭션 안이면 저장점(SAVEPOINT)으로 겹쳐 쓴다(겹친 쪽이 실패하면 그 부분만 되돌림).
+    가장 바깥 트랜잭션이 끝나기 직전(COMMIT 전)에 바뀐 접수의 요약 열과 자동 환불 건을 같은 트랜잭션 안에서 맞춘다.
+    조회 전용 연결에서는 아무것도 하지 않는다(쓰기는 WRITE_SINK로 넘김)."""
+    from dgpc import store as _store
+    if id(con) in _store.READONLY:
+        yield
+        return
+    if con.in_transaction:
+        sp = f"dg_sp{next(_SP)}"
+        con.execute(f"SAVEPOINT {sp}")
+        try:
+            yield
+            con.execute(f"RELEASE {sp}")
+        except BaseException:
+            con.execute(f"ROLLBACK TO {sp}")
+            con.execute(f"RELEASE {sp}")
+            raise
+        return
     con.execute("BEGIN IMMEDIATE")
     try:
         yield
+        if id(con) in _store.DIRTY_TRACKED:
+            flush_dirty(con)
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
         raise
+
+
+def flush_dirty(con):
+    """트랜잭션 안: 트리거가 모은 접수의 요약 열을 다시 계산하고, 그 접수들만 자동 환불 건을 맞춘다."""
+    for _ in range(4):
+        ids = [r[0] for r in con.execute("SELECT DISTINCT id FROM temp.dirty_req").fetchall()]
+        if not ids:
+            return
+        con.execute("DELETE FROM temp.dirty_req")
+        ids = [i for i in ids if i]
+        refresh_request_summary(con, ids)
+        _fin().sync_refunds(con, ids)
+
+
+def is_readonly(con) -> bool:
+    from dgpc import store as _store
+    return id(con) in _store.READONLY
+
+
+# 조회 전용 연결에서 생긴 기록(변경 이력·접속기록)을 쓰기 연결로 넘기는 곳. 서버가 요청마다 정한다: fn(write_con) 을 잠금 안에서 실행.
+WRITE_SINK: contextvars.ContextVar = contextvars.ContextVar("write_sink", default=None)
+
+
+def write(con, fn):
+    """기록 쓰기 한 묶음: 쓰기 연결이면 그 자리에서 트랜잭션으로, 조회 전용 연결이면 WRITE_SINK(서버 잠금 + 쓰기 연결)로 넘긴다."""
+    if is_readonly(con):
+        actor = ACTOR.get()
+        def w(wc):
+            tok = ACTOR.set(actor)
+            try:
+                with tx(wc):
+                    return fn(wc)
+            finally:
+                ACTOR.reset(tok)
+        return _sink(w)
+    with tx(con):
+        return fn(con)
+
+
+def _sink(fn):
+    s = WRITE_SINK.get()
+    if s is None:
+        raise RuntimeError("조회 전용 연결에서 기록을 남길 곳(WRITE_SINK)이 없습니다.")
+    return s(fn)
 
 
 def rows(con, sql, args=()):
@@ -111,6 +186,8 @@ def _audit_fields(r: dict) -> list:
 
 
 def audit(con, entity, entity_id, action, detail=None):
+    if is_readonly(con):  # 조회 전용 연결: 서버 잠금 안에서 쓰기 연결로(한 트랜잭션)
+        return write(con, lambda wc: audit(wc, entity, entity_id, action, detail))
     prev = con.execute("SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
     prev = prev[0] if prev else (get_setting(con, "audit_chain_anchor", "") or "")
     note = note_sha = None
@@ -121,8 +198,9 @@ def audit(con, entity, entity_id, action, detail=None):
         detail = {**{k: v for k, v in detail.items() if k != "reason"}, "note_sha": note_sha}
     d = json.dumps(detail, ensure_ascii=False) if detail is not None else None
     at, actor = now(), ACTOR.get()
-    cur = con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor, prev_hash, legacy) VALUES (?,?,?,?,?,?,?,0)",
-                      (entity, entity_id, action, d, at, actor, prev))
+    ac = detail.get("after_close") if isinstance(detail, dict) and isinstance(detail.get("after_close"), str) else None
+    cur = con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor, prev_hash, legacy, after_close) VALUES (?,?,?,?,?,?,?,0,?)",
+                      (entity, entity_id, action, d, at, actor, prev, ac))
     rid = cur.lastrowid
     con.execute("UPDATE audit_log SET hash=? WHERE id=?",
                 (chain_hash(prev, _audit_fields({"id": rid, "entity": entity, "entity_id": entity_id, "action": action, "detail": d, "at": at, "actor": actor})), rid))
@@ -265,6 +343,10 @@ def set_setting(con, key, value):
                 (key, json.dumps(value, ensure_ascii=False)))
 
 
+PAYMENT_GUIDE_DEFAULT = "부과 금액은 수거 전까지 가상계좌 또는 현장 카드로 내 주세요. 납부 방법·기한은 담당 부서에 확인하세요."
+CONTACT_PLACEHOLDER = "동구청 청소 담당 부서 (전화번호는 설정에서 입력)"
+
+
 def settings(con) -> dict:
     return {
         "depot": get_setting(con, "depot", {"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}),
@@ -284,9 +366,11 @@ def settings(con) -> dict:
         "backup_dir": get_setting(con, "backup_dir", ""),
         "capacity": _area().capacity_settings(con),
         "intake_notices": get_setting(con, "intake_notices", []),
-        "contact_info": get_setting(con, "contact_info", "동구청 청소 담당 부서 (전화번호는 설정에서 입력)"),
+        "contact_info": get_setting(con, "contact_info", CONTACT_PLACEHOLDER),
         "disposal_guide": get_setting(con, "disposal_guide", "수거일 아침 7시까지 집 앞(공동주택은 관리사무소가 정한 곳)에 내놓고, 이 표지를 물건에 붙여 주세요."),
         "monthly_report_title": get_setting(con, "monthly_report_title", "대형폐기물 수거 월보"),
+        "payment_guide": get_setting(con, "payment_guide", PAYMENT_GUIDE_DEFAULT),
+        "reduction_round_unit": reduction_round_unit(con), "reduction_round_units": list(ROUND_UNITS),
         "reductions": _fin().reductions(con), "reduction_proofs": list(_fin().PROOF_METHODS),
         "pii_retention_years": get_setting(con, "pii_retention_years", 3), "access_log_retention_years": max(2, get_setting(con, "access_log_retention_years", 2)),
         "pay_methods": list(PAY_METHODS), "refund_methods": list(REFUND_PAY_METHODS),
@@ -325,7 +409,15 @@ def save_settings(con, data: dict):
                 notes.append({"keywords": kws, "text": text})
             set_setting(con, "intake_notices", notes[:30])
         audit(con, "settings", "pc", "SAVE", {"keys": ",".join(sorted(data))[:120]})
-        for k, lim in (("contact_info", 200), ("disposal_guide", 400), ("monthly_report_title", 60)):
+        if "reduction_round_unit" in data:
+            try:
+                u = int(data["reduction_round_unit"])
+            except (TypeError, ValueError):
+                u = 0
+            if u not in ROUND_UNITS:
+                raise UserError("감면액 끝수 처리 단위는 1원 또는 10원입니다.")
+            set_setting(con, "reduction_round_unit", u)
+        for k, lim in (("contact_info", 200), ("disposal_guide", 400), ("monthly_report_title", 60), ("payment_guide", 300)):
             if k in data:
                 v = (data[k] or "").strip()[:lim]
                 if k == "monthly_report_title" and not v:
@@ -693,7 +785,30 @@ def _after_close(con, rid: str) -> dict:
     return {"after_close": r["planned_date"]} if r and close_info(con, r["planned_date"]) else {}
 
 
+STALE_MSG = "다른 곳에서 바뀌었습니다. 다시 열어 확인하세요"
+
+
+def check_req_ver(con, rid: str, base, required: bool = True):
+    """화면이 열었을 때의 접수 버전(req_ver)과 지금 버전이 같은지(트랜잭션 안에서 부른다). 다르면 StaleError(서버는 409)."""
+    cur = one(con, "SELECT req_ver FROM request WHERE id=?", (rid,))
+    if not cur:
+        raise UserError("접수를 찾을 수 없습니다.")
+    if base in (None, ""):
+        if required:
+            raise StaleError("접수 버전(req_ver)이 없습니다. 화면을 새로 고친 뒤 다시 저장하세요.", req_ver=cur["req_ver"], request_id=rid)
+        return cur["req_ver"]
+    try:
+        b = int(base)
+    except (TypeError, ValueError):
+        raise UserError("접수 버전(req_ver)이 올바르지 않습니다.")
+    if b != cur["req_ver"]:
+        raise StaleError(STALE_MSG, req_ver=cur["req_ver"], request_id=rid)
+    return b
+
+
 def update_request(con, rid: str, data: dict, reason: str) -> dict:
+    """접수 수정. data["req_ver"](화면이 연 버전)가 꼭 있어야 하고 지금 버전과 같아야 한다(다른 사람이 먼저 고쳤으면 StaleError).
+    버전 확인·현장 결과가 있는 품목 잠금 확인은 쓰기 트랜잭션 안에서 한다."""
     cur = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not cur:
         raise UserError("접수를 찾을 수 없습니다.")
@@ -703,15 +818,19 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
         raise UserError("수정 사유를 적어 주세요." + (" (마감한 날의 접수입니다)" if close_info(con, cur["planned_date"]) else ""))
     d = validate({"channel": cur["channel"], **data})
     items = build_items(data["items"], con)
-    dong, dwarn = _resolve_dong(con, data, d["address"]) if "dong" in data or d["address"] != cur["address"] else (cur["dong"], [])
-    locked = locked_lines(con, rid)
-    old_items = {i["line_id"]: i for i in rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))}
-    new_ids = {i["line_id"] for i in items}
-    for lid in locked:
-        if lid in old_items and (lid not in new_ids or next(i for i in items if i["line_id"] == lid)["qty"] != old_items[lid]["qty"]):
-            raise UserError(f"현장 결과가 있는 품목({old_items[lid]['name']})은 바꾸거나 지울 수 없습니다.")
-    flag = _after_close(con, rid)
     with tx(con):
+        check_req_ver(con, rid, data.get("req_ver"))
+        cur = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+        if cur["status"] == "CANCELLED":
+            raise UserError("취소된 접수는 수정할 수 없습니다.")
+        dong, dwarn = _resolve_dong(con, data, d["address"]) if "dong" in data or d["address"] != cur["address"] else (cur["dong"], [])
+        locked = locked_lines(con, rid)
+        old_items = {i["line_id"]: i for i in rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))}
+        new_ids = {i["line_id"] for i in items}
+        for lid in locked:
+            if lid in old_items and (lid not in new_ids or next(i for i in items if i["line_id"] == lid)["qty"] != old_items[lid]["qty"]):
+                raise UserError(f"현장 결과가 있는 품목({old_items[lid]['name']})은 바꾸거나 지울 수 없습니다.")
+        flag = _after_close(con, rid)
         con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
                     (rid, cur["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), reason.strip(), now()))
         con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note=?, memo=?, lat=?, lon=?,
@@ -745,7 +864,7 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
     if (d["planned_date"] or None) != cur["planned_date"] or dong != cur["dong"]:
         warn += _area().capacity_warnings(con, d["planned_date"] or None, dong, rid, _area().request_volume(con, rid))
     return {"id": rid, "resend_needed": released or bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
-            "warnings": warn, "after_close": bool(flag)}
+            "warnings": warn, "after_close": bool(flag), "req_ver": cur["req_ver"] + 1}
 
 
 def _reason(codes: dict, code: str | None, text: str | None, what: str) -> tuple[str, str, str]:
@@ -781,12 +900,14 @@ def _cancel(con, rid: str, code: str, text: str, full: str) -> dict:
     return {"field_notice_needed": bool(sent), "refund_needed": paid > 0, "paid": paid}
 
 
-def cancel_request(con, rid: str, reason: str = "", code: str | None = None) -> dict:
-    """접수 취소(사유 코드 + 직접 입력). 이미 납부한 금액이 있으면 환불 필요로 알려 준다(마감 수납 확인·'환불 필요' 목록)."""
+def cancel_request(con, rid: str, reason: str = "", code: str | None = None, req_ver=None) -> dict:
+    """접수 취소(사유 코드 + 직접 입력). 이미 납부한 금액이 있으면 환불 필요로 알려 준다(마감 수납 확인·'환불 필요' 목록).
+    req_ver를 주면 화면이 연 버전과 같을 때만 취소한다(다르면 StaleError). 환불 건 맞추기는 같은 트랜잭션 안에서."""
     code, text, full = _reason(CANCEL_CODES, code, reason, "취소")
     with tx(con):
+        if req_ver not in (None, ""):
+            check_req_ver(con, rid, req_ver)
         res = _cancel(con, rid, code, text, full)
-    _fin().sync_refunds(con)
     return res
 
 
@@ -811,22 +932,39 @@ def is_chosung(s: str) -> bool:
 
 SORTABLE = {"receipt_no": "receipt_no", "planned_date": "COALESCE(planned_date,'9999')", "received_at": "received_at", "name": "name",
             "dong": "COALESCE(dong,'')", "status": "status", "channel": "channel", "address": "address"}
-QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND", "FIELD")
+QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND", "FIELD", "OVERDUE", "NODATE")
+_NOT_FINAL = "status NOT IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD','CANCELLED')"
 
 
-def _enrich(con, r: dict) -> dict:
-    r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
-    r["state"] = derive(con, r)
+def _quick_sql(key: str) -> tuple[str, list]:
+    """빠른 조회 조건(SQL). 오늘 날짜는 인자로."""
+    t = today_kst()
+    return {
+        "TODAY": ("planned_date=?", [t]),
+        "NOLOC": ("lat IS NULL", []),
+        "FEE": ("fee_final IS NULL", []),
+        "UNASSIGNED": ("status NOT IN ('DONE','CANCELLED') AND NOT EXISTS (SELECT 1 FROM active_assignment a WHERE a.request_id=request.id)", []),
+        "REFUND": ("status='CANCELLED' AND pay_status='REFUND_NEEDED'", []),
+        "FIELD": ("origin_device IS NOT NULL AND field_checked_at IS NULL", []),
+        "OVERDUE": (f"planned_date < ? AND {_NOT_FINAL}", [t]),       # 지난 예정일인데 최종 결과 없음
+        "NODATE": (f"planned_date IS NULL AND {_NOT_FINAL}", []),      # 예정일 없음
+    }.get(key, ("1=1", []))
+
+
+def _enrich(con, r: dict, pre: dict | None = None) -> dict:
+    r["items"] = (pre["items"].get(r["id"]) if pre else None) or rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
+    r["state"] = derive(con, r, pre)
     r["warnings"] = address_warnings(con, r["address"])
     r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
         JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
     return r
 
 
-def _request_sql(f: dict) -> tuple[str, list]:
-    """조회조건 → SQL (검색어·날짜 범위·상태·팀·동·경로). 초성·수납 상태·빠른 조회는 계산 뒤 거른다."""
-    sql, args = "SELECT * FROM request WHERE 1=1", []
-    q = " ".join(t for t in (f.get("q") or "").split() if not is_chosung(t))
+def _request_sql(f: dict, scope_ids=None) -> tuple[str, list]:
+    """조회조건 → WHERE (검색어·초성·날짜 범위·상태·팀·동·경로·수납 상태·수거팀 범위). 빠른 조회는 따로."""
+    sql, args = " WHERE 1=1", []
+    toks = (f.get("q") or "").split()
+    q = " ".join(t for t in toks if not is_chosung(t))
     if f.get("date"):
         sql += " AND planned_date=?"; args.append(f["date"])
     col = "received_at" if f.get("date_field") == "received" else "planned_date"
@@ -848,8 +986,7 @@ def _request_sql(f: dict) -> tuple[str, list]:
     elif status:
         sql += " AND status=?"; args.append(status)
     if f.get("crew"):
-        sql += """ AND id IN (SELECT a.request_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE b.crew_id=?)"""
-        args.append(f["crew"])
+        sql += " AND active_crew_id=?"; args.append(f["crew"])
     if f.get("dong"):
         if f["dong"] == "-":
             sql += " AND dong IS NULL"
@@ -857,58 +994,60 @@ def _request_sql(f: dict) -> tuple[str, list]:
             sql += " AND dong=?"; args.append(f["dong"])
     if f.get("channel"):
         sql += " AND channel=?"; args.append(f["channel"])
+    if f.get("pay"):
+        sql += " AND pay_status=?"; args.append(f["pay"])
     if q:
         qp = norm_phone(q)
-        sql += " AND (name LIKE ? OR address LIKE ? OR receipt_no LIKE ?" + (" OR phone LIKE ?" if qp else "") + ")"
-        args += [f"%{q}%"] * 3 + ([f"%{qp}%"] if qp else [])
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        sql += " AND (name LIKE ? ESCAPE '\\' OR address LIKE ? ESCAPE '\\' OR receipt_no LIKE ? ESCAPE '\\'" + (" OR phone LIKE ?" if qp else "") + ")"
+        args += [f"%{esc}%"] * 3 + ([f"%{qp}%"] if qp else [])
+    for t in toks:  # 초성 검색: 이름·주소의 초성 (예: ㄱㅅㅎ → 가상하나) — 저장한 초성 열(chosung)
+        if is_chosung(t):
+            sql += " AND instr(COALESCE(chosung,''), ?) > 0"; args.append(t)
+    if scope_ids is not None:
+        sql += " AND id IN (SELECT value FROM json_each(?))"; args.append(json.dumps(sorted(scope_ids)))
     return sql, args
 
 
-def _quick_ok(con, r: dict, key: str, today: str) -> bool:
-    if key == "TODAY":
-        return r["planned_date"] == today
-    if key == "NOLOC":
-        return r["lat"] is None
-    if key == "UNASSIGNED":
-        return r["status"] not in ("DONE", "CANCELLED") and not one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (r["id"],))
-    if key == "FEE":
-        return derive(con, r)["fee"]["final"] is None
-    if key == "REFUND":
-        return r["status"] == "CANCELLED" and payment_status(con, r["id"])["status"] == "REFUND_NEEDED"
-    if key == "FIELD":  # 휴대폰 현장 접수 중 사무실 확인 전
-        return bool(r.get("origin_device")) and not r.get("field_checked_at")
-    return True
-
-
 def search_requests(con, f: dict | None = None, scope_ids: set[str] | None = None, with_counts: bool = True) -> dict:
-    """접수 목록 조회(서버 쪽 쪽 나눔). f: q, date, date_field(planned|received), date_from, date_to, status, crew, dong, channel,
-    pay(수납 상태), quick, sort, dir, page(1부터), size. 돌려줌: rows(이 쪽), total(조건에 맞는 전체), counts(빠른 조회별 건수)."""
+    """접수 목록 조회(서버 쪽 쪽 나눔, SQL로 거르고 세고 자른다 — 접수마다 계산하지 않음). f: q, date, date_field(planned|received), date_from, date_to,
+    status, crew, dong, channel, pay(수납 상태), quick(ALL·TODAY·NOLOC·FEE·UNASSIGNED·REFUND·FIELD·OVERDUE·NODATE), sort, dir, page(1부터), size.
+    돌려줌: rows(이 쪽), total(조건에 맞는 전체), counts(빠른 조회별 건수)."""
     f = dict(f or {})
-    sql, args = _request_sql(f)
-    key = SORTABLE.get(f.get("sort") or "", None)
-    desc = (f.get("dir") or "").lower() == "desc"
-    order = f" ORDER BY {key} {'DESC' if desc else 'ASC'}, received_at DESC" if key else " ORDER BY COALESCE(planned_date,'9999'), received_at DESC"
-    out = rows(con, sql + order, args)
-    cho = [t for t in (f.get("q") or "").split() if is_chosung(t)]
-    if cho:  # 초성 검색: 이름·주소의 초성 (예: ㄱㅅㅎ → 가상하나)
-        out = [r for r in out if all(t in chosung_of(re.sub(r"\s+", "", (r["name"] or "") + "|" + (r["address"] or ""))) for t in cho)]
-    if scope_ids is not None:
-        out = [r for r in out if r["id"] in scope_ids]
-    if f.get("pay"):
-        out = [r for r in out if payment_status(con, r["id"])["status"] == f["pay"]]
-    today = today_kst()
-    counts = {k: sum(1 for r in out if _quick_ok(con, r, k, today)) for k in QUICK if k != "ALL"} if with_counts else {}
-    counts["ALL"] = len(out)
     quick = f.get("quick") or "ALL"
     if quick not in QUICK:
         raise UserError("빠른 조회 값이 올바르지 않습니다.")
+    where, args = _request_sql(f, scope_ids)
+    counts = {}
+    if with_counts:
+        parts, cargs = [], []
+        for k in QUICK[1:]:
+            qs, qa = _quick_sql(k)
+            parts.append(f"COALESCE(SUM(CASE WHEN {qs} THEN 1 ELSE 0 END),0)")
+            cargs += qa
+        r = con.execute(f"SELECT COUNT(*), {', '.join(parts)} FROM request" + where, cargs + args).fetchone()
+        counts = {"ALL": r[0], **{k: r[i + 1] for i, k in enumerate(QUICK[1:])}}
     if quick != "ALL":
-        out = [r for r in out if _quick_ok(con, r, quick, today)]
-    total = len(out)
-    size = max(1, min(500, int(f.get("size") or 50)))
+        qs, qa = _quick_sql(quick)
+        where += f" AND ({qs})"; args = args + qa
+    if with_counts and quick == "ALL":
+        total = counts["ALL"]
+    else:
+        total = con.execute("SELECT COUNT(*) FROM request" + where, args).fetchone()[0]
+        counts.setdefault("ALL", total if quick == "ALL" else con.execute("SELECT COUNT(*) FROM request" + _request_sql(f, scope_ids)[0], _request_sql(f, scope_ids)[1]).fetchone()[0])
+    key = SORTABLE.get(f.get("sort") or "", None)
+    desc = (f.get("dir") or "").lower() == "desc"
+    order = f" ORDER BY {key} {'DESC' if desc else 'ASC'}, received_at DESC" if key else " ORDER BY COALESCE(planned_date,'9999'), received_at DESC"
+    try:
+        size = max(1, min(500, int(f.get("size") or 50)))
+        page_ = int(f.get("page") or 1)
+    except (TypeError, ValueError):
+        raise UserError("쪽 번호·쪽 크기는 숫자입니다.")
     pages = max(1, -(-total // size))
-    page = max(1, min(pages, int(f.get("page") or 1)))
-    part = [_enrich(con, r) for r in out[(page - 1) * size: page * size]]
+    page = max(1, min(pages, page_))
+    part = rows(con, "SELECT * FROM request" + where + order + " LIMIT ? OFFSET ?", args + [size, (page - 1) * size])
+    pre = prefetch(con, [r["id"] for r in part], ("items", "events", "links"))
+    part = [_enrich(con, r, pre) for r in part]
     return {"rows": part, "total": total, "page": page, "size": size, "pages": pages, "counts": counts}
 
 
@@ -943,24 +1082,81 @@ def _events_for(con, rid):
         WHERE e.request_id=? AND e.apply_status='APPLIED' ORDER BY i.imported_at, e.device_seq""", (rid,))
 
 
-def derive(con, req: dict) -> dict:
-    """휴대폰 앱(fees.js deriveStop)과 같은 규칙. 행별 잔량, 상쇄 없음, 금액은 현장 확인 수량 기준."""
-    items = req.get("items") or rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (req["id"],))
+def _chunks(ids, n=500):
+    ids = list(ids)
+    for i in range(0, len(ids), n):
+        yield ids[i:i + n]
+
+
+def prefetch(con, ids, what=("items", "events", "links", "payments", "partial", "active")) -> dict:
+    """여러 접수의 품목·적용된 현장 기록·유사 품목 적용·수납·일부 수거 환불·현재 배정 팀을 묶어서 읽는다(접수마다 질의하지 않게)."""
+    ids = list(dict.fromkeys(i for i in ids if i))
+    out = {k: {i: [] for i in ids} for k in ("items", "events", "links", "payments")}
+    out["partial"] = {i: 0 for i in ids}
+    out["active"] = {i: None for i in ids}
+    for ch in _chunks(ids):
+        q = ",".join("?" * len(ch))
+        if "items" in what:
+            for r in rows(con, f"SELECT * FROM request_item WHERE request_id IN ({q}) AND removed=0", ch):
+                out["items"][r["request_id"]].append(r)
+        if "events" in what:
+            for r in rows(con, f"""SELECT e.request_id, e.kind, e.body_json, e.device_ts FROM result_event e JOIN result_import i ON i.id=e.import_id
+                    WHERE e.request_id IN ({q}) AND e.apply_status='APPLIED' ORDER BY i.imported_at, e.device_seq""", ch):
+                out["events"][r.pop("request_id")].append(r)
+        if "links" in what:
+            for r in rows(con, f"SELECT * FROM item_link WHERE request_id IN ({q}) AND void_reason IS NULL ORDER BY at", ch):
+                out["links"][r["request_id"]].append(r)
+        if "payments" in what:
+            for r in rows(con, f"SELECT * FROM payment WHERE request_id IN ({q}) ORDER BY recorded_at", ch):
+                out["payments"][r["request_id"]].append(r)
+        if "partial" in what:
+            for r in rows(con, f"""SELECT request_id, COALESCE(SUM(amount),0) AS n FROM refund_case WHERE request_id IN ({q}) AND status='PAID' AND cause='PARTIAL'
+                    GROUP BY request_id""", ch):
+                out["partial"][r["request_id"]] = r["n"] or 0
+        if "active" in what:
+            for r in rows(con, f"SELECT a.request_id, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE a.request_id IN ({q})", ch):
+                out["active"][r["request_id"]] = r["crew_id"]
+    return out
+
+
+def _price(v):
+    try:
+        return int(v) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def derive(con, req: dict, pre: dict | None = None) -> dict:
+    """휴대폰 앱(fees.js deriveStop)과 같은 규칙. 행별 잔량, 상쇄 없음, 금액은 현장 확인 수량 기준.
+    pre: prefetch() 결과(있으면 DB를 다시 읽지 않음)."""
+    rid = req["id"]
+    if pre is not None:
+        items = req.get("items") or pre["items"].get(rid, [])
+        events, links = pre["events"].get(rid, []), pre["links"].get(rid, [])
+    else:
+        items = req.get("items") or rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))
+        events = _events_for(con, rid)
+        links = rows(con, "SELECT * FROM item_link WHERE request_id=? AND void_reason IS NULL ORDER BY at", (rid,))
+    return derive_pure(items, events, links)
+
+
+def derive_pure(items: list[dict], events: list[dict], links: list[dict]) -> dict:
+    """DB 없이 계산(미리 읽은 품목·현장 기록·유사 품목 적용). 휴대폰이 보낸 이상한 수량·단가가 있어도 멈추지 않는다(0~9999 정수로)."""
     lines = [{"line_id": i["line_id"], "kind": "RECEIVED", "name": i["name"], "spec": i["spec"], "unit": i["unit"],
               "unit_label": i["unit_label"], "price": i["unit_price"] if i["price_status"] == "CONFIRMED" else None,
               "qty_received": i["qty"], "amount_received": i["amount"], "qty_confirmed": i["qty"], "qty_collected": 0, "reason": "",
               "fee_rate_id": i["fee_rate_id"]} for i in items]
     by = {l["line_id"]: l for l in lines}
-    contact, outcome, loc, n = "NOT_CONTACTED", None, None, 0
+    contact, outcome, outcome_ts, loc, n = "NOT_CONTACTED", None, None, None, 0
     memos = []
     # 휴대폰 v0.10 기록: 도착·스티커 확인·추가 금액 고지·문자/길안내(횟수만)·작업자·부재 증거
     fx = {"arrive": None, "stickers": {}, "fee_notices": [], "sms": {}, "nav": 0, "nav_apps": {}, "workers": [], "no_photo_reason": None, "other_kinds": {}}
     known = {"CONTACT", "FIELD_ITEM_ADD", "ITEM_RESULT", "ATTEMPT", "LOCATION_FIX", "FIELD_MEMO", "PHOTO_META", "REVISIT_APPT", "DIAL_INTENT", "UNLOAD",
              "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT", "FIELD_INTAKE", "CORRECTION", "CANCEL_REQUEST"}
-    for e in _events_for(con, req["id"]):
+    for e in events:
         try:
             b = json.loads(e["body_json"]) or {}
-        except ValueError:
+        except (ValueError, TypeError):
             b = {}
         if not isinstance(b, dict):
             b = {}
@@ -971,7 +1167,7 @@ def derive(con, req: dict) -> dict:
         if k == "ARRIVE":
             fx["arrive"] = {"at": e["device_ts"], "acc": b.get("acc"), "has_gps": b.get("lat") is not None, "worker": w}
         elif k == "STICKER_CHECK" and b.get("line_id"):
-            fx["stickers"][b["line_id"]] = {"result": b.get("result"), "number": (b.get("number") or "")[:30], "decision": b.get("decision"), "at": e["device_ts"]}
+            fx["stickers"][b["line_id"]] = {"result": b.get("result"), "number": str(b.get("number") or "")[:30], "decision": b.get("decision"), "at": e["device_ts"]}
         elif k == "FEE_NOTICE":
             fx["fee_notices"].append({"at": e["device_ts"], "received": b.get("received"), "total": b.get("total"), "extra": b.get("extra"),
                                       "pending": b.get("pending"), "response": b.get("response"), "lines": len(b.get("lines") or []), "worker": w})
@@ -988,23 +1184,24 @@ def derive(con, req: dict) -> dict:
             fx["other_kinds"][k] = fx["other_kinds"].get(k, 0) + 1
         if k == "CONTACT":
             contact = b.get("result", contact)
-        elif k == "FIELD_ITEM_ADD" and b.get("line_id") not in by:
+        elif k == "FIELD_ITEM_ADD" and b.get("line_id") and b.get("line_id") not in by:
             l = {"line_id": b["line_id"], "kind": "FIELD", "name": b.get("name"), "spec": b.get("spec", ""), "unit": b.get("unit"),
-                 "unit_label": b.get("unit_label"), "price": b.get("unit_price") if b.get("price_status") == "CONFIRMED" else None,
-                 "qty_received": 0, "amount_received": 0, "qty_confirmed": int(b.get("qty") or 0), "qty_collected": 0, "reason": "",
+                 "unit_label": b.get("unit_label"), "price": _price(b.get("unit_price")) if b.get("price_status") == "CONFIRMED" else None,
+                 "qty_received": 0, "amount_received": 0, "qty_confirmed": _int_clamp(b.get("qty")), "qty_collected": 0, "reason": "",
                  "fee_rate_id": b.get("fee_rate_id")}
             lines.append(l); by[l["line_id"]] = l; n += 1
         elif k == "ITEM_RESULT" and b.get("line_id") in by:
-            by[b["line_id"]].update(qty_confirmed=int(b.get("qty_confirmed", 0)), qty_collected=int(b.get("qty_collected", 0)), reason=b.get("reason") or "")
+            qc = _int_clamp(b.get("qty_confirmed", 0))
+            by[b["line_id"]].update(qty_confirmed=qc, qty_collected=min(qc, _int_clamp(b.get("qty_collected", 0))), reason=str(b.get("reason") or ""))
             n += 1
         elif k == "ATTEMPT":
-            outcome = b.get("outcome"); n += 1
+            outcome, outcome_ts = b.get("outcome"), e.get("device_ts"); n += 1
         elif k == "LOCATION_FIX":
             loc = {"lat": b.get("lat"), "lon": b.get("lon"), "source": b.get("source")}
         elif k == "FIELD_MEMO":
-            memos.append((b.get("text") or "")[:300])
+            memos.append(str(b.get("text") or "")[:300])
     # 표에 없던 품목을 담당자가 유사 품목 단가로 확정한 기록(근거·확인자)을 덧씌운다. 원래 행은 그대로 둔다.
-    for lk in rows(con, "SELECT * FROM item_link WHERE request_id=? AND void_reason IS NULL ORDER BY at", (req["id"],)):
+    for lk in links:
         l = by.get(lk["line_id"])
         if l and l["price"] is None:
             row = FEE_ROWS.get(lk["fee_rate_id"]) or {}
@@ -1019,11 +1216,54 @@ def derive(con, req: dict) -> dict:
     qty_by_unit: dict[str, int] = {}
     for l in lines:
         qty_by_unit[l["unit_label"]] = qty_by_unit.get(l["unit_label"], 0) + l["qty_confirmed"]
-    return {"lines": lines, "contact": contact, "outcome": outcome, "field_loc": loc, "has_field_records": n > 0, "memos": memos, "field": fx,
+    return {"lines": lines, "contact": contact, "outcome": outcome, "outcome_ts": outcome_ts, "field_loc": loc, "has_field_records": n > 0, "memos": memos, "field": fx,
             "fee": {"received": received, "confirmed_subtotal": subtotal, "diff": subtotal - received,
                     "field_added": sum(l["price"] * l["qty_confirmed"] for l in lines if l["kind"] == "FIELD" and l["price"] is not None),
                     "pending_count": len(pending), "final": None if pending else subtotal, "qty_by_unit": qty_by_unit},
             "remaining_total": sum(l["remaining"] for l in lines)}
+
+
+def chosung_key(name: str | None, address: str | None) -> str:
+    """초성 검색용 열 값: 이름|주소(공백 없이)의 초성."""
+    return chosung_of(re.sub(r"\s+", "", (name or "") + "|" + (address or "")))
+
+
+def refresh_request_summary(con, rids) -> int:
+    """접수 요약 열(fee_final·levied·paid_total·pay_status·active_crew_id·chosung)을 derive()·수납 기록으로 다시 계산해 저장.
+    쓰기 경로마다 트랜잭션 끝에서 자동으로 불린다(store 임시 트리거 → tx → flush_dirty)."""
+    if isinstance(rids, str):
+        rids = [rids]
+    rids = [r for r in dict.fromkeys(rids) if r]
+    if not rids:
+        return 0
+    unit = reduction_round_unit(con)
+    n = 0
+    for ch in _chunks(rids):
+        reqs = rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(ch))})", ch)
+        pre = prefetch(con, [r["id"] for r in reqs])
+        for r in reqs:
+            final = derive(con, r, pre)["fee"]["final"]
+            ps = payment_core(r, final, pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            con.execute("UPDATE request SET fee_final=?, levied=?, paid_total=?, pay_status=?, active_crew_id=?, chosung=? WHERE id=?",
+                        (final, ps["levied"], ps["paid"], ps["status"], pre["active"][r["id"]], chosung_key(r["name"], r["address"]), r["id"]))
+            n += 1
+    return n
+
+
+def _sane_ts(ts) -> str | None:
+    """휴대폰 시각(UTC ISO) → 'YYYY-MM-DDTHH:MM:SSZ'. 형식 오류·지금+10분보다 미래·2020년 이전이면 None."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        return None
+    t = t.astimezone(dt.timezone.utc)
+    if t > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10) or t.year < 2020:
+        return None
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _refresh_status(con, rid):
@@ -1041,8 +1281,10 @@ def _refresh_status(con, rid):
         con.execute("UPDATE request SET lat=?, lon=?, geo_source=? WHERE id=?",
                     (st["field_loc"]["lat"], st["field_loc"]["lon"], "ADDR" if st["field_loc"].get("source") == "ADDR" else "FIELD", rid))
     if new != r["status"]:
+        # 완료일 = 휴대폰에서 최종 결과(ATTEMPT)를 남긴 시각. 형식이 틀리거나 미래(+10분 넘음)면 지금
+        done_at = _sane_ts(st.get("outcome_ts")) if new in FINAL else None
         con.execute("UPDATE request SET status=?, updated_at=?, completed_at=CASE WHEN ? IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD') THEN ? ELSE completed_at END WHERE id=?",
-                    (new, now(), new, now(), rid))
+                    (new, now(), new, done_at or now(), rid))
         audit(con, "request", rid, "STATUS", {"from": r["status"], "to": new})
     if new in FINAL:
         con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
@@ -1078,33 +1320,152 @@ def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason
     out = []
     with tx(con):
         for cid, stops in plan.items():
-            prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
-            con.execute("UPDATE assignment_batch SET status='SUPERSEDED' WHERE crew_id=? AND work_date=? AND status='ACTIVE'", (cid, work_date))
-            bid = str(uuid.uuid4())
-            clean = []
-            for x in stops:
-                u = x.get("unload_after")
-                item = {"request_id": x["request_id"], "eta": x.get("eta") or ""}
-                if isinstance(u, dict) and u.get("label"):
-                    item["unload_after"] = {"eta": str(u.get("eta") or "")[:5], "label": str(u["label"])[:40],
-                                            "minutes": int(u.get("minutes") or 0), "volume_m3": float(u.get("volume_m3") or 0)}
-                clean.append(item)
-            con.execute("INSERT INTO assignment_batch VALUES (?,?,?,?,'ACTIVE',?,?)",
-                        (bid, cid, work_date, prev + 1, json.dumps(clean, ensure_ascii=False), now()))
-            for i, s in enumerate(stops, 1):
-                con.execute("INSERT INTO assignment_stop VALUES (?,?,?,?)", (bid, s["request_id"], i, s.get("eta")))
-                con.execute("INSERT INTO active_assignment VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET batch_id=excluded.batch_id",
-                            (s["request_id"], bid))
-                con.execute("UPDATE request SET status=CASE WHEN status IN ('RECEIVED','PARTIAL','NOT_COLLECTED','ON_HOLD') THEN 'ASSIGNED' ELSE status END, planned_date=?, updated_at=? WHERE id=?",
-                            (work_date, now(), s["request_id"]))
-            out.append({"batch_id": bid, "crew_id": cid, "assign_ver": prev + 1, "count": len(stops)})
-            audit(con, "batch", bid, "CONFIRM", {"crew": crews[cid]["name"], "date": work_date, "ver": prev + 1, "n": len(stops),
-                                                 **({"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else {})})
-        # 이전 버전에만 있고 새 버전에서 빠진 접수는 활성 배정을 풀고 접수 상태로 되돌린다
-        for rid, in con.execute("SELECT request_id FROM active_assignment WHERE batch_id IN (%s)" % ",".join("?" * len(replaced)), list(replaced)).fetchall() if replaced else []:
-            con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
-            con.execute("UPDATE request SET status='RECEIVED', updated_at=? WHERE id=? AND status='ASSIGNED'", (now(), rid))
+            out.append(_write_batch(con, cid, work_date, stops, crews[cid]["name"], {**({"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else {})}))
+        _release_dropped(con, replaced)
     return out
+
+
+def _clean_stop(x: dict) -> dict:
+    u = x.get("unload_after")
+    item = {"request_id": x["request_id"], "eta": x.get("eta") or ""}
+    if isinstance(u, dict) and u.get("label"):
+        item["unload_after"] = {"eta": str(u.get("eta") or "")[:5], "label": str(u["label"])[:40],
+                                "minutes": _int_clamp(u.get("minutes"), 0, 600), "volume_m3": _num(u.get("volume_m3")) or 0.0}
+    return item
+
+
+def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: str, extra: dict | None = None, action: str = "CONFIRM") -> dict:
+    """팀의 그날 배정 새 버전(assign_ver = 지난 최대 + 1)을 만들고 이전 버전은 SUPERSEDED. 트랜잭션은 호출하는 쪽."""
+    prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
+    con.execute("UPDATE assignment_batch SET status='SUPERSEDED' WHERE crew_id=? AND work_date=? AND status='ACTIVE'", (cid, work_date))
+    bid = str(uuid.uuid4())
+    clean = [_clean_stop(x) for x in stops]
+    con.execute("INSERT INTO assignment_batch (id, crew_id, work_date, assign_ver, status, route_json, created_at) VALUES (?,?,?,?,'ACTIVE',?,?)",
+                (bid, cid, work_date, prev + 1, json.dumps(clean, ensure_ascii=False), now()))
+    for i, st in enumerate(clean, 1):
+        con.execute("INSERT INTO assignment_stop VALUES (?,?,?,?)", (bid, st["request_id"], i, st["eta"] or None))
+        con.execute("INSERT INTO active_assignment VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET batch_id=excluded.batch_id", (st["request_id"], bid))
+        con.execute("UPDATE request SET status=CASE WHEN status IN ('RECEIVED','PARTIAL','NOT_COLLECTED','ON_HOLD') THEN 'ASSIGNED' ELSE status END, planned_date=?, updated_at=? WHERE id=?",
+                    (work_date, now(), st["request_id"]))
+    audit(con, "batch", bid, action, {"crew": crew_name, "date": work_date, "ver": prev + 1, "n": len(clean), **(extra or {})})
+    return {"batch_id": bid, "crew_id": cid, "assign_ver": prev + 1, "count": len(clean)}
+
+
+def _release_dropped(con, old_batch_ids):
+    """이전 버전에만 있고 새 버전에서 빠진 접수는 활성 배정을 풀고 접수 상태로 되돌린다."""
+    old_batch_ids = list(old_batch_ids)
+    if not old_batch_ids:
+        return
+    for rid, in con.execute("SELECT request_id FROM active_assignment WHERE batch_id IN (%s)" % ",".join("?" * len(old_batch_ids)), old_batch_ids).fetchall():
+        con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
+        con.execute("UPDATE request SET status='RECEIVED', updated_at=? WHERE id=? AND status='ASSIGNED'", (now(), rid))
+
+
+def current_assignment(con, work_date: str) -> list[dict]:
+    """그날 확정된(ACTIVE) 배정: 팀별 갱신본·순서·예상 도착·하차 경유. 부분 수정 화면의 시작점."""
+    out = rows(con, """SELECT b.id AS batch_id, b.crew_id, c.name AS crew_name, b.assign_ver, b.route_json, b.created_at FROM assignment_batch b
+        JOIN crew c ON c.id=b.crew_id WHERE b.work_date=? AND b.status='ACTIVE' ORDER BY c.name""", (work_date,))
+    for b in out:
+        route = {x["request_id"]: x for x in json.loads(b.pop("route_json") or "[]") if isinstance(x, dict)}
+        b["stops"] = rows(con, """SELECT s.seq, s.eta, r.id AS request_id, r.receipt_no, r.status, r.dong, r.lat, r.lon FROM assignment_stop s
+            JOIN request r ON r.id=s.request_id WHERE s.batch_id=? ORDER BY s.seq""", (b["batch_id"],))
+        for st in b["stops"]:
+            if route.get(st["request_id"], {}).get("unload_after"):
+                st["unload_after"] = route[st["request_id"]]["unload_after"]
+        sent = one(con, "SELECT MAX(displayed_at) AS t FROM transfer_bundle WHERE batch_id=?", (b["batch_id"],))
+        b["sent_at"] = sent["t"] if sent else None
+    return out
+
+
+ASSIGN_OPS = ("insert", "remove", "reorder", "move")
+
+
+def edit_assignment(con, work_date: str, op: str, data: dict) -> dict:
+    """확정된 배정을 다시 계산하지 않고 고친다: insert(팀 끝·지정 위치에 넣기) · remove(빼기) · reorder(순서 바꾸기) · move(다른 팀으로).
+    고친 팀마다 새 갱신본(assign_ver+1)을 만든다(휴대폰에는 다시 보내야 함). data["assign_ver"]: {팀ID: 화면이 본 갱신본}이 지금과 다르면 StaleError."""
+    if not _date_ok(work_date or ""):
+        raise UserError("배정 날짜를 골라 주세요.")
+    if op not in ASSIGN_OPS:
+        raise UserError("배정 수정 종류가 올바르지 않습니다.")
+    reason = str(data.get("reason") or "").strip()[:200]
+    crews = {c["id"]: c for c in list_crews(con)}
+    rid = data.get("request_id") or ""
+    with tx(con):
+        cur = {b["crew_id"]: b for b in current_assignment(con, work_date)}
+        seen = data.get("assign_ver") or {}
+        if isinstance(seen, dict):
+            for cid, v in seen.items():
+                have = cur.get(cid, {}).get("assign_ver", 0)
+                if str(v) != str(have):
+                    raise StaleError("배정이 다른 곳에서 바뀌었습니다. 다시 열어 확인하세요", crew_id=cid, assign_ver=have)
+
+        def stops_of(cid):
+            return [{"request_id": x["request_id"], "eta": x["eta"] or "", **({"unload_after": x["unload_after"]} if x.get("unload_after") else {})}
+                    for x in cur.get(cid, {}).get("stops", [])]
+
+        def where(r_):
+            return next((cid for cid, b in cur.items() if any(x["request_id"] == r_ for x in b["stops"])), None)
+
+        def place(lst, item, pos):
+            try:
+                pos = int(pos) if pos not in (None, "") else None
+            except (TypeError, ValueError):
+                raise UserError("넣을 위치는 숫자(1부터)입니다.")
+            if pos is None or pos > len(lst):
+                lst.append(item)
+            else:
+                lst.insert(max(0, pos - 1), item)
+
+        changes: dict[str, list] = {}
+        if op in ("insert", "move"):
+            to = data.get("crew_id") if op == "insert" else data.get("to_crew_id")
+            if to not in crews:
+                raise UserError("넣을 팀을 골라 주세요.")
+            req = one(con, "SELECT status FROM request WHERE id=?", (rid,))
+            if not req:
+                raise UserError("접수를 찾을 수 없습니다.")
+            if req["status"] in ("CANCELLED", "DONE"):
+                raise UserError("취소·완료된 접수는 배정할 수 없습니다.")
+            src = where(rid)
+            if op == "insert":
+                if src:
+                    raise UserError(f"이미 이날 {crews[src]['name']} 배정에 들어 있습니다. [다른 팀으로 옮기기]를 쓰세요.")
+                act = one(con, """SELECT b.work_date, c.name FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id JOIN crew c ON c.id=b.crew_id
+                    WHERE a.request_id=?""", (rid,))
+                if act:
+                    raise UserError(f"이미 다른 배정({act['work_date']} {act['name']})에 들어 있는 접수입니다. 먼저 그 배정에서 빼 주세요.")
+            else:
+                if not src:
+                    raise UserError("이날 배정에 없는 접수입니다.")
+                if src == to:
+                    raise UserError("같은 팀입니다. 순서 바꾸기를 쓰세요.")
+                changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
+            lst = changes.get(to) or stops_of(to)
+            place(lst, {"request_id": rid, "eta": str(data.get("eta") or "")[:5]}, data.get("position"))
+            changes[to] = lst
+        elif op == "remove":
+            src = where(rid)
+            if not src:
+                raise UserError("이날 배정에 없는 접수입니다.")
+            changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
+        else:  # reorder
+            cid = data.get("crew_id")
+            if cid not in cur:
+                raise UserError("순서를 바꿀 팀의 배정이 없습니다.")
+            order = [x for x in (data.get("order") or []) if isinstance(x, str)]
+            old = stops_of(cid)
+            if sorted(order) != sorted(x["request_id"] for x in old) or len(set(order)) != len(order):
+                raise UserError("순서 목록이 지금 배정과 다릅니다(빠지거나 더해진 접수). 다시 열어 확인하세요.")
+            by = {x["request_id"]: x for x in old}
+            changes[cid] = [by[i] for i in order]
+        out, old_ids = [], []
+        for cid, lst in changes.items():
+            if cid in cur:
+                old_ids.append(cur[cid]["batch_id"])
+            out.append(_write_batch(con, cid, work_date, lst, crews[cid]["name"], {"edit": op, **({"reason": reason} if reason else {}),
+                                                                                   **({"request": rid} if rid else {})}, action="EDIT"))
+        _release_dropped(con, old_ids)
+    return {"batches": out, "resend_needed": [b["crew_id"] for b in out]}
 
 
 def list_batches(con, work_date: str) -> list[dict]:
@@ -1167,7 +1528,22 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
                       "revisit": revisit, "assign_ver": b["assign_ver"], "items": items})
     payload = {"schema": "dg.daylist/1", "work_date": b["work_date"], "crew": b["crew_name"], "assign_ver": b["assign_ver"],
                "fee_table": fee_table_for_phone(con), "stops": stops}
+    if b.get("device_id"):  # 휴대폰이 지워도 되는 것: PC가 이미 받은 기록 순번·회수한 사진 (dgproto가 서명해 싣는다)
+        payload["rel"] = release_info(con, b["device_id"])
     return payload, b
+
+
+def release_info(con, device_id: str) -> dict:
+    """휴대폰에 알려 줄 '안전하게 받은 것': seq = 이 기기 기록 1..seq를 PC가 빠짐없이 저장한(반영·충돌·거부 모두) 마지막 순번,
+    ph = 이 기기에서 회수했지만 아직 휴대폰에 알리지 않은(수신 확인된 목록에 실리지 않은) 사진 ID."""
+    # 빠짐없이 받은 마지막 번호: 1부터 이어진 구간의 끝(중간 번호가 빠졌으면 그 앞에서 멈춤 — 휴대폰은 이 번호까지 지운다)
+    seq = con.execute("""SELECT MIN(e.device_seq) FROM result_event e WHERE e.device_id=? AND e.device_seq >= 1
+        AND NOT EXISTS (SELECT 1 FROM result_event x WHERE x.device_id=e.device_id AND x.device_seq=e.device_seq+1)""", (device_id,)).fetchone()[0]
+    if not con.execute("SELECT 1 FROM result_event WHERE device_id=? AND device_seq=1 LIMIT 1", (device_id,)).fetchone():
+        seq = 0
+    ph = [r[0] for r in con.execute("""SELECT photo_id FROM photo WHERE device_id=? AND recovery_status='RECOVERED' AND rel_acked_at IS NULL
+        ORDER BY recovered_at LIMIT 500""", (device_id,)).fetchall()]
+    return {"seq": max(0, seq or 0), "ph": ph}
 
 
 def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, device_id: str | None = None,
@@ -1177,6 +1553,7 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
         device_id = b["device_id"]
         if not device_id:
             raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정에서 기기를 연결하세요.")
+    rel = payload.get("rel")
     if payload.get("schema") == "dg.daylist/1":
         payload = P.compact_daylist(payload, FEE_ROWS)  # QR 장수를 줄이는 압축 형식
     dev = one(con, "SELECT * FROM device WHERE id=?", (device_id,))
@@ -1191,22 +1568,30 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
     frames = P.split_frames(env, bundle_id, chunk)
     bid = str(uuid.UUID(bytes=bundle_id))
     with tx(con):
-        con.execute("INSERT INTO transfer_bundle VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
+        con.execute("""INSERT INTO transfer_bundle (id, device_id, batch_id, work_date, assign_ver, chunk_count, envelope_sha256, receipt_code,
+            frames_json, displayed_at, receipt_confirmed_at, rel_seq, rel_json) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
                     (bid, device_id, batch_id, payload["work_date"], payload["assign_ver"], len(frames),
-                     hashlib.sha256(env).hexdigest(), code, json.dumps(frames), now()))
+                     hashlib.sha256(env).hexdigest(), code, json.dumps(frames), now(),
+                     (rel or {}).get("seq"), json.dumps(rel) if rel else None))
         audit(con, "bundle", bid, "DISPLAY", {"batch": batch_id, "frames": len(frames)})
     return {"bundle_id": bid, "frames": frames, "bytes": len(env), "count": len(payload.get("s") or payload.get("stops") or []),
             "work_date": payload["work_date"], "assign_ver": payload["assign_ver"]}
 
 
 def confirm_receipt(con, bundle: str, code: str) -> str:
-    r = rows(con, "SELECT id, receipt_code FROM transfer_bundle WHERE id LIKE ?", (bundle + "%",))
+    r = rows(con, "SELECT id, receipt_code, rel_json FROM transfer_bundle WHERE id LIKE ?", (bundle + "%",))
     if len(r) != 1:
         raise UserError("전송 묶음을 찾을 수 없습니다.")
-    if re.sub(r"\s", "", code or "").upper() != r[0]["receipt_code"]:
-        raise UserError("확인 코드가 맞지 않습니다. 수신이 확인되지 않았습니다.")
+    c_ = re.sub(r"[\s-]", "", code or "").upper()
+    if c_.startswith("R") and len(c_) == len(r[0]["receipt_code"].replace("-", "")) + 1:  # 휴대폰 화면의 앞 글자 'R-'(수신 코드)를 붙여 넣어도
+        c_ = c_[1:]
+    if c_ != r[0]["receipt_code"].replace("-", "").upper():
+        raise UserError("수신 코드가 맞지 않습니다. 수신이 확인되지 않았습니다.")
     with tx(con):
         con.execute("UPDATE transfer_bundle SET receipt_confirmed_at=?, frames_json=NULL WHERE id=?", (now(), r[0]["id"]))  # 받은 것이 확인되면 QR 조각(암호문)은 더 둘 까닭이 없다
+        rel = json.loads(r[0]["rel_json"] or "{}")
+        for ch in _chunks(rel.get("ph") or []):  # 이 목록으로 휴대폰에 '회수 완료'를 알린 사진
+            con.execute(f"UPDATE photo SET rel_acked_at=? WHERE rel_acked_at IS NULL AND photo_id IN ({','.join('?' * len(ch))})", [now(), *ch])
         audit(con, "bundle", r[0]["id"], "RECEIPT", None)
     return r[0]["id"]
 
@@ -1250,37 +1635,63 @@ def _num(v):
         return None
 
 
-def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
+def prepare_result(con, data: bytes) -> dict:
+    """결과 파일 검증·복호(시간이 걸리는 서명 확인)만. 서버는 이 단계를 DB 잠금 밖(조회 전용 연결)에서 한다."""
     sha = hashlib.sha256(data).hexdigest()
     prev = one(con, "SELECT summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
     if prev:
-        return {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"]}
+        return {"sha": sha, "duplicate": {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"]}}
     dev_id, head, payload, release = _open_from_device(con, data, P.TYPE_RESULT)
     if payload.get("schema") != "dg.result/1":
         raise UserError("결과 파일 형식이 아닙니다.")
+    return {"sha": sha, "dev_id": dev_id, "payload": payload, "release": release}
+
+
+def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None = None) -> dict:
+    prep = prepared or prepare_result(con, data)
+    if prep.get("duplicate"):
+        return prep["duplicate"]
+    sha, dev_id, payload, release = prep["sha"], prep["dev_id"], prep["payload"], prep["release"]
+    if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):  # 잠금 밖에서 검증하는 사이 같은 파일이 먼저 들어옴
+        prev = one(con, "SELECT summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
+        return {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"]}
     crew = one(con, "SELECT id FROM crew WHERE device_id=?", (dev_id,))
     imp = str(uuid.uuid4())
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}
     touched = set()
     with tx(con):
-        con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,?)", (imp, channel, dev_id, sha, now(), release))
+        con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,?)",
+                    (imp, channel, dev_id, sha, now(), release))
+
+        def insert_event(ev, request_id, assign_ver, base_req_ver, kind, body, status, reason):
+            # 휴대폰을 백업에서 되살리면 순번이 다시 쓰일 수 있다: event_id가 새것이면 받고 '순번 재사용' 경고만 남긴다(충돌 아님)
+            warn = None
+            old = one(con, "SELECT event_id FROM result_event WHERE device_id=? AND device_seq=? AND event_id!=? LIMIT 1", (dev_id, ev["seq"], ev["event_id"]))
+            if old:
+                warn = f"순번 {ev['seq']} 재사용(휴대폰 복원 추정) — 앞 기록 {old['event_id'][:8]}"
+                counts["seq_reused"] = counts.get("seq_reused", 0) + 1
+            con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                body_json, apply_status, conflict_reason, device_ts, warning) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (ev["event_id"], imp, dev_id, ev["seq"], request_id, assign_ver, base_req_ver, kind, json.dumps(body, ensure_ascii=False),
+                         status, reason, ev.get("device_ts"), warn))
+
         def one_event(ev):
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (ev["event_id"],)):
                 counts["skipped_duplicate"] += 1
                 return
+            if not isinstance(ev.get("seq"), int):
+                ev["seq"] = int(ev.get("seq") or 0)
             if ev["kind"] == "UNLOAD":  # 휴대폰에서 기록한 하차 (접수와 무관, 팀 단위)
-                b = ev.get("body", {})
-                ok_ = bool(crew) and (b.get("volume_m3") or b.get("weight_kg"))
-                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ev["event_id"], imp, dev_id, ev["seq"], "", ev.get("assign_ver") or 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
-                             "APPLIED" if ok_ else "REJECTED", None if ok_ else "팀에 연결되지 않은 휴대폰이거나 부피·중량 없음", ev.get("device_ts")))
+                b = ev.get("body") if isinstance(ev.get("body"), dict) else {}
+                ok_ = bool(crew) and (_num(b.get("volume_m3")) or _num(b.get("weight_kg")))
+                insert_event(ev, "", ev.get("assign_ver") or 0, None, "UNLOAD", b, "APPLIED" if ok_ else "REJECTED",
+                             None if ok_ else "팀에 연결되지 않은 휴대폰이거나 부피·중량 없음")
                 if ok_:
                     con.execute("""INSERT OR IGNORE INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at)
                         VALUES (?,?,?,?,?,?,?,?,?)""", (ev["event_id"], crew["id"], b.get("work_date") or payload.get("work_date") or today_kst(),
-                                                         (b.get("at_time") or "")[:5], (b.get("place") or "반입지")[:60],
-                                                         float(b["volume_m3"]) if b.get("volume_m3") else None, float(b["weight_kg"]) if b.get("weight_kg") else None,
-                                                         ("휴대폰 기록 " + (b.get("note") or "")).strip()[:200], now()))
+                                                         str(b.get("at_time") or "")[:5], str(b.get("place") or "반입지")[:60],
+                                                         _num(b.get("volume_m3")) or None, _num(b.get("weight_kg")) or None,
+                                                         ("휴대폰 기록 " + str(b.get("note") or "")).strip()[:200], now()))
                     counts["unloads"] = counts.get("unloads", 0) + 1
                 return
             ev.setdefault("request_id", "")
@@ -1292,28 +1703,23 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                     note = "이미 PC에 있는 접수(다시 만들지 않음)"
                 else:
                     try:
-                        _field_request(con, ev["request_id"], ev["body"], dev_id, ev.get("device_ts"))
+                        with tx(con):
+                            _field_request(con, ev["request_id"], ev["body"], dev_id, ev.get("device_ts"))
                         counts["field_intakes"] = counts.get("field_intakes", 0) + 1
                         touched.add(ev["request_id"])
                     except UserError as e:
                         reason = f"현장 접수 확인 필요: {e}"
                         counts["review"] = counts.get("review", 0) + 1
-                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ev["event_id"], imp, dev_id, ev["seq"], ev["request_id"], 0, None, "FIELD_INTAKE",
-                             json.dumps(ev["body"] if reason else _strip_request_pii("FIELD_INTAKE", ev["body"]), ensure_ascii=False),
-                             "CONFLICT" if reason else "APPLIED", reason or note, ev.get("device_ts")))
+                insert_event(ev, ev["request_id"], 0, None, "FIELD_INTAKE", ev["body"] if reason else _strip_request_pii("FIELD_INTAKE", ev["body"]),
+                             "CONFLICT" if reason else "APPLIED", reason or note)
                 return
             if not ev["request_id"] and ev.get("kind") not in KNOWN_KINDS:
                 # 앞으로 생길 팀 단위 기록(알 수 없는 종류): 접수와 무관하게 보관만 하고 병합을 막지 않는다
-                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,'APPLIED',NULL,?)""",
-                            (ev["event_id"], imp, dev_id, ev["seq"], "", ev.get("assign_ver") or 0, None, str(ev.get("kind") or "?")[:40],
-                             json.dumps(ev["body"], ensure_ascii=False), ev.get("device_ts")))
+                insert_event(ev, "", ev.get("assign_ver") or 0, None, str(ev.get("kind") or "?")[:40], ev["body"], "APPLIED", None)
                 counts["stored_other"] = counts.get("stored_other", 0) + 1
                 return
             req = one(con, "SELECT status, req_ver, origin_device FROM request WHERE id=?", (ev["request_id"],))
-            reason = None
+            reason, info = None, None
             # 이 휴대폰이 현장에서 접수한 건: PC 목록에 들어오기 전(갱신본 0)에 남긴 결과는 배정 기록 없이도 받는다
             own = bool(req) and req.get("origin_device") == dev_id
             if not req:
@@ -1332,7 +1738,8 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                 elif act and crew and act["crew_id"] != crew["id"]:
                     reason = "다른 팀에 다시 배정된 접수"
                 elif act and ev.get("assign_ver") is not None and ev["assign_ver"] < act["assign_ver"] and not (own and not ev["assign_ver"]):
-                    reason = f"오래된 목록(갱신본 {ev['assign_ver']} < 현재 {act['assign_ver']})의 결과"
+                    # v0.13: 지금 배정도 같은 팀이면 옛 갱신본의 결과도 반영한다(다른 팀으로 옮겼거나 뺀 경우만 충돌)
+                    info = f"이전 갱신본({ev['assign_ver']} < 현재 {act['assign_ver']})의 결과 — 같은 팀 배정 유지로 반영"
                 elif not act and not done_before and not own and not one(con, """SELECT 1 AS x FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
                         WHERE s.request_id=? AND b.crew_id=?""", (ev["request_id"], crew["id"] if crew else "")):
                     reason = "이 팀에 배정된 적 없는 접수"
@@ -1343,23 +1750,17 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                     newer = b0 and one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (crew["id"], b0["work_date"]))
                     if newer and (newer["v"] or 0) > ev["assign_ver"]:
                         reason = f"새 목록(갱신본 {newer['v']})에서 빠진 접수의 옛 목록 결과"
-            if not reason and ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):
+            if ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 충돌함에 들어가는 것도 정리해서 저장(반영할 때 다시 정리)
                 _sanitize_item_event(con, ev["kind"], ev["body"])
             status = "CONFLICT" if reason else "APPLIED"
-            note = reason or (f"접수 수정(버전 {ev.get('base_req_ver')}→{req['req_ver']}) 뒤에 기록된 결과" if req and ev.get("base_req_ver") and ev["base_req_ver"] != req["req_ver"] else None)
+            note = reason or info or (f"접수 수정(버전 {ev.get('base_req_ver')}→{req['req_ver']}) 뒤에 기록된 결과" if req and ev.get("base_req_ver") and ev["base_req_ver"] != req["req_ver"] else None)
             if reason and ev["kind"] in REVIEW_KINDS:
                 counts["review"] = counts.get("review", 0) + 1  # 정정·취소 요청: 충돌이 아니라 사무실 확인 대상
             else:
                 counts["conflict" if reason else "applied"] += 1
-            con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (ev["event_id"], imp, dev_id, ev["seq"], ev["request_id"], ev.get("assign_ver") or 0, ev.get("base_req_ver"),
-                         ev["kind"], json.dumps(ev.get("body", {}), ensure_ascii=False), status, note, ev.get("device_ts")))
+            insert_event(ev, ev["request_id"], ev.get("assign_ver") or 0, ev.get("base_req_ver"), ev["kind"], ev.get("body", {}), status, note)
             if ev["kind"] == "PHOTO_META" and not reason:
-                b = ev.get("body", {})
-                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id, taken_at, lat, lon, acc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                            (b.get("photo_id"), ev["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id"),
-                             (b.get("taken_at") or b.get("file_ts") or None), _num(b.get("lat")), _num(b.get("lon")), _num(b.get("acc"))))
+                _photo_meta(con, ev["request_id"], ev.get("body", {}), dev_id)
                 counts["photos_expected"] += 1
             if not reason:
                 touched.add(ev["request_id"])
@@ -1367,6 +1768,8 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                     _apply_revisit(con, ev["request_id"], ev.get("body", {}))
         for ev in payload.get("events", []):
             # 기록 하나가 DB 제약에 걸려도 같은 파일의 다른 결과까지 버리지 않는다: 기록마다 저장점, 실패한 기록은 충돌함으로
+            if not isinstance(ev, dict):
+                continue
             con.execute("SAVEPOINT ev1")
             try:
                 one_event(ev)
@@ -1377,8 +1780,11 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                 try:
                     con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                         body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,'CONFLICT',?,?)""",
-                                (str(ev.get("event_id") or uuid.uuid4()), imp, dev_id, -int.from_bytes(os.urandom(4), "big") - 1, str(ev.get("request_id") or ""),
-                                 int(ev.get("assign_ver") or 0), ev.get("base_req_ver"), str(ev.get("kind") or "?")[:40],
+                                (str(ev.get("event_id") or uuid.uuid4()), imp, dev_id,
+                                 ev["seq"] if isinstance(ev.get("seq"), int) and not isinstance(ev.get("seq"), bool) else -int.from_bytes(os.urandom(4), "big") - 1,
+                                 str(ev.get("request_id") or ""),
+                                 _int_clamp(ev.get("assign_ver"), 0, 10 ** 9), ev.get("base_req_ver") if isinstance(ev.get("base_req_ver"), int) else None,
+                                 str(ev.get("kind") or "?")[:40],
                                  json.dumps(ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
                                  f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts")))
                 except Exception:  # noqa: BLE001
@@ -1388,6 +1794,12 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
+
+
+def _photo_meta(con, rid: str, b: dict, dev_id: str):
+    con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id, taken_at, lat, lon, acc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (b.get("photo_id"), rid, b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id"),
+                 (b.get("taken_at") or b.get("file_ts") or None), _num(b.get("lat")), _num(b.get("lon")), _num(b.get("acc"))))
 
 
 def _int_clamp(v, lo=0, hi=9999) -> int:
@@ -1465,12 +1877,20 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         raise UserError("반영 또는 거부를 골라 주세요.")
     if not (reason or "").strip():
         raise UserError("판단 사유를 적어 주세요.")
-    body = json.loads(e["body_json"] or "{}")
-    cancelled = False
+    try:
+        body = json.loads(e["body_json"] or "{}")
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
     with tx(con):
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
+            if e["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):
+                # 직접 가져올 때와 똑같이: 수량은 0~9999 정수, 현장 추가 단가는 PC 수수료표(휴대폰 단가를 믿지 않음)
+                _sanitize_item_event(con, e["kind"], body)
+                con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps(body, ensure_ascii=False), event_id))
             if e["kind"] == "FIELD_INTAKE" and not one(con, "SELECT 1 AS x FROM request WHERE id=?", (e["request_id"],)):
                 _field_request(con, e["request_id"], body, e["device_id"], e["device_ts"])
             if e["kind"] == "CORRECTION":
@@ -1478,19 +1898,41 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
             if e["kind"] == "CANCEL_REQUEST":
                 code, text, full = _reason(CANCEL_CODES, body.get("code") or "OTHER", body.get("text") or "현장 요청", "취소")
                 _cancel(con, e["request_id"], code, text, f"{full} (현장 요청 · 사무실 확인: {reason.strip()})"[:300])
-                cancelled = True
             if e["kind"] == "REVISIT_APPT":
-                _apply_revisit(con, e["request_id"], json.loads(e["body_json"]))
+                _apply_revisit(con, e["request_id"], body)
             if e["kind"] == "PHOTO_META":
-                b = json.loads(e["body_json"])
-                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id) VALUES (?,?,?,?,?,?)",
-                            (b.get("photo_id"), e["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), e["device_id"]))
-            _refresh_status(con, e["request_id"])
+                _photo_meta(con, e["request_id"], body, e["device_id"])
+            if e["request_id"]:
+                _refresh_status(con, e["request_id"])
         if e["kind"] in ("FIELD_INTAKE", "CORRECTION"):  # 처리한 요청 기록에서는 개인정보를 지운다(원본은 접수·버전 이력에)
             con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps(_strip_request_pii(e["kind"], body), ensure_ascii=False), event_id))
-        audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip(), "kind": e["kind"]})
-    if cancelled:
-        _fin().sync_refunds(con)
+        audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip(), "kind": e["kind"], **({"request": e["request_id"]} if e["request_id"] else {})})
+
+
+def resolve_conflicts_bulk(con, action: str, reason: str, request_id: str = "", import_id: str = "") -> dict:
+    """한 접수(또는 한 가져오기)의 남은 충돌을 한 사유로 한꺼번에 반영·거부. 반영할 수 없는 기록(예: 형식이 틀린 정정 요청)은 건너뛰고 이유를 알려 준다."""
+    if bool(request_id) == bool(import_id):
+        raise UserError("접수 또는 가져오기 하나를 골라 주세요.")
+    if action not in ("APPLY", "REJECT"):
+        raise UserError("반영 또는 거부를 골라 주세요.")
+    if not (reason or "").strip():
+        raise UserError("판단 사유를 적어 주세요.")
+    col = "request_id" if request_id else "import_id"
+    evs = rows(con, f"SELECT event_id, kind FROM result_event WHERE {col}=? AND apply_status='CONFLICT' ORDER BY device_ts, device_seq", (request_id or import_id,))
+    if not evs:
+        raise UserError("처리할 충돌 기록이 없습니다.")
+    done, failed = 0, []
+    with tx(con):
+        for e in evs:
+            try:
+                with tx(con):
+                    resolve_conflict(con, e["event_id"], action, reason)
+                done += 1
+            except UserError as ex:
+                failed.append({"event_id": e["event_id"], "kind": e["kind"], "error": str(ex)})
+        audit(con, "event", request_id or import_id, "RESOLVE_BULK_" + action, {"reason": reason.strip(), "count": done, "failed": len(failed),
+                                                                              "by": "request" if request_id else "import"})
+    return {"resolved": done, "failed": failed}
 
 
 # ------------------------------------------------------------------ 휴대폰(PC 연결 방식)의 현장 접수·정정 요청·취소 요청
@@ -1610,21 +2052,41 @@ def check_field_intake(con, rid: str) -> dict:
 
 
 # ------------------------------------------------------------------ 사진 회수 (보안 매체로 옮긴 사진 묶음 파일)
-def import_photos(con, data: bytes) -> dict:
+def prepare_photos(con, data: bytes) -> dict:
+    """사진 파일 검증·복호·사진마다 해시 계산(시간이 걸리는 부분). 서버는 DB 잠금 밖에서 한다."""
     sha = hashlib.sha256(data).hexdigest()
     prev = one(con, "SELECT summary_json, release_code FROM photo_import WHERE package_sha256=?", (sha,))
     if prev:
-        return {"duplicate_file": True, **json.loads(prev["summary_json"]), "release_code": prev["release_code"]}
+        return {"sha": sha, "duplicate": {"duplicate_file": True, **json.loads(prev["summary_json"]), "release_code": prev["release_code"]}}
     dev_id, head, payload, release = _open_from_device(con, data, TYPE_PHOTOS)
     if payload.get("schema") != "dg.photos/1":
         raise UserError("사진 파일 형식이 아닙니다.")
-    counts = {"recovered": 0, "already": 0, "hash_mismatch": 0, "unexpected": 0}
-    with tx(con):
-        for p in payload.get("photos", []):
+    photos = []
+    for p in payload.get("photos", []):
+        try:
             raw = base64.b64decode(p["data"])
-            if hashlib.sha256(raw).hexdigest() != p.get("sha256"):
+        except (KeyError, TypeError, ValueError):
+            raw = None
+        photos.append({**{k: v for k, v in p.items() if k != "data"}, "raw": raw, "ok": raw is not None and hashlib.sha256(raw).hexdigest() == p.get("sha256")})
+    return {"sha": sha, "dev_id": dev_id, "photos": photos, "release": release}
+
+
+def import_photos(con, data: bytes, prepared: dict | None = None) -> dict:
+    prep = prepared or prepare_photos(con, data)
+    if prep.get("duplicate"):
+        return prep["duplicate"]
+    sha, dev_id, release = prep["sha"], prep["dev_id"], prep["release"]
+    prev = one(con, "SELECT summary_json, release_code FROM photo_import WHERE package_sha256=?", (sha,))
+    if prev:
+        return {"duplicate_file": True, **json.loads(prev["summary_json"]), "release_code": prev["release_code"]}
+    counts = {"recovered": 0, "already": 0, "hash_mismatch": 0, "unexpected": 0}
+    pid = str(uuid.uuid4())
+    with tx(con):
+        for p in prep["photos"]:
+            if not p["ok"]:
                 counts["hash_mismatch"] += 1
                 continue
+            raw = p["raw"]
             cur = one(con, "SELECT sha256, recovery_status FROM photo WHERE photo_id=?", (p["photo_id"],))
             if cur and cur["recovery_status"] == "RECOVERED":
                 counts["already"] += 1
@@ -1638,10 +2100,12 @@ def import_photos(con, data: bytes) -> dict:
                             (p["photo_id"], p.get("request_id"), p.get("phase"), p["sha256"], len(raw), dev_id))
             con.execute("UPDATE photo SET data=?, recovery_status='RECOVERED', recovered_at=? WHERE photo_id=?", (raw, now(), p["photo_id"]))
             counts["recovered"] += 1
-        con.execute("INSERT INTO photo_import VALUES (?,?,?,?,?,?)", (str(uuid.uuid4()), sha, dev_id, now(), json.dumps(counts), release))
+        rc = release if counts["hash_mismatch"] == 0 else None
+        con.execute("INSERT INTO photo_import (id, package_sha256, device_id, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,?)",
+                    (pid, sha, dev_id, now(), json.dumps(counts), rc))
         audit(con, "photo_import", sha[:16], "IMPORT", counts)
     # 해시가 맞지 않은 사진이 있으면 휴대폰에서 지우지 않도록 확인 코드를 주지 않는다
-    return {**counts, "release_code": release if counts["hash_mismatch"] == 0 else None}
+    return {**counts, "release_code": release if counts["hash_mismatch"] == 0 else None, "import_id": pid}
 
 
 def photo_bytes(con, photo_id: str) -> bytes | None:
@@ -1680,12 +2144,22 @@ def _post_close_edits(con, work_date: str) -> list[dict]:
     """마감한 뒤 그날 접수·수납을 고친 기록(변경 이력의 '마감 후 수정' 표시)."""
     out = []
     for a in rows(con, """SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log
-            WHERE entity IN ('request','payment') AND json_extract(detail, '$.after_close')=? ORDER BY id""", (work_date,)):
+            WHERE after_close=? AND entity IN ('request','payment') ORDER BY id""", (work_date,)):
         d = json.loads(a["detail"] or "{}")
         rid = a["entity_id"] if a["entity"] == "request" else d.get("request")
         rq = one(con, "SELECT receipt_no FROM request WHERE id=?", (rid,)) if rid else None
         out.append({"at": a["at"], "actor": a["actor"], "entity": a["entity"], "action": a["action"], "request_id": rid,
                     "receipt_no": rq["receipt_no"] if rq else "", "reason": d.get("reason") or ""})
+    return out
+
+
+def crews_without_result(con, work_date: str) -> list[dict]:
+    """그날 목록을 휴대폰에 보냈는데(전송 묶음 있음) 마지막으로 보낸 뒤 그 휴대폰 결과 파일을 하나도 가져오지 않은 팀(마감 때 경고, 막지 않음)."""
+    out = []
+    for b in rows(con, """SELECT t.device_id, MAX(t.displayed_at) AS sent_at, c.id AS crew_id, c.name AS crew FROM transfer_bundle t
+            JOIN assignment_batch b ON b.id=t.batch_id JOIN crew c ON c.id=b.crew_id WHERE t.work_date=? GROUP BY t.device_id, c.id ORDER BY c.name""", (work_date,)):
+        if not one(con, "SELECT 1 AS x FROM result_import WHERE device_id=? AND imported_at > ? LIMIT 1", (b["device_id"], b["sent_at"])):
+            out.append({"crew_id": b["crew_id"], "crew": b["crew"], "sent_at": b["sent_at"], "work_date": work_date})
     return out
 
 
@@ -1698,9 +2172,12 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     pending_fee, revisit, no_result = [], [], []
     assigned_ids = {r["request_id"] for r in rows(con, """SELECT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
         WHERE b.work_date=? AND b.status='ACTIVE'""", (work_date,))}
+    pre = prefetch(con, [r["id"] for r in reqs], ("items", "events", "links", "payments", "partial"))
+    unit = reduction_round_unit(con)
+    derived = {}
     for r in reqs:
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
-        st = derive(con, r)
+        st = derived[r["id"]] = derive(con, r, pre)
         if st["fee"]["pending_count"] and r["status"] != "CANCELLED":
             pending_fee.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "count": st["fee"]["pending_count"]})
         if r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
@@ -1713,7 +2190,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     for r in reqs:
         if r["status"] == "CANCELLED":
             continue
-        fx = derive(con, r)["field"]
+        fx = derived[r["id"]]["field"]
         bad = [v for v in fx["stickers"].values() if v["result"] in ("MISSING", "MISMATCH")]
         if bad:
             sticker_issues.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "count": len(bad),
@@ -1733,14 +2210,15 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     unpaid = []
     for r in reqs:
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD", "CANCELLED"):
-            ps = payment_status(con, r["id"])
+            ps = payment_core(r, derived[r["id"]]["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
             if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING", "REFUND_NEEDED", "OVERREFUNDED_REVIEW"):
                 unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
                                "levied": ps["levied"], "paid": ps["paid"]})
     if not crew_id:  # 예정일이 없거나 다른 날인 접수라도 이날 취소했고 환불할 돈이 남았으면 함께 본다
         d0 = dt.datetime.fromisoformat(work_date).replace(tzinfo=KST).astimezone(dt.timezone.utc)
         rng = (d0.strftime("%Y-%m-%dT%H:%M:%SZ"), (d0 + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        for r in rows(con, "SELECT * FROM request WHERE status='CANCELLED' AND cancelled_at>=? AND cancelled_at<? AND COALESCE(planned_date,'')!=?", (*rng, work_date)):
+        for r in rows(con, """SELECT * FROM request WHERE status='CANCELLED' AND cancelled_at>=? AND cancelled_at<? AND COALESCE(planned_date,'')!=?
+                AND pay_status='REFUND_NEEDED'""", (*rng, work_date)):
             ps = payment_status(con, r["id"])
             if ps["status"] == "REFUND_NEEDED":
                 unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
@@ -1769,7 +2247,9 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     for c in closes:
         c["carried"] = len(json.loads(c.pop("carried_json") or "[]"))
     cap = area.capacity_settings(con)
+    crews_nr = [c for c in crews_without_result(con, work_date) if not crew_id or c["crew_id"] == crew_id]
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
+            "crews_no_result": crews_nr,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
             "field_intakes": len(field_intakes(con)),
             "payments": unpaid, "unloads": unloads, "sticker_issues": sticker_issues, "fee_refused": fee_refused, "no_evidence": no_evidence,
@@ -1812,7 +2292,8 @@ def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
                                                    json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
         audit(con, "day", work_date, "CLOSE", {"seq": seq, "open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"],
                                                "carried": len(carry), **_secs("close_secs", close_secs)})
-    return {**s, "seq": seq, "carried": carry}
+    warns = [f"{c['crew']}: 목록을 보냈는데 결과 파일을 아직 가져오지 않았습니다." for c in s.get("crews_no_result") or []]
+    return {**s, "seq": seq, "carried": carry, "warnings": warns}
 
 
 def approve_close(con, work_date: str, note: str = "") -> dict:
@@ -1896,16 +2377,22 @@ def _fin():
     return finance
 
 
-def payment_status(con, rid: str) -> dict:
-    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
-    final = derive(con, r)["fee"]["final"]
-    fs = _fin().fee_summary(r, final)
+ROUND_UNITS = (1, 10)  # 감면액 끝수 처리 단위(원): 1 = 원 미만 버림(기본, 이전과 같음), 10 = 10원 미만 버림
+
+
+def reduction_round_unit(con) -> int:
+    u = get_setting(con, "reduction_round_unit", 1)
+    return u if u in ROUND_UNITS else 1
+
+
+def payment_core(r: dict, final, recs: list[dict], partial_adj: int = 0, unit: int = 1) -> dict:
+    """DB 없이 수납 상태 계산(계산 금액 → 감면 → 부과 금액, 납부 기록, 일부 수거 환불 지급액)."""
+    fs = _fin().fee_summary(r, final, unit)
     owed = fs["levied"]
-    recs = rows(con, "SELECT * FROM payment WHERE request_id=? ORDER BY recorded_at", (rid,))
     live = [x for x in recs if not x["void_reason"]]
     paid = sum(x["amount"] for x in live if x["kind"] == "PAY") - sum(x["amount"] for x in live if x["kind"] == "REFUND")
     # 결재를 거쳐 지급한 '일부 수거 차액' 환불은 부과 금액을 그만큼 줄인 것으로 본다(차액을 돌려준 뒤 '부족'으로 남지 않게)
-    adj = (one(con, "SELECT COALESCE(SUM(amount),0) AS n FROM refund_case WHERE request_id=? AND status='PAID' AND cause='PARTIAL'", (rid,)) or {}).get("n") or 0
+    adj = partial_adj or 0
     if owed is not None and adj:
         owed = max(0, owed - adj)
         fs = {**fs, "partial_refund": adj, "levied_after_partial": owed}
@@ -1928,6 +2415,36 @@ def payment_status(con, rid: str) -> dict:
     return {**fs, "paid": paid, "status": status, "records": recs, "levy_no": r.get("levy_no")}
 
 
+def payment_status(con, rid: str, pre: dict | None = None, r: dict | None = None) -> dict:
+    r = r or one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    if pre is None:
+        pre = prefetch(con, [rid], ("items", "events", "links", "payments", "partial"))
+    final = derive(con, r, pre)["fee"]["final"]
+    return payment_core(r, final, pre["payments"].get(rid, []), pre["partial"].get(rid, 0), reduction_round_unit(con))
+
+
+def _date_ok(v: str) -> bool:
+    try:
+        dt.date.fromisoformat(v)
+        return bool(re.fullmatch(r"\d{4}-\d\d-\d\d", v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _won(v, what: str = "금액") -> int:
+    """화면에서 받은 금액(숫자·'12,000'·'12000원') → 정수. 숫자가 아니면 업무 오류."""
+    if isinstance(v, bool):
+        raise UserError(f"{what}을 숫자로 적어 주세요.")
+    if isinstance(v, (int, float)):
+        if isinstance(v, float) and not v.is_integer():
+            raise UserError(f"{what}은 원 단위 정수로 적어 주세요.")
+        return int(v)
+    t = re.sub(r"[,\s]|원$", "", str(v or ""))
+    if not re.fullmatch(r"-?\d{1,12}", t):
+        raise UserError(f"{what}을 숫자로 적어 주세요.")
+    return int(t)
+
+
 def add_payment(con, rid: str, data: dict) -> dict:
     if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (rid,)):
         raise UserError("접수를 찾을 수 없습니다.")
@@ -1936,24 +2453,23 @@ def add_payment(con, rid: str, data: dict) -> dict:
     if flag and not why:
         raise UserError(f"마감한 날({flag['after_close']})의 접수입니다. 수납 기록 사유를 적어 주세요.")
     kind = data.get("kind", "PAY")
-    amount = int(data.get("amount") or 0)
+    amount = _won(data.get("amount") or 0)
     method = data.get("method") or ""
-    paid_on = data.get("paid_on") or today_kst()
+    paid_on = (data.get("paid_on") or today_kst()).strip() if isinstance(data.get("paid_on") or "", str) else ""
     if kind == "REFUND":  # 환불은 결재선(신청 → 다른 사람 결재 → 지급 기록)으로만
         raise UserError("환불은 [환불] 화면에서 신청·결재한 뒤 지급 기록으로 남깁니다. 여기서는 납부만 기록합니다.")
     if kind != "PAY" or amount <= 0:
         raise UserError("금액을 1원 이상으로 적어 주세요.")
     if method not in PAY_METHODS + LEGACY_PAY_METHODS + (REFUND_PAY_METHODS if kind == "REFUND" else ()):
         raise UserError("납부 방법을 골라 주세요.")
-    ref = (data.get("receipt_ref") or "").strip()[:40] or None
-    if not re.fullmatch(r"\d{4}-\d\d-\d\d", paid_on):
+    ref = str(data.get("receipt_ref") or "").strip()[:40] or None
+    if not _date_ok(paid_on):
         raise UserError("날짜 형식이 올바르지 않습니다.")
     pid = str(uuid.uuid4())
     with tx(con):
         con.execute("INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, receipt_ref, source) VALUES (?,?,?,?,?,?,?,?,?,'수기')",
                     (pid, rid, kind, amount, method, paid_on, (data.get("note") or "").strip()[:100], now(), ref))
         audit(con, "payment", pid, kind, {"request": rid, "amount": amount, "method": method, **({"ref": ref} if ref else {}), **({"reason": why[:200]} if why else {}), **flag})
-    _fin().sync_refunds(con)
     return payment_status(con, rid)
 
 
@@ -1966,7 +2482,6 @@ def void_payment(con, pid: str, reason: str) -> dict:
     with tx(con):
         con.execute("UPDATE payment SET void_reason=?, voided_at=? WHERE id=?", (reason.strip(), now(), pid))
         audit(con, "payment", pid, "VOID", {"request": p["request_id"], "reason": reason.strip(), **_after_close(con, p["request_id"])})
-    _fin().sync_refunds(con)
     return payment_status(con, p["request_id"])
 
 
@@ -2099,14 +2614,24 @@ def create_user(con, username: str, display_name: str, role: str, password: str,
     return uid
 
 
-def check_login(con, username: str, password: str) -> dict | None:
+def verify_login(con, username: str, password: str) -> dict | None:
+    """비밀번호 확인만(쓰기 없음 — 서버는 DB 잠금 밖·조회 전용 연결에서 scrypt를 돌린다)."""
     u = one(con, "SELECT * FROM app_user WHERE username=? AND active=1", ((username or "").strip().lower(),))
     if not u:
         _pw_hash(password or "", b"0" * 16)  # 아이디 유무에 따른 응답 시간 차이를 줄인다
         return None
     if not _hmac.compare_digest(_pw_hash(password or "", bytes.fromhex(u["pw_salt"])), u["pw_hash"]):
         return None
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
+            "crew_id": u["crew_id"]}
+
+
+def check_login(con, username: str, password: str) -> dict | None:
+    u = verify_login(con, username, password)
+    if not u:
+        return None
     con.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (now(), u["id"]))
+    u = one(con, "SELECT * FROM app_user WHERE id=?", (u["id"],))
     return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
             "crew_id": u["crew_id"]}
 
@@ -2355,7 +2880,6 @@ def cancel_requests(con, ids, code: str | None = None, text: str = "") -> dict:
             res["field_notice_needed"] += r["field_notice_needed"]
             if r["refund_needed"]:
                 res["refund_needed"].append(one(con, "SELECT receipt_no FROM request WHERE id=?", (rid,))["receipt_no"])
-    _fin().sync_refunds(con)
     return res
 
 
@@ -2389,19 +2913,34 @@ PAY_LABEL = {"NONE": "해당 없음", "AMOUNT_PENDING": "금액 확인 대기", 
              "PAID": "납부 확인", "OVERPAID_REVIEW": "과납 확인 필요", "REFUND_NEEDED": "환불 필요", "OVERREFUNDED_REVIEW": "환불 초과 확인 필요", "EXEMPT": "전액 감면"}
 
 
-def _export_row(con, r: dict) -> list:
-    st = derive(con, r)
-    ps = payment_status(con, r["id"])
-    ver = one(con, "SELECT fee_version_id FROM request_item WHERE request_id=? AND fee_version_id IS NOT NULL LIMIT 1", (r["id"],))
-    a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
-        WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
+def _export_rows(con, reqs: list[dict]):
+    """CSV 행(묶어서 미리 읽음 — 접수마다 질의하지 않음). 만들면서 하나씩 돌려준다."""
+    unit = reduction_round_unit(con)
+    for ch in _chunks([r for r in reqs], 500):
+        ids = [r["id"] for r in ch]
+        pre = prefetch(con, ids, ("items", "events", "links", "payments", "partial"))
+        crew_of = _last_crew_names(con, ids)
+        ver = {}
+        for x in rows(con, f"SELECT request_id, fee_version_id FROM request_item WHERE request_id IN ({','.join('?' * len(ids))}) AND fee_version_id IS NOT NULL", ids):
+            ver.setdefault(x["request_id"], x["fee_version_id"])
+        for r in ch:
+            st = derive(con, r, pre)
+            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            yield r, _export_line(r, st, ps, ver.get(r["id"]), crew_of.get(r["id"]))
+
+
+def _export_line(r: dict, st: dict, ps: dict, ver: str | None, crew: str | None) -> list:
     blank = lambda v: "" if v is None else v
     return [r["receipt_no"], r.get("levy_no") or "", _kst_date(r["received_at"]), r["planned_date"], _kst_date(r.get("completed_at")) or "", r["dong"] or "", r["channel"] or "",
             STATUS_LABEL.get(r["status"], r["status"]), r["status"],
             "; ".join(f'{l["name"]} {l["spec"]} {l["qty_confirmed"]}{l["unit_label"]}' for l in st["lines"]),
             sum(l["qty_collected"] for l in st["lines"]), sum(l["remaining"] for l in st["lines"]),
             blank(ps["calculated"]), ps.get("reduction_label") or "", ps["reduction_rate"] or "", blank(ps["reduction"]) if ps["reduction_rate"] else "", blank(ps["levied"]),
-            ps["paid"], PAY_LABEL.get(ps["status"], ps["status"]), ps["status"], ver["fee_version_id"] if ver else "", a["name"] if a else ""]
+            ps["paid"], PAY_LABEL.get(ps["status"], ps["status"]), ps["status"], ver or "", crew or ""]
+
+
+def _export_row(con, r: dict) -> list:
+    return next(_export_rows(con, [r]))[1]
 
 
 def export_requests(con, ids, include_pii: bool = False) -> bytes:
@@ -2414,10 +2953,13 @@ def export_requests(con, ids, include_pii: bool = False) -> bytes:
     w = safe_csv_writer(buf)
     w.writerow(EXPORT_COLS + (["이름", "연락처", "배출 주소", "상세 위치"] if include_pii else []))
     with tx(con):
-        for rid in ids:
-            r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
-            w.writerow(_export_row(con, r) + ([r["name"], r["phone"], r["address"], r["spot_note"]] if include_pii else []))
-            audit(con, "request", rid, "EXPORT", {"pii": bool(include_pii)})
+        reqs = []
+        for ch in _chunks(ids):
+            got = {r["id"]: r for r in rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(ch))})", ch)}
+            reqs += [got[i] for i in ch if i in got]
+        for r, line in _export_rows(con, reqs):
+            w.writerow(line + ([r["name"], r["phone"], r["address"], r["spot_note"]] if include_pii else []))
+            audit(con, "request", r["id"], "EXPORT", {"pii": bool(include_pii)})
         if include_pii:
             from dgpc import privacy as _pv
             _pv.record_access(con, "EXPORT", "", len(ids), "고른 접수 CSV(개인정보 포함)")
@@ -2571,16 +3113,42 @@ def purge_candidates(con, today: str | None = None) -> list[dict]:
         ORDER BY p.recovered_at""", (cutoff,))
 
 
-def purge_photos(con, today: str | None = None) -> dict:
-    c = purge_candidates(con, today)
-    if not c:
-        return {"count": 0, "bytes": 0}
-    with tx(con):
-        t = now()
-        for p in c:
-            con.execute("UPDATE photo SET data=NULL, purged_at=? WHERE photo_id=?", (t, p["photo_id"]))
-        audit(con, "photo", "retention", "PURGE", {"count": len(c), "bytes": sum(p["bytes"] or 0 for p in c), "retention_days": settings(con)["photo_retention_days"]})
-    return {"count": len(c), "bytes": sum(p["bytes"] or 0 for p in c)}
+def incremental_vacuum(con, pages: int = 20000):
+    """파기·사진 정리로 빈 쪽을 파일 크기에서 조금씩 돌려준다(auto_vacuum=INCREMENTAL인 DB만; 아니면 아무 일 없음). 트랜잭션 밖에서."""
+    if con.in_transaction or is_readonly(con):
+        return
+    try:
+        if con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2:
+            con.execute(f"PRAGMA incremental_vacuum({int(pages)})")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def purge_photos(con, today: str | None = None, lock=None, batch: int = 500, trigger: str = "MANUAL", progress=None) -> dict:
+    """보관 기간 지난 사진 바이트 지우기. 500장씩 한 트랜잭션, 묶음 사이에 lock(서버 DB 잠금)을 놓는다."""
+    from contextlib import nullcontext
+    guard = lock if lock is not None else nullcontext()
+    with guard:
+        c = purge_candidates(con, today)
+        days = settings(con)["photo_retention_days"]
+    n = size = 0
+    for i in range(0, len(c), batch):
+        ch = c[i:i + batch]
+        with guard:
+            with tx(con):
+                t = now()
+                for p in ch:
+                    con.execute("UPDATE photo SET data=NULL, purged_at=? WHERE photo_id=? AND purged_at IS NULL", (t, p["photo_id"]))
+                audit(con, "photo", "retention", "PURGE", {"count": len(ch), "bytes": sum(p["bytes"] or 0 for p in ch), "retention_days": days, "trigger": trigger})
+        n += len(ch); size += sum(p["bytes"] or 0 for p in ch)
+        if progress:
+            progress(n, len(c))
+    with guard:
+        with tx(con):
+            set_setting(con, "last_photo_purge_run", {"at": now(), "count": n, "trigger": trigger})
+        if n:
+            incremental_vacuum(con)
+    return {"count": n, "bytes": size}
 
 
 # ------------------------------------------------------------------ 백업
@@ -2597,7 +3165,8 @@ def make_backup(con, passphrase: str) -> dict:
         _store.backup_to(con, dest, passphrase)
     except ValueError as e:
         raise UserError(str(e))
-    h = hashlib.sha256(dest.read_bytes()).hexdigest()
+    from dgpc import backup as _bk
+    h = _bk._sha(dest)  # 큰 백업도 메모리에 다 올리지 않고 조각으로 해시
     with tx(con):
         audit(con, "backup", dest.name, "BACKUP", {"file": dest.name, "bytes": dest.stat().st_size, "sha256": h[:16]})
         set_setting(con, "last_backup_at", now())
@@ -2613,12 +3182,25 @@ def list_backups(con) -> list[dict]:
              "at": dt.datetime.fromtimestamp(f.stat().st_mtime, KST).strftime("%Y-%m-%d %H:%M")} for f in files]
 
 
+BACKUP_NAME_RE = re.compile(r"^donggu-(?:backup|auto)-\d{8}-\d{6}(?:-\d{1,3})?\.(?:dgbak|dgabk)$")
+
+
+def backup_path(con, name: str, ext: str) -> Path:
+    """백업 파일 이름 검사(정한 이름 형식만) + 실제 경로가 백업 폴더 바로 안인지 확인."""
+    if not isinstance(name, str) or not BACKUP_NAME_RE.fullmatch(name) or not name.endswith(ext):
+        raise UserError("백업 파일 이름이 올바르지 않습니다.")
+    d = backup_dir(con).resolve()
+    p = (d / name).resolve()
+    if p.parent != d:
+        raise UserError("백업 파일 이름이 올바르지 않습니다.")
+    return p
+
+
 def verify_backup(con, name: str, passphrase: str) -> dict:
     from dgpc import store as _store
-    if "/" in name or "\\" in name or not name.endswith(".dgbak"):
-        raise UserError("백업 파일 이름이 올바르지 않습니다.")
+    path = backup_path(con, name, ".dgbak")
     try:
-        bcon, n = _store.open_backup(backup_dir(con) / name, passphrase)
+        bcon, n = _store.open_backup(path, passphrase)
     except ValueError as e:
         raise UserError(str(e))
     bcon.close()
@@ -2740,12 +3322,17 @@ def approve_fee_revision(con, rev_id: str, approve: bool = True, reason: str = "
 
 
 # ------------------------------------------------------------------ 로컬 주소 → 좌표
-def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None = None, preview: bool = False) -> dict:
+def parse_addr_points(raw: bytes, region: str = "", columns: dict | None = None) -> dict:
+    """주소 자료 파일 읽기(DB 없음 — 서버는 잠금 밖에서)."""
     from dgpc import geo
     try:
-        res = geo.read_points(raw, columns, region)
+        return geo.read_points(raw, columns, region)
     except ValueError as e:
         raise UserError(str(e))
+
+
+def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None = None, preview: bool = False, parsed: dict | None = None) -> dict:
+    res = parsed or parse_addr_points(raw, region, columns)
     pts = res["points"]
     if not pts:
         raise UserError("가져올 주소 좌표가 없습니다. 지역 이름(시군구) 거르기나 파일 형식을 확인하세요.")
@@ -2883,31 +3470,68 @@ def _basis_date(r: dict, basis: str) -> str | None:
     return r["planned_date"]
 
 
-def stats(con, start: str, end: str, basis: str = "planned") -> dict:
-    """기간 집계(기준: 수거 예정일·접수일·완료일). 이름·연락처·주소는 쓰지 않는다."""
+def _kst_range(start: str, end: str) -> tuple[str, str]:
+    """한국시간 날짜 start~end(포함) → UTC 시각 [a, b)."""
+    a = dt.datetime.fromisoformat(start).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+    b = (dt.datetime.fromisoformat(end) + dt.timedelta(days=1)).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+    return a.strftime("%Y-%m-%dT%H:%M:%SZ"), b.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _basis_rows(con, start: str, end: str, basis: str, cols: str = "*") -> list[dict]:
+    """집계 기준 날짜가 기간 안인 접수(SQL 범위로, 색인 사용). 결과는 _basis_date로 한 번 더 확인한다."""
+    if basis == "received":
+        a, b = _kst_range(start, end)
+        out = rows(con, f"SELECT {cols} FROM request WHERE received_at >= ? AND received_at < ?", (a, b))
+    elif basis == "completed":
+        a, b = _kst_range(start, end)
+        out = rows(con, f"""SELECT {cols} FROM request WHERE (status IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD') AND completed_at >= ? AND completed_at < ?)
+            OR (status='CANCELLED' AND cancelled_at >= ? AND cancelled_at < ?)""", (a, b, a, b))
+    else:
+        out = rows(con, f"SELECT {cols} FROM request WHERE planned_date BETWEEN ? AND ?", (start, end))
+    keep = []
+    for r in out:
+        bd = _basis_date(r, basis)
+        if bd and start <= bd <= end:
+            r["_bd"] = bd
+            keep.append(r)
+    return keep
+
+
+def _last_crew_names(con, ids) -> dict:
+    """접수별 마지막(가장 최근 배정) 팀 이름 — 묶어서 한 번에."""
+    out = {}
+    for ch in _chunks(ids):
+        for r in rows(con, f"""SELECT s.request_id, c.name, b.created_at FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
+                WHERE s.request_id IN ({','.join('?' * len(ch))}) ORDER BY b.created_at""", ch):
+            out[r["request_id"]] = r["name"]
+    return out
+
+
+def _check_period(start: str, end: str, basis: str = "planned"):
     for d in (start, end):
-        if not re.fullmatch(r"\d{4}-\d\d-\d\d", d or ""):
+        if not _date_ok(d or ""):
             raise UserError("기간을 날짜로 골라 주세요.")
     if start > end:
         raise UserError("시작일이 끝일보다 늦습니다.")
     if basis not in STATS_BASIS:
         raise UserError("집계 기준을 골라 주세요.")
+
+
+def stats(con, start: str, end: str, basis: str = "planned") -> dict:
+    """기간 집계(기준: 수거 예정일·접수일·완료일). 이름·연락처·주소는 쓰지 않는다. 기간은 SQL 범위로 고르고 품목·기록은 묶어서 읽는다."""
+    _check_period(start, end, basis)
     fin = _fin()
-    allr = rows(con, "SELECT * FROM request")
-    reqs = []
-    for r in allr:
-        bd = _basis_date(r, basis)
-        if bd and start <= bd <= end:
-            r["_bd"] = bd
-            reqs.append(r)
+    reqs = _basis_rows(con, start, end, basis)
+    live_ids = [r["id"] for r in reqs if r["status"] != "CANCELLED"]
+    pre = prefetch(con, live_ids, ("items", "events", "links", "payments", "partial"))
+    crew_of = _last_crew_names(con, live_ids)
+    unit = reduction_round_unit(con)
     by_day: dict[str, dict] = {}
     def day(d):
         return by_day.setdefault(d, {"date": d, "received": 0, "planned": 0, "done": 0, "partial": 0, "not_collected": 0, "cancelled": 0,
                                      "calculated": 0, "levied": 0, "paid": 0, "unload_m3": 0.0, "unload_kg": 0.0})
-    for r in allr:
-        d = _kst_date(r["received_at"])
-        if d and start <= d <= end:
-            day(d)["received"] += 1
+    for r in _basis_rows(con, start, end, "received", "id, received_at, status, planned_date, completed_at, cancelled_at"):
+        day(r["_bd"])["received"] += 1
     totals = {"requests": len(reqs), "by_status": {}, "calculated": 0, "reduction": 0, "levied": 0, "paid": 0, "amount_pending": 0, "unpaid": 0,
               "field_added_lines": 0, "lead_days_avg": None, "reduction_count": 0}
     items: dict[str, dict] = {}
@@ -2936,9 +3560,9 @@ def stats(con, start: str, end: str, basis: str = "planned") -> dict:
             dd[key] += 1
         if r["status"] == "CANCELLED":
             continue
-        st = derive(con, r)
+        st = derive(con, r, pre)
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
-            ps = payment_status(con, r["id"])
+            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
             if ps["calculated"] is None:
                 totals["amount_pending"] += 1
             else:
@@ -2967,8 +3591,7 @@ def stats(con, start: str, end: str, basis: str = "planned") -> dict:
         rd_ = _kst_date(r["received_at"])
         if rd_ and r["status"] == "DONE" and r["planned_date"]:
             leads.append((dt.date.fromisoformat(r["planned_date"]) - dt.date.fromisoformat(rd_)).days)
-        a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
-            WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
+        a = {"name": crew_of[r["id"]]} if r["id"] in crew_of else None
         if a:
             c = crews.setdefault(a["name"], {"crew": a["name"], "assigned": 0, "done": 0, "partial_or_not": 0})
             c["assigned"] += 1
@@ -3017,12 +3640,10 @@ def stats_csv(con, start: str, end: str, kind: str = "requests", basis: str = "p
         for x in s[kind]:
             w.writerow(spec[1](x))
     else:
-        stats(con, start, end, basis)  # 기간 검사
+        _check_period(start, end, basis)
         w.writerow(EXPORT_COLS)
-        for r in sorted(rows(con, "SELECT * FROM request ORDER BY planned_date, receipt_no"), key=lambda r: (_basis_date(r, basis) or "", r["receipt_no"])):
-            bd = _basis_date(r, basis)
-            if bd and start <= bd <= end:
-                w.writerow(_export_row(con, r))
+        for _r, line in _export_rows(con, sorted(_basis_rows(con, start, end, basis), key=lambda r: (r["_bd"], r["receipt_no"]))):
+            w.writerow(line)
     audit(con, "report", kind, "EXPORT", {"start": start, "end": end, "basis": basis})
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
@@ -3058,20 +3679,93 @@ def open_solo_backup(raw: bytes, password: str) -> dict:
     return obj
 
 
-def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, preview: bool = False) -> dict:
-    """단독 방식 휴대폰의 접수·현장 기록·사진을 PC 원본으로 옮긴다. 같은 접수(같은 ID)는 다시 들어오지 않는다."""
-    obj = open_solo_backup(raw, password)
+def _solo_receipt(con, rec: str) -> str:
+    """단독 휴대폰 접수번호가 PC에 이미 있으면 S 표시(…-S0001), 그것도 있으면 …-S0001-2, -3 … 빈 번호까지."""
+    exists = lambda x: one(con, "SELECT 1 AS x FROM request WHERE receipt_no=?", (x,))
+    if not exists(rec):
+        return rec
+    base = re.sub(r"-(\d+)$", r"-S\1", rec) if re.search(r"-\d+$", rec) else rec + "-S"
+    cand, n = base, 2
+    while exists(cand):
+        cand, n = f"{base}-{n}", n + 1
+    return cand
+
+
+def _solo_items(con, r: dict) -> list[dict]:
+    """단독 휴대폰 품목 → PC 수수료표로 다시 계산(build_items). 표에 없는 품목은 이름으로 '금액 확인 대기'. 수량이 틀리면 UserError."""
+    fr = fee_rows(con)
+    src = r.get("items") or []
+    if not isinstance(src, list):
+        raise UserError("품목 형식이 올바르지 않습니다.")
+    out = []
+    for it in src:
+        if not isinstance(it, dict):
+            raise UserError("품목 형식이 올바르지 않습니다.")
+        q = it.get("qty")
+        if isinstance(q, bool) or not re.fullmatch(r"\d{1,4}", str(q if q is not None else "").strip()) or int(str(q).strip()) <= 0:
+            raise UserError(f"품목 '{str(it.get('name') or '')[:20]}' 수량이 1~9999 정수가 아닙니다({str(q)[:10]}).")
+        x = {"line_id": str(it.get("line_id") or "")[:40] or None, "qty": int(str(q).strip()), "name": str(it.get("name") or "")[:60],
+             "spec": str(it.get("spec") or "")[:60], "unit": str(it.get("unit") or "EA")[:10], "unit_label": str(it.get("unit_label") or "개")[:10]}
+        if it.get("fee_rate_id") in fr:
+            x["fee_rate_id"] = it["fee_rate_id"]
+        elif not x["name"]:
+            raise UserError("품목 이름이 없습니다.")
+        out.append(x)
+    return build_items(out, con) if out else []
+
+
+def _solo_check(con, r) -> tuple[dict | None, str | None]:
+    """단독 접수 한 건 검사 → (넣을 자료, 오류). 오류가 있으면 그 건만 건너뛴다(미리보기에 행별로 표시)."""
+    if not isinstance(r, dict):
+        return None, "접수 형식이 올바르지 않습니다."
+    if not isinstance(r.get("request_id"), str) or not re.fullmatch(r"[0-9A-Za-z-]{8,64}", r["request_id"]):
+        return None, "접수 ID가 없거나 형식이 틀립니다."
+    if not isinstance(r.get("receipt_no"), str) or not r["receipt_no"].strip():
+        return None, "접수번호가 없습니다."
+    purged = bool(r.get("pii_purged")) or not (str(r.get("name") or "").strip() and norm_phone(str(r.get("phone") or "")) and str(r.get("address") or "").strip())
+    rr = {**r, "name": "(정리됨)", "phone": "00000000000", "address": "(정리됨)", "spot_note": "", "memo": "", "lat": None, "lon": None} if purged else r
+    try:
+        items = _solo_items(con, r)
+        d = validate({**{k: (str(rr.get(k)) if rr.get(k) is not None else None) for k in ("name", "phone", "address", "spot_note", "memo", "planned_date", "appt_start", "appt_end")},
+                      "lat": _num(rr.get("lat")), "lon": _num(rr.get("lon")), "items": items or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
+    except UserError as e:
+        return None, str(e)
+    if not items:
+        items = build_items([{"name": "(품목 없음)", "qty": 1}], con)
+    return {"r": r, "rr": rr, "d": d, "items": items, "purged": purged}, None
+
+
+def prepare_solo(raw: bytes, password: str) -> dict:
+    """단독 백업 열기(PBKDF2 60만 회 — 오래 걸림). 서버는 DB 잠금 밖에서 한다."""
+    return open_solo_backup(raw, password)
+
+
+def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, preview: bool = False, opened: dict | None = None) -> dict:
+    """단독 방식 휴대폰의 접수·현장 기록·사진을 PC 원본으로 옮긴다. 같은 접수(같은 ID)는 다시 들어오지 않는다.
+    접수마다 검사해서 틀린 건(수량 0·접수번호 없음 등)은 미리보기에 행별 오류로 보여 주고 옮길 때 건너뛴다."""
+    obj = opened or open_solo_backup(raw, password)
     state = obj.get("state") or {}
     if state.get("mode") != "SOLO":
         raise UserError("휴대폰 단독 방식의 백업이 아닙니다.")
     reqs = state.get("requests") or []
-    events = state.get("events") or []
+    events = [e for e in (state.get("events") or []) if isinstance(e, dict) and e.get("event_id")]
     photos = obj.get("photos") or {}
-    new = [r for r in reqs if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (r["request_id"],))]
+    if not isinstance(reqs, list) or not isinstance(photos, dict):
+        raise UserError("단독 백업 형식이 올바르지 않습니다.")
+    checked, errors = [], []
+    for r in reqs:
+        c, err = _solo_check(con, r)
+        if err:
+            errors.append({"request_id": str((r or {}).get("request_id") or "")[:8] if isinstance(r, dict) else "", "receipt_no": str((r or {}).get("receipt_no") or "") if isinstance(r, dict) else "",
+                           "error": err})
+        else:
+            checked.append(c)
+    new = [c for c in checked if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (c["r"]["request_id"],))]
     # 단독 휴대폰마다 기기 표시를 따로(순번이 1부터라 여러 대를 가져오면 겹친다): 가장 이른 기록 ID로 만든 고정 값
-    first = min(events, key=lambda e: e.get("seq") or 0)["event_id"] if events else ",".join(sorted(r["request_id"] for r in reqs))
+    first = min(events, key=lambda e: e.get("seq") if isinstance(e.get("seq"), int) else 0)["event_id"] if events else \
+        ",".join(sorted(str(r.get("request_id")) for r in reqs if isinstance(r, dict)))
     solo_dev = "SOLO:" + hashlib.sha256(str(first).encode()).hexdigest()[:12]
-    info = {"requests": len(reqs), "new": len(new), "already": len(reqs) - len(new), "events": len(events),
+    info = {"requests": len(reqs), "new": len(new), "already": len(checked) - len(new), "invalid": len(errors), "errors": errors, "events": len(events),
             "photos": len(photos), "unloads": sum(1 for e in events if e.get("kind") == "UNLOAD"), "created_at": obj.get("created_at")}
     if preview:
         return info
@@ -3081,92 +3775,100 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
     if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):
         return {**info, "duplicate_file": True}
     imp = str(uuid.uuid4())
-    newids = {r["request_id"] for r in new}
+    newids = {c["r"]["request_id"] for c in new}
     line_map: dict[tuple[str, str], str] = {}
-    counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0}
+    counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0, "renamed": 0}
+    from dgpc import store as _store
     with tx(con):
-        con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,NULL)", (imp, "USB", "SOLO", sha, now()))
-        for r in new:
-            # 휴대폰에서 보관 기간이 지나 개인정보를 지운 접수(pii_purged): 이름·연락처·주소가 비어 있어도 가명으로 옮긴다
-            purged = bool(r.get("pii_purged")) or not ((r.get("name") or "").strip() and norm_phone(r.get("phone")) and (r.get("address") or "").strip())
-            rr = {**r, "name": "(정리됨)", "phone": "00000000000", "address": "(정리됨)", "spot_note": "", "memo": "", "lat": None, "lon": None} if purged else r
-            d = validate({**rr, "items": r.get("items") or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
-            dong_s = (r.get("dong") or "").strip()[:20] or None
-            rec = r["receipt_no"]
-            if one(con, "SELECT 1 AS x FROM request WHERE receipt_no=?", (rec,)):
-                rec = re.sub(r"-(\d+)$", r"-S\1", rec)  # PC 접수번호와 겹치면 단독 표시(S)
-            from dgpc import store as _store
+        con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,NULL)",
+                    (imp, "USB", "SOLO", sha, now()))
+        for c in new:
+            r, d, purged = c["r"], c["d"], c["purged"]
+            dong_s = str(r.get("dong") or "").strip()[:20] or None
+            rec = _solo_receipt(con, r["receipt_no"].strip()[:40])
+            counts["renamed"] += rec != r["receipt_no"].strip()[:40]
             dcode = (one(con, "SELECT code FROM dong WHERE name=?", (dong_s,)) or {}).get("code") if dong_s else None
+            rv = r.get("req_ver")
             con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
                 planned_date, appt_start, appt_end, must_today, urgent, priority, status, cancel_reason, received_at, updated_at, dong, levy_no, pii_purged_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?)""",
-                        (r["request_id"], rec, int(r.get("req_ver") or 1), d["name"], d["phone"], d["address"], d["spot_note"], d["memo"],
-                         rr.get("lat"), rr.get("lon"), ({"ADDR": "ADDR", "GPS": "FIELD"}.get(r.get("geo_source"), "MANUAL")) if rr.get("lat") is not None else None, d["planned_date"] or None, None, None,
-                         "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", None if purged else r.get("cancel_reason"),
-                         r.get("received_at") or now(), r.get("updated_at") or now(), dong_s,
-                         _store.next_levy_no(con, _store.levy_year(r.get("received_at")), dcode), (r.get("pii_purged") if isinstance(r.get("pii_purged"), str) else now()) if purged else None))
-            for it in r.get("items") or []:
-                # 품목 행 ID는 PC 전체에서 하나여야 한다. 휴대폰 단독 자료에서 이미 쓰인 ID(다른 접수에 같은 행 ID가 들어간 경우 등)는
-                # 새 ID로 바꾸고, 그 접수의 현장 기록·사진이 가리키는 행 ID도 함께 바꾼다.
+                        (r["request_id"], rec, rv if isinstance(rv, int) and rv > 0 else 1, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"],
+                         d["lat"], d["lon"], ({"ADDR": "ADDR", "GPS": "FIELD"}.get(r.get("geo_source"), "MANUAL")) if d["lat"] is not None else None,
+                         d["planned_date"] or None, None, None,
+                         "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", None if purged else (str(r.get("cancel_reason"))[:200] if r.get("cancel_reason") else None),
+                         _sane_ts(r.get("received_at")) or now(), _sane_ts(r.get("updated_at")) or now(), dong_s,
+                         _store.next_levy_no(con, _store.levy_year(r.get("received_at") if isinstance(r.get("received_at"), str) else None), dcode),
+                         (r.get("pii_purged") if isinstance(r.get("pii_purged"), str) else now()) if purged else None))
+            for it in c["items"]:
+                # 품목 행 ID는 PC 전체에서 하나여야 한다. 이미 쓰인 ID는 새 ID로 바꾸고, 그 접수의 현장 기록·사진이 가리키는 행 ID도 함께 바꾼다.
                 lid = it["line_id"]
                 if one(con, "SELECT 1 AS x FROM request_item WHERE line_id=?", (lid,)):
-                    line_map[(r["request_id"], lid)] = lid = str(uuid.uuid4())
+                    line_map[(r["request_id"], lid)] = it["line_id"] = str(uuid.uuid4())
                     counts["lines_renumbered"] = counts.get("lines_renumbered", 0) + 1
-                con.execute("""INSERT INTO request_item (line_id, request_id, fee_rate_id, fee_version_id, name, spec, unit, unit_label, qty,
-                    unit_price, amount, price_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (lid, r["request_id"], it.get("fee_rate_id"), it.get("fee_version_id") or (FEE_TABLE["version_id"] if it.get("fee_rate_id") else None),
-                             it["name"], it.get("spec") or "", it.get("unit") or "EA", it.get("unit_label") or "개", int(it["qty"]),
-                             it.get("unit_price"), it.get("amount"), it.get("price_status") or "PENDING"))
+                _insert_item(con, r["request_id"], it)
             for v in r.get("versions") or []:
+                if not isinstance(v, dict):
+                    continue
                 snap = v.get("snapshot") or {}
                 if purged and isinstance(snap, dict):
                     snap = {k: x for k, x in snap.items() if k not in ("name", "phone", "address", "spot_note", "memo", "lat", "lon")}
+                vv = v.get("req_ver")
                 con.execute("INSERT OR IGNORE INTO request_version VALUES (?,?,?,?,?)",
-                            (r["request_id"], int(v.get("req_ver") or 1), json.dumps(snap, ensure_ascii=False), v.get("reason") or "휴대폰 단독 수정", v.get("at") or now()))
+                            (r["request_id"], vv if isinstance(vv, int) else 1, json.dumps(snap, ensure_ascii=False), str(v.get("reason") or "휴대폰 단독 수정")[:200],
+                             _sane_ts(v.get("at")) or now()))
             counts["requests"] += 1
         for e in events:
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (e["event_id"],)):
                 counts["skipped"] += 1
                 continue
+            body = e.get("body") if isinstance(e.get("body"), dict) else {}
+            seq = e.get("seq") if isinstance(e.get("seq"), int) else 0
             if e.get("kind") == "UNLOAD":
-                b = e.get("body") or {}
-                ok_ = bool(crew_id) and (b.get("volume_m3") or b.get("weight_kg"))
+                ok_ = bool(crew_id) and (_num(body.get("volume_m3")) or _num(body.get("weight_kg")))
                 con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                     body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (e["event_id"], imp, solo_dev, e.get("seq") or 0, "", 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
+                            (e["event_id"], imp, solo_dev, seq, "", 0, None, "UNLOAD", json.dumps(body, ensure_ascii=False),
                              "APPLIED" if ok_ else "REJECTED", None if ok_ else "수거팀을 고르지 않아 하차 기록을 붙일 곳이 없음", e.get("ts")))
                 if ok_:
                     con.execute("""INSERT OR IGNORE INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at)
-                        VALUES (?,?,?,?,?,?,?,?,?)""", (e["event_id"], crew_id, b.get("work_date") or today_kst(), (b.get("at_time") or "")[:5], (b.get("place") or "반입지")[:60],
-                                                         b.get("volume_m3"), b.get("weight_kg"), "휴대폰 단독 기록", now()))
+                        VALUES (?,?,?,?,?,?,?,?,?)""", (e["event_id"], crew_id, body.get("work_date") if _date_ok(str(body.get("work_date") or "")) else today_kst(),
+                                                         str(body.get("at_time") or "")[:5], str(body.get("place") or "반입지")[:60],
+                                                         _num(body.get("volume_m3")) or None, _num(body.get("weight_kg")) or None, "휴대폰 단독 기록", now()))
                     counts["unloads_applied"] += 1
                 continue
             if e.get("request_id") not in newids:  # 이미 PC에 있던 접수의 기록은 덮어쓰지 않음
                 counts["skipped"] += 1
                 continue
-            if isinstance(e.get("body"), dict) and (e["request_id"], e["body"].get("line_id")) in line_map:
-                e = {**e, "body": {**e["body"], "line_id": line_map[(e["request_id"], e["body"]["line_id"])]}}
+            if (e["request_id"], body.get("line_id")) in line_map:
+                body = {**body, "line_id": line_map[(e["request_id"], body["line_id"])]}
+            kind = str(e.get("kind") or "?")[:40]
+            if kind in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 휴대폰 단가·수량을 그대로 믿지 않음(PC 수수료표, 0~9999)
+                body = dict(body)
+                _sanitize_item_event(con, kind, body)
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (e["event_id"], imp, solo_dev, e.get("seq") or 0, e["request_id"], 0, e.get("base_req_ver"), e["kind"],
-                         json.dumps(e.get("body") or {}, ensure_ascii=False), "APPLIED", None, e.get("ts")))
+                        (e["event_id"], imp, solo_dev, seq, e["request_id"], 0, e.get("base_req_ver") if isinstance(e.get("base_req_ver"), int) else None, kind,
+                         json.dumps(body, ensure_ascii=False), "APPLIED", None, e.get("ts")))
             counts["events"] += 1
-            if e["kind"] == "PHOTO_META":
-                b = e.get("body") or {}
-                data = base64.b64decode(photos[b["photo_id"]]) if b.get("photo_id") in photos else None
-                good = data is not None and hashlib.sha256(data).hexdigest() == b.get("sha256")
+            if kind == "PHOTO_META":
+                data = None
+                if body.get("photo_id") in photos:
+                    try:
+                        data = base64.b64decode(photos[body["photo_id"]])
+                    except (TypeError, ValueError):
+                        data = None
+                good = data is not None and hashlib.sha256(data).hexdigest() == body.get("sha256")
                 con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, data, recovery_status, recovered_at, line_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (b.get("photo_id"), e["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), "SOLO", data if good else None,
-                             "RECOVERED" if good else "EXPECTED", now() if good else None, b.get("line_id")))
+                            (body.get("photo_id"), e["request_id"], body.get("phase"), body.get("sha256"), body.get("bytes"), "SOLO", data if good else None,
+                             "RECOVERED" if good else "EXPECTED", now() if good else None, body.get("line_id")))
                 counts["photos_recovered"] += good
-            elif e["kind"] == "REVISIT_APPT":
-                _apply_revisit(con, e["request_id"], e.get("body") or {})
+            elif kind == "REVISIT_APPT":
+                _apply_revisit(con, e["request_id"], body)
         for rid in newids:
             _refresh_status(con, rid)
-        con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts}), imp))
-        audit(con, "import", imp, "SOLO", counts)
+        con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts, "invalid": len(errors)}), imp))
+        audit(con, "import", imp, "SOLO", {**counts, "invalid": len(errors)})
     return {**info, **counts}
-
 
 
 # ------------------------------------------------------------------ 유사 품목 적용 (표에 없는 품목의 단가를 근거와 함께 확정)
@@ -3352,13 +4054,13 @@ def pilot_report(con, start: str | None = None, end: str | None = None, crew_id:
     def in_scope(rid):
         return scope is None or rid in scope
     today = today_kst()
-    reqs = [r for r in rows(con, "SELECT id, status, received_at, completed_at, planned_date FROM request WHERE status!='CANCELLED'")
-            if in_scope(r["id"]) and start <= (_kst_date(r["received_at"]) or "") <= end]
+    reqs = [r for r in _basis_rows(con, start, end, "received", "id, status, received_at, completed_at, cancelled_at, planned_date, fee_final")
+            if r["status"] != "CANCELLED" and in_scope(r["id"])]
     n = len(reqs)
     ids = {r["id"] for r in reqs}
     # 누락: 마감 때 '미배정·결과 없음·최종 결과 없음'으로 이월된 건 + 예정일이 지났는데 아직 결과가 없는 건(중복 없이)
     missed = set()
-    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CARRY'"):
+    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CARRY' AND at >= ?", (_kst_range(start, start)[0],)):
         dj = json.loads(a["detail"] or "{}")
         if a["entity_id"] in ids and dj.get("kind") in PILOT_MISS_KINDS:
             missed.add(a["entity_id"])
@@ -3374,10 +4076,11 @@ def pilot_report(con, start: str | None = None, end: str | None = None, crew_id:
             leads.append((dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days)
     complaints = 0
     if ids:
-        for c in rows(con, "SELECT request_id, kind FROM contact_log WHERE kind IN ('독촉','불만')"):
-            complaints += c["request_id"] in ids
+        for ch in _chunks(list(ids)):
+            complaints += con.execute(f"SELECT COUNT(*) FROM contact_log WHERE kind IN ('독촉','불만') AND request_id IN ({','.join('?' * len(ch))})", ch).fetchone()[0]
     isecs = []
-    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CREATE'"):
+    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CREATE' AND at >= ? AND detail LIKE '%intake_secs%'",
+                  (_kst_range(start, start)[0],)):
         if a["entity_id"] in ids:
             v = json.loads(a["detail"] or "{}").get("intake_secs")
             if v:
@@ -3390,16 +4093,18 @@ def pilot_report(con, start: str | None = None, end: str | None = None, crew_id:
                 csecs.append(v)
     # 당일 결과 회수: 최종 결과가 있는 건 중 그 결과가 수거 예정일 당일에 PC로 들어온 비율
     sameday = total_final = 0
-    for r in reqs:
-        if r["status"] not in FINAL:
-            continue
+    fin_ids = [r["id"] for r in reqs if r["status"] in FINAL]
+    last_by: dict[str, dict] = {}
+    for ch in _chunks(fin_ids):
         # 마지막 수거 결과(ATTEMPT)를 휴대폰에 남긴 날 = 그 결과가 PC에 들어온 날이면 당일 회수(예정일이 재방문·이월로 바뀌어도 맞게)
-        last = one(con, """SELECT e.device_ts AS d, i.imported_at AS t FROM result_event e JOIN result_import i ON i.id=e.import_id
-            WHERE e.request_id=? AND e.kind='ATTEMPT' AND e.apply_status='APPLIED' ORDER BY e.device_ts DESC LIMIT 1""", (r["id"],))
-        if last and last["t"] and last["d"]:
+        for x in rows(con, f"""SELECT e.request_id, e.device_ts AS d, i.imported_at AS t FROM result_event e JOIN result_import i ON i.id=e.import_id
+                WHERE e.request_id IN ({','.join('?' * len(ch))}) AND e.kind='ATTEMPT' AND e.apply_status='APPLIED' ORDER BY e.device_ts""", ch):
+            last_by[x["request_id"]] = x
+    for last in last_by.values():
+        if last["t"] and last["d"]:
             total_final += 1
             sameday += _kst_date(last["d"]) == _kst_date(last["t"])
-    pending = sum(derive(con, one(con, "SELECT * FROM request WHERE id=?", (r["id"],)))["fee"]["final"] is None for r in reqs)
+    pending = sum(r["fee_final"] is None for r in reqs)  # 요약 열(fee_final) — 접수마다 다시 계산하지 않음
     avg = lambda xs: round(sum(xs) / len(xs), 1) if xs else None
     per100 = lambda x, base_n: round(x * 100 / base_n, 1) if base_n else None
     B = cfg["base"]
@@ -3444,3 +4149,55 @@ def pilot_csv(con, start=None, end=None, crew_id=None) -> bytes:
                     "" if x["diff"] is None else x["diff"], x["verdict"] or "", x.get("count", "")])
     audit(con, "report", "pilot", "EXPORT", {"start": r["start"], "end": r["end"]})
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+# ------------------------------------------------------------------ 같은 요청 다시 보내기 막기 (client_req_id)
+IDEM_HOURS = 24
+
+
+def idempotent(con, user: str, endpoint: str, key, fn):
+    """화면이 보낸 client_req_id(요청마다 새 값)가 24시간 안에 이미 처리된 것이면 그때의 응답을 그대로 돌려준다(두 번 눌러도 한 건).
+    처리와 응답 기록은 한 트랜잭션(처리 중 오류면 기록도 남지 않음)."""
+    key = str(key or "").strip()[:80]
+    if not key:
+        return fn()
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=IDEM_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with tx(con):
+        prev = one(con, "SELECT response_json FROM idem WHERE user=? AND endpoint=? AND key=? AND at>=?", (user or "-", endpoint, key, since))
+        if prev:
+            return json.loads(prev["response_json"])
+        res = fn()
+        con.execute("INSERT OR REPLACE INTO idem (key, user, endpoint, response_json, at) VALUES (?,?,?,?,?)",
+                    (key, user or "-", endpoint, json.dumps(res, ensure_ascii=False, default=str), now()))
+    return res
+
+
+def purge_idem(con) -> int:
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=IDEM_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with tx(con):
+        return con.execute("DELETE FROM idem WHERE at < ?", (since,)).rowcount
+
+
+# ------------------------------------------------------------------ 주민 안내 문구 (문자·전화 안내용, 이름 없음)
+def notice_text(con, rid: str) -> str:
+    """주민에게 보낼 안내 글(문자·전화 안내 원고): 접수번호·배출일·부과 금액·납부 방법/기한·배출 안내·문의처. 이름·연락처·주소는 넣지 않는다."""
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    if not r:
+        raise UserError("접수를 찾을 수 없습니다.")
+    cfg = settings(con)
+    ps = payment_status(con, rid, r=r)
+    won = lambda v: "금액 확인 중(확정되면 다시 안내)" if v is None else f"{v:,}원"
+    appt = f" {r['appt_start']}~{r['appt_end'] or ''}" if r["appt_start"] else ""
+    lines = [f"[{cfg['jurisdiction'] or '동구'} 대형폐기물 배출 안내]",
+             f"접수번호: {r['receipt_no']}" + (f" (부과번호 {r['levy_no']})" if r.get("levy_no") else ""),
+             f"배출일: {(r['planned_date'] or '미정(정해지면 안내)') + appt}"]
+    if r["status"] == "CANCELLED":
+        lines.append("이 접수는 취소되었습니다." + (" 납부하신 금액은 환불 절차로 안내합니다." if ps["paid"] > 0 else ""))
+    else:
+        lines.append(f"부과 금액: {won(ps['levied'])}" + (f" (감면 {ps['reduction_rate']}% 적용)" if ps["reduction_rate"] else ""))
+        if ps["paid"]:
+            lines.append(f"납부 확인: {ps['paid']:,}원")
+        lines.append(f"납부 방법·기한: {cfg['payment_guide']}")
+        lines.append(f"배출 안내: {cfg['disposal_guide']}")
+    lines.append(f"문의: {cfg['contact_info']}")
+    return "\n".join(lines) + "\n"

@@ -61,12 +61,13 @@ def save_reductions(con, items: list[dict]):
     return out
 
 
-def fee_summary(r: dict, final: int | None) -> dict:
-    """계산 금액 → 감면액 → 부과 금액."""
+def fee_summary(r: dict, final: int | None, unit: int = 1) -> dict:
+    """계산 금액 → 감면액 → 부과 금액. 감면액은 unit(1원·10원) 미만 버림(설정 reduction_round_unit, 기본 1원)."""
     rate = int(r.get("reduction_rate") or 0) if r.get("reduction_code") else 0
     if final is None:
         return {"calculated": None, "reduction_rate": rate, "reduction": None, "levied": None, "reduction_label": r.get("reduction_label")}
-    red = final * rate // 100
+    unit = unit if unit in (1, 10) else 1
+    red = (final * rate // 100) // unit * unit
     return {"calculated": final, "reduction_rate": rate, "reduction": red, "levied": final - red, "reduction_label": r.get("reduction_label") if rate else None}
 
 
@@ -107,6 +108,8 @@ def set_reduction(con, rid: str, data: dict) -> dict:
     if not vals and not r["reduction_code"]:
         raise S.UserError("감면 사유를 골라 주세요.")
     with S.tx(con):
+        if data.get("req_ver") not in (None, ""):  # 화면이 연 버전과 같을 때만(다르면 409)
+            S.check_req_ver(con, rid, data.get("req_ver"))
         if vals:
             con.execute("""UPDATE request SET reduction_code=?, reduction_rate=?, reduction_label=?, reduction_proof=?, reduction_checker=?, reduction_at=? WHERE id=?""",
                         (*vals.values(), rid))
@@ -117,7 +120,6 @@ def set_reduction(con, rid: str, data: dict) -> dict:
         S.audit(con, "request", rid, "REDUCTION" if vals else "REDUCTION_CLEAR",
                 {**({"code": vals["reduction_code"], "rate": vals["reduction_rate"], "proof": vals["reduction_proof"], "checker": vals["reduction_checker"]} if vals else {}),
                  **({"reason": why[:200]} if why else {}), **flag})
-    sync_refunds(con)
     return S.payment_status(con, rid)
 
 
@@ -282,7 +284,6 @@ def import_recon(con, raw: bytes, preview: bool = True) -> dict:
         con.execute("INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json) VALUES (?,?,?,?,?,?,?)",
                     (iid, sha, S.now(), S.ACTOR.get(), res["total"], len(matched), json.dumps(res["counts"], ensure_ascii=False)))
         S.audit(con, "revenue", iid, "RECON", {"rows": res["total"], "matched": len(matched), **res["counts"]})
-    sync_refunds(con)
     return {**res, "recorded": len(matched)}
 
 
@@ -304,44 +305,55 @@ def _partial_due(con, r: dict, ps: dict) -> int:
     return max(0, ps["paid"] - lev)
 
 
-def sync_refunds(con) -> dict:
-    """환불 필요(취소 뒤 납부 남음)·과납 건에 자동 환불 건(신청 전)을 만들고, 해소된 자동 건은 '해소'로 닫는다."""
+def sync_refunds(con, rids=None, progress=None) -> dict:
+    """환불 필요(취소 뒤 납부 남음)·과납 건에 자동 환불 건(신청 전)을 만들고, 해소된 자동 건은 '해소'로 닫는다.
+    rids: 바뀐 접수만(쓰기 경로의 트랜잭션 끝에서 자동). None = 전체 점검(야간 예약 작업·관리자 단추에서만)."""
+    if S.is_readonly(con):
+        return {"created": 0, "closed": 0}
     made = closed = 0
-    open_by: dict[str, list] = {}
-    for c in S.rows(con, "SELECT * FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED')"):
-        open_by.setdefault(c["request_id"], []).append(c)
-    rids = {x["request_id"] for x in S.rows(con, "SELECT DISTINCT request_id FROM payment WHERE void_reason IS NULL")} | set(open_by)
-    own_tx = not con.in_transaction
-    if own_tx:
-        con.execute("BEGIN IMMEDIATE")
-    try:
-        for rid in rids:
-            ps = S.payment_status(con, rid)
-            need, cause = 0, None
-            if ps["status"] == "REFUND_NEEDED":
-                need, cause = ps["paid"], "CANCELLED"
-            elif ps["status"] == "OVERPAID_REVIEW":
-                need, cause = ps["paid"] - ps["levied"], "OVERPAID"
-            cases = open_by.get(rid, [])
-            autos = [c for c in cases if c["auto"] and c["status"] == "DRAFT"]
-            if need > 0 and not cases:
-                con.execute("INSERT INTO refund_case (id, request_id, cause, amount, status, auto, created_at) VALUES (?,?,?,?,'DRAFT',1,?)",
-                            (str(uuid.uuid4()), rid, cause, need, S.now()))
-                made += 1
-            elif need > 0:
-                for c in autos:
-                    if c["amount"] != need or c["cause"] != cause:
-                        con.execute("UPDATE refund_case SET amount=?, cause=? WHERE id=?", (need, cause, c["id"]))
-            elif need <= 0:
-                for c in autos:
-                    con.execute("UPDATE refund_case SET status='VOID', void_reason='환불 필요 해소(수납 기록 변경)' WHERE id=?", (c["id"],))
-                    closed += 1
-        if own_tx:
-            con.execute("COMMIT")
-    except BaseException:
-        if own_tx:
-            con.execute("ROLLBACK")
-        raise
+    if rids is None:
+        rids = sorted({x["request_id"] for x in S.rows(con, "SELECT DISTINCT request_id FROM payment WHERE void_reason IS NULL")}
+                      | {x["request_id"] for x in S.rows(con, "SELECT DISTINCT request_id FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED')")})
+    else:
+        rids = [r for r in dict.fromkeys(rids) if r]
+    if not rids:
+        return {"created": 0, "closed": 0}
+    with S.tx(con):
+        unit = S.reduction_round_unit(con)
+        for ch in S._chunks(rids):
+            q = ",".join("?" * len(ch))
+            open_by: dict[str, list] = {}
+            for c in S.rows(con, f"SELECT * FROM refund_case WHERE status IN ('DRAFT','REQUESTED','APPROVED') AND request_id IN ({q})", ch):
+                open_by.setdefault(c["request_id"], []).append(c)
+            has_pay = {x["request_id"] for x in S.rows(con, f"SELECT DISTINCT request_id FROM payment WHERE request_id IN ({q})", ch)}
+            todo = [r for r in ch if r in has_pay or r in open_by]
+            if not todo:
+                continue
+            reqs = {r["id"]: r for r in S.rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(todo))})", todo)}
+            pre = S.prefetch(con, list(reqs), ("items", "events", "links", "payments", "partial"))
+            for rid, r in reqs.items():
+                ps = S.payment_core(r, S.derive(con, r, pre)["fee"]["final"], pre["payments"][rid], pre["partial"][rid], unit)
+                need, cause = 0, None
+                if ps["status"] == "REFUND_NEEDED":
+                    need, cause = ps["paid"], "CANCELLED"
+                elif ps["status"] == "OVERPAID_REVIEW":
+                    need, cause = ps["paid"] - ps["levied"], "OVERPAID"
+                cases = open_by.get(rid, [])
+                autos = [c for c in cases if c["auto"] and c["status"] == "DRAFT"]
+                if need > 0 and not cases:
+                    con.execute("INSERT INTO refund_case (id, request_id, cause, amount, status, auto, created_at) VALUES (?,?,?,?,'DRAFT',1,?)",
+                                (str(uuid.uuid4()), rid, cause, need, S.now()))
+                    made += 1
+                elif need > 0:
+                    for c in autos:
+                        if c["amount"] != need or c["cause"] != cause:
+                            con.execute("UPDATE refund_case SET amount=?, cause=? WHERE id=?", (need, cause, c["id"]))
+                elif need <= 0:
+                    for c in autos:
+                        con.execute("UPDATE refund_case SET status='VOID', void_reason='환불 필요 해소(수납 기록 변경)' WHERE id=?", (c["id"],))
+                        closed += 1
+            if progress:
+                progress(len(ch))
     return {"created": made, "closed": closed}
 
 
@@ -358,7 +370,6 @@ def partial_candidates(con) -> list[dict]:
 
 
 def list_refunds(con, status: str = "") -> dict:
-    sync_refunds(con)
     sql = """SELECT f.*, r.receipt_no, r.levy_no, r.dong, r.status AS request_status FROM refund_case f JOIN request r ON r.id=f.request_id"""
     args: list = []
     if status == "OPEN":
@@ -454,7 +465,6 @@ def pay_refund(con, cid: str, data: dict) -> dict:
         con.execute("""UPDATE refund_case SET status='PAID', paid_on=?, pay_method=?, account_checked=?, account_last4=?, paid_by=?, paid_at=?, payment_id=? WHERE id=?""",
                     (paid_on, method, 1 if checked else 0, last4 or None, S.ACTOR.get(), S.now(), pid, cid))
         S.audit(con, "refund", cid, "PAY", {"request": c["request_id"], "amount": c["amount"], "method": method, "account_checked": checked})
-    sync_refunds(con)
     return S.payment_status(con, c["request_id"])
 
 

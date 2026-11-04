@@ -35,6 +35,11 @@ def ok(c, m):
     print("  ✓", m)
 
 
+def RV(con, rid):
+    """화면이 연 접수 버전(req_ver) 흉내."""
+    return S.one(con, "SELECT req_ver FROM request WHERE id=?", (rid,))["req_ver"]
+
+
 def raises(fn, text, m):
     try:
         fn()
@@ -119,7 +124,7 @@ def main():
     raises(lambda: S.update_request(con, r1["id"], {**base, "name": "가상일", "phone": "01000001111", "address": "가상시 동구 예시로 1, 101호",
                                                      "items": [{"fee_rate_id": fee["의자|고정식 의자"], "qty": 3}]}, ""), "수정 사유", "사유 없는 수정 거부")
     items1 = S.get_request(con, r1["id"])["items"]
-    S.update_request(con, r1["id"], {**base, "name": "가상일", "phone": "01000001111", "address": "가상시 동구 예시로 1, 101호",
+    S.update_request(con, r1["id"], {**base, "req_ver": RV(con, r1["id"]), "name": "가상일", "phone": "01000001111", "address": "가상시 동구 예시로 1, 101호",
                                      "lat": 35.1470, "lon": 126.9250, "items": [{"line_id": items1[0]["line_id"], "fee_rate_id": fee["의자|고정식 의자"], "qty": 3}]},
                      "주민 요청: 호수 추가")
     g1 = S.get_request(con, r1["id"])
@@ -206,11 +211,21 @@ def main():
         phone.ev(s2, "ITEM_RESULT", {"line_id": s2["items"][0]["line_id"], "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}, assign_ver=1)]},
         P.TYPE_RESULT)
     rep3 = S.import_result(con, late)
+    ok(rep3["applied"] == 1 and rep3["conflict"] == 0 and S.get_request(con, r2["id"])["state"]["lines"][0]["qty_collected"] == 1
+       and "같은 팀" in (S.one(con, "SELECT conflict_reason FROM result_event WHERE import_id=?", (rep3["import_id"],))["conflict_reason"] or ""),
+       "v0.13: 지금도 같은 팀 배정이면 옛 갱신본 결과도 반영(오래된 목록이라고 충돌로 보내지 않음, 메모만)")
+    # 다른 팀으로 옮긴 뒤 옛 목록 결과가 오면 충돌
+    S.confirm_plan(con, day, {c1: [], c2: [{"request_id": r2["id"]}]})
+    late_b = phone.seal({"schema": "dg.result/1", "work_date": day, "events": [
+        phone.ev(s2, "ITEM_RESULT", {"line_id": s2["items"][0]["line_id"], "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 0, "reason": "다시"}, assign_ver=2)]},
+        P.TYPE_RESULT)
+    rep3 = S.import_result(con, late_b)
     cf = S.list_conflicts(con)
-    ok(rep3["conflict"] == 1 and len(cf) == 1 and "오래된 목록" in cf[0]["conflict_reason"], "배정 변경 후 옛 목록 결과 → 충돌함 (자동 덮어쓰기 없음)")
+    ok(rep3["conflict"] == 1 and len(cf) == 1 and "다른 팀" in cf[0]["conflict_reason"], "다른 팀으로 옮긴 접수의 옛 목록 결과 → 충돌함 (자동 덮어쓰기 없음)")
     raises(lambda: S.resolve_conflict(con, cf[0]["event_id"], "APPLY", ""), "사유", "충돌 처리에 사유 필수")
-    S.resolve_conflict(con, cf[0]["event_id"], "APPLY", "팀장 확인: 실제 수거함")
-    ok(S.get_request(con, r2["id"])["state"]["lines"][0]["qty_collected"] == 1, "담당자 확인 후 반영")
+    S.resolve_conflict(con, cf[0]["event_id"], "APPLY", "팀장 확인: 실제 수거 못 함")
+    ok(S.get_request(con, r2["id"])["state"]["lines"][0]["qty_collected"] == 0, "담당자 확인 후 반영")
+    S.confirm_plan(con, day, {c2: []})
 
     # 취소 후 들어온 결과
     S.confirm_plan(con, day, {c1: [{"request_id": r2["id"]}]})
@@ -669,7 +684,7 @@ def v10():
     ok(gd["closed"] and gd["closed"]["status"] == "APPROVED", "접수 상세에 '마감한 날' 표시")
     raises(lambda: S.update_request(con, t["done"], {**base, "name": "가상이월done", "address": "가상시 동구 시험길 5", "planned_date": day,
                                                        "items": [{"line_id": gd["items"][0]["line_id"], "fee_rate_id": chair, "qty": 1}]}, ""), "마감한 날", "마감한 날 접수 수정은 사유 필수")
-    upd = S.update_request(con, t["done"], {**base, "name": "가상이월done", "address": "가상시 동구 시험길 5, 2층", "planned_date": day,
+    upd = S.update_request(con, t["done"], {**base, "req_ver": RV(con, t["done"]), "name": "가상이월done", "address": "가상시 동구 시험길 5, 2층", "planned_date": day,
                                             "items": [{"line_id": gd["items"][0]["line_id"], "fee_rate_id": chair, "qty": 1}]}, "주소 보완(가상)")
     raises(lambda: S.add_payment(con, t["done"], {"amount": 2000, "method": "현장 납부", "paid_on": day}), "사유", "마감한 날 수납 기록은 사유 필수")
     S.add_payment(con, t["done"], {"amount": 2000, "method": "현장 납부", "paid_on": day, "reason": "늦게 확인한 납부(가상)"})
@@ -1013,7 +1028,10 @@ def v11():
        and {x["category"] for x in st["categories"]} >= {"가구류"} if any(x["category"] == "가구류" for x in st["categories"]) else st["categories"], "통계: 감면 건수·품목 분류·월별·세입")
     st_r = S.stats(con, S.today_kst(), S.today_kst(), "received")
     st_c = S.stats(con, S.today_kst(), S.today_kst(), "completed")
-    ok(st_r["totals"]["requests"] >= 7 and st_c["totals"]["requests"] == 3 and st_r["basis_label"] == "접수일", "통계 기준: 접수일·완료일(오늘 끝난 3건: 일부 수거 1·취소 2)")
+    rp_done = S.one(con, "SELECT completed_at FROM request WHERE id=?", (rp["id"],))["completed_at"]
+    rp_ts = S.one(con, "SELECT device_ts FROM result_event WHERE request_id=? AND kind='ATTEMPT' ORDER BY device_ts DESC LIMIT 1", (rp["id"],))["device_ts"]
+    ok(st_r["totals"]["requests"] >= 7 and st_c["totals"]["requests"] == 2 and st_r["basis_label"] == "접수일" and rp_done == rp_ts,
+       f"통계 기준: 접수일·완료일(완료일 = 휴대폰 최종 결과 시각 {rp_done} → 오늘 끝난 건은 취소 2건)")
     raises(lambda: S.stats(con, "2026-11-01", "2026-11-02", "x"), "기준", "없는 집계 기준 거부")
     for i in range(25):
         S.create_request(con, {**base, "name": f"가상품목{i}", "phone": f"010000072{i:02d}", "items": [{"name": f"가상 품목 {i}", "qty": 1}]})
@@ -1077,7 +1095,7 @@ def v11():
     # 개인정보 보유기간·파기
     S.ACTOR.set("admin")
     S.add_contact(con, ra["id"], {"kind": "문의", "content": "가상감면 010-0000-7001 문의"})
-    S.update_request(con, ra["id"], {**base, "name": "가상감면", "memo": "메모 가상감면", "items": [{"line_id": S.get_request(con, ra["id"])["items"][0]["line_id"], "fee_rate_id": wardrobe, "qty": 2}]}, "가상 수정")
+    S.update_request(con, ra["id"], {**base, "req_ver": RV(con, ra["id"]), "name": "가상감면", "memo": "메모 가상감면", "items": [{"line_id": S.get_request(con, ra["id"])["items"][0]["line_id"], "fee_rate_id": wardrobe, "qty": 2}]}, "가상 수정")
     con.execute("UPDATE request SET status='DONE', completed_at='2022-01-10T00:00:00Z' WHERE id=?", (ra["id"],))
     con.execute("UPDATE request SET cancelled_at='2022-02-01T00:00:00Z' WHERE id=?", (rc["id"],))
     pvw = PV.purge_preview(con)
@@ -1785,7 +1803,7 @@ def v12_review():
     # 접수 수정: 이미 받은 품목은 접수 때 단가를 그대로(개정 단가로 바뀌지 않음)
     it = S.get_request(con, r2["id"])["items"][0]
     con.execute("UPDATE request_item SET unit_price=4321, amount=4321 WHERE line_id=?", (it["line_id"],))
-    S.update_request(con, r2["id"], {**base, "name": "검토둘", "phone": "010-0000-9199", "items": [{"line_id": it["line_id"], "fee_rate_id": chair["id"], "qty": 2}]}, "연락처 변경")
+    S.update_request(con, r2["id"], {**base, "req_ver": RV(con, r2["id"]), "name": "검토둘", "phone": "010-0000-9199", "items": [{"line_id": it["line_id"], "fee_rate_id": chair["id"], "qty": 2}]}, "연락처 변경")
     it2 = S.get_request(con, r2["id"])["items"][0]
     ok(it2["unit_price"] == 4321 and it2["amount"] == 8642, "접수 수정: 받은 품목 단가는 그대로, 수량만 바뀌면 같은 단가로 다시 셈")
 
@@ -1829,10 +1847,15 @@ def v12_review():
     b4 = S.confirm_plan(con, base["planned_date"], {cid: [{"request_id": r3["id"]}, {"request_id": r4["id"]}]})[0]
     stop4 = {"request_id": r4["id"], "assign_ver": b4["assign_ver"], "req_ver": 1}
     good = ph.ev(stop4, "ATTEMPT", {"outcome": "NOT_COLLECTED"})
-    bad = ph.ev(stop4, "CONTACT", {"result": "NO_ANSWER"}); bad["seq"] = evs[0]["seq"]  # 이미 받은 순번과 겹침
-    rr2 = S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [bad, good]}, P.TYPE_RESULT))
-    ok(S.get_request(con, r4["id"])["status"] == "NOT_COLLECTED" and rr2["conflict"] >= 1 and rr2.get("release_code"),
-       "기록 하나가 순번 충돌로 실패해도 같은 파일의 다른 결과는 반영, 실패한 기록은 충돌함")
+    bad = ph.ev(stop4, "CONTACT", {"result": "NO_ANSWER"}); bad["seq"] = evs[0]["seq"]  # 이미 받은 순번과 겹침(휴대폰 복원)
+    broken = ph.ev(stop4, "CONTACT", {"result": "NO_ANSWER"}); broken["seq"] = "망가진 순번"
+    rr2 = S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [bad, broken, good]}, P.TYPE_RESULT))
+    ok(S.get_request(con, r4["id"])["status"] == "NOT_COLLECTED" and rr2["conflict"] == 1 and rr2.get("release_code"),
+       "기록 하나가 실패해도 같은 파일의 다른 결과는 반영, 실패한 기록은 충돌함")
+    bev = S.one(con, "SELECT apply_status, warning FROM result_event WHERE event_id=?", (bad["event_id"],))
+    ok(rr2.get("seq_reused") == 1 and bev["apply_status"] == "APPLIED" and "재사용" in (bev["warning"] or ""),
+       "v0.13: 휴대폰 복원으로 순번이 겹쳐도 event_id가 새것이면 반영하고 경고만(충돌 아님)")
+    ok(S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [bad]}, P.TYPE_RESULT))["skipped_duplicate"] == 1, "같은 event_id는 여전히 한 번만")
 
     # 재방문 약속으로 예정일이 바뀌면 옛 날짜 배정이 풀림
     appt = ph.ev(stop4, "REVISIT_APPT", {"date": "2026-11-27", "start": "10:00", "end": "11:00"}, assign_ver=b4["assign_ver"])
@@ -1867,6 +1890,466 @@ def v12_review():
     print(f"\n통과 {passed}개 (전체 검토 반영 포함)")
 
 
+def v13():
+    """v0.13 PC 서버: 무결성·동시성·재전송 방지·성능(요약 열·색인)·잠금 정책·이전 단계·운영 API."""
+    print("\n— v0.13 PC 서버 —")
+    import io
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+    import zlib
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from dgpc import backup as BK, finance as FN, ops as OPS, privacy as PV, server as SV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-v13-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    today = S.today_kst()
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair, ward = fee["의자|고정식 의자"], fee["장롱|120cm 이상 1쪽당"]
+    base = {"phone": "010-0000-9300", "address": "가상시 동구 예시로 13", "planned_date": today, "lat": 35.15, "lon": 126.92}
+
+    # 17. 이전 단계
+    ok(con.execute("PRAGMA user_version").fetchone()[0] == store.LATEST and con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2,
+       f"새 DB: 구조 버전 {store.LATEST}(PRAGMA user_version), auto_vacuum=INCREMENTAL")
+    import sqlcipher3
+    mp = Path(tempfile.mkdtemp(prefix="dg-mig-")) / "m.db"
+    mc = sqlcipher3.connect(str(mp), isolation_level=None)
+    mc.execute("PRAGMA key = 'test-db-key-not-for-production'")
+    store._TEST_FAIL_STEP = 2
+    try:
+        store.run_migrations(mc)
+        ok(False, "중간 실패가 나야 함")
+    except RuntimeError:
+        pass
+    store._TEST_FAIL_STEP = None
+    ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
+       and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
+    ok(store.run_migrations(mc) == [2] and "fee_final" in store._cols(mc, "request") and mc.execute("PRAGMA user_version").fetchone()[0] == 2,
+       "다시 열면 멈춘 단계부터 다시 실행")
+    mc.execute("PRAGMA user_version = 99")
+    try:
+        store.run_migrations(mc)
+        ok(False, "새 DB 거부")
+    except SystemExit as e:
+        ok("새것" in str(e), "DB가 프로그램보다 새 버전이면 열지 않음")
+    mc.close()
+
+    # 기기·팀·접수
+    ph = Phone(S.registration_text(con))
+    reg = S.register_device(con, ph.code(), "v13폰", confirm=True)
+    dev = reg["device_id"]
+    c1 = S.save_crew(con, {"name": "십삼1팀", "device_id": dev})
+    c2 = S.save_crew(con, {"name": "십삼2팀"})
+    mk = lambda name, **kw: S.create_request(con, {**base, "name": name, "items": [{"fee_rate_id": chair["id"], "qty": 1}], **kw})["id"]
+    ra, rb, rc_ = mk("십삼가"), mk("십삼나", phone="010-0000-9301"), mk("십삼다", phone="010-0000-9302")
+
+    # 5. 겹친 트랜잭션(저장점)
+    with S.tx(con):
+        con.execute("UPDATE request SET memo='바깥' WHERE id=?", (ra,))
+        try:
+            with S.tx(con):
+                con.execute("UPDATE request SET memo='안쪽' WHERE id=?", (ra,))
+                raise S.UserError("안쪽 실패")
+        except S.UserError:
+            pass
+    ok(S.one(con, "SELECT memo FROM request WHERE id=?", (ra,))["memo"] == "바깥", "tx 겹쳐 쓰기: 안쪽 실패는 그 부분만 되돌림(SAVEPOINT)")
+
+    # 3. 낙관적 동시성
+    upd = lambda rid, **kw: S.update_request(con, rid, {**base, "name": "십삼가", "items": [{"line_id": S.get_request(con, rid)["items"][0]["line_id"],
+                                                                                          "fee_rate_id": chair["id"], "qty": 1}], **kw}, "주민 요청")
+    raises(lambda: upd(ra), "req_ver", "수정에 req_ver 없으면 거부")
+    r0 = RV(con, ra)
+    ok(upd(ra, req_ver=r0)["req_ver"] == r0 + 1, "열었던 버전과 같으면 수정, 새 버전 돌려줌")
+    try:
+        upd(ra, req_ver=r0)
+        ok(False, "옛 버전 수정 거부")
+    except S.StaleError as e:
+        ok("다른 곳에서 바뀌었습니다" in str(e) and e.info["req_ver"] == r0 + 1, f"옛 버전으로 수정 → StaleError(409), 지금 버전 {e.info['req_ver']}")
+    raises(lambda: S.cancel_request(con, rb, "", "RESIDENT", req_ver=RV(con, rb) - 1 or 99), "다른 곳에서", "취소도 옛 버전이면 거부")
+    raises(lambda: FN.set_reduction(con, rb, {"reduction_code": "BASIC", "reduction_proof": "서류 확인", "reduction_checker": "가상", "req_ver": 77}),
+           "다른 곳에서", "감면 변경도 옛 버전이면 거부")
+    ok(S.one(con, "SELECT status FROM request WHERE id=?", (rb,))["status"] != "CANCELLED", "거부된 취소는 반영 안 됨")
+
+    # 4. 재전송 방지
+    n0 = S.one(con, "SELECT COUNT(*) AS n FROM request")["n"]
+    a1 = S.idempotent(con, "kim", "requests", "k-1", lambda: S.create_request(con, {**base, "name": "두번누름", "items": [{"fee_rate_id": chair["id"], "qty": 1}]}))
+    a2 = S.idempotent(con, "kim", "requests", "k-1", lambda: S.create_request(con, {**base, "name": "두번누름", "items": [{"fee_rate_id": chair["id"], "qty": 1}]}))
+    ok(a1["id"] == a2["id"] and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n0 + 1, "같은 client_req_id 두 번 → 접수 1건, 같은 응답")
+    try:
+        S.idempotent(con, "kim", "payments", "k-2", lambda: S.add_payment(con, ra, {"amount": "abc", "method": "현장 카드"}))
+    except S.UserError:
+        pass
+    ok(not S.one(con, "SELECT 1 AS x FROM idem WHERE key='k-2'"), "처리 중 오류면 재전송 기록도 남지 않음")
+
+    # 26. 수납 입력 검사·감면 끝수
+    raises(lambda: S.add_payment(con, ra, {"amount": "만원", "method": "현장 카드"}), "숫자", "납부 금액이 숫자가 아니면 업무 오류(500 아님)")
+    raises(lambda: S.add_payment(con, ra, {"amount": 1000, "method": "현장 카드", "paid_on": "2026-13-45"}), "날짜", "없는 날짜 거부")
+    ok(S.add_payment(con, ra, {"amount": "1,000원", "method": "현장 카드"})["paid"] == 1000, "'1,000원'처럼 적어도 금액으로 받음")
+    ok(FN.fee_summary({"reduction_code": "X", "reduction_rate": 50}, 3015)["reduction"] == 1507
+       and FN.fee_summary({"reduction_code": "X", "reduction_rate": 50}, 3015, 10)["reduction"] == 1500, "감면액 끝수: 기본 1원 미만 버림(이전과 같음), 10원 설정 시 10원 미만 버림")
+    raises(lambda: S.save_settings(con, {"reduction_round_unit": 7}), "1원 또는 10원", "끝수 단위는 1·10원만")
+    S.save_settings(con, {"reduction_round_unit": 10})
+    ok(S.settings(con)["reduction_round_unit"] == 10 and S.settings(con)["reduction_round_units"] == [1, 10], "끝수 단위 설정·선택지(bootstrap settings)")
+    S.save_settings(con, {"reduction_round_unit": 1})
+    raises(lambda: FN.request_refund(con, {"request_id": ra, "cause": "MANUAL", "amount": "x", "note": "가상"}), "환불 금액", "환불 금액 숫자 아님 → 업무 오류")
+
+    # 5·6. 취소 → 같은 트랜잭션 안에서 환불 건
+    try:
+        with S.tx(con):
+            S.cancel_request(con, ra, "", "RESIDENT")
+            raise S.UserError("되돌리기")
+    except S.UserError:
+        pass
+    ok(S.one(con, "SELECT status FROM request WHERE id=?", (ra,))["status"] != "CANCELLED" and not S.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=?", (ra,)),
+       "취소와 자동 환불 건은 한 트랜잭션(되돌리면 둘 다 없음)")
+    S.cancel_request(con, ra, "", "RESIDENT", req_ver=RV(con, ra))
+    rf = S.one(con, "SELECT status, amount, cause FROM refund_case WHERE request_id=?", (ra,))
+    ok(rf and rf["status"] == "DRAFT" and rf["amount"] == 1000 and rf["cause"] == "CANCELLED", "납부 뒤 취소 → 별도 호출 없이 자동 환불 건(신청 전) 생김")
+    con.execute("DELETE FROM refund_case WHERE request_id=?", (ra,))  # 어긋난 상태 흉내
+    ok(FN.sync_refunds(con, [rb])["created"] == 0 and not S.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=?", (ra,)), "sync_refunds(rids): 준 접수만 본다")
+    job = OPS.JOBS.run_now({"actor": "admin", "client": "local", "kind": "refund_sync", "progress": 0}, OPS.job_fn("refund_sync", con, None))
+    ok(job["status"] == "DONE" and job["result"]["created"] == 1 and S.one(con, "SELECT 1 AS x FROM refund_case WHERE request_id=?", (ra,)),
+       "전체 점검은 관리자 단추·야간 작업(작업 실행기)에서만 → 빠진 환불 건 다시 생김")
+
+    # 12. 요약 열 = derive()
+    def summary_matches():
+        bad = []
+        for r in S.rows(con, "SELECT * FROM request"):
+            ps = S.payment_status(con, r["id"])
+            act = S.one(con, "SELECT b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE a.request_id=?", (r["id"],))
+            want = (S.derive(con, r)["fee"]["final"], ps["levied"], ps["paid"], ps["status"], act["crew_id"] if act else None, S.chosung_key(r["name"], r["address"]))
+            if (r["fee_final"], r["levied"], r["paid_total"], r["pay_status"], r["active_crew_id"], r["chosung"]) != want:
+                bad.append((r["receipt_no"], want))
+        return bad
+    ok(not summary_matches(), "요약 열(fee_final·levied·paid_total·pay_status·active_crew_id·chosung) = derive()·수납 계산")
+
+    # 23. 배정 부분 수정
+    rd_ = mk("십삼라", phone="010-0000-9303")
+    S.confirm_plan(con, today, {c1: [{"request_id": rb, "eta": "09:00"}, {"request_id": rc_, "eta": "09:30"}]})
+    cur = {b["crew_id"]: b for b in S.current_assignment(con, today)}
+    ok([s_["request_id"] for s_ in cur[c1]["stops"]] == [rb, rc_] and cur[c1]["assign_ver"] == 1, "확정 배정 불러오기(팀·순서·갱신본)")
+    e1 = S.edit_assignment(con, today, "insert", {"crew_id": c1, "request_id": rd_, "assign_ver": {c1: 1}})
+    cur = {b["crew_id"]: b for b in S.current_assignment(con, today)}
+    ok([s_["request_id"] for s_ in cur[c1]["stops"]] == [rb, rc_, rd_] and cur[c1]["assign_ver"] == 2 and cur[c1]["stops"][0]["eta"] == "09:00"
+       and e1["resend_needed"] == [c1], "팀 끝에 넣기: 다시 계산 없이 새 갱신본(2), 기존 순서·도착 예정 유지")
+    try:
+        S.edit_assignment(con, today, "remove", {"request_id": rd_, "assign_ver": {c1: 1}})
+        ok(False, "옛 갱신본 거부")
+    except S.StaleError as e:
+        ok(e.info["assign_ver"] == 2, "옛 갱신본을 보고 고치면 거부(409, 지금 갱신본 알려 줌)")
+    S.edit_assignment(con, today, "reorder", {"crew_id": c1, "order": [rd_, rb, rc_]})
+    raises(lambda: S.edit_assignment(con, today, "reorder", {"crew_id": c1, "order": [rd_, rb]}), "순서 목록", "순서 바꾸기는 같은 접수 모두여야 함")
+    S.edit_assignment(con, today, "move", {"request_id": rc_, "to_crew_id": c2, "position": 1})
+    S.edit_assignment(con, today, "remove", {"request_id": rd_})
+    cur = {b["crew_id"]: b for b in S.current_assignment(con, today)}
+    ok([s_["request_id"] for s_ in cur[c1]["stops"]] == [rb] and [s_["request_id"] for s_ in cur[c2]["stops"]] == [rc_]
+       and S.one(con, "SELECT status FROM request WHERE id=?", (rd_,))["status"] == "RECEIVED" and not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rd_,))
+       and S.one(con, "SELECT active_crew_id FROM request WHERE id=?", (rc_,))["active_crew_id"] == c2,
+       "순서 바꾸기·다른 팀으로 옮기기·빼기(뺀 건은 배정 풀림), 요약 열의 현재 팀도 따라감")
+    raises(lambda: S.edit_assignment(con, today, "insert", {"crew_id": c2, "request_id": rb}), "이미 이날", "이미 배정된 접수 넣기는 거부(옮기기를 쓰라고)")
+
+    # 8. 휴대폰에 '받은 것' 알리기 + 1·24. 충돌함 정리
+    b1 = cur[c1]
+    stop_b = {"request_id": rb, "assign_ver": b1["assign_ver"], "req_ver": RV(con, rb)}
+    stop_c = {"request_id": rc_, "assign_ver": 1, "req_ver": RV(con, rc_)}  # 2팀으로 옮긴 접수(1팀 휴대폰의 옛 목록)
+    lid = str(uuid.uuid4())
+    pid_ = str(uuid.uuid4())
+    pic = b"\xff\xd8v13-photo"
+    evs = [ph.ev(stop_b, "PHOTO_META", {"photo_id": pid_, "phase": "AFTER", "sha256": hashlib.sha256(pic).hexdigest(), "bytes": len(pic)}),
+           ph.ev(stop_c, "FIELD_ITEM_ADD", {"line_id": lid, "fee_rate_id": ward["id"], "name": "장롱", "qty": 1, "unit_price": 1, "price_status": "CONFIRMED"}),
+           ph.ev(stop_c, "ITEM_RESULT", {"line_id": lid, "line_kind": "FIELD", "qty_confirmed": "abc", "qty_collected": "1"})]
+    imp = S.import_result(con, ph.seal({"schema": "dg.result/1", "events": evs}, P.TYPE_RESULT))
+    stored = {e["kind"]: json.loads(e["body_json"]) for e in S.rows(con, "SELECT kind, body_json FROM result_event WHERE import_id=? AND apply_status='CONFLICT'", (imp["import_id"],))}
+    ok(imp["conflict"] == 2 and stored["FIELD_ITEM_ADD"]["unit_price"] == ward["price"] and stored["ITEM_RESULT"]["qty_confirmed"] == 0,
+       "충돌함에 들어가는 현장 품목도 정리해서 저장(단가 = PC 표, 수량 0~9999)")
+    con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps({"line_id": lid, "fee_rate_id": ward["id"], "name": "장롱", "qty": 1,
+                                                                                     "unit_price": 1, "price_status": "CONFIRMED"}), evs[1]["event_id"]))  # 이전 버전이 저장한 정리 안 된 기록 흉내
+    bulk = S.resolve_conflicts_bulk(con, "APPLY", "팀장 확인: 실제 수거", request_id=rc_)
+    fl = [l for l in S.get_request(con, rc_)["state"]["lines"] if l["line_id"] == lid][0]
+    ok(bulk["resolved"] == 2 and fl["price"] == ward["price"] and fl["qty_confirmed"] == 0, f"충돌함 [반영]도 직접 가져오기와 같게 정리: 휴대폰 단가 1원 무시 → PC 표 {ward['price']:,}원")
+    raises(lambda: S.resolve_conflicts_bulk(con, "APPLY", "", request_id=rc_), "사유", "일괄 처리도 사유 필수")
+    con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, kind, body_json, apply_status)
+        VALUES (?,?,?,?,?,?,?,?,'APPLIED')""", (str(uuid.uuid4()), imp["import_id"], dev, 9999, rc_, 1, "ITEM_RESULT", json.dumps({"line_id": lid, "qty_confirmed": "x", "qty_collected": None})))
+    g = S.get_request(con, rc_)
+    ok(g["state"]["lines"][-1]["qty_confirmed"] == 0 and FN.sync_refunds(con) is not None and S.payment_status(con, rc_), "숫자 아닌 수량이 들어 있어도 상세·환불 점검이 멈추지 않음")
+    rel = S.release_info(con, dev)
+    ok(rel["seq"] == ph.seq and rel["ph"] == [], f"release_info: 1..{rel['seq']} 빠짐없이 받음(중간이 빈 9999번은 넘지 않음), 아직 회수 사진 없음")
+    con.execute("DELETE FROM result_event WHERE device_seq=9999")
+    s0 = ph.seq
+    gap = ph.ev(stop_b, "CONTACT", {"result": "REACHED"}); gap["seq"] = s0 + 2  # s0+1 이 빠진 채 더 큰 번호만 옴
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [gap]}, P.TYPE_RESULT))
+    ok(S.release_info(con, dev)["seq"] == s0, "중간 번호가 빠지면 rel.seq는 빠진 번호 앞에서 멈춤(휴대폰이 못 받은 기록을 지우지 않게)")
+    fill = ph.ev(stop_b, "CONTACT", {"result": "REACHED"}); fill["seq"] = s0 + 1
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [fill]}, P.TYPE_RESULT))
+    ok(S.release_info(con, dev)["seq"] == s0 + 2 == ph.seq, f"빠진 번호가 들어오면 이어서 {s0 + 2}까지")
+    pr = S.import_photos(con, ph.seal({"schema": "dg.photos/1", "photos": [{"photo_id": pid_, "request_id": rb, "phase": "AFTER", "sha256": hashlib.sha256(pic).hexdigest(),
+                                                                         "data": base64.b64encode(pic).decode()}]}, S.TYPE_PHOTOS))
+    ok(S.release_info(con, dev)["ph"] == [pid_], "회수한 사진 ID가 다음 목록의 rel.ph에 실림")
+    recent = OPS.recent_imports(con)
+    rr = {x["id"]: x for x in recent}
+    ok(rr[imp["import_id"]]["release_code"] == imp["release_code"] and rr[pr["import_id"]]["photo_code"] == pr["release_code"]
+       and not rr[imp["import_id"]]["phone_confirmed"] and rr[imp["import_id"]]["crew"] == "십삼1팀", "최근 가져오기: 팀·확인 코드(결과·사진)·휴대폰 확인 전")
+    bun = S.make_bundle(con, b1["batch_id"])
+    tb = S.one(con, "SELECT rel_seq, rel_json FROM transfer_bundle WHERE id=?", (bun["bundle_id"],))
+    ok(tb["rel_seq"] == ph.seq and json.loads(tb["rel_json"])["ph"] == [pid_], "목록 묶음에 rel(받은 순번·사진) 저장")
+    _, plr, receipt = ph.receive(bun["frames"])
+    ok(plr.get("rel") == {"seq": ph.seq, "ph": [pid_]}, "휴대폰이 받은 목록(서명된 봉투)에 rel이 실려 옴")
+    S.confirm_receipt(con, bun["bundle_id"], "r-" + receipt[:4] + " " + receipt[4:])
+    ok(S.one(con, "SELECT receipt_confirmed_at FROM transfer_bundle WHERE id=?", (bun["bundle_id"],))["receipt_confirmed_at"], "수신 코드는 화면 앞 글자 'R-'·띄어쓰기를 붙여 넣어도 받음")
+    rr = {x["id"]: x for x in OPS.recent_imports(con)}
+    ok(S.release_info(con, dev)["ph"] == [] and rr[imp["import_id"]]["phone_confirmed"] and rr[imp["import_id"]]["phone_confirmed_by"] == "DAYLIST",
+       "휴대폰이 그 목록을 받았다고 확인 → 사진은 알린 것으로, 결과 가져오기는 '휴대폰 확인'으로")
+    OPS.confirm_import(con, pr["import_id"])
+    ok({x["id"]: x for x in OPS.recent_imports(con)}[pr["import_id"]]["phone_confirmed_by"] == "MANUAL", "담당자가 '휴대폰에 입력함' 표시")
+
+    # 7. 완료일 = 휴대폰 최종 결과 시각
+    fut = ph.ev(stop_b, "ATTEMPT", {"outcome": "DONE"})
+    fut["device_ts"] = "2099-01-01T00:00:00Z"
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [fut]}, P.TYPE_RESULT))
+    done_at = S.one(con, "SELECT completed_at FROM request WHERE id=?", (rb,))["completed_at"]
+    ok(done_at[:10] in (dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"), (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).strftime("%Y-%m-%d"))
+       and done_at < "2099", f"미래 시각(휴대폰 시계 오류)은 무시하고 지금으로 → {done_at}")
+    re_ = mk("십삼마", phone="010-0000-9304")
+    S.edit_assignment(con, today, "insert", {"crew_id": c1, "request_id": re_})
+    v_ = S.current_assignment(con, today)
+    st_e = {"request_id": re_, "assign_ver": [b for b in v_ if b["crew_id"] == c1][0]["assign_ver"], "req_ver": 1}
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [ph.ev(st_e, "ATTEMPT", {"outcome": "NOT_COLLECTED"})]}, P.TYPE_RESULT))
+    ev_ts = S.one(con, "SELECT device_ts FROM result_event WHERE request_id=? AND kind='ATTEMPT'", (re_,))["device_ts"]
+    ok(S.one(con, "SELECT completed_at FROM request WHERE id=?", (re_,))["completed_at"] == ev_ts, f"완료일 = 최종 결과(ATTEMPT) 기기 시각 {ev_ts}")
+
+    # 9. 마감: 목록 보냈는데 결과 안 온 팀 경고(막지 않음)
+    rf_ = mk("십삼바", phone="010-0000-9305")
+    S.edit_assignment(con, today, "insert", {"crew_id": c1, "request_id": rf_})
+    bun2 = S.make_bundle(con, [b for b in S.current_assignment(con, today) if b["crew_id"] == c1][0]["batch_id"])
+    cs = S.day_summary(con, today)
+    ok([x["crew"] for x in cs["crews_no_result"]] == ["십삼1팀"], "마감 점검: 목록을 보냈는데 그 뒤 결과 파일이 없는 팀")
+    cl = S.close_day(con, today, "가상 마감")
+    ok(cl["seq"] == 1 and any("십삼1팀" in w for w in cl["warnings"]), "마감은 막지 않고 경고만")
+    _, _, rcpt2 = ph.receive(bun2["frames"])
+
+    # 21. 처리할 일 · 빠른 조회
+    ro = mk("지난일", phone="010-0000-9306", planned_date="2026-10-01")
+    rn = mk("날짜없음", phone="010-0000-9307", planned_date="")
+    pend = {x["key"]: x for x in OPS.pending(con)["items"]}
+    ok(pend["close_approve"]["count"] == 1 and pend["close_approve"]["oldest"] == today and pend["overdue"]["count"] >= 1 and pend["overdue"]["oldest"] == "2026-10-01"
+       and pend["nodate"]["count"] >= 1 and pend["no_result_crews"]["count"] == 1 and pend["unclosed_days"]["oldest"] == "2026-10-01",
+       "처리할 일: 마감 확인 대기·지난 예정일 미처리·예정일 없음·결과 미회수 팀·마감 안 한 지난 날짜(가장 오래된 날)")
+    sr = S.search_requests(con, {"quick": "OVERDUE"})
+    ok([x["id"] for x in sr["rows"]] == [ro] and sr["counts"]["NODATE"] >= 1 and rn in [x["id"] for x in S.search_requests(con, {"quick": "NODATE"})["rows"]],
+       "빠른 조회 OVERDUE(지난 예정일·최종 결과 없음)·NODATE(예정일 없음)")
+    ok([x["receipt_no"] for x in S.search_requests(con, {"q": "ㅈㄴㅇ"})["rows"]] == [S.one(con, "SELECT receipt_no FROM request WHERE id=?", (ro,))["receipt_no"]],
+       "초성 검색은 저장한 초성 열로(SQL)")
+    for _ in range(3):
+        mk("쪽나눔", phone="010-0000-9308", planned_date="2026-12-01")
+    pg = S.search_requests(con, {"date": "2026-12-01", "size": 2, "page": 2})
+    ok(pg["total"] == 3 and pg["pages"] == 2 and len(pg["rows"]) == 1 and pg["counts"]["ALL"] == 3, "목록 쪽 나눔·건수는 SQL(LIMIT/OFFSET·COUNT)")
+
+    # 22. 운영 준비 점검
+    rd1 = {x["key"]: x for x in OPS.readiness(con)["items"]}
+    ok(not rd1["depot"]["ok"] and not rd1["devices"]["ok"] and not rd1["backup_key"]["ok"] and not rd1["contact"]["ok"] and rd1["admin_password"]["ok"] is False
+       and len(rd1) == 10 and not rd1["fee"]["ok"], "운영 준비: 차고지 기본값·팀2 휴대폰 없음·백업 키 없음·문의처 기본 문구 → 고칠 곳 표시")
+    S.save_settings(con, {"depot": {"lat": 35.14, "lon": 126.92, "label": "가상 차고지"}, "contact_info": "가상 청소과 000-0000"})
+    rd2 = {x["key"]: x for x in OPS.readiness(con)["items"]}
+    ok(rd2["depot"]["ok"] and rd2["contact"]["ok"] and rd2["depot"]["fix"] == "settings/route", "설정하면 그 항목 통과")
+
+    # 25. 주민 안내 문구
+    nt = S.notice_text(con, rb)
+    ok(S.one(con, "SELECT receipt_no FROM request WHERE id=?", (rb,))["receipt_no"] in nt and "부과 금액" in nt and "납부 방법" in nt and "가상 청소과" in nt
+       and "십삼나" not in nt and "9301" not in nt, "주민 안내 문구: 접수번호·배출일·부과 금액·납부 방법·문의처, 이름·연락처 없음")
+
+    # 11. 색인이 실제 조회에 쓰임
+    def plan_uses(sql, args, ix):
+        return ix in " ".join(str(r[-1]) for r in con.execute("EXPLAIN QUERY PLAN " + sql, args).fetchall())
+    checks = [("SELECT * FROM photo WHERE request_id=?", ("x",), "ix_photo_req"),
+              ("SELECT 1 FROM assignment_stop s WHERE s.request_id=?", ("x",), "ix_stop_req"),
+              ("SELECT * FROM payment p WHERE p.void_reason IS NULL AND p.paid_on BETWEEN ? AND ?", ("a", "b"), "ix_payment_paid_on"),
+              ("SELECT id FROM audit_log WHERE after_close=? AND entity IN ('request','payment') ORDER BY id", ("2026-11-01",), "ix_audit_after_close"),
+              ("SELECT entity_id FROM audit_log WHERE entity='request' AND action='CARRY' AND at >= ?", ("a",), "ix_audit_eai"),
+              ("SELECT MAX(device_seq) FROM result_event WHERE device_id=?", ("x",), "ix_event_dev_seq"),
+              ("SELECT * FROM request WHERE received_at >= ? AND received_at < ?", ("a", "b"), "ix_request_received"),
+              ("SELECT 1 FROM transfer_bundle WHERE batch_id=?", ("x",), "ix_bundle_batch"),
+              ("SELECT * FROM access_log WHERE actor=? ORDER BY id DESC", ("x",), "ix_access_actor"),
+              ("SELECT * FROM unload_log WHERE work_date=?", ("x",), "ix_unload_date"),
+              ("SELECT * FROM result_event WHERE import_id=?", ("x",), "ix_event_import")]
+    miss = [ix for sql, a, ix in checks if not plan_uses(sql, a, ix)]
+    ok(not miss, f"색인 {len(checks)}개가 실제 조회 계획에 쓰임 {miss}")
+
+    # 10은 v12_review. 2. 단독 휴대폰 두 대(같은 날)
+    def make_dgb(obj, pw):
+        salt, iv = os.urandom(16), os.urandom(12)
+        co = zlib.compressobj(9, zlib.DEFLATED, -15); plain = co.compress(json.dumps(obj).encode()) + co.flush()
+        key = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 600000, 32)
+        return b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1")
+    first_no = S.one(con, "SELECT receipt_no FROM request ORDER BY receipt_no LIMIT 1")["receipt_no"]
+    def solo(name, extra=()):
+        rid, l_ = str(uuid.uuid4()), str(uuid.uuid4())
+        r = {"request_id": rid, "receipt_no": first_no, "name": name, "phone": "01000009390", "address": "가상시 동구 단독로 13", "planned_date": today,
+             "items": [{"line_id": l_, "fee_rate_id": chair["id"], "name": "의자", "spec": "", "unit": "EA", "unit_label": "개", "qty": 2, "unit_price": 1, "price_status": "CONFIRMED"}],
+             "status": "ACTIVE", "received_at": "2026-11-03T23:00:00Z"}
+        evs_ = [{"event_id": str(uuid.uuid4()), "seq": 1, "request_id": rid, "kind": "ITEM_RESULT", "body": {"line_id": l_, "qty_confirmed": 2, "qty_collected": 99}, "ts": "2026-11-04T01:00:00Z"},
+                {"event_id": str(uuid.uuid4()), "seq": 2, "request_id": rid, "kind": "ATTEMPT", "body": {"outcome": "DONE"}, "ts": "2026-11-04T01:01:00Z"}]
+        return rid, make_dgb({"format": "dg.backup/1", "state": {"mode": "SOLO", "requests": [r, *extra], "events": evs_}, "photos": {}}, "solo-pass-13")
+    bad_q = {"request_id": str(uuid.uuid4()), "receipt_no": "DG-29990101-0009", "name": "수량영", "phone": "01000009391", "address": "가상시 동구 단독로 14",
+             "items": [{"line_id": str(uuid.uuid4()), "name": "의자", "qty": 0}], "status": "ACTIVE"}
+    no_rec = {"request_id": str(uuid.uuid4()), "name": "번호없음", "phone": "01000009392", "address": "가상시 동구 단독로 15", "items": [], "status": "ACTIVE"}
+    sa, fa = solo("단독가")
+    sb, fb = solo("단독나", (bad_q, no_rec))
+    pv = S.import_solo(con, fb, "solo-pass-13", preview=True)
+    ok(pv["new"] == 1 and pv["invalid"] == 2 and {e["receipt_no"] for e in pv["errors"]} == {"DG-29990101-0009", ""} and any("수량" in e["error"] for e in pv["errors"])
+       and any("접수번호" in e["error"] for e in pv["errors"]), "단독 미리보기: 수량 0·접수번호 없음은 행별 오류(500 아님)")
+    S.import_solo(con, fa, "solo-pass-13", c1)
+    mv = S.import_solo(con, fb, "solo-pass-13", c1)
+    ga, gb = S.get_request(con, sa), S.get_request(con, sb)
+    pre_ = first_no.rsplit("-", 1)
+    ok(ga["receipt_no"] == f"{pre_[0]}-S{pre_[1]}" and gb["receipt_no"] == f"{pre_[0]}-S{pre_[1]}-2" and mv["requests"] == 1 and mv["invalid"] == 2,
+       f"단독 휴대폰 두 대 같은 날: {ga['receipt_no']}, {gb['receipt_no']} (빈 번호까지), 틀린 접수는 건너뜀")
+    ok(ga["items"][0]["unit_price"] == chair["price"] and ga["state"]["lines"][0]["qty_collected"] == 2 and ga["status"] == "DONE",
+       "단독 품목 단가는 PC 수수료표로(휴대폰 1원 무시), 수거 수량은 확인 수량을 넘지 않게 정리")
+
+    # 15. 예약 작업: 개인정보 자동 파기(묶음)·사진 정리·상태
+    st0 = {x["key"]: x for x in OPS.ops_status(con)["items"]}
+    ok(st0["pii_purge"]["stale"] and st0["photo_purge"]["stale"] and OPS.ops_status(con)["warnings"], "예약 작업이 돈 적 없으면 대시보드 경고")
+    olds = [mk(f"오래된{i}", phone=f"010-0000-94{i:02d}") for i in range(3)]
+    for o in olds:
+        con.execute("UPDATE request SET status='DONE', completed_at='2020-01-01T00:00:00Z' WHERE id=?", (o,))
+    lk = threading.Lock()
+    res = PV.purge_pii(con, trigger="SCHEDULE", lock=lk, batch=2)
+    logs = S.rows(con, "SELECT count, trigger FROM pii_purge_log ORDER BY at")
+    ok(res["count"] == 3 and [x["count"] for x in logs] == [2, 1] and all(x["trigger"] == "SCHEDULE" for x in logs) and not lk.locked(),
+       "개인정보 파기: 묶음마다 한 트랜잭션·대장 한 줄, 묶음 사이 잠금 풀림(SCHEDULE)")
+    dr = OPS.daily_tasks(con, None, None)
+    st1 = {x["key"]: x for x in OPS.ops_status(con)["items"]}
+    ok(not st1["pii_purge"]["stale"] and not st1["photo_purge"]["stale"] and not st1["daily"]["stale"] and "verify_quick" in dr and dr["verify_full"] is True,
+       "하루 예약 작업(파기·사진 정리·환불 점검·재전송 기록 정리·무결성 검사) 뒤 경고 사라짐")
+
+    # 14. 무결성: 검사점부터 빠른 검사, 전체 검사는 따로
+    PV.record_access(con, "VIEW", ra, 1, "가상")
+    q1 = PV.verify_all(con, full=False)
+    ck = S.get_setting(con, PV.CKPT_KEYS["access"])
+    PV.record_access(con, "VIEW", ra, 1, "가상2")
+    q2 = PV.verify_all(con, full=False)
+    ok(q1["ok"] and q2["ok"] and q2["access"]["incremental"] and q2["access"]["from_id"] == ck["id"] and q2["access"]["checked"] == 1,
+       "빠른 검사: 검사점 다음 새 행만 확인(1행)")
+    first = S.one(con, "SELECT id, filter FROM access_log ORDER BY id LIMIT 1")
+    con.execute("UPDATE access_log SET filter='고침' WHERE id=?", (first["id"],))
+    ok(PV.verify_all(con, full=False, save=False)["ok"] and not PV.verify_all(con, full=True, save=False)["ok"], "검사점 앞 행을 고치면 빠른 검사는 못 보고 전체 검사가 찾음")
+    jf = OPS.JOBS.run_now({"actor": "admin", "client": "local", "kind": "verify_full", "progress": 0}, OPS.job_fn("verify_full", con, None))
+    ok(jf["status"] == "DONE" and jf["result"]["ok"] is False and jf["progress"] > 0, "전체 검사는 백그라운드 작업(진행률)")
+    con.execute("UPDATE access_log SET filter=? WHERE id=?", (first["filter"], first["id"]))
+    ck2 = S.get_setting(con, PV.CKPT_KEYS["access"])
+    con.execute("UPDATE access_log SET filter='고침' WHERE id=?", (ck2["id"],))
+    ok(not PV.verify_all(con, full=False, save=False)["ok"], "검사점 행 자체를 고치면 빠른 검사도 찾음")
+    con.execute("UPDATE access_log SET filter='가상2' WHERE id=?", (ck2["id"],))
+
+    # 16·19. 백업: 조각 해시·이름 검사·두 번째 위치 변경 이력
+    bk = S.make_backup(con, "backup-pass-13x")
+    ok(bk["sha256"] == hashlib.sha256(Path(bk["file"]).read_bytes()).hexdigest(), "수동 백업 해시는 조각으로 읽어 계산(같은 값)")
+    for bad in ("../pc.db", "donggu-backup-x.dgbak", "/etc/passwd", "donggu-backup-20261104-120000.dgbak/../../x.dgbak"):
+        raises(lambda b=bad: S.verify_backup(con, b, "backup-pass-13x"), "이름", f"백업 이름 형식·폴더 밖 거부: {bad}")
+    ok(S.verify_backup(con, bk["name"], "backup-pass-13x")["ok"], "정한 형식의 백업 이름은 검사")
+    d2 = tempfile.mkdtemp(prefix="dg-dest2-")
+    S.save_settings(con, {"backup_dest2": d2})
+    a_ = S.list_audit(con, entity="backup", action="DEST2")
+    ok(a_ and json.loads(a_[0]["detail"])["to"] == d2, "두 번째 보관 위치 변경은 경로와 함께 변경 이력")
+
+    # 13·18·20. 서버: 조회는 잠금 없이, 409, 재전송 방지, 작업 번호, 세션 절대 만료, 로그
+    S.create_user(con, "admin13", "관리자", "ADMIN", "admin-pass-013")
+    S.create_user(con, "kim13", "김접수", "INTAKE", "intake-pass-13")
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+    SV.CON, SV.PORT, SV.LAN = con, port, None
+    SV.setup_logging(Path(os.environ["DG_STATE"]))
+    srv = SV.Server(("127.0.0.1", port), SV.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def http(method, path, body=None, cookie=None, timeout=20):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
+                                     headers={"X-DG-CSRF": "1", "Content-Type": "application/json", **({"Cookie": cookie} if cookie else {})})
+        try:
+            r = opener.open(req, timeout=timeout)
+            return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def login(u, pw):
+        st_, hd, _ = http("POST", "/api/login", {"username": u, "password": pw})
+        return re.search(r"dg_s=[^;]+", hd.get("Set-Cookie") or "").group(0) if st_ == 200 else None
+    adm, kim = login("admin13", "admin-pass-013"), login("kim13", "intake-pass-13")
+    ok(adm and kim, "서버 로그인(비밀번호 확인은 잠금 밖)")
+    with SV.LOCK:  # 쓰기 잠금을 잡고 있어도 조회는 된다
+        t0 = time.time()
+        st_, _, body = http("GET", "/api/pending", cookie=kim, timeout=5)
+    ok(st_ == 200 and json.loads(body)["items"] and time.time() - t0 < 5, "조회(GET)는 쓰기 잠금 없이 조회 전용 연결(WAL)로")
+    st_, _, body = http("GET", "/api/requests?quick=OVERDUE", cookie=kim)
+    ok(st_ == 200 and json.loads(body)["total"] >= 1 and S.one(con, "SELECT action FROM access_log ORDER BY id DESC LIMIT 1")["action"] == "LIST",
+       "조회 전용 연결에서도 접속기록은 잠금 안에서 쓰기 연결로 남김")
+    st_, _, body = http("POST", f"/api/requests/{rn}", {**base, "name": "날짜없음", "planned_date": "", "req_ver": RV(con, rn) + 5, "reason": "가상",
+                                                         "items": [{"line_id": S.get_request(con, rn)["items"][0]["line_id"], "fee_rate_id": chair["id"], "qty": 1}]}, cookie=kim)
+    jb = json.loads(body)
+    ok(st_ == 409 and jb["stale"] and jb["req_ver"] == RV(con, rn) and "다시 열어" in jb["error"], "옛 버전 수정 → HTTP 409 + 지금 req_ver")
+    n0 = S.one(con, "SELECT COUNT(*) AS n FROM request")["n"]
+    body_ = {**base, "name": "서버두번", "items": [{"fee_rate_id": chair["id"], "qty": 1}], "client_req_id": "c-" + uuid.uuid4().hex}
+    r1_, r2_ = json.loads(http("POST", "/api/requests", body_, cookie=kim)[2]), json.loads(http("POST", "/api/requests", body_, cookie=kim)[2])
+    ok(r1_["id"] == r2_["id"] and S.one(con, "SELECT COUNT(*) AS n FROM request")["n"] == n0 + 1, "POST /api/requests 두 번(같은 client_req_id) → 1건")
+    pay_b = {"amount": 500, "method": "현장 현금", "reason": "마감 뒤 납부(가상)", "client_req_id": "p-" + uuid.uuid4().hex}
+    http("POST", f"/api/requests/{r1_['id']}/payments", pay_b, cookie=kim); http("POST", f"/api/requests/{r1_['id']}/payments", pay_b, cookie=kim)
+    ok(S.one(con, "SELECT COUNT(*) AS n FROM payment WHERE request_id=?", (r1_["id"],))["n"] == 1, "수납 기록 두 번 → 1건")
+    st_, _, body = http("POST", "/api/photo-purge", {}, cookie=adm)
+    jid = json.loads(body)["job_id"]
+    for _ in range(100):
+        j = json.loads(http("GET", f"/api/jobs/{jid}", cookie=adm)[2])
+        if j["status"] in ("DONE", "FAILED"):
+            break
+        time.sleep(0.05)
+    ok(j["status"] == "DONE" and "count" in j["result"] and http("GET", f"/api/jobs/{jid}", cookie=kim)[0] == 404, "사진 정리 → 작업 번호, GET /api/jobs/{id}로 결과(다른 사용자는 못 봄)")
+    st_, _, body = http("GET", "/api/diag", cookie=adm)
+    dg = json.loads(body)
+    ok(st_ == 200 and dg["tables"]["request"] >= 10 and dg["db_bytes"] > 0 and dg["schema_version"] == store.LATEST and http("GET", "/api/diag", cookie=kim)[0] == 403,
+       "진단(관리자만): DB·WAL·사진 크기, 표별 건수, 마지막 백업·검사·파기")
+    st_, hd, body = http("GET", f"/api/requests/{rb}/notice", cookie=kim)
+    ok(st_ == 200 and hd.get("Content-Type", "").startswith("text/plain") and "접수번호" in body.decode(), "GET /api/requests/{id}/notice → 안내 글(text/plain)")
+    tkn = json.loads(http("POST", f"/api/requests/{rb}/receipt-print", {}, cookie=kim)[2])["token"]
+    ok("납부 안내" in http("GET", f"/print/doc/{tkn}", cookie=kim)[2].decode(), "접수증에 납부 안내 칸(설정 payment_guide)")
+    st_, hd, _ = http("GET", f"/bundle/{bun2['bundle_id'][:8]}", cookie=kim)
+    ok(st_ == 200 and "frame-ancestors 'none'" in (hd.get("Content-Security-Policy") or "") and hd.get("X-Frame-Options") == "DENY", "QR 표시 화면에도 보안 머리(CSP·틀 막기)")
+    SV.SLOW_MS = -1
+    http("GET", "/api/readiness", cookie=kim)
+    # 서버는 응답을 보낸 뒤 로그를 쓴다: 로그가 남을 때까지(최대 3초) 기다린 뒤 기준을 되돌린다
+    logf = Path(os.environ["DG_STATE"]) / "logs" / "server.log"
+    for _ in range(60):
+        if "느린 요청 GET /api/readiness" in logf.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.05)
+    SV.SLOW_MS = 1000
+    ok("느린 요청 GET /api/readiness" in logf.read_text(encoding="utf-8"), "1초 넘는 요청은 WARNING(경로 틀·ms)")
+    tok_ = kim.split("=", 1)[1]
+    SV.SESSIONS[tok_]["created"] -= SV.ABS_S + 1
+    ok(http("GET", "/api/me", cookie=kim)[0] == 401, "세션 절대 만료(조작이 이어져도 10시간)")
+    SV.SESSIONS["dead"] = {"exp": time.time() - 1, "created": time.time(), "user_id": "x", "username": "x", "role": "ADMIN"}
+    ok(SV.cleanup_sessions() >= 1 and "dead" not in SV.SESSIONS, "만료 세션 정기 정리")
+    for _ in range(3):
+        http("POST", "/api/login", {"username": "kim13", "password": "wrong-password"})
+    SV.FAILS.clear()
+    with SV.LOCK:
+        SV.flush_login_fails(con, force=True)
+    lf = S.rows(con, "SELECT detail, actor FROM audit_log WHERE action='LOGIN_FAIL'")
+    ok(len(lf) == 1 and json.loads(lf[0]["detail"])["count"] == 3 and lf[0]["actor"] == "kim13", "로그인 실패 이력은 분마다 모아 한 줄(횟수)")
+    SV.LAN = {"hostname": "x", "nets": []}
+    for _ in range(SV.IP_FAIL_MAX):
+        SV.ip_failed("10.0.0.9")
+    ok(SV.ip_blocked("10.0.0.9") > 0 and SV.ip_blocked("10.0.0.8") == 0, "LAN 모드: 한 PC에서 10분에 20번 틀리면 그 PC 잠금")
+    SV.LAN = None
+    SV.IP_FAILS.clear()
+    srv.shutdown(); srv.server_close()
+
+    ok(not summary_matches(), "여러 쓰기 경로(취소·수납·배정 수정·충돌 반영·단독 옮기기·파기) 뒤에도 요약 열 = derive()")
+    con.close()
+    print(f"\n통과 {passed}개 (v0.13 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -1876,3 +2359,4 @@ if __name__ == "__main__":
     v12_pilot()
     v12_load()
     v12_review()
+    v13()

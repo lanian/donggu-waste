@@ -50,6 +50,9 @@ def save_settings(con, data: dict):
         b = (data["backup_dest2"] or "").strip()
         if b and not Path(b).is_absolute():
             raise S.UserError("두 번째 보관 위치는 전체 경로로 적어 주세요 (예: \\\\서버\\백업, E:\\동구백업).")
+        old = S.get_setting(con, "backup_dest2", "") or ""
+        if b != old:  # 백업 사본이 어디로 가는지 바뀜 → 경로를 이력에 남긴다
+            S.audit(con, "backup", "dest2", "DEST2", {"from": old[:200], "to": b[:200]})
         S.set_setting(con, "backup_dest2", b)
     for k, lo, hi, what in (("backup_keep_daily", 1, 365, "일별 보관 개수"), ("backup_keep_monthly", 0, 120, "월별 보관 개수"), ("backup_retention_days", 7, 3650, "백업 보관 일수")):
         if k in data:
@@ -299,9 +302,7 @@ def run_retention(con) -> list[str]:
 
 
 def verify_auto(con, name: str, pem: bytes, password: str) -> dict:
-    if "/" in name or "\\" in name or not name.endswith(".dgabk"):
-        raise S.UserError("백업 파일 이름이 올바르지 않습니다.")
-    src = S.backup_dir(con) / name
+    src = S.backup_path(con, name, ".dgabk")
     if not src.exists():
         raise S.UserError("백업 파일이 없습니다.")
     tmp = S.backup_dir(con) / f".verify-{secrets.token_hex(6)}.db"

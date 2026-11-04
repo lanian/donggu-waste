@@ -31,7 +31,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import area as A, backup as BK, finance as FN, privacy as PV, routing, service as S, store
+import contextlib
+import queue
+
+from . import area as A, backup as BK, finance as FN, ops as OPS, privacy as PV, routing, service as S, store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
@@ -46,9 +49,14 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://tiles.openfreemap.org; "
        "connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; media-src 'self' blob: mediastream:; object-src 'none'; base-uri 'none'; "
        "form-action 'none'; frame-ancestors 'none'")
+RAW_CSP = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; "
+           "frame-ancestors 'none'")
 # 세션 무조작 만료(30분). 자동 시험에서만 DG_SESSION_IDLE_S 로 줄일 수 있다(60초 이상).
 IDLE_S = max(60, int(os.environ.get("DG_SESSION_IDLE_S") or 30 * 60))
+# 세션 절대 만료(조작이 이어져도 로그인 뒤 10시간). 시험에서만 DG_SESSION_ABS_S 로 줄일 수 있다(60초 이상).
+ABS_S = max(60, int(os.environ.get("DG_SESSION_ABS_S") or 10 * 3600))
 MAX_BODY = 40 * 1024 * 1024
+SLOW_MS = 1000  # 이보다 오래 걸린 요청은 WARNING 으로 남긴다(경로 틀·ms만)
 
 LOCK = threading.Lock()
 CON = None
@@ -58,6 +66,89 @@ PRINTS: dict[str, dict] = {}  # 고른 접수 인쇄: 잠깐 쓰는 표(주소�
 PORT = 8765
 LAN: dict | None = None  # LAN 모드 설정 (기본 꺼짐): {"hostname", "nets", "cert", "key"}
 LOG = logging.getLogger("dgpc")
+IP_FAILS: dict[str, dict] = {}  # LAN 모드: 접속 PC(IP)별 로그인 실패 {"times": [...], "until": 잠금 끝}
+FAIL_AGG: dict[tuple[str, str], int] = {}  # 로그인 실패 변경 이력은 분마다 모아 한 줄: (분, 아이디 표시) → 횟수
+RPOOL: queue.LifoQueue = queue.LifoQueue()  # 조회 전용 DB 연결(WAL 읽기, 잠금 없음)
+RPOOL_MAX = 4
+STATE = {"scheduler_tick": None, "started_at": None}
+IP_FAIL_MAX, IP_FAIL_WINDOW, IP_BLOCK_S = 20, 600, 600
+
+
+def ip_blocked(ip: str) -> int:
+    """LAN 모드에서 이 PC(IP)가 잠겨 있으면 남은 초."""
+    if not LAN:
+        return 0
+    f = IP_FAILS.get(ip)
+    return max(0, int(f["until"] - time.time()) + 1) if f and f["until"] > time.time() else 0
+
+
+def ip_failed(ip: str):
+    """LAN 모드: 한 PC에서 10분에 20번 넘게 틀리면(아이디를 바꿔 가며 시도) 그 PC를 10분 잠근다."""
+    if not LAN:
+        return
+    now_ = time.time()
+    if len(IP_FAILS) > 1000:
+        for k in [k for k, v in IP_FAILS.items() if v["until"] < now_ and (not v["times"] or now_ - v["times"][-1] > IP_FAIL_WINDOW)]:
+            IP_FAILS.pop(k, None)
+    f = IP_FAILS.setdefault(ip, {"times": [], "until": 0.0})
+    f["times"] = [t for t in f["times"] if now_ - t < IP_FAIL_WINDOW] + [now_]
+    if len(f["times"]) >= IP_FAIL_MAX:
+        f["until"] = now_ + IP_BLOCK_S
+
+
+def note_login_fail(who: str, at: float | None = None):
+    m = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(at or time.time()))
+    FAIL_AGG[(m, who)] = FAIL_AGG.get((m, who), 0) + 1
+
+
+def flush_login_fails(con, force: bool = False) -> int:
+    """지난 분의 로그인 실패를 아이디마다 한 줄(횟수)로 변경 이력에 남긴다(실패마다 한 줄씩 쌓지 않음). 잠금은 부르는 쪽."""
+    cur = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())
+    keys = [k for k in list(FAIL_AGG) if force or k[0] < cur]
+    if not keys:
+        return 0
+    with S.tx(con):
+        for m, who in keys:
+            n = FAIL_AGG.pop((m, who), 0)
+            tok = S.ACTOR.set(who)
+            try:
+                S.audit(con, "user", "-", "LOGIN_FAIL", {"count": n, "minute": m})
+            finally:
+                S.ACTOR.reset(tok)
+    return len(keys)
+
+
+@contextlib.contextmanager
+def read_con():
+    """조회 전용 연결 하나 빌리기(없으면 새로 연다). 이 연결에서 생긴 기록(접속기록·이력)은 S.WRITE_SINK로 잠금 안에서 쓴다."""
+    try:
+        rc = RPOOL.get_nowait()
+    except queue.Empty:
+        rc = store.connect(readonly=True)
+    tok = S.WRITE_SINK.set(_locked_write)
+    try:
+        yield rc
+    finally:
+        S.WRITE_SINK.reset(tok)
+        if rc.in_transaction:
+            try:
+                rc.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                pass
+        if RPOOL.qsize() < RPOOL_MAX:
+            RPOOL.put(rc)
+        else:
+            rc.close()
+
+
+def _locked_write(fn):
+    with LOCK:
+        return fn(CON)
+
+
+def _is_ro_error(e: Exception) -> bool:
+    t = str(e).lower()
+    return "readonly" in t or "read-only" in t or "attempt to write" in t
 
 
 def _fail_key(username: str) -> str:
@@ -94,15 +185,17 @@ def login_succeeded(username: str):
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
                        "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
-                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv", "load-check"},
+                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv", "load-check",
+                       "jobs", "imports", "pending", "readiness", "assign", "ops-status"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
-                        "fee-revisions", "geocode", "links", "refunds", "recon", "stats", "pilot"}},
-    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
-              "POST": {"import", "unloads", "qrtest", "password"}},
+                        "fee-revisions", "geocode", "links", "refunds", "recon", "stats", "pilot", "imports"}},
+    "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table", "jobs", "imports"},
+              "POST": {"import", "unloads", "qrtest", "password", "imports"}},
 }
 
 
-LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr", "juso-search", "juso-coord"}
+LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr", "juso-search", "juso-coord", "diag"}
+ADMIN_ONLY = {("GET", "diag"), ("POST", "refunds/sync")}
 LEAD_POST = {"password", "close/approve", "access/check", "stats/print"}
 APPROVE_RE = re.compile(r"^refunds/[^/]+/(approve|reject)$")
 
@@ -110,6 +203,8 @@ APPROVE_RE = re.compile(r"^refunds/[^/]+/(approve|reject)$")
 def allowed(role: str, method: str, p: str) -> bool:
     if role == "ADMIN" or p in ("prefs", "me"):
         return True
+    if (method, p) in ADMIN_ONLY:
+        return False
     head = p.split("/")[0]
     if role == "LEAD":
         return (method == "GET" and head not in LEAD_GET_DENY) or (method == "POST" and (p in LEAD_POST or bool(APPROVE_RE.match(p))))
@@ -245,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         t = m.group(1)
         sess = SESSIONS.get(t)
-        if not sess or sess["exp"] < time.time():
+        if not sess or sess["exp"] < time.time() or time.time() - sess.get("created", 0) > ABS_S:
             SESSIONS.pop(t, None)
             return None
         sess["exp"] = time.time() + IDLE_S
@@ -278,13 +373,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def require_crew_request(self, rid: str):
         cs = self.crew_scope()
-        if cs is not None and not (cs and S.request_in_crew(CON, rid, cs)):
+        if cs is not None and not (cs and S.request_in_crew(self.c, rid, cs)):
             raise S.UserError("내 팀에 배정된 접수만 볼 수 있습니다.")
 
     def me(self) -> dict:
         u = self.user
         return {"username": u["username"], "display_name": u["display_name"], "role": u["role"], "role_label": S.ROLES[u["role"]], "crew_id": u.get("crew_id"),
-                "must_change": bool(u.get("must_change")), "prefs": S.user_prefs(CON, u["user_id"])}
+                "must_change": bool(u.get("must_change")), "prefs": S.user_prefs(self.c, u["user_id"])}
 
     # ---------------------------------------------------------- 진입점
     def do_GET(self):
@@ -300,12 +395,16 @@ class Handler(BaseHTTPRequestHandler):
             self._route(method)
         finally:
             u = (self.user or {}).get("username") or "-"
-            LOG.info("%s %s %s %dms user=%s client=%s", method, path_template(self.path), self._status, int((time.time() - t0) * 1000), u,
+            ms = int((time.time() - t0) * 1000)
+            LOG.info("%s %s %s %dms user=%s client=%s", method, path_template(self.path), self._status, ms, u,
                      self.client_address[0] if LAN else "local")
+            if ms > SLOW_MS:
+                LOG.warning("느린 요청 %s %s %dms", method, path_template(self.path), ms)
 
     def _route(self, method):
         self.json_body_cache = None
         self.user = None
+        self.c = None
         S.ACTOR.set("system")
         PV.CLIENT.set(self.client_address[0] if LAN else "local")
         if LAN and not ip_allowed(self.client_address[0], LAN["nets"]):
@@ -364,6 +463,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 return self.qrtest_page(path[8:])
             return self.send_json({"error": "없음"}, 404)
+        except S.StaleError as e:  # 다른 곳에서 먼저 바뀜(낙관적 동시성) → 409 + 지금 버전
+            return self.send_json({"error": str(e), "stale": True, **e.info}, 409)
         except S.UserError as e:
             return self.send_json({"error": str(e)}, 400)
         except Exception:  # 오류 내용에 개인정보가 섞일 수 있어 화면에는 일반 문구만, 로그에는 전화·주소 모양 값을 가린 추적 기록
@@ -375,8 +476,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- API
     def api(self, method, p, qs):
         if p == "state" and method == "GET":
-            with LOCK:
-                need = not S.users_exist(CON)
+            with read_con() as rc:
+                need = not S.users_exist(rc)
             return self.send_json({"setup_needed": need, "logged_in": bool(self.session())})
         if p == "setup" and method == "POST":
             d = self.json_body()
@@ -388,27 +489,7 @@ class Handler(BaseHTTPRequestHandler):
                 u = S.check_login(CON, d.get("username") or "", d.get("password") or "")
             return self.login_ok(u)
         if p == "login" and method == "POST":
-            d = self.json_body()
-            wait = login_blocked(d.get("username") or "")
-            if wait:
-                raise S.UserError(f"이 아이디로 여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")
-            with LOCK:
-                good = S.check_login(CON, d.get("username") or "", d.get("password") or "")
-                if good:
-                    S.ACTOR.set(good["username"])
-                    with S.tx(CON):
-                        S.audit(CON, "user", good["id"], "LOGIN", None)
-                else:
-                    # 아이디 칸에 비밀번호를 잘못 넣는 일이 있어, 있는 아이디일 때만 그대로 적고 아니면 가린다(변경 이력은 지울 수 없음)
-                    un = (d.get("username") or "").strip()[:30]
-                    S.ACTOR.set(un if un and S.one(CON, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)) else "(없는 아이디)")
-                    with S.tx(CON):
-                        S.audit(CON, "user", "-", "LOGIN_FAIL", None)
-            if not good:
-                login_failed(d.get("username") or "")
-                raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
-            login_succeeded(d.get("username") or "")
-            return self.login_ok(good)
+            return self.login()
         tok = self.session()
         if not tok:
             return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
@@ -421,18 +502,140 @@ class Handler(BaseHTTPRequestHandler):
         if sess.get("must_change") and p not in ("me", "password", "bootstrap", "prefs"):
             return self.send_json({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
         self.user = sess
+        S.ACTOR.set(sess["username"])
+        if method == "GET":
+            # 조회는 DB 잠금 없이 조회 전용 연결(WAL)로. 접속기록·이력은 잠금 안에서 쓰기 연결로 넘어간다.
+            try:
+                with read_con() as rc:
+                    self.c = rc
+                    return self.api_authed(method, p, qs)
+            except Exception as e:  # noqa: BLE001 — 조회 중 쓰기가 필요했던 경우(드묾): 잠금 잡고 쓰기 연결로 다시
+                if not _is_ro_error(e):
+                    raise
+            with LOCK:
+                self.c = CON
+                return self.api_authed(method, p, qs)
+        if self.api_unlocked(p, qs) is not False:  # 처리함(응답 보냄)
+            return None
         with LOCK:
-            S.ACTOR.set(sess["username"])
+            self.c = CON
             return self.api_authed(method, p, qs)
+
+    def login(self):
+        """로그인: scrypt 확인은 DB 잠금 밖(조회 전용 연결)에서, 마지막 로그인 시각·이력만 잠금 안에서."""
+        d = self.json_body()
+        ip = self.client_address[0] if LAN else "local"
+        wait = login_blocked(d.get("username") or "") or ip_blocked(ip)
+        if wait:
+            raise S.UserError(f"여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")
+        with read_con() as rc:
+            good = S.verify_login(rc, d.get("username") or "", d.get("password") or "")
+            un = (d.get("username") or "").strip()[:30]
+            known = bool(un and S.one(rc, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)))
+        with LOCK:
+            if good:
+                S.ACTOR.set(good["username"])
+                with S.tx(CON):
+                    CON.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (S.now(), good["id"]))
+                    S.audit(CON, "user", good["id"], "LOGIN", None)
+            else:
+                # 아이디 칸에 비밀번호를 잘못 넣는 일이 있어, 있는 아이디일 때만 그대로 적고 아니면 가린다. 분마다 모아 한 줄로 남긴다.
+                note_login_fail(un if known else "(없는 아이디)")
+            flush_login_fails(CON)
+        if not good:
+            login_failed(d.get("username") or "")
+            ip_failed(ip)
+            raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
+        login_succeeded(d.get("username") or "")
+        return self.login_ok(good)
+
+    def idem(self, endpoint: str, fn):
+        """client_req_id가 있으면 같은 요청을 한 번만 처리(24시간 안 다시 오면 그때 응답). 잠금 안에서 부른다."""
+        d = self.json_body()
+        key = d.get("client_req_id") if isinstance(d, dict) else None
+        return S.idempotent(self.c, self.user["username"], endpoint, key, fn)
+
+    def job(self, kind: str, **kw) -> dict:
+        jid = OPS.JOBS.submit(kind, OPS.job_fn(kind, CON, LOCK, lambda: store.connect(readonly=True), **kw), self.user["username"],
+                              self.client_address[0] if LAN else "local")
+        return {"job_id": jid, "status": "QUEUED", "kind": kind}
+
+    def api_unlocked(self, p, qs):
+        """DB 잠금을 오래 잡지 않을 POST: 파일 검증·복호·외부 호출·노선 계산은 잠금 밖, 반영만 잠금 안. 해당 없으면 False."""
+        if p in ("import/result", "import/photos"):
+            body = self.body()
+            with read_con() as rc:
+                if self.crew_scope() is not None and S.device_crew(rc, body) != self.crew_scope():
+                    raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
+                prep = S.prepare_result(rc, body) if p == "import/result" else S.prepare_photos(rc, body)
+            with LOCK:
+                if p == "import/result":
+                    return self.send_json(S.import_result(CON, body, "QR" if qs.get("channel") == "QR" else "MAIL", prepared=prep))
+                return self.send_json(S.import_photos(CON, body, prepared=prep))
+        if p == "import/solo":
+            import base64 as _b64
+            pw = _b64.b64decode(self.headers.get("X-DG-Pass") or "").decode("utf-8", "replace")
+            body = self.body()
+            opened = S.prepare_solo(body, pw)  # PBKDF2 60만 회: 잠금 밖
+            if qs.get("preview") == "1":
+                with read_con() as rc:
+                    return self.send_json(S.import_solo(rc, body, pw, qs.get("crew") or None, preview=True, opened=opened))
+            with LOCK:
+                return self.send_json(S.import_solo(CON, body, pw, qs.get("crew") or None, opened=opened))
+        if p == "requests/import" and qs.get("preview") == "1":
+            with read_con() as rc:
+                return self.send_json(S.import_requests(rc, self.body(), preview=True))
+        if p == "recon" and qs.get("preview") == "1":
+            with read_con() as rc:
+                return self.send_json(FN.import_recon(rc, self.body(), preview=True))
+        if p == "addr-import":
+            cols = None
+            if qs.get("columns"):
+                from dgpc import geo
+                cols = geo.parse_columns_arg(qs["columns"])
+            body = self.body()
+            parsed = S.parse_addr_points(body, qs.get("region", ""), cols)  # 큰 파일 읽기: 잠금 밖
+            if qs.get("preview") == "1":
+                with read_con() as rc:
+                    return self.send_json(S.import_addr_points(rc, body, qs.get("region", ""), cols, preview=True, parsed=parsed))
+            with LOCK:
+                return self.send_json(S.import_addr_points(CON, body, qs.get("region", ""), cols, parsed=parsed))
+        if p == "external/test":  # 외부 서비스 시험: 잠금 밖
+            with read_con() as rc:
+                return self.send_json(S.external_test(rc, self.json_body().get("service", "")))
+        if p == "route":
+            out = self.route_plan(self.json_body())
+            with read_con() as rc:
+                PV.record_access(rc, "LIST", "", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")
+            return self.send_json(out)
+        # 오래 걸리는 관리 작업 → 백그라운드 작업 번호
+        if p == "backup":
+            pw = self.json_body().get("passphrase", "")
+            if len(pw or "") < 12:
+                raise S.UserError("백업 비밀번호는 12자 이상으로 정해 주세요.")
+            return self.send_json(self.job("backup", passphrase=pw))
+        if p == "backup/auto":
+            return self.send_json(self.job("backup_auto"))
+        if p == "backup/retention":
+            return self.send_json(self.job("backup_retention"))
+        if p == "privacy/purge":
+            return self.send_json(self.job("pii_purge"))
+        if p == "photo-purge":
+            return self.send_json(self.job("photo_purge"))
+        if p == "refunds/sync":
+            return self.send_json(self.job("refund_sync"))
+        if p == "integrity/full":
+            return self.send_json(self.job("verify_full"))
+        return False
 
     def login_ok(self, u):
         t = secrets.token_urlsafe(32)
-        SESSIONS[t] = {"exp": time.time() + IDLE_S, "user_id": u["id"], "username": u["username"], "role": u["role"],
+        SESSIONS[t] = {"exp": time.time() + IDLE_S, "created": time.time(), "user_id": u["id"], "username": u["username"], "role": u["role"],
                        "display_name": u["display_name"], "must_change": u.get("must_change", False), "crew_id": u.get("crew_id")}
         return self.send_json({"ok": True}, extra={"Set-Cookie": f"dg_s={t}" + self.cookie_flags()})
 
     def api_authed(self, method, p, qs):
-        c = CON
+        c = self.c
         parts = p.split("/")
         if method == "GET":
             if p == "bootstrap":
@@ -440,7 +643,8 @@ class Handler(BaseHTTPRequestHandler):
                                        "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
                                        "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
                                        "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
-                                       "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__})
+                                       "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__,
+                                       "quick_filters": list(S.QUICK), "reduction_round_units": list(S.ROUND_UNITS), "api": 13})
             if p == "calendar":
                 start = qs.get("start") or S.today_kst()
                 dong = qs.get("dong") or None
@@ -492,11 +696,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(PV.access_csv(c, qs), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-access.csv"'})
             if p == "access/status":
                 return self.send_json({**PV.check_status(c), "checks": PV.list_checks(c)})
-            if p == "integrity":
-                res = PV.verify_all(c)
-                with S.tx(c):
-                    S.audit(c, "access", "verify", "VERIFY", {"ok": res["ok"]})
+            if p == "integrity":  # 빠른 검사(검사점부터 새 행만). 전체 검사는 POST integrity/full (백그라운드 작업)
+                res = PV.verify_all(c, full=False)
+                S.audit(c, "access", "verify", "VERIFY", {"ok": res["ok"], "incremental": True})
                 return self.send_json(res)
+            if parts[0] == "jobs" and len(parts) == 2:
+                j = OPS.JOBS.get(parts[1])
+                if not j or (j["actor"] != self.user["username"] and self.user["role"] != "ADMIN"):
+                    return self.send_json({"error": "작업을 찾을 수 없습니다."}, 404)
+                return self.send_json(j)
+            if p == "imports/recent":
+                return self.send_json(OPS.recent_imports(c, int(qs.get("limit") or 30), self.crew_scope()))
+            if p == "pending":
+                return self.send_json(OPS.pending(c))
+            if p == "readiness":
+                return self.send_json(OPS.readiness(c))
+            if p == "ops-status":
+                return self.send_json(OPS.ops_status(c))
+            if p == "diag":
+                return self.send_json({**OPS.diag(c), "scheduler_tick": STATE["scheduler_tick"], "started_at": STATE["started_at"],
+                                       "sessions": len(SESSIONS), "jobs_queued": OPS.JOBS.q.qsize()})
+            if p == "assign/current":
+                return self.send_json(S.current_assignment(c, qs.get("date") or S.today_kst()))
+            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "notice":
+                self.require_crew_request(parts[1])
+                return self.send_bytes(S.notice_text(c, parts[1]).encode("utf-8"), "text/plain; charset=utf-8")
             if p == "backup-status":
                 return self.send_json(BK.status(c))
             if p == "revenue":
@@ -592,7 +816,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST":
             if p == "requests":
                 d = self.json_body()
-                return self.send_json(S.create_request(c, d))
+                return self.send_json(self.idem(p, lambda: S.create_request(c, d)))
             if p == "requests/bulk":
                 return self.send_json(self.bulk(self.json_body()))
             if p == "requests/export":
@@ -618,14 +842,12 @@ class Handler(BaseHTTPRequestHandler):
             if p == "stats/print":
                 d = self.json_body()
                 return self.send_json({"token": self.put_print(self.monthly_html(d.get("start", ""), d.get("end", ""), d.get("basis") or "planned"))})
-            if p == "privacy/purge":
-                return self.send_json(PV.purge_pii(c, trigger="MANUAL"))
             if p == "access/check":
                 return self.send_json(PV.record_check(c, self.json_body().get("note", "")))
             if p == "recon":
                 return self.send_json(FN.import_recon(c, self.body(), preview=qs.get("preview") == "1"))
             if p == "refunds/request":
-                return self.send_json({"id": FN.request_refund(c, self.json_body())})
+                return self.send_json(self.idem(p, lambda: {"id": FN.request_refund(c, self.json_body())}))
             if parts[0] == "refunds" and len(parts) == 3 and parts[2] in ("approve", "reject"):
                 FN.approve_refund(c, parts[1], parts[2] == "approve", self.json_body().get("note", ""))
                 return self.send_json({"ok": True})
@@ -637,10 +859,6 @@ class Handler(BaseHTTPRequestHandler):
             if p == "backup-key":
                 pem, info = BK.generate_key(c, self.json_body().get("password", ""))
                 return self.send_json({"pem": pem.decode(), **info})
-            if p == "backup/auto":
-                return self.send_json(BK.make_auto(c, "MANUAL"))
-            if p == "backup/retention":
-                return self.send_json({"deleted": BK.run_retention(c)})
             if p == "backups/verify-auto":
                 d = self.json_body()
                 return self.send_json(BK.verify_auto(c, d.get("name", ""), (d.get("key") or "").encode(), d.get("password", "")))
@@ -653,39 +871,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(S.check_field_intake(c, parts[1]))
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "cancel":
                 d = self.json_body()
-                return self.send_json(S.cancel_request(c, parts[1], d.get("reason", ""), d.get("code") or None))
+                return self.send_json(S.cancel_request(c, parts[1], d.get("reason", ""), d.get("code") or None, d.get("req_ver")))
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "contacts":
-                return self.send_json({"id": S.add_contact(c, parts[1], self.json_body())})
+                return self.send_json(self.idem(p, lambda: {"id": S.add_contact(c, parts[1], self.json_body())}))
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "location":
                 d = self.json_body()
                 S.set_location(c, parts[1], d["lat"], d["lon"])
                 return self.send_json({"ok": True})
-            if p == "route":
-                out = self.route_plan(self.json_body())
-                PV.record_access(c, "LIST", "", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")
-                return self.send_json(out)
             if p == "assign":
                 d = self.json_body()
                 return self.send_json(S.confirm_plan(c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted"))))
+            if p == "assign/edit":  # 확정 배정 부분 수정(넣기·빼기·순서·팀 옮기기)
+                d = self.json_body()
+                return self.send_json(S.edit_assignment(c, d.get("date", ""), d.get("op", ""), d))
+            if parts[0] == "imports" and len(parts) == 3 and parts[2] == "confirm":
+                return self.send_json(OPS.confirm_import(c, parts[1]))
+            if p == "conflicts/bulk":
+                d = self.json_body()
+                return self.send_json(S.resolve_conflicts_bulk(c, d.get("action", ""), d.get("reason", ""), d.get("request_id") or "", d.get("import_id") or ""))
             if p == "bundles":
                 b = S.make_bundle(c, self.json_body()["batch_id"])
                 return self.send_json({k: b[k] for k in ("bundle_id", "bytes", "count", "work_date", "assign_ver")} | {"frames": len(b["frames"])})
             if parts[0] == "bundles" and len(parts) == 3 and parts[2] == "receipt":
                 S.confirm_receipt(c, parts[1], self.json_body().get("code", ""))
                 return self.send_json({"ok": True})
-            if p in ("import/result", "import/photos") and self.crew_scope() is not None:
-                body = self.body()
-                if S.device_crew(c, body) != self.crew_scope():
-                    raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
-                self.body = lambda b=body: b  # 이미 읽은 본문을 다시 쓰도록
-            if p == "import/result":
-                return self.send_json(S.import_result(c, self.body(), "QR" if qs.get("channel") == "QR" else "MAIL"))
-            if p == "import/solo":
-                import base64 as _b64
-                pw = _b64.b64decode(self.headers.get("X-DG-Pass") or "").decode("utf-8", "replace")
-                return self.send_json(S.import_solo(c, self.body(), pw, qs.get("crew") or None, preview=qs.get("preview") == "1"))
-            if p == "import/photos":
-                return self.send_json(S.import_photos(c, self.body()))
             if parts[0] == "conflicts" and len(parts) == 2:
                 d = self.json_body()
                 S.resolve_conflict(c, parts[1], d.get("action", ""), d.get("reason", ""))
@@ -694,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(S.save_pilot(c, self.json_body()))
             if p == "close":
                 d = self.json_body()
-                return self.send_json(S.close_day(c, d.get("date", ""), d.get("note", ""), d.get("close_secs")))
+                return self.send_json(self.idem(p, lambda: S.close_day(c, d.get("date", ""), d.get("note", ""), d.get("close_secs"))))
             if p == "close/approve":
                 d = self.json_body()
                 return self.send_json(S.approve_close(c, d.get("date", ""), d.get("note", "")))
@@ -728,14 +937,14 @@ class Handler(BaseHTTPRequestHandler):
                 S.unlink_similar(c, parts[1], self.json_body().get("reason", ""))
                 return self.send_json({"ok": True})
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "payments":
-                return self.send_json(S.add_payment(c, parts[1], self.json_body()))
+                return self.send_json(self.idem(p, lambda: S.add_payment(c, parts[1], self.json_body())))
             if parts[0] == "payments" and len(parts) == 3 and parts[2] == "void":
                 return self.send_json(S.void_payment(c, parts[1], self.json_body().get("reason", "")))
             if p == "unloads":
                 d = self.json_body()
                 if self.crew_scope() is not None and d.get("crew_id") != self.crew_scope():
                     raise S.UserError("내 팀의 하차만 기록할 수 있습니다.")
-                return self.send_json({"id": S.add_unload(c, d)})
+                return self.send_json(self.idem(p, lambda: {"id": S.add_unload(c, d)}))
             if p == "volumes":
                 d = self.json_body()
                 S.save_volume_override(c, d.get("fee_rate_id", ""), d.get("m3"))
@@ -770,25 +979,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if p == "geocode/missing":
                 return self.send_json(S.geocode_missing(c, self.json_body().get("date", "")))
-            if p == "addr-import":
-                cols = None
-                if qs.get("columns"):
-                    from dgpc import geo
-                    cols = geo.parse_columns_arg(qs["columns"])
-                return self.send_json(S.import_addr_points(c, self.body(), qs.get("region", ""), cols, preview=qs.get("preview") == "1"))
             if p == "fee-revisions":
                 return self.send_json({"id": S.save_fee_draft(c, self.json_body())})
             if parts[0] == "fee-revisions" and len(parts) == 3 and parts[2] in ("approve", "reject"):
                 S.approve_fee_revision(c, parts[1], parts[2] == "approve", self.json_body().get("reason", ""))
                 return self.send_json({"ok": True})
-            if p == "backup":
-                r = S.make_backup(c, self.json_body().get("passphrase", ""))
-                return self.send_json({k: r[k] for k in ("name", "bytes", "sha256")})
             if p == "backups/verify":
                 d = self.json_body()
                 return self.send_json(S.verify_backup(c, d.get("name", ""), d.get("passphrase", "")))
-            if p == "photo-purge":
-                return self.send_json(S.purge_photos(c))
             if p == "prefs":  # 본인 화면 설정(테마·글자 크기)
                 return self.send_json(S.save_prefs(c, self.user["user_id"], self.json_body()))
             if p == "password":  # 본인 비밀번호 변경
@@ -799,41 +997,48 @@ class Handler(BaseHTTPRequestHandler):
             if p == "settings":
                 S.save_settings(c, self.json_body())
                 return self.send_json(S.settings(c))
-            if p == "external/test":
-                return self.send_json(S.external_test(c, self.json_body().get("service", "")))
         return self.send_json({"error": "없음"}, 404)
 
     def route_plan(self, d):
-        c = CON
+        """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이동시간 캐시·이력 저장만 다시 잠금 안."""
         date = d["date"]
         ids = set(d.get("request_ids") or [])
-        crews = [x for x in S.list_crews(c) if x["id"] in set(d.get("crew_ids") or []) and x["active"]]
-        reqs = []
-        for r in S.list_requests(c, date=date):
-            if r["status"] in ("CANCELLED", "DONE") or (ids and r["id"] not in ids):
-                continue
-            r["waiting_days"] = max(0, (time.time() - time.mktime(time.strptime(r["received_at"][:10], "%Y-%m-%d"))) // 86400)
-            if r["state"]["has_field_records"]:  # 재방문: 남은 품목만 적재·작업시간에 반영
-                r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"], "fee_rate_id": l["fee_rate_id"]} for l in r["state"]["lines"] if l["remaining"]]
-            reqs.append(r)
-        st = S.settings(c)
-        dongs = {x["name"]: x for x in A.list_dongs(c)}
+        with LOCK:
+            c = CON
+            crews = [x for x in S.list_crews(c) if x["id"] in set(d.get("crew_ids") or []) and x["active"]]
+            reqs = []
+            for r in S.list_requests(c, date=date):
+                if r["status"] in ("CANCELLED", "DONE") or (ids and r["id"] not in ids):
+                    continue
+                r["waiting_days"] = max(0, (time.time() - time.mktime(time.strptime(r["received_at"][:10], "%Y-%m-%d"))) // 86400)
+                if r["state"]["has_field_records"]:  # 재방문: 남은 품목만 적재·작업시간에 반영
+                    r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"], "fee_rate_id": l["fee_rate_id"]} for l in r["state"]["lines"] if l["remaining"]]
+                reqs.append(r)
+            st = S.settings(c)
+            dongs = {x["name"]: x for x in A.list_dongs(c)}
+            method = S.travel_method(c)
+            kakao_key = S.secret(c, "kakao_rest_key") if method == "KAKAO" else ""
+            ov = S.volume_overrides(c)
         pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
             if st["capacity"]["prefer_dong_crew"] else {}
-        method = S.travel_method(c)
-        res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
-                           travel_method=method, kakao_key=S.secret(c, "kakao_rest_key") if method == "KAKAO" else "",
-                           travel_cache=routing.TravelCache(c) if method == "KAKAO" else None,
-                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
-                           volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
-                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
-                           unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
+        cache = BufferedTravelCache() if method == "KAKAO" else None
+        try:
+            res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
+                               travel_method=method, kakao_key=kakao_key, travel_cache=cache,
+                               service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
+                               volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
+                               max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
+                               unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
+        finally:
+            if cache is not None:
+                cache.close()
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
-        ov = S.volume_overrides(c)
-        if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만)
+        if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만) + 새로 받은 이동시간 저장
             mi = res.get("matrix_info") or {}
-            with S.tx(c):
-                S.audit(c, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "cache": mi.get("cache_hits", 0), "estimated": mi.get("fallback_pairs", 0)})
+            with LOCK:
+                routing.TravelCache(CON).put_many(cache.pending)
+                with S.tx(CON):
+                    S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "cache": mi.get("cache_hits", 0), "estimated": mi.get("fallback_pairs", 0)})
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]),
@@ -855,19 +1060,24 @@ class Handler(BaseHTTPRequestHandler):
         raise S.UserError("알 수 없는 일괄 처리입니다.")
 
     def raw_page(self, page: bytes):
+        """QR 표시 화면(자체 CSP 메타 + 인라인 스크립트). 응답 머리에도 같은 범위의 CSP와 틀 막기·캐시 금지를 붙인다."""
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
+        self.send_header("Content-Security-Policy", RAW_CSP)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         self.end_headers()
         self.wfile.write(page)
 
     def qrtest_page(self, short: str):
         from pc_tool import display_html, qr_png_data_uri
-        with LOCK:
-            r = S.rows(CON, "SELECT * FROM qr_test WHERE id LIKE ?", (short + "%",))
+        with read_con() as rc:
+            r = S.rows(rc, "SELECT * FROM qr_test WHERE id LIKE ?", (short + "%",))
         if len(r) != 1:
             return self.send_json({"error": "없음"}, 404)
         t = r[0]
@@ -964,7 +1174,7 @@ class Handler(BaseHTTPRequestHandler):
 <tr><th>접수일</th><td>{e(S._kst_date(r["received_at"]) or "")}</td></tr><tr><th>배출일(수거 예정일)</th><td class="big">{e(r["planned_date"] or "미정 (정해지면 안내)")}{e(appt)}</td></tr>
 <tr><th>행정동</th><td>{e(r["dong"] or "")}</td></tr><tr><th>배출 위치</th><td>{e(r["spot_note"] or "")}</td></tr></table>
 <h2>품목</h2><table><thead><tr><th>품목·규격</th><th>수량</th><th>금액</th></tr></thead><tbody>{items}</tbody></table>
-<table class="kv"><tr><th>계산 금액</th><td>{won(ps["calculated"])}</td></tr>{red}<tr><th>부과 금액</th><td class="big">{won(ps["levied"])}</td></tr></table>
+<table class="kv"><tr><th>계산 금액</th><td>{won(ps["calculated"])}</td></tr>{red}<tr><th>부과 금액</th><td class="big">{won(ps["levied"])}</td></tr><tr><th>납부 안내</th><td>{e(cfg["payment_guide"])}</td></tr></table>
 <h2>배출 장소 안내</h2><p>{e(cfg["disposal_guide"])}</p><h2>문의처</h2><p>{e(cfg["contact_info"])}</p>
 <p class="foot">출력 {dt_now()} · 금액 확인 대기 품목이 있으면 확정 뒤 안내합니다. 이 접수증은 납부 영수증이 아닙니다.</p></section>"""
         with S.tx(c):
@@ -1032,25 +1242,39 @@ class Handler(BaseHTTPRequestHandler):
 
     def bundle_page(self, bundle_short: str):
         from pc_tool import display_html, qr_png_data_uri
-        r = S.rows(CON, "SELECT t.*, c.name AS crew FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id LEFT JOIN crew c ON c.id=b.crew_id WHERE t.id LIKE ?",
-                   (bundle_short + "%",))
-        if len(r) != 1:
-            return self.send_json({"error": "없음"}, 404)
-        b = r[0]
+        with read_con() as rc:
+            r = S.rows(rc, "SELECT t.*, c.name AS crew FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id LEFT JOIN crew c ON c.id=b.crew_id WHERE t.id LIKE ?",
+                       (bundle_short + "%",))
+            if len(r) != 1:
+                return self.send_json({"error": "없음"}, 404)
+            b = r[0]
+            n = S.one(rc, "SELECT COUNT(*) AS n FROM assignment_stop WHERE batch_id=?", (b["batch_id"],))["n"] if b["batch_id"] else ""
         if not b["frames_json"]:
             return self.send_json({"error": "수신이 확인됐거나 보관 기간이 지나 정리된 전송 자료입니다. 필요하면 목록 전송에서 다시 만드세요."}, 404)
         frames = json.loads(b["frames_json"])
         imgs = [qr_png_data_uri(f, "M")[0] for f in frames]
-        n = S.one(CON, "SELECT COUNT(*) AS n FROM assignment_stop WHERE batch_id=?", (b["batch_id"],))["n"] if b["batch_id"] else ""
-        page = display_html(imgs, b["id"][:8], b["work_date"], b["assign_ver"], n, 3, b["crew"] or "").encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(page)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(page)
+        self.raw_page(display_html(imgs, b["id"][:8], b["work_date"], b["assign_ver"], n, 3, b["crew"] or "").encode())
+
+
+class BufferedTravelCache(routing.TravelCache):
+    """노선 계산 중(잠금 밖) 쓰는 이동시간 캐시: 읽기는 조회 전용 연결, 새 값은 모아 두었다가 계산 뒤 잠금 안에서 저장."""
+
+    def __init__(self):
+        super().__init__(store.connect(readonly=True))
+        self.pending: dict = {}
+
+    def get_many(self, pairs):
+        got = super().get_many(pairs)
+        return {**got, **{k: v for k, v in self.pending.items() if k in set(pairs)}}
+
+    def put_many(self, vals):
+        self.pending.update(vals or {})
+
+    def close(self):
+        try:
+            self.con.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def dt_now() -> str:
@@ -1065,23 +1289,40 @@ class Server(ThreadingHTTPServer):
         return not LAN or ip_allowed(client_address[0], LAN["nets"])
 
 
+def cleanup_sessions() -> int:
+    """만료된 세션(무조작·절대 만료)과 지난 인쇄 자료를 메모리에서 지운다."""
+    now_ = time.time()
+    gone = [k for k, v in SESSIONS.items() if v["exp"] < now_ or now_ - v.get("created", 0) > ABS_S]
+    for k in gone:
+        SESSIONS.pop(k, None)
+    for k in [k for k, v in PRINTS.items() if v["exp"] < now_]:
+        PRINTS.pop(k, None)
+    return len(gone)
+
+
+DAILY_AT = os.environ.get("DG_DAILY_AT", "02:30")  # 하루 예약 작업 시각(한국시간). 그 시각 뒤 처음 도는 때(늦게 켜졌으면 켜자마자) 한 번
+
+
 def scheduler(stop: threading.Event, every_s: int = 30):
-    """서버가 도는 동안: 정한 시각 자동 백업(하루 1회, 늦게 켜졌으면 켜자마자), 하루 1회 접속기록·백업 보관 정리."""
-    last_daily = None
+    """서버가 도는 동안: 정한 시각 자동 백업(하루 1회, 늦게 켜졌으면 켜자마자), 하루 1회 예약 작업(개인정보 자동 파기·사진 정리·
+    환불 전체 점검·접속기록/백업 보관 정리·무결성 검사), 세션 정리·로그인 실패 이력 모으기(매번)."""
     while not stop.wait(every_s):
         try:
             S.ACTOR.set("system")
             PV.CLIENT.set("local")
+            STATE["scheduler_tick"] = S.now()
+            cleanup_sessions()
             with LOCK:
+                flush_login_fails(CON)
                 is_due = BK.due(CON)
+                last = (S.get_setting(CON, "last_daily_tasks", None) or {}).get("at")
             if is_due:  # 잠금은 DB를 쓰는 짧은 동안만(파일 봉인·복사는 잠금 밖) → 백업 중에도 화면 요청이 기다리지 않음
                 r = BK.make_auto(CON, "SCHEDULE", lock=LOCK)
                 LOG.info("자동 백업 %s", "성공" if r["ok"] else "실패: " + scrub(r.get("error", "")))
-            with LOCK:
-                if last_daily != S.today_kst():
-                    last_daily = S.today_kst()
-                    PV.purge_old_access(CON)
-                    BK.run_retention(CON)
+            now_kst = time.strftime("%H:%M", time.gmtime(time.time() + 9 * 3600))
+            if (S._kst_date(last) or "") < S.today_kst() and now_kst >= DAILY_AT:
+                res = OPS.daily_tasks(CON, LOCK, lambda: store.connect(readonly=True))
+                LOG.info("하루 예약 작업 %s", json.dumps({k: v for k, v in res.items() if not isinstance(v, dict)}, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             LOG.error("예약 작업 오류\n%s", scrub(traceback.format_exc()))
 
@@ -1093,6 +1334,8 @@ def serve(port: int = 8765, lan: dict | None = None, host: str | None = None):
     CON = store.connect()
     S.ensure_pc_keys(CON)
     S.migrate_legacy_login(CON)
+    STATE["started_at"] = S.now()
+    OPS.JOBS.start()
     logf = setup_logging()
     bind = (host or "0.0.0.0") if lan else "127.0.0.1"
     srv = Server((bind, port), Handler)
