@@ -1149,6 +1149,9 @@ def v11():
        "건물명 찾기 → 표준 주소·좌표·동")
     ok(h2 and h2[0]["bname"] == "가상아파트" and h3 and h3[0]["kind"] == "지번" and h4 and h4[0]["kind"] == "도로명" and h5 and h5[0]["address"].startswith("동구 시험길 3-1"),
        "초성(ㄱㅅㅇㅍㅌ)·지번(법정동 번지)·도로명·도로명만으로 찾기")
+    h6 = S.addr_search(con, "예시")
+    ok(any(x.get("hint") and x["road"] == "예시로" and "12~12" in x["label"] for x in h6) and not any(x.get("hint") for x in h4),
+       "도로명 앞부분만('예시') → '예시로 — 건물번호를 이어서 적으세요' 제안 (번호까지 적으면 제안 없음)")
     # 이름 없는 위치정보요약DB: 건물명 열 자동 인식
     def aline(road, main, bname, lat, lon):
         xx, yy = geo.wgs84_to_utmk(lat, lon)

@@ -85,8 +85,14 @@ def write_y4m(path, frames, hold=4, loops=4, w=1280, h=720):
     import pc_tool
     out = []
     for f in frames:
-        uri, _ = pc_tool.qr_png_data_uri(f, "M")
-        im = Image.open(_io.BytesIO(base64.b64decode(uri.split(",")[1]))).convert("RGB")
+        try:
+            uri, _ = pc_tool.qr_png_data_uri(f, "M")
+            im = Image.open(_io.BytesIO(base64.b64decode(uri.split(",")[1]))).convert("RGB")
+        except ValueError:  # 영숫자 방식으로 못 담는 글(기기 코드 base64url) → 바이트 방식
+            import qrcode
+            q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
+            q.add_data(f.encode()); q.make(fit=True)
+            im = q.make_image(fill_color="black", back_color="white").get_image().convert("RGB")
         canvas = Image.new("RGB", (w, h), "white")
         side = h - 40
         canvas.paste(im.resize((side, side), Image.NEAREST), ((w - side) // 2, 20))
@@ -227,6 +233,7 @@ def run():
         # 휴대폰 등록·팀
         page.goto(URL + "#/settings/devices")
         expect(page.get_by_alt_text("기기 등록 QR")).to_have_attribute("src", re.compile("^data:image/png"))
+        page.get_by_text("웹캠이 없을 때: 기기 코드 붙여 넣기").click()
         page.get_by_placeholder(re.compile("기기 코드")).fill(phone.code())
         page.get_by_placeholder(re.compile("기기 이름")).fill("1팀 업무폰")
         page.get_by_role("button", name="기기 등록").click()
@@ -252,6 +259,9 @@ def run():
             quiet(page)
             page.get_by_label("이름").fill(name)
             page.get_by_label("연락처").fill(phone_no)
+            if name == "가상하나":
+                ok(page.locator(".addr-setup").get_by_text("주소 검색 자료가 아직 없습니다").is_visible(),
+                   "주소 자료·행안부 승인키가 없으면 접수 화면에 '주소 검색 자료가 아직 없습니다'와 설정 위치 안내")
             page.get_by_label("배출 주소").fill(addr)
             page.get_by_label("상세 배출 위치").fill("현관 앞")
             page.get_by_label("수거 예정일").fill(today)
@@ -500,6 +510,12 @@ def run():
         page.locator(".addr-sug button", has_text="가상빌라").first.click()
         expect(page.get_by_label("배출 주소")).to_have_value(re.compile("시험로 9 \\(가상동, 가상빌라\\)"))
         ok(abs(float(page.locator("input[readonly]").first.input_value()) - 35.1472) < 1e-5, "주소 찾기(건물명 초성 ㄱㅅㅂㄹ) → 제안 고르면 표준 주소·좌표 채움")
+        ok(page.locator(".addr-setup").count() == 0, "주소 자료를 가져온 뒤에는 '주소 검색 자료가 없습니다' 안내가 사라짐")
+        page.get_by_label("주소 찾기").fill("시험")
+        page.locator(".addr-sug button", has_text="건물번호").first.click()
+        expect(page.get_by_label("주소 찾기")).to_have_value("시험로 ")
+        expect(page.locator(".addr-sug button", has_text="시험로 9").first).to_be_visible()
+        ok(page.locator(".addr-sug button", has_text="시험로 9").count() >= 1, "도로명 앞부분('시험') → 도로 제안 고르면 '시험로 '로 채우고 번호별 주소 제안")
         page.goto(URL + "#/requests")
         page.goto(URL + "#/request/new")
         page.get_by_role("button", name="비우고 새로 쓰기").click()
@@ -669,15 +685,15 @@ def run():
         page.wait_for_function("() => document.documentElement.dataset.theme === 'dark'")
         bg = lambda: page.evaluate("() => getComputedStyle(document.body).backgroundColor")
         lum = lambda c: sum(int(x) for x in re.findall(r"\d+", c)[:3])
-        page.get_by_label("글자 크기").select_option("15")
-        page.wait_for_function("() => getComputedStyle(document.documentElement).fontSize === '15px'")
+        page.get_by_label("글자 크기").select_option("16")
+        page.wait_for_function("() => getComputedStyle(document.documentElement).fontSize === '16px'")
         page.reload()
         expect(page.get_by_label("화면 테마")).to_have_value("dark")
-        ok(lum(bg()) < 150 and page.evaluate("() => getComputedStyle(document.documentElement).fontSize") == "15px" and page.get_by_label("글자 크기").input_value() == "15",
+        ok(lum(bg()) < 150 and page.evaluate("() => getComputedStyle(document.documentElement).fontSize") == "16px" and page.get_by_label("글자 크기").input_value() == "16",
            f"테마 어둡게·글자 크게 → 바탕 어두움({bg()}), 다시 열어도 유지(계정에 저장)")
         page.screenshot(path=SHOTS / "pc_20_dark.png", full_page=True)
         page.get_by_label("화면 테마").select_option("light")
-        page.get_by_label("글자 크기").select_option("14")
+        page.get_by_label("글자 크기").select_option("15")
         page.wait_for_function("() => document.documentElement.dataset.theme === 'light'")
         ok(lum(bg()) > 600, "테마 밝게로 되돌림")
         # 좁은 화면: 메뉴 단추로 열고 닫기, 표는 카드 안에서 가로 스크롤
@@ -998,6 +1014,27 @@ def run():
         ok(ps_end["status"] in ("PAID", "UNDERPAID") and any(x["kind"] == "REFUND" and x["source"] == "환불 결재" for x in ps_end["records"]),
            f"환불 지급 기록(접수 담당자) → 환불 납부 기록, 수납 상태 {ps_end['status']}")
         b2.close()
+
+        # 기기 코드 QR(휴대폰 화면) → PC 웹캠으로 읽어 바로 등록 (가짜 카메라 영상)
+        phone2 = Phone(S.registration_text(store.connect()))
+        write_y4m(WORK / "devcode.y4m", [phone2.code()])
+        b4 = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True,
+                                args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", f"--use-file-for-fake-video-capture={WORK / 'devcode.y4m'}"])
+        p4 = b4.new_context(viewport={"width": 1400, "height": 950}, permissions=["camera"]).new_page()
+        p4.goto(URL)
+        p4.get_by_placeholder("아이디").fill("admin")
+        p4.get_by_placeholder("비밀번호").fill(PW)
+        p4.get_by_role("button", name="로그인").click()
+        expect(p4.get_by_role("heading", name="오늘 현황")).to_be_visible()
+        p4.goto(URL + "#/settings/devices")
+        p4.get_by_placeholder(re.compile("기기 이름")).fill("2팀 업무폰")
+        p4.get_by_role("button", name="휴대폰 QR 웹캠으로 읽기").click()
+        expect(p4.locator(".big")).to_contain_text("지문", timeout=30000)
+        fp4 = re.sub(r"\D", "", p4.locator(".big").inner_text())
+        ok(fp4 == P.fingerprint(P.pub_raw(phone2.pc_sign), P.pub_raw(phone2.kex), P.pub_raw(phone2.sign))
+           and any(d["label"] == "2팀 업무폰" for d in S.list_devices(store.connect())),
+           f"휴대폰 기기 코드 QR을 PC 웹캠으로 읽어 바로 등록 (붙여 넣기 없이), 지문 일치 ({fp4})")
+        b4.close()
 
     external = [u for u, _ in REQUESTS if not u.startswith(("http://127.0.0.1", "data:", "blob:"))]
     hosts = sorted({u.split("/")[2] for u in external})

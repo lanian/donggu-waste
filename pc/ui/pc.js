@@ -779,7 +779,18 @@ async function screenRequest(id) {
     addrSug.hidden = true; addrSug.replaceChildren(); jusoSeq++; addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
     checkDup(); loadCal(); saveDraft(); F.spot_note.focus();
   });
-  const sugBtn = (x) => h('button', { type: 'button', role: 'option', onclick: () => pickAddr(x) }, chip(x.kind, x.kind === '행안부' ? 'warn' : 'info'), ` ${x.label}`, x.dong ? h('span', { class: 'p' }, x.dong) : null);
+  // 도로 이름만 맞은 결과(hint)는 고르면 검색어를 '도로명 '으로 채워 번호를 이어 적게 한다
+  const sugBtn = (x) => h('button', { type: 'button', role: 'option', onclick: () => {
+    if (x.hint) { addrQ.value = x.road + ' '; addrQ.focus(); addrQ.dispatchEvent(new Event('input')); return; }
+    pickAddr(x);
+  } }, chip(x.kind, x.kind === '행안부' ? 'warn' : 'info'), ` ${x.label}`, x.dong ? h('span', { class: 'p' }, x.dong) : null);
+  // 주소 자료도 행안부 승인키도 없으면 검색할 곳이 없다: 이유와 할 일을 미리 보여 준다
+  const addrSetupNote = () => h('div', { class: 'notice warn small addr-setup' },
+    h('b', {}, '주소 검색 자료가 아직 없습니다. '), '그래서 주소 찾기에서 아무것도 나오지 않습니다. 지금은 배출 주소를 직접 적고 오른쪽 지도를 눌러 위치를 정하세요. ',
+    boot.me.role === 'ADMIN'
+      ? h('span', {}, '검색이 되게 하려면 ', h('a', { href: '#/settings/addr' }, '설정 → 주소·외부 서비스'), '에서 ① 주소 위치 자료(도로명주소 위치정보요약DB, 이 PC 안에서만 검색)를 가져오거나 ② 행안부 주소 검색 승인키를 넣으세요.')
+      : '운영 관리자에게 주소 자료 가져오기(설정 → 주소·외부 서비스)를 요청하세요.');
+  const noAddrSource = () => !boot.addr_count && !jusoOn();
   // 이 PC의 주소 자료 결과를 먼저, 그 아래 행안부 결과(설정에 승인키가 있을 때). ext: 행안부 응답 또는 { loading: true }
   const drawSug = (list, ext = null) => {
     // 같은 건물(도로명+건물번호)이 이 PC 자료에 이미 있으면 행안부 결과에서 뺀다
@@ -789,7 +800,8 @@ async function screenRequest(id) {
     const kids = [...list.map(sugBtn), ...extItems.map(sugBtn)];
     if (ext && ext.loading) kids.push(h('p', { class: 'muted pad-s small' }, '행안부 주소 검색 중…'));
     if (ext && (ext.blocked || ext.error)) kids.push(h('p', { class: 'muted pad-s small jusonote' }, '행안부 검색: ' + (ext.blocked || ext.error)));
-    if (!kids.length && addrQ.value.trim().length >= 2) kids.push(h('p', { class: 'muted pad-s' }, '주소 자료에서 찾지 못했습니다. 배출 주소 칸에 직접 적고 지도로 위치를 지정하세요.'));
+    if (!kids.length && addrQ.value.trim().length >= 2) kids.push(noAddrSource() ? addrSetupNote()
+      : h('p', { class: 'muted pad-s' }, `주소 자료(${(boot.addr_count || 0).toLocaleString()}곳)에서 찾지 못했습니다. 도로명과 건물번호(예: 필문대로 245), 동과 번지(예: 계림동 123), 아파트 이름으로 다시 찾거나, 배출 주소 칸에 직접 적고 지도로 위치를 지정하세요.`));
     addrSug.replaceChildren(...kids);
     addrSug.hidden = !addrQ.value.trim(); addrQ.setAttribute('aria-expanded', addrSug.hidden ? 'false' : 'true');
   };
@@ -814,7 +826,7 @@ async function screenRequest(id) {
   const geoMsg = h('span', { class: 'muted' }, r.geo_source === 'ADDR' ? '주소 자료로 찾은 위치 (건물 출입구 기준)' : '');
   const findAddr = wrap(async () => {
     const g = await api('geocode?address=' + encodeURIComponent(F.address.value));
-    if (!g || g.none) { geoMsg.textContent = '주소 자료에서 찾지 못했습니다. 도로명과 건물번호를 확인하거나 지도를 눌러 지정하세요.'; return; }
+    if (!g || g.none) { geoMsg.textContent = boot.addr_count ? '주소 자료에서 찾지 못했습니다. 도로명과 건물번호를 확인하거나 지도를 눌러 지정하세요.' : '이 PC에 주소 위치 자료가 없어 찾을 수 없습니다. 지도를 눌러 위치를 지정하세요.'; return; }
     if (g.ambiguous) { geoMsg.textContent = `같은 도로명·번호가 여러 지역에 있습니다(${g.options.join(', ')}). 주소에 구 이름을 넣어 주세요.`; return; }
     F.lat.value = g.lat; F.lon.value = g.lon; geoSource = 'ADDR';
     geoMsg.textContent = `${g.sigungu || ''} ${g.label}${g.exact ? '' : ' (부번 없이 본번으로 찾음)'} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.`;
@@ -935,7 +947,7 @@ async function screenRequest(id) {
       h('div', {},
         h('div', { class: 'card formtable' }, h('h2', {}, '신청자'),
           h('div', { class: 'grid2' }, lab('이름', F.name), lab('연락처', F.phone)),
-          editable ? h('div', { class: 'addr-find' }, h('label', { class: 'f' }, '주소 찾기', addrQ), addrSug) : null,
+          editable ? h('div', { class: 'addr-find' }, h('label', { class: 'f' }, '주소 찾기', addrQ), addrSug, noAddrSource() ? addrSetupNote() : null) : null,
           lab('배출 주소', F.address), addrWarn,
           h('div', { class: 'grid2' }, lab('행정동', F.dong), lab('접수 경로', F.channel)), dongMsg && h('p', { class: 'dongmsg' }, dongMsg),
           lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo), dupBox),
@@ -1413,6 +1425,30 @@ let jsqrReady = null;
 function loadJsQR() {
   return (jsqrReady ||= new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = '/web/vendor/jsQR.js'; sc.onload = res; sc.onerror = rej; document.head.append(sc); }));
 }
+// 웹캠으로 QR 한 장 읽기: accept(text)가 참인 QR이 보이면 끝. video._stop()으로 멈춤
+async function webcamReadOnce(video, accept) {
+  await loadJsQR();
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+  video.hidden = false; video.srcObject = stream; await video.play();
+  const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return new Promise((res, rej) => {
+    let done = false;
+    const stop = () => { done = true; stream.getTracks().forEach((t) => t.stop()); video.hidden = true; video._stop = null; };
+    video._stop = () => { stop(); rej(new Error('읽기를 멈췄습니다.')); };
+    const loop = () => {
+      if (done) return;
+      if (!video.isConnected) { stop(); rej(new Error('화면을 떠나 읽기를 멈췄습니다.')); return; }
+      if (video.videoWidth) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+        if (code && code.data && accept(code.data)) { stop(); res(code.data); return; }
+      }
+      setTimeout(loop, 80);
+    };
+    loop();
+  });
+}
 function webcamCard(onDone) {
   const video = h('video', { playsinline: true, muted: true, style: 'width:100%;max-width:520px;border-radius:10px;background:#000;display:none' });
   const status = h('p', { class: 'muted' }, '휴대폰 [결과 보내기] → [PC 화면 카메라로 보내기]를 누른 뒤 이 PC 웹캠에 비추세요.');
@@ -1673,15 +1709,33 @@ function settingsDevices() {
   const devMsg = h('p', { class: 'msg' }), regMsg = h('p', { class: 'msg' });
   const regImg = h('img', { alt: '기기 등록 QR', style: 'width:260px;image-rendering:pixelated' });
   api('registration-qr').then((r) => { regImg.src = r.image; }).catch(() => {});
-  const code = h('textarea', { placeholder: '휴대폰 화면의 기기 코드 (DGD1.…)', rows: 3, style: 'width:100%' });
+  const code = h('textarea', { placeholder: '휴대폰 화면의 기기 코드 (DGD1.…) — 웹캠이 없을 때만 붙여 넣기', rows: 3, style: 'width:100%' });
   const label = h('input', { placeholder: '기기 이름 (예: 1팀 업무폰)' });
   const fp = h('p', { class: 'big' });
+  const register = wrap(async () => { const r = await post('devices/register', { code: code.value, label: label.value }); fp.textContent = `지문 ${r.fingerprint.slice(0, 3)} ${r.fingerprint.slice(3)}`; toast('등록했습니다. 지문을 휴대폰과 대조하세요.'); boot = null; setTimeout(() => { if (location.hash.startsWith('#/settings')) render(); }, 2500); }, regMsg);
+  // 휴대폰 화면의 기기 코드 QR을 이 PC 웹캠으로 읽어 바로 등록 (코드를 옮겨 적거나 보낼 필요 없음)
+  const camVideo = h('video', { playsinline: true, muted: true, class: 'regcam', hidden: true });
+  const camBtn = btn('휴대폰 QR 웹캠으로 읽기', wrap(async () => {
+    if (camVideo._stop) { camVideo._stop(); return; }
+    camBtn.textContent = '읽기 멈추기'; regMsg.textContent = '휴대폰 [기기 등록] 2단계의 QR을 웹캠에 비추세요.'; regMsg.className = 'msg';
+    try {
+      const text = await webcamReadOnce(camVideo, (t) => /^DGD1\./.test(t.trim()));
+      code.value = text.trim(); regMsg.textContent = '기기 코드를 읽었습니다. 등록합니다…';
+      await register();
+    } finally { camBtn.textContent = '휴대폰 QR 웹캠으로 읽기'; }
+  }, regMsg), 'primary');
   const devs = grid(['기기', '이름', '상태', '등록', ''], boot.devices.map((d) => [d.id.slice(0, 8), d.label || '', d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),
     d.registered_at.slice(0, 10), h('span', { class: 'row' }, ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
       btn(t, wrap(async () => { if (k !== 'ACTIVE' && !(await confirmDlg(`휴대폰 ${t}`, `${d.id.slice(0, 8)} 기기를 '${t}'합니다. 이 기기로는 목록을 보낼 수 없고 결과도 받지 않습니다. 계속할까요?`, { ok: t, danger: true }))) return; await post(`devices/${d.id}/status`, { status: k }); boot = null; render(); }, devMsg), 'small')))]), { empty: '등록된 휴대폰이 없습니다.' });
   return [h('div', { class: 'grid2' },
-    h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'), h('p', { class: 'muted' }, '1) 휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음). 2) 휴대폰의 기기 코드를 붙여 넣습니다. 3) 양쪽 6자리 지문이 같은지 확인합니다.'),
-      regImg, code, label, btn('기기 등록', wrap(async () => { const r = await post('devices/register', { code: code.value, label: label.value }); fp.textContent = `지문 ${r.fingerprint.slice(0, 3)} ${r.fingerprint.slice(3)}`; toast('등록했습니다. 지문을 휴대폰과 대조하세요.'); boot = null; setTimeout(() => { if (location.hash.startsWith('#/settings')) render(); }, 2500); }, regMsg), 'primary'), fp, regMsg),
+    h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'),
+      h('ol', { class: 'steps-list' }, h('li', {}, '휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음).'),
+        h('li', {}, '휴대폰에 나온 기기 코드 QR을 [휴대폰 QR 웹캠으로 읽기]로 이 PC 웹캠에 비춥니다. 읽으면 바로 등록됩니다.'),
+        h('li', {}, '양쪽 6자리 지문이 같은지 확인합니다.')),
+      regImg, label, h('div', { class: 'row' }, camBtn), camVideo, fp, regMsg,
+      h('details', { class: 'free' }, h('summary', {}, '웹캠이 없을 때: 기기 코드 붙여 넣기'),
+        h('p', { class: 'small muted' }, '휴대폰의 [코드 복사]로 복사한 코드를 업무 메일 등 승인된 경로로 이 PC에 옮겨 붙여 넣습니다(공개키만 들어 있어 비밀은 아니지만, 지문 대조로 바꿔치기를 막습니다).'),
+        code, btn('기기 등록', register, 'small'))),
     h('div', { class: 'card' }, h('h2', {}, '등록된 휴대폰'), devs, h('p', { class: 'muted' }, '분실 시 바로 "분실 처리"하세요. 오프라인 휴대폰의 자료를 원격으로 지울 수는 없지만, 이후 그 기기로는 목록을 보내지 않고 결과도 받지 않습니다.'), devMsg))];
 }
 function settingsCrews() {
@@ -2136,10 +2190,14 @@ function addrCard() {
     out.replaceChildren(h('div', { class: 'notice' }, h('p', {}, `찾은 열: ${Object.entries(r.columns).filter(([k]) => k !== 'header').map(([k, v]) => `${k}=${v}`).join(', ')} · ${r.count.toLocaleString()}건`),
       h('ul', {}, ...r.sample.map((x) => h('li', {}, `${x.sigungu} ${x.road} ${x.main}${x.sub ? '-' + x.sub : ''} → ${x.lat.toFixed(6)}, ${x.lon.toFixed(6)}`))),
       h('p', { class: 'small' }, '표본 주소가 지도에서 맞는 곳인지 확인한 뒤 가져오세요.'),
-      btn('이대로 가져오기', wrap(async () => { const x = await send(false); toast(`${x.count.toLocaleString()}건 가져옴 (전체 ${x.total.toLocaleString()}건)`); out.replaceChildren(); render(); }, msg), 'primary')));
+      btn('이대로 가져오기', wrap(async () => { const x = await send(false); toast(`${x.count.toLocaleString()}건 가져옴 (전체 ${x.total.toLocaleString()}건)`); out.replaceChildren(); boot = null; render(); }, msg), 'primary')));
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '주소 위치 자료'),
     h('p', { class: 'muted' }, '행정안전부 도로명주소 "위치정보요약DB" 파일을 이 PC에 넣으면 접수 화면에서 주소로 위치를 찾습니다. 모든 처리는 이 PC 안에서 하며 외부로 보내지 않습니다. 큰 파일은 명령으로 가져오세요: ', h('code', {}, 'python pc/pc_tool.py import-addr <파일·폴더> --region 동구')),
+    h('ol', { class: 'small steps-list' },
+      h('li', {}, '주소기반산업지원서비스(business.juso.go.kr)에서 "위치정보요약DB"의 광주광역시 파일을 내려받습니다(매월 갱신, 월 1회 다시 가져오기 권장).'),
+      h('li', {}, '압축을 풀고 안의 .txt 파일을 아래 [파일 선택]으로 고릅니다. 시군구 거르기는 "동구" 그대로 둡니다.'),
+      h('li', {}, '[미리보기]로 표본 주소가 지도에서 맞는지 본 뒤 [이대로 가져오기]. 그 뒤 접수 화면의 주소 찾기에서 도로명·지번·건물명으로 검색됩니다.')),
     h('div', { class: 'row' }, '저장된 자료', stat),
     h('div', { class: 'row' }, file, region, cols, btn('미리보기', prev, 'small')), out, msg);
 }
@@ -2222,12 +2280,12 @@ function backupCard() {
 
 // ------------------------------------------------------------ 화면 설정: 테마(자동·밝게·어둡게)·글자 크기 — 사용자별로 서버에 저장
 const THEME = { auto: '자동(시스템)', light: '밝게', dark: '어둡게' };
-const FONT = { 13: '작게', 14: '보통', 15: '크게', 16: '아주 크게' };
+const FONT = { 14: '작게', 15: '보통', 16: '크게', 17: '아주 크게' };
 function applyPrefs(p) {
   const root = document.documentElement;
   const t = (p && p.theme) || 'auto';
   if (t === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', t);
-  root.style.setProperty('--fs', `${(p && p.font) || 14}px`);
+  root.style.setProperty('--fs', `${(p && p.font) || 15}px`);
 }
 async function savePrefs(patch) {
   const p = await post('prefs', patch);

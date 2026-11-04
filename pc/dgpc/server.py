@@ -38,9 +38,11 @@ UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
 WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
-UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css", "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css"}
+UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css", "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
+            # 화면 글꼴: Pretendard GOV(범정부 디자인 시스템 권장, SIL OFL) 일부 글자 묶음. 이 PC 안에서만 내려줌(외부 글꼴 서버 없음)
+            **{f"/fonts/PretendardGOV-{w}.subset.woff2": f"fonts/PretendardGOV-{w}.subset.woff2" for w in ("Regular", "SemiBold", "Bold")}}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
-         ".css": "text/css; charset=utf-8"}
+         ".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://tiles.openfreemap.org; "
        "connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; media-src 'self' blob: mediastream:; object-src 'none'; base-uri 'none'; "
        "form-action 'none'; frame-ancestors 'none'")
@@ -430,7 +432,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
                                        "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
                                        "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
-                                       "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES})
+                                       "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
+                                       "addr_count": S.addr_stats(c)["count"]})
             if p == "calendar":
                 start = qs.get("start") or S.today_kst()
                 dong = qs.get("dong") or None

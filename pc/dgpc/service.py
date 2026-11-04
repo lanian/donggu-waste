@@ -1946,13 +1946,13 @@ def check_login(con, username: str, password: str) -> dict | None:
 
 
 THEMES = ("auto", "light", "dark")
-FONT_SIZES = (13, 14, 15, 16)
+FONT_SIZES = (14, 15, 16, 17)  # v0.12.16: 기본 15(보통). 예전에 고른 13은 14로
 
 
 def user_prefs(con, uid: str) -> dict:
     r = one(con, "SELECT prefs_json FROM app_user WHERE id=?", (uid,))
     p = json.loads(r["prefs_json"]) if r and r["prefs_json"] else {}
-    return {"theme": p.get("theme") if p.get("theme") in THEMES else "auto", "font": p.get("font") if p.get("font") in FONT_SIZES else 14}
+    return {"theme": p.get("theme") if p.get("theme") in THEMES else "auto", "font": p.get("font") if p.get("font") in FONT_SIZES else (14 if p.get("font") == 13 else 15)}
 
 
 def save_prefs(con, uid: str, data: dict) -> dict:
@@ -2647,6 +2647,12 @@ def addr_search(con, q: str, limit: int = 12) -> list[dict]:
         dong = c.get("dong_h") if c.get("dong_h") and area.get_dong(con, c["dong_h"]) else area.detect_dong(con, addr).get("dong")
         out.append({"kind": kind, "address": addr, "label": addr + (f' · 지번 {c["dong_b"] or ""} {c["jibun_main"]}{"-" + str(c["jibun_sub"]) if c["jibun_sub"] else ""}' if kind == "지번" else ""),
                     "lat": c["lat"], "lon": c["lon"], "dong": dong, "bname": c.get("bname") or ""})
+    # 도로명 앞부분만 적었을 때(예: '필문', '동계천로'): 맞는 도로를 알려 주고 번호를 이어 적게 한다(고르면 검색어만 채움)
+    if len(out) < limit and not pa and not is_chosung(qn) and not re.search(r"\d", qn) and len(qn) >= 2:
+        for x in rows(con, """SELECT road, MIN(main) AS lo, MAX(main) AS hi, COUNT(*) AS n FROM addr_point WHERE road LIKE ?
+                GROUP BY road ORDER BY length(road), road LIMIT ?""", (qn + "%", min(6, limit - len(out)))):
+            out.append({"kind": "도로", "hint": True, "road": x["road"], "address": x["road"],
+                        "label": f'{x["road"]} — 건물번호 {x["lo"]}~{x["hi"]} 중 하나를 이어서 적으세요 ({x["n"]}곳)'})
     return out
 
 

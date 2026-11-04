@@ -518,3 +518,6 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .stops.route > li.trip-head .adv { flex-basis: 100%; font-weight: 600; }
 .load-guide { margin: 8px 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--field-ink); }
 .load-guide p { margin: 0 0 4px; } .load-guide ul { margin: 0; padding: 0; list-style: none; } .load-guide li { margin: 4px 0; }
+/* 기기 등록: 기기 코드 QR (PC 웹캠으로 읽음) */
+.qrwrap { max-width: 320px; margin: 8px auto; padding: 8px; background: #fff; border-radius: var(--radius-sm); }
+.devcode-alt { margin-top: 8px; } .devcode-alt summary { cursor: pointer; font-weight: 700; color: var(--muted); padding: 8px 0; }

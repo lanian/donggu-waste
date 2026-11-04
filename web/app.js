@@ -13,7 +13,7 @@ import * as J from './juso.js';
 import * as L from './load.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.15';
+export const APP_VERSION = '0.12.16';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -695,11 +695,16 @@ async function screenRegister() {
   const code = await P.deviceCode(dev.id, kexRaw, signRaw);
   const fp = await P.fingerprint(pc.pcSignPub, kexRaw, signRaw);
   const ta = h('textarea', { readonly: true, rows: 4, class: 'code' }); ta.value = code;
+  const qr = h('canvas', { class: 'qrcanvas devqr', role: 'img', 'aria-label': '기기 코드 QR' });
+  setTimeout(() => { if (qr.isConnected) drawQr(qr, code, 'Byte'); }, 0);
   return h('main', { class: 'with-dock' }, back, flowSteps(STEPS, 1),
     h('section', { class: 'card' },
       h('h2', {}, h('span', { class: 'stepno' }, '2'), '기기 코드 전달'),
-      h('p', {}, '아래 기기 코드를 관리자에게 전달하면 PC에 등록합니다. (공개키만 들어 있습니다)'),
-      ta, btn('코드 복사', async () => { try { await navigator.clipboard.writeText(code); toast('복사했습니다'); } catch { ta.select(); } }, 'big')),
+      h('p', {}, '관리자 PC [설정 → 기기 → 휴대폰 QR 웹캠으로 읽기]를 누른 뒤, 이 QR을 PC 웹캠에 비추세요. 읽으면 PC에 바로 등록됩니다. (공개키만 들어 있습니다)'),
+      h('div', { class: 'qrwrap' }, qr),
+      h('details', { class: 'devcode-alt' }, h('summary', {}, 'PC에 웹캠이 없을 때: 코드 복사'),
+        h('p', { class: 'small' }, '코드를 복사해 업무 메일 등 승인된 경로로 관리자에게 보내면 PC에 붙여 넣어 등록합니다.'),
+        ta, btn('코드 복사', async () => { try { await navigator.clipboard.writeText(code); toast('복사했습니다'); } catch { ta.select(); } }, 'big'))),
     h('section', { class: 'card' },
       h('h2', {}, h('span', { class: 'stepno' }, '3'), '지문 숫자 대조'),
       h('p', {}, 'PC 화면에 나온 지문 숫자가 아래와 같은지 확인하세요.'),
@@ -2137,9 +2142,9 @@ async function screenPick(id) {
 }
 
 // ------------------------------------------------------------ 결과 QR 표시 (역방향: 휴대폰 → PC 웹캠)
-function drawQr(canvas, text) {
+function drawQr(canvas, text, mode = 'Alphanumeric') {
   const q = qrcode(0, 'M');
-  q.addData(text, 'Alphanumeric');
+  q.addData(text, mode);
   q.make();
   const n = q.getModuleCount(), quiet = 4, size = Math.min(canvas.parentElement ? canvas.parentElement.clientWidth : 360, 520);
   const cell = Math.floor(size / (n + quiet * 2));
