@@ -1166,6 +1166,23 @@ def v11():
     ok(sr["requests"] == 2 and gs["name"] == "(정리됨)" and gs["dong"] == "가상1동" and gs["pii_purged_at"] and gs["levy_no"] and "옛이름" not in S.one(con, "SELECT snapshot_json FROM request_version WHERE request_id=?", (rid_s,))["snapshot_json"],
        "단독 방식 백업: 개인정보 지운 접수(빈 이름·연락처·주소)도 가명으로 옮김, 동 받음")
 
+    # 단독 백업의 품목 행 ID가 PC에 이미 있으면(CI에서 실제로 난 UNIQUE 실패) 새 ID로 바꾸고 현장 기록·사진도 따라 바꾼다
+    used = S.one(con, "SELECT line_id FROM request_item WHERE request_id=?", (rid_g,))["line_id"]
+    rid_c, ev_c = str(uuid.uuid4()), str(uuid.uuid4())
+    obj2 = {"format": "dg.backup/1", "created_at": "2026-11-04T00:00:00Z", "state": {"mode": "SOLO", "requests": [
+        {"request_id": rid_c, "receipt_no": "DG-20260802-0001", "name": "가상겹침", "phone": "01000007402", "address": "가상시 동구 예시로 10", "status": "RECEIVED",
+         "items": [{"line_id": used, "fee_rate_id": chair, "name": "의자", "spec": "고정식 의자", "qty": 2}]}],
+        "events": [{"event_id": ev_c, "seq": 1, "request_id": rid_c, "kind": "ITEM_RESULT", "body": {"line_id": used, "line_kind": "RECEIVED", "qty_confirmed": 2, "qty_collected": 2, "reason": ""}, "ts": "2026-11-04T01:00:00Z"}]}, "photos": {}}
+    comp = zlib.compressobj(wbits=-15)
+    plain = comp.compress(_json.dumps(obj2).encode()) + comp.flush()
+    dgb2 = b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1")
+    r2 = S.import_solo(con, dgb2, "solo-pass-1")
+    new_lid = S.one(con, "SELECT line_id FROM request_item WHERE request_id=?", (rid_c,))["line_id"]
+    ev_body = _json.loads(S.one(con, "SELECT body_json FROM result_event WHERE event_id=?", (ev_c,))["body_json"])
+    ok(r2["requests"] == 1 and r2.get("lines_renumbered") == 1 and new_lid != used and ev_body["line_id"] == new_lid
+       and S.one(con, "SELECT request_id FROM request_item WHERE line_id=?", (used,))["request_id"] == rid_g,
+       "단독 백업 품목 행 ID가 PC에 이미 있으면 새 ID로 바꿔 옮김(현장 기록도 따라감, 기존 행은 그대로)")
+
     # 휴대폰 v0.10.1: 반입지 좌표를 목록에 싣기, 길안내 앱 종류, 단독 방식 위치 출처
     S.save_settings(con, {"unload_site": {"lat": 35.13, "lon": 126.95, "label": "가상 반입지"}})
     ru = S.create_request(con, {**base, "name": "가상반입", "phone": "01000007301", "planned_date": "2026-11-20", "lat": 35.14, "lon": 126.92})

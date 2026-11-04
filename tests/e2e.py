@@ -943,8 +943,12 @@ def solo(pw, url, video):
     dl.value.save_as(bfile)
     blob = bfile.read_bytes()
     ok(blob[:4] == b"DGB1" and "가상일".encode() not in blob and b"01000007777" not in blob, f"백업 파일 암호화 확인 ({len(blob):,}B, 이름·연락처 평문 없음)")
-    moved = subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "import-solo", str(bfile)], env={**ENV, "DG_SOLO_PASS": "backup-pass-1"},
-                           capture_output=True, text=True, check=True).stdout
+    mr = subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "import-solo", str(bfile)], env={**ENV, "DG_SOLO_PASS": "backup-pass-1"},
+                        capture_output=True, text=True)
+    if mr.returncode:
+        print("import-solo 실패 출력:\n" + mr.stdout + mr.stderr, flush=True)
+    ok(mr.returncode == 0, "단독 백업 파일을 PC 명령(import-solo)이 열기")
+    moved = mr.stdout
     mv = json.loads(moved.split(": ", 1)[1])
     ok(mv["requests"] == 2 and mv["events"] >= 3 and mv["unloads"] == 1 and mv["unloads_applied"] == 0,
        f"단독 백업 → PC로 옮기기 (휴대폰 암호화 형식 그대로 PC가 열기): 접수 {mv['requests']}건·기록 {mv['events']}건")
