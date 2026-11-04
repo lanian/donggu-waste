@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.4';
+export const APP_VERSION = '0.12.5';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -1295,7 +1295,7 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
 function intakePickScreen(f, table, locked, saveDraft) {
   const P = f.pick;
   const keep = { onmousedown: (e) => e.preventDefault() };  // 단추를 눌러도 검색칸 포커스(키보드) 유지
-  const q = h('input', { type: 'search', class: 'search', value: P.q, placeholder: '품목 찾기 (예: 의자, 매트리스, ㅈㄹ)', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '품목 찾기' });
+  const q = h('input', { type: 'search', class: 'search', value: P.q, placeholder: '이름으로 찾기 (예: 의자, ㅈㄹ)', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '품목 찾기' });
   const list = h('div', { class: 'pick-list' });
   const bar = h('div', { class: 'pick-sum', 'aria-live': 'polite' });
   const lineOf = (rid) => f.items.find((x) => x.fee_rate_id === rid && !locked.has(x.line_id));
@@ -1309,16 +1309,40 @@ function intakePickScreen(f, table, locked, saveDraft) {
     if (!l && d > 0) { f.items.push(lineFromRow(r, 1, table)); st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 }; }
     else if (l) setLine(l, l.qty + d);
     if (d > 0 && navigator.vibrate) navigator.vibrate(12);
-    saveDraft(); draw();
+    saveDraft(); draw(); redrawSheet();
     if (document.activeElement === q) q.select();  // 다음 품목을 치면 검색어가 바로 바뀌게
+  };
+  let redrawSheet = () => {};
+  // 분류 → 품목 이름 단추 → (규격이 여러 개면) 규격 고르기 창. 글자를 치지 않고 눌러서 담는다.
+  const CATS = [...new Set(table.rows.map((r) => r.category))];
+  const catLabel = (c) => ({ 가전제품류: '가전', 가구류: '가구', 생활용품: '생활' })[c] || c;
+  const openSpecs = async (cat, name) => {
+    const rows = table.rows.filter((r) => r.category === cat && r.name === name);
+    if (rows.length === 1) { bump(rows[0], 1); toast(`${name} ${rows[0].spec} — ${qtyOf(rows[0].id)}개`); return; }
+    const box = h('div', { class: 'pick-list sheet-list' });
+    redrawSheet = () => box.replaceChildren(...rows.map((r) => row(r, true)));
+    redrawSheet();
+    await sheet({ title: name, text: '규격을 골라 담으세요. 여러 규격을 함께 담아도 됩니다.', body: box, choices: [], cancel: '닫기' });
+    redrawSheet = () => {};
+    draw();
+  };
+  const nameChips = (cat) => {
+    const names = [...new Set(table.rows.filter((r) => r.category === cat).map((r) => r.name))];
+    return h('div', { class: 'name-chips' }, ...names.map((nm) => {
+      const ids = table.rows.filter((r) => r.category === cat && r.name === nm).map((r) => r.id);
+      const n = ids.reduce((a2, id) => a2 + qtyOf(id), 0);
+      const multi = ids.length > 1;
+      return btn([h('span', {}, nm), n ? h('b', { class: 'nc-n' }, n) : h('span', { class: 'nc-i', 'aria-hidden': 'true' }, multi ? '›' : '+')],
+        () => openSpecs(cat, nm), 'name-chip' + (n ? ' on' : ''), { 'aria-label': `${nm}${n ? ` (${n}개 담김)` : ''}${multi ? ' 규격 고르기' : ' 1개 담기'}` });
+    }));
   };
   const ctl = (n, onMinus, onPlus, name) => (n
     ? h('span', { class: 'pick-ctl' }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), h('b', { class: 'val' }, n), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기` }))
     : btn('+ 담기', onPlus, 'opt pick-add', { ...keep, 'aria-label': `${name} 담기` }));
-  const row = (r) => {
+  const row = (r, specOnly = false) => {
     const n = qtyOf(r.id), name = `${r.name} ${r.spec}`.trim();
     return h('div', { class: 'pick-row' + (n ? ' on' : '') },
-      h('div', { class: 'pick-info' }, h('strong', {}, name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
+      h('div', { class: 'pick-info' }, h('strong', {}, specOnly && r.spec ? r.spec : name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
         r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 담김') : null),
       ctl(n, () => bump(r, -1), () => bump(r, 1), name));
   };
@@ -1328,13 +1352,19 @@ function intakePickScreen(f, table, locked, saveDraft) {
     locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); saveDraft(); draw(); }, () => { setLine(l, l.qty + 1); saveDraft(); draw(); }, l.name)));
   const draw = () => {
     const out = [];
+    drawTabs();
     if (!P.q) {
-      if (f.items.length) out.push(h('p', { class: 'pick-h' }, '담은 품목'), ...picked());
-      const favs = st.feeFavs || [], use = st.feeUsage || {};
-      const ids = [...favs, ...Object.keys(use).sort((a, b) => use[b] - use[a]).filter((x) => !favs.includes(x))].filter((x) => !lineOf(x)).slice(0, 12);
-      const quick = ids.map((x) => table.rows.find((r) => r.id === x)).filter(Boolean);
-      if (quick.length) out.push(h('p', { class: 'pick-h' }, '즐겨찾기·자주 쓴 품목'), ...quick.map(row));
-      if (!f.items.length && !quick.length) out.push(h('p', { class: 'small' }, '위 칸에 품목 이름이나 초성을 적으세요.'));
+      const cat = P.cat || 'FREQ';
+      if (cat === 'PICKED') {
+        out.push(...(f.items.length ? picked() : [h('p', { class: 'small' }, '아직 담은 품목이 없습니다.')]));
+      } else if (cat === 'FREQ') {
+        const favs = st.feeFavs || [], use = st.feeUsage || {};
+        const ids = [...favs, ...Object.keys(use).sort((a, b) => use[b] - use[a]).filter((x) => !favs.includes(x))].slice(0, 15);
+        const quick = ids.map((x) => table.rows.find((r) => r.id === x)).filter(Boolean);
+        out.push(...(quick.length ? quick.map(row) : [h('p', { class: 'small' }, '자주 쓴 품목이 아직 없습니다. 위 분류(가전·가구·생활·기타)를 눌러 고르거나 이름을 검색하세요.')]));
+      } else {
+        out.push(nameChips(cat));
+      }
     } else {
       const rows = searchFees(table, P.q).slice(0, 40);
       out.push(...(rows.length ? rows.map(row) : [h('p', { class: 'small' }, '찾는 품목이 없습니다. 아래 [목록에 없는 품목]으로 담으세요.')]));
@@ -1344,6 +1374,13 @@ function intakePickScreen(f, table, locked, saveDraft) {
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.unit_price * x.qty, 0);
     bar.textContent = f.items.length ? `${f.items.length}종 · ${n}개 · ${won(sum)}${pend ? ` + 확인 대기 ${pend}` : ''}` : '담은 품목 없음';
+  };
+  const tabs = h('div', { class: 'pick-tabs', role: 'group', 'aria-label': '품목 분류' });
+  const drawTabs = () => {
+    const cur = P.q ? null : (P.cat || 'FREQ');
+    const n = f.items.length;
+    tabs.replaceChildren(...[['FREQ', '자주 쓴'], ...CATS.map((c) => [c, catLabel(c)]), ['PICKED', n ? `담음 ${n}` : '담음']].map(([k, t]) =>
+      btn(t, () => { P.cat = k; P.q = ''; q.value = ''; draw(); scrollTo(0, 0); }, 'tab' + (cur === k ? ' on' : '') + (k === 'PICKED' && n ? ' has' : ''), { ...keep, 'aria-pressed': cur === k ? 'true' : 'false' })));
   };
   q.addEventListener('input', () => { P.q = q.value; draw(); list.scrollTop = 0; });
   q.addEventListener('focus', () => q.select());
@@ -1362,10 +1399,9 @@ function intakePickScreen(f, table, locked, saveDraft) {
     }, 'big'));
   const done = () => { f.picking = false; P.q = ''; render(); setTimeout(() => { const el = document.getElementById('intake-items'); if (el) el.scrollIntoView({ block: 'start' }); }, 0); };
   draw();
-  setTimeout(() => q.focus(), 50);
   return h('main', { class: 'pick-screen' },
     h('div', { class: 'pick-head' }, h('header', { class: 'bar pick-top' }, btn('← 완료', done, 'ghost'), h('h1', { class: 'bar-title' }, '품목 담기')),
-      h('div', { class: 'qrow' }, q, clear)),
+      h('div', { class: 'qrow' }, q, clear), tabs),
     free, list,
     h('nav', { class: 'footbar pick-foot', 'aria-label': '담은 품목' }, bar, btn('완료', done, 'primary big')),
     h('p', { class: 'small pick-table' }, `수수료표: ${table.label}`));

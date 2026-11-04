@@ -520,7 +520,6 @@ def midday_update(pw, url):
 def pick_items(page, items, free=None):
     """접수의 [품목 담기] 화면: 검색 → [+ 담기] → [더하기]로 수량, 목록에 없는 품목은 확인 대기 → [완료]."""
     page.get_by_role("button", name=re.compile(r"^\+ 품목 (더 )?담기$")).click()
-    expect(page.get_by_label("품목 찾기")).to_be_focused()
     for q, n in items:
         page.get_by_label("품목 찾기").fill(q)
         row = page.locator(".pick-list .pick-row").first
@@ -564,8 +563,26 @@ def pc_field(pw, url):
     page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
     # 품목 담기 화면: 연달아 담기 — 담기 단추를 눌러도 검색칸 포커스 유지·검색어 선택, 바로 다음 품목 입력
     page.get_by_role("button", name="+ 품목 담기").click()
+    # 글자 없이: 분류 → 품목 이름 → 규격 고르기 창
+    page.get_by_role("group", name="품목 분류").get_by_role("button", name="가전").click()
+    page.get_by_role("button", name=re.compile("^냉장고.*규격 고르기")).click()
+    dlg = page.get_by_role("dialog")
+    dlg.locator(".pick-row", has_text="300ℓ 미만").get_by_role("button", name=re.compile("담기$")).click()
+    dlg.locator(".pick-row", has_text="300ℓ 미만").get_by_role("button", name=re.compile("더하기$")).click()
+    dlg.get_by_role("button", name="닫기").click()
+    expect(page.get_by_role("button", name=re.compile("^냉장고.*2개 담김"))).to_be_visible()
+    page.get_by_role("group", name="품목 분류").get_by_role("button", name="가구").click()
+    page.get_by_role("button", name=re.compile("^싱크대.*1개 담기")).click()
+    expect(page.locator(".pick-sum")).to_have_text(re.compile("^2종 · 3개"))
+    page.screenshot(path=SHOTS / "30b_pick_category.png")
+    page.get_by_role("group", name="품목 분류").get_by_role("button", name=re.compile("^담음 2")).click()
+    page.locator(".pick-list .pick-row.on").nth(0).get_by_role("button", name=re.compile("빼기$")).click()
+    page.locator(".pick-list .pick-row.on").nth(0).get_by_role("button", name=re.compile("빼기$")).click()
+    page.locator(".pick-list .pick-row.on").nth(0).get_by_role("button", name=re.compile("빼기$")).click()
+    expect(page.locator(".pick-sum")).to_have_text("담은 품목 없음")
+    ok(True, "품목 담기: 글자 없이 분류(가전·가구…) → 이름 단추 → 규격 창에서 담기·수량, 규격이 하나면 바로 담김, [담음] 탭에서 빼기")
     q = page.get_by_label("품목 찾기")
-    expect(q).to_be_focused()
+    q.click()
     q.fill("고정 의자")
     page.locator(".pick-list .pick-row").first.get_by_role("button", name=re.compile("담기$")).click()
     page.locator(".pick-list .pick-row").first.get_by_role("button", name=re.compile("더하기$")).click()
