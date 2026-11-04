@@ -1167,6 +1167,8 @@ async function screenStop(id) {
   const outcome = h('section', { class: 'card' }, h('h2', {}, '수거 결과', d.outcome ? h('span', { class: 'hint' }, ' — 저장됨: ' + LABEL.outcome[d.outcome]) : null),
     // 가장 흔한 경우를 한 번에: 모든 품목을 실은 것으로 채우고 완료 저장
     btn('전부 실음 · 수거 완료', async () => {
+      await flushSteps();
+      const d = deriveStop(stop, st.events);
       if (needsFeeNotice(d) && !(await feeNotice(stop, d))) return;
       ui.tried = null; ui.outcomeMsg = '';
       const after = await fillAll();
@@ -1176,6 +1178,9 @@ async function screenStop(id) {
     }, d.outcome === 'DONE' ? 'primary huge on' : 'primary huge'),
     outMsg,
     h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(LABEL.outcome[k], async () => {
+      // 사유·수량을 고른 직후 누르면 화면이 아직 다시 그려지기 전일 수 있다: 모아 둔 수량을 먼저 저장하고 지금 기록으로 판단
+      await flushSteps();
+      const d = deriveStop(stop, st.events);
       const left = d.lines.filter((l) => l.remaining > 0);
       if (k !== 'ON_HOLD' && !left.length) return fail('못 실은 품목이 없습니다. 모두 실었으면 [전부 실음 · 수거 완료]를 누르세요.');
       if (k !== 'ON_HOLD' && left.some((l) => !l.reason)) return fail('못 실은 품목마다 사유를 골라 주세요 (위 품목 칸).');
