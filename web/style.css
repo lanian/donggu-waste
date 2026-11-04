@@ -486,9 +486,9 @@ html.text-big .chk-opts { grid-template-columns: 1fr; } html.text-big .chk-opts 
 html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .pick-screen { padding-bottom: 110px; }
 /* 품목 담기: 분류 탭(가로로 밀기), 품목 이름 단추, 규격 고르기 창 */
-.pick-tabs { display: flex; gap: 6px; overflow-x: auto; margin-top: 8px; padding-bottom: 2px; scrollbar-width: none; }
+.pick-tabs { display: flex; gap: 3px; overflow-x: auto; margin-top: 8px; padding-bottom: 2px; scrollbar-width: none; }
 .pick-tabs::-webkit-scrollbar { display: none; }
-.pick-tabs .btn.tab { flex: none; width: auto; min-height: 40px; padding: 0 14px; margin: 0; border-radius: 999px; }
+.pick-tabs .btn.tab { flex: none; width: auto; min-height: 40px; padding: 0 11px; margin: 0; border-radius: 999px; }
 .pick-tabs .btn.tab.has:not(.on) { border-color: var(--brand); color: var(--brand-soft-ink); }
 .name-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .name-chips .btn.name-chip { width: 100%; margin: 0; min-height: 56px; justify-content: space-between; gap: 6px; text-align: left; padding: 8px 12px; border-radius: 14px; font-weight: 700; }
@@ -496,3 +496,5 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .name-chips .btn.name-chip.on { border-color: var(--brand); background: var(--brand-soft); }
 .nc-i { color: var(--muted); font-size: 1.2rem; } .nc-n { min-width: 26px; padding: 2px 8px; border-radius: 999px; background: var(--brand); color: var(--brand-ink); text-align: center; }
 .sheet-list { max-height: 55vh; overflow-y: auto; margin: 8px 0; }
+.pick-row .btn.pick-star { flex: none; width: 36px; min-height: 36px; margin: 0 -4px 0 -6px; padding: 0; border: 0; background: none; font-size: 1.2rem; }
+.pick-row .btn.pick-star.on { color: #8a6100; }

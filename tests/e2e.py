@@ -247,41 +247,43 @@ def main():
             ok(True, "통화 후 재방문 약속(날짜·시간) 기록")
             received_total = page.locator(".fee dd").nth(0).inner_text()
 
-            # 현장 추가: 회전 의자 2개
+            # 현장 추가: 품목 담기 화면에서 여러 개 담고 한 번에 저장
             page.get_by_role("button", name="+ 현장 품목 추가").click()
-            page.get_by_placeholder(re.compile("품목명")).fill("회전 의자")
-            page.locator(".btn.result").first.click()
-            page.locator(".stepper").first.locator(".btn.step").last.click()  # 수량 2
-            # 검색어를 바꾸면 선택이 풀리는지
-            page.get_by_placeholder(re.compile("품목명")).fill("매트")
-            ok(page.get_by_role("button", name="추가", exact=True).is_disabled(), "검색어 변경 시 이전 선택 해제")
-            page.get_by_placeholder(re.compile("품목명")).fill("사무용의자")
-            ok("회전식" in page.locator(".btn.result").first.inner_text(), "현장 표현(사무용의자) → 공식 품목(의자 회전식) 연결")
-            page.locator(".btn.result").first.click()
-            page.get_by_role("button", name="추가", exact=True).click()
-            page.get_by_role("button", name="+ 현장 품목 추가").click()
-            expect(page.get_by_text("즐겨찾기·자주 쓴 품목")).to_be_visible()
-            ok(page.get_by_text("즐겨찾기·자주 쓴 품목").is_visible() and "회전식 의자" in page.locator(".results").inner_text(), "검색 전 자주 쓴 품목 바로 표시")
-            page.get_by_role("button", name="즐겨찾기").first.click()
-            expect(page.get_by_role("button", name="즐겨찾기 해제")).to_have_count(1)
-            page.get_by_placeholder("품목 이름 (예: 안마기)").fill("안마기")
-            page.get_by_role("button", name="확인 대기로 추가").click()
+            q = page.get_by_label("품목 찾기")
+            q.click()
+            q.fill("사무용의자")
+            first_row = page.locator(".pick-list .pick-row").first
+            ok("회전식" in first_row.inner_text(), "현장 표현(사무용의자) → 공식 품목(의자 회전식) 연결")
+            first_row.get_by_role("button", name=re.compile("담기$")).click()
+            first_row.get_by_role("button", name=re.compile("더하기$")).click()  # 2개
+            page.locator(".pick-free summary").click()
+            page.get_by_label("목록에 없는 품목 이름").fill("안마기")
+            page.get_by_role("button", name="확인 대기로 담기").click()
+            save_btn = page.locator(".pick-foot").get_by_role("button")
+            expect(save_btn).to_have_text("추가 저장 (3)")
+            ok(page.get_by_role("button", name="+ 현장 품목 추가").count() == 0, "현장 품목 추가: 여러 품목을 담는 동안 화면에 머묾(담을 때마다 지점으로 돌아가지 않음)")
+            save_btn.click()
             try:
                 expect(page.locator(".line.field")).to_have_count(2)
             except AssertionError:
                 page.screenshot(path=SHOTS / "debug_field.png", full_page=True); print("ERRORS", errors); print(page.url); raise
             fee_text = page.locator(".fee").inner_text()
             ok("미확정" in fee_text and "1건" in fee_text, "목록에 없는 품목은 0원이 아니라 확인 대기, 최종 금액 미확정")
-            ok("6,000원" in page.locator(".fee dd").nth(1).inner_text(), "회전식 의자 2개 = 현장 추가분 6,000원")
-            # 같은 품목을 다시 추가 → 더하기/따로 선택
+            ok("6,000원" in page.locator(".fee dd").nth(1).inner_text(), "회전식 의자 2개 = 현장 추가분 6,000원 ([추가 저장]으로 한 번에)")
+            # 다시 열면 [자주 쓴]에 방금 쓴 품목, 같은 품목을 또 담으면 저장 때 더하기/따로 선택
             page.get_by_role("button", name="+ 현장 품목 추가").click()
-            page.get_by_placeholder(re.compile("품목명")).fill("회전 의자")
-            page.locator(".btn.result").first.click()
-            page.get_by_role("button", name="추가", exact=True).click()
-            expect(page.get_by_text("이미 현장에서 추가한 품목입니다")).to_be_visible()
-            page.get_by_role("button", name=re.compile("^기존 행에 더하기")).click()
+            expect(page.locator(".pick-list .pick-row", has_text="회전식")).to_have_count(1)
+            ok(True, "검색 전 [자주 쓴]에 쓴 품목 바로 표시")
+            page.locator(".pick-list .pick-row", has_text="회전식").get_by_role("button", name=re.compile("즐겨찾기$")).click()
+            expect(page.locator(".pick-list .pick-row", has_text="회전식").get_by_role("button", name=re.compile("즐겨찾기 해제$"))).to_have_count(1)
+            page.locator(".pick-list .pick-row", has_text="회전식").get_by_role("button", name=re.compile("담기$")).click()
+            page.locator(".pick-foot").get_by_role("button", name="추가 저장 (1)").click()
+            expect(page.get_by_role("dialog")).to_contain_text("이미 현장에서 추가한 품목입니다")
+            expect(page.get_by_role("dialog")).to_contain_text("2 → 3개")
+            page.get_by_role("button", name="기존 행에 더하기").click()
             expect(page.locator(".line.field")).to_have_count(2)
-            ok("9,000원" in page.locator(".fee dd").nth(1).inner_text(), "같은 품목 재추가 → '기존 행에 더하기'로 2+1=3개 (행 늘지 않음, 변경 기록)")
+            expect(page.locator(".fee dd").nth(1)).to_contain_text("9,000원")
+            ok(True, "같은 품목 재추가 → 저장 때 '기존 행에 더하기'로 2+1=3개 (행 늘지 않음, 변경 기록)")
 
             # 첫 원접수 품목은 1개만 수거하고 나머지는 사유 기록
             orig = page.locator(".line.orig").first
