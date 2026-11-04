@@ -126,7 +126,7 @@ def access_csv(con, f: dict) -> bytes:
     import io
     w, args = access_where(f)
     buf = io.StringIO()
-    wr = csv.writer(buf)
+    wr = S.safe_csv_writer(buf)
     wr.writerow(["번호", "시각(한국시간)", "사용자", "작업", "작업 코드", "대상(접수)", "건수", "조건", "접속 위치", "해시"])
     n = 0
     for r in S.rows(con, "SELECT a.*, q.receipt_no FROM access_log a LEFT JOIN request q ON q.id=a.target" + w.replace("WHERE 1=1", "WHERE 1=1") + " ORDER BY a.id DESC LIMIT 200000",
@@ -292,6 +292,8 @@ def pseudonymize(con, rid: str, ts: str):
         d["pii_purged"] = True
         con.execute("UPDATE request_version SET snapshot_json=? WHERE request_id=? AND req_ver=?", (json.dumps(d, ensure_ascii=False), rid, ver))
     con.execute("UPDATE contact_log SET content=? WHERE request_id=?", (PURGED, rid))
+    con.execute("UPDATE request_version SET reason=? WHERE request_id=? AND reason IS NOT NULL", (PURGED, rid))  # 수정 사유 글
+    con.execute("UPDATE audit_note SET note=NULL WHERE request_id=?", (rid,))  # 변경 이력의 사유 글(해시는 남아 사슬 검사는 그대로)
     for eid, kind, body, status in con.execute("SELECT event_id, kind, body_json, apply_status FROM result_event WHERE request_id=?", (rid,)).fetchall():
         con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (_scrub_event_body(body, kind), eid))
         if status == "CONFLICT" and kind in _REQ_KINDS:  # 처리하지 않은 정정 요청은 값이 지워져 반영할 수 없으므로 정리
@@ -338,6 +340,9 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL") -> dict:
             if after != before:
                 con.execute("UPDATE day_close_log SET summary_json=? WHERE id=?", (after, cid))
         con.execute("UPDATE transfer_bundle SET frames_json=NULL WHERE work_date < ?", (crit["cutoff"],))
+        # 카카오 이동시간 캐시(주민 좌표 쌍): 30일 넘은 것은 쓰지도 않으므로 지운다(카카오를 끈 뒤에도 남지 않게)
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+        con.execute("DELETE FROM travel_cache WHERE fetched_at < ?", (old,))
         pid = str(uuid.uuid4())
         con.execute("INSERT INTO pii_purge_log (id, at, count, actor, criteria_json, trigger) VALUES (?,?,?,?,?,?)",
                     (pid, ts, len(ids), S.ACTOR.get(), json.dumps(crit, ensure_ascii=False), trigger))

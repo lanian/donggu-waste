@@ -83,9 +83,9 @@ def main():
 
     # 기기·팀
     phone = Phone(S.registration_text(con))
-    reg = S.register_device(con, phone.code(), "가상 1팀 휴대폰")
+    reg = S.register_device(con, phone.code(), "가상 1팀 휴대폰", confirm=True)
     dev = reg["device_id"]
-    ok(len(reg["fingerprint"]) == 6, f"휴대폰 등록, 지문 {reg['fingerprint']}")
+    ok(len(reg["fingerprint"]) == 9 and reg["confirmed"], f"휴대폰 등록, 지문 9자리 {reg['fingerprint']}")
     c1 = S.save_crew(con, {"name": "가상 1팀", "device_id": dev, "capacity_m3": 6, "shift_start": "09:00", "shift_end": "13:00"})
     c2 = S.save_crew(con, {"name": "가상 2팀", "capacity_m3": 6})
 
@@ -647,7 +647,9 @@ def v10():
        and carry[t["as"]]["kind"] == "결과 없음" and carry[t["un"]]["kind"] == "미배정",
        "마감 화면 이월 대상: 미배정·결과 없음·재방문 약속 없는 미수거 → 다음 업무일(휴무일·주말·가상2동 화목 → 11/17)")
     S.ACTOR.set("kim")
+    _today = S.today_kst; S.today_kst = lambda: "2026-12-31"  # 마감은 지난 날만: 시험 날짜(11-12)를 지난 것으로
     cl = S.close_day(con, day, "가상 마감")
+    S.today_kst = _today
     g_as = S.get_request(con, t["as"])
     ok(len(cl["carried"]) == 3 and g_as["planned_date"] == "2026-11-17" and g_as["status"] == "RECEIVED" and g_as["versions"][0]["reason"].startswith("마감 이월")
        and not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (t["as"],)) and S.get_request(con, t["done"])["planned_date"] == day,
@@ -675,7 +677,9 @@ def v10():
     ok(upd["after_close"] and len(edits) == 2 and {e["entity"] for e in edits} == {"request", "payment"} and edits[0]["receipt_no"],
        "마감 후 수정 2건(접수 수정·수납)이 '마감 후 수정'으로 표시·마감 화면 목록에")
     # 다시 마감: 회차가 쌓임
+    _today = S.today_kst; S.today_kst = lambda: "2026-12-31"  # 마감은 지난 날만: 시험 날짜(11-12)를 지난 것으로
     S.close_day(con, day, "다시 마감")
+    S.today_kst = _today
     hist = S.day_summary(con, day)["closes"]
     ok([h["seq"] for h in hist] == [1, 2] and hist[0]["status"] == "APPROVED" and hist[1]["status"] == "RECORDED" and hist[0]["carried"] == 3 and hist[1]["carried"] == 0,
        "다시 마감 → 새 회차(덮어쓰지 않음), 새 회차는 다시 팀장 확인 필요")
@@ -691,8 +695,13 @@ def v10():
        "납부 2,000원 뒤 취소 → 환불 필요 경고, 사유 코드 '주민 취소' 저장")
     ok(any(x["id"] == rp and x["status"] == "REFUND_NEEDED" for x in S.day_summary(con, "2026-11-18")["payments"]), "환불 필요 건이 마감 수납 확인 목록에")
     ok(S.search_requests(con, {"status": "", "quick": "REFUND"})["total"] == 1, "'환불 필요' 빠른 조회")
-    S.add_payment(con, rp, {"kind": "REFUND", "amount": 2000, "method": "무통장 입금", "paid_on": "2026-11-04"})
-    ok(S.payment_status(con, rp)["status"] == "NONE" and S.search_requests(con, {"quick": "REFUND"})["total"] == 0, "환불 기록하면 목록에서 빠짐")
+    raises(lambda: S.add_payment(con, rp, {"kind": "REFUND", "amount": 2000, "method": "무통장 입금", "paid_on": "2026-11-04"}), "결재", "환불은 수납 기록으로 바로 못 넣음(결재선 우회 막음)")
+    from dgpc import finance as FN
+    case = S.one(con, "SELECT id FROM refund_case WHERE request_id=? AND status='DRAFT'", (rp,))["id"]
+    FN.request_refund(con, {"case_id": case})
+    _act = S.ACTOR.get(); S.ACTOR.set("checker-b"); FN.approve_refund(con, case, True); S.ACTOR.set(_act)
+    FN.pay_refund(con, case, {"method": "계좌 이체", "account_checked": True, "paid_on": "2026-11-04"})
+    ok(S.payment_status(con, rp)["status"] == "NONE" and S.search_requests(con, {"quick": "REFUND"})["total"] == 0, "환불 신청·결재·지급하면 목록에서 빠짐")
 
     # 일괄 처리
     bl = [S.create_request(con, {**base, "phone": f"0100000040{i}", "name": f"가상일괄{i}", "address": f"가상시 동구 샘플로 {i}", "planned_date": "2026-11-18",
@@ -954,7 +963,7 @@ def v11():
 
     # 휴대폰 새 기록 (ARRIVE·STICKER_CHECK·FEE_NOTICE·SMS/NAV·작업자·사진 촬영 정보·알 수 없는 기록)
     phone = Phone(S.registration_text(con))
-    dev = S.register_device(con, phone.code(), "가상폰")["device_id"]
+    dev = S.register_device(con, phone.code(), "가상폰", confirm=True)["device_id"]
     c1 = S.save_crew(con, {"name": "가상 1팀", "device_id": dev, "capacity_m3": 8})
     rp = S.create_request(con, {**base, "name": "가상현장", "phone": "01000007010", "planned_date": "2026-11-05",
                                  "items": [{"fee_rate_id": chair, "qty": 2}, {"fee_rate_id": wardrobe, "qty": 1}]})
@@ -1471,7 +1480,7 @@ def v11_external():
     # 휴대폰 목록: 감면율(rd)·부과번호(lv)
     reg = S.registration_text(con)
     ph = Phone(reg)
-    dev = S.register_device(con, ph.code(), "감면폰")["device_id"]
+    dev = S.register_device(con, ph.code(), "감면폰", confirm=True)["device_id"]
     cid = S.save_crew(con, {"name": "감면 시험팀", "device_id": dev})
     base = {"phone": "01000008888", "address": "가상시 동구 예시로 8", "planned_date": "2026-11-06", "lat": 35.15, "lon": 126.92,
             "items": [{"fee_rate_id": next(r["id"] for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED"), "qty": 1}]}
@@ -1502,10 +1511,10 @@ def v12_field():
     con = store.connect(create=True)
     S.ensure_pc_keys(con)
     ph = Phone(S.registration_text(con))
-    dev = S.register_device(con, ph.code(), "현장폰")["device_id"]
+    dev = S.register_device(con, ph.code(), "현장폰", confirm=True)["device_id"]
     cid = S.save_crew(con, {"name": "현장 시험팀", "device_id": dev})
     other = Phone(S.registration_text(con))
-    S.register_device(con, other.code(), "다른폰")
+    S.register_device(con, other.code(), "다른폰", confirm=True)
     fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
     chair = fee["의자|고정식 의자"]
     day = "2026-11-10"
@@ -1601,7 +1610,7 @@ def v12_field():
     ok(S.one(con, "SELECT status FROM request WHERE id=?", (r0["id"],))["status"] != "CANCELLED", "취소 요청도 바로 취소하지 않음")
     S.resolve_conflict(con, canc["event_id"], "APPLY", "주민 통화 확인")
     cr = S.one(con, "SELECT status, cancel_code FROM request WHERE id=?", (r0["id"],))
-    au = S.rows(con, "SELECT detail FROM audit_log WHERE entity='request' AND entity_id=? AND action='CANCEL'", (r0["id"],))
+    au = [S._with_note(con, a) for a in S.rows(con, "SELECT id, detail FROM audit_log WHERE entity='request' AND entity_id=? AND action='CANCEL'", (r0["id"],))]
     ok(cr["status"] == "CANCELLED" and cr["cancel_code"] == "RESIDENT" and au and "현장 요청" in au[-1]["detail"], "취소 요청 반영: 사유 코드(주민 취소) + '현장 요청' 기록")
     d = S.derive(con, S.one(con, "SELECT * FROM request WHERE id=?", (rid,)))
     ok(not d["field"]["other_kinds"], "PC 화면의 '알 수 없는 기록'에 새 종류가 섞이지 않음")
@@ -1738,6 +1747,126 @@ def v12_load():
     print(f"\n통과 {passed}개 (적재 기준·노선 포함)")
 
 
+def v12_review():
+    """전체 검토(2026-11-04)에서 나온 결함의 재발 방지."""
+    print("\n— v0.12 전체 검토 반영 —")
+    import io
+    from dgpc import finance as FN, privacy as PV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-review-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair, ward = fee["의자|고정식 의자"], fee["장롱|120cm 이상 1쪽당"]
+    base = {"phone": "010-0000-9100", "address": "가상시 동구 예시로 91", "planned_date": "2026-11-20", "lat": 35.15, "lon": 126.92}
+
+    # 기기 등록: 지문 확인 전에는 목록을 못 보냄, 분실 기기는 다시 등록되지 않음, 지문은 PC 키 합의 키까지 덮음
+    ph = Phone(S.registration_text(con))
+    reg = S.register_device(con, ph.code(), "검토폰")
+    cid = S.save_crew(con, {"name": "검토팀", "device_id": reg["device_id"]})
+    r1 = S.create_request(con, {**base, "name": "검토하나", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    bt = S.confirm_plan(con, base["planned_date"], {cid: [{"request_id": r1["id"]}]})[0]
+    raises(lambda: S.make_bundle(con, bt["batch_id"]), "지문 확인 전", "지문 확인 전인 휴대폰으로는 목록 QR을 만들지 않음")
+    S.confirm_device(con, reg["device_id"])
+    ok(S.make_bundle(con, bt["batch_id"]), "지문 같음 확인 뒤 목록 QR 만들기")
+    fp_other_kex = P.fingerprint(P.pub_raw(ph.pc_sign), P.pub_raw(P.gen_key()), ph.id, P.pub_raw(ph.kex), P.pub_raw(ph.sign))
+    ok(len(reg["fingerprint"]) == 9 and fp_other_kex != reg["fingerprint"], "지문 9자리, 등록 QR의 키 합의 키를 바꾸면 지문이 달라짐")
+    S.set_device_status(con, reg["device_id"], "LOST")
+    raises(lambda: S.register_device(con, ph.code(), "되살리기"), "분실", "분실 처리한 기기는 같은 코드로 다시 등록되지 않음")
+    S.set_device_status(con, reg["device_id"], "ACTIVE")
+
+    # 접수번호: 단독 휴대폰에서 옮긴 번호와 겹치지 않게(그날 가장 큰 번호 + 1)
+    day = S.today_kst().replace("-", "")
+    con.execute("UPDATE request SET receipt_no=? WHERE id=?", (f"DG-{day}-0007", r1["id"]))
+    r2 = S.create_request(con, {**base, "name": "검토둘", "phone": "010-0000-9101", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    ok(S.get_request(con, r2["id"])["receipt_no"] == f"DG-{day}-0008", "접수번호: 그날 가장 큰 번호 다음 (건수+1이면 겹침)")
+    raises(lambda: S.create_request(con, {**base, "name": "x", "phone": "010-0000-9102", "items": [{"fee_rate_id": chair["id"], "qty": "1.5"}]}), "정수", "수량 1.5 → 업무 오류(처리 오류 아님)")
+
+    # 접수 수정: 이미 받은 품목은 접수 때 단가를 그대로(개정 단가로 바뀌지 않음)
+    it = S.get_request(con, r2["id"])["items"][0]
+    con.execute("UPDATE request_item SET unit_price=4321, amount=4321 WHERE line_id=?", (it["line_id"],))
+    S.update_request(con, r2["id"], {**base, "name": "검토둘", "phone": "010-0000-9199", "items": [{"line_id": it["line_id"], "fee_rate_id": chair["id"], "qty": 2}]}, "연락처 변경")
+    it2 = S.get_request(con, r2["id"])["items"][0]
+    ok(it2["unit_price"] == 4321 and it2["amount"] == 8642, "접수 수정: 받은 품목 단가는 그대로, 수량만 바뀌면 같은 단가로 다시 셈")
+
+    # 수수료 개정 시행일 뒤섞임 막기
+    S.ACTOR.set("writer")
+    d1 = S.save_fee_draft(con, {"effective_from": "2027-01-01", "confirmed_by": "확인자", "overrides": {chair["id"]: {"price": chair["price"] + 1000, "reason": "가상"}}})
+    S.ACTOR.set("checker"); S.approve_fee_revision(con, d1)
+    S.ACTOR.set("writer")
+    raises(lambda: S.save_fee_draft(con, {"effective_from": "2026-12-01", "confirmed_by": "확인자", "overrides": {ward["id"]: {"price": 99999, "reason": "가상"}}}), "나중 시행",
+           "더 나중 시행 개정이 승인돼 있으면 앞선 날짜 개정은 만들 수 없음(단가가 한 달 일찍 적용되는 일 막음)")
+    raises(lambda: S.save_fee_draft(con, {"effective_from": "2026-02-30", "confirmed_by": "확인자", "overrides": {}}), "날짜", "없는 날짜(2월 30일) 시행일 거부")
+    ok(S.fee_state(con, "2026-12-15")["rev_no"] == 0 and S.fee_state(con, "2027-01-02")["rev_no"] == 1, "시행일 전에는 옛 표, 시행일부터 개정 표")
+    S.ACTOR.set("admin")
+
+    # 환불: 수납 기록으로 바로 못 넣음, 결재 뒤 원 납부가 정정되면 지급 막음, 일부 수거 차액 환불 뒤 '부족'으로 안 남음
+    S.add_payment(con, r1["id"], {"amount": chair["price"], "method": S.PAY_METHODS[0], "paid_on": "2026-11-04"})
+    S.cancel_request(con, r1["id"], "", "RESIDENT")
+    case = S.one(con, "SELECT id FROM refund_case WHERE request_id=? AND status='DRAFT'", (r1["id"],))["id"]
+    FN.request_refund(con, {"case_id": case})
+    S.ACTOR.set("checker"); FN.approve_refund(con, case, True); S.ACTOR.set("admin")
+    pay = S.one(con, "SELECT id FROM payment WHERE request_id=? AND kind='PAY'", (r1["id"],))["id"]
+    S.void_payment(con, pay, "잘못 기록")
+    raises(lambda: FN.pay_refund(con, case, {"method": "현금", "paid_on": "2026-11-05"}), "남은 납부", "결재된 환불이라도 원 납부가 정정되면 지급 막음(초과 환불 방지)")
+
+    # 결과 병합: 팀 없는 기기·옛 갱신본·현장 추가 단가와 음수 수량
+    lone = Phone(S.registration_text(con))
+    S.register_device(con, lone.code(), "예비폰", confirm=True)
+    r3 = S.create_request(con, {**base, "name": "검토셋", "phone": "010-0000-9103", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    b3 = S.confirm_plan(con, base["planned_date"], {cid: [{"request_id": r3["id"]}]})[0]
+    stop3 = {"request_id": r3["id"], "assign_ver": b3["assign_ver"], "req_ver": 1}
+    rr = S.import_result(con, lone.seal({"schema": "dg.result/1", "events": [lone.ev(stop3, "ATTEMPT", {"outcome": "DONE"})]}, P.TYPE_RESULT))
+    ok(rr["conflict"] == 1 and S.get_request(con, r3["id"])["status"] != "DONE", "팀에 연결되지 않은 휴대폰의 완료 결과 → 충돌함(반영 안 함)")
+    lid = str(uuid.uuid4())
+    evs = [ph.ev(stop3, "FIELD_ITEM_ADD", {"line_id": lid, "fee_rate_id": ward["id"], "name": "장롱", "qty": 1, "unit_price": 1, "price_status": "CONFIRMED"}),
+           ph.ev(stop3, "ITEM_RESULT", {"line_id": lid, "line_kind": "FIELD", "qty_confirmed": -3, "qty_collected": -3})]
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": evs}, P.TYPE_RESULT))
+    fl = [l for l in S.derive(con, S.one(con, "SELECT * FROM request WHERE id=?", (r3["id"],)))["lines"] if l["line_id"] == lid][0]
+    ok(fl["price"] == ward["price"] and fl["qty_confirmed"] == 0, f"현장 추가 품목 단가는 PC 표로({ward['price']:,}원), 음수 수량은 0으로")
+    # 같은 파일 안 기록 하나가 DB 제약에 걸려도 나머지는 반영
+    r4 = S.create_request(con, {**base, "name": "검토넷", "phone": "010-0000-9104", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    b4 = S.confirm_plan(con, base["planned_date"], {cid: [{"request_id": r3["id"]}, {"request_id": r4["id"]}]})[0]
+    stop4 = {"request_id": r4["id"], "assign_ver": b4["assign_ver"], "req_ver": 1}
+    good = ph.ev(stop4, "ATTEMPT", {"outcome": "NOT_COLLECTED"})
+    bad = ph.ev(stop4, "CONTACT", {"result": "NO_ANSWER"}); bad["seq"] = evs[0]["seq"]  # 이미 받은 순번과 겹침
+    rr2 = S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [bad, good]}, P.TYPE_RESULT))
+    ok(S.get_request(con, r4["id"])["status"] == "NOT_COLLECTED" and rr2["conflict"] >= 1 and rr2.get("release_code"),
+       "기록 하나가 순번 충돌로 실패해도 같은 파일의 다른 결과는 반영, 실패한 기록은 충돌함")
+
+    # 재방문 약속으로 예정일이 바뀌면 옛 날짜 배정이 풀림
+    appt = ph.ev(stop4, "REVISIT_APPT", {"date": "2026-11-27", "start": "10:00", "end": "11:00"}, assign_ver=b4["assign_ver"])
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "events": [appt]}, P.TYPE_RESULT))
+    ok(not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (r4["id"],)) and S.get_request(con, r4["id"])["planned_date"] == "2026-11-27",
+       "재방문 약속으로 예정일이 바뀌면 옛 날짜 배정 해제(새 날짜 배정이 막히지 않게)")
+
+    # 마감: 아직 오지 않은 날은 마감 못 함
+    raises(lambda: S.close_day(con, "2099-01-02"), "오지 않은", "미래 날짜 마감 거부")
+
+    # 노선: 같은 건물 묶음 합이 차량보다 크면 묶지 않고 반입지 경유로 나눠 싣기
+    apts = [{"id": f"a{i}", "lat": 35.1500, "lon": 126.9300 + 0.00001 * i, "items": [{"name": "장롱", "spec": "120cm 이상 1쪽당", "qty": 2}]} for i in range(5)]
+    crew8 = [{"id": "c", "name": "c", "capacity_m3": 8, "shift_start": "09:00", "shift_end": "17:00"}]
+    rp = routing.plan(apts, crew8, {"lat": 35.1462, "lon": 126.9233}, time_limit_s=2, unload_site={"lat": 35.16, "lon": 126.95, "label": "가상 반입지"})
+    ok(len(rp["routes"][0]["stops"]) == 5 and rp["routes"][0]["unloads"] >= 1, f"공동주택 5건(각 2.8m³, 합 14m³) → 8m³ 차량이 반입지 {rp['routes'][0]['unloads']}회 들러 모두 방문")
+    raises(lambda: S.save_crew(con, {"name": "음수팀", "capacity_m3": -5}), "적재 용량", "차량 용량 음수 거부(노선 계산기가 멈추는 일 막음)")
+
+    # CSV 수식 주입 막기
+    buf = io.StringIO(); S.safe_csv_writer(buf).writerow(["=HYPERLINK(1)", "-", "-5", "@x", "보통"])
+    ok(buf.getvalue().strip() == "'=HYPERLINK(1),-,-5,'@x,보통", "CSV: = + - @ 로 시작하는 글 앞에 ' (숫자·'-'는 그대로)")
+
+    # 변경 이력의 사유 글: 보유기간 파기 때 지워지고, 해시 사슬 검사는 그대로
+    S.cancel_request(con, r2["id"], "가상둘 본인 010-1234-5678 요청", "OTHER")
+    note = S.one(con, "SELECT note FROM audit_note WHERE request_id=? ORDER BY audit_id DESC LIMIT 1", (r2["id"],))["note"]
+    raw = S.one(con, "SELECT detail FROM audit_log WHERE entity='request' AND entity_id=? AND action='CANCEL'", (r2["id"],))["detail"]
+    ok("010-1234-5678" in note and "010-1234-5678" not in raw, "사유 글은 변경 이력 본문이 아니라 따로(해시만 사슬에)")
+    PV.pseudonymize(con, r2["id"], S.now())
+    va = PV.verify_audit(con)
+    ok(all(x["note"] is None for x in S.rows(con, "SELECT note FROM audit_note WHERE request_id=?", (r2["id"],))) and va.get("ok", va.get("valid", True)) is not False,
+       f"파기하면 사유 글을 지움(변경 이력 사슬 검사는 그대로: {va})")
+    con.close()
+    print(f"\n통과 {passed}개 (전체 검토 반영 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -1746,3 +1875,4 @@ if __name__ == "__main__":
     v12_field()
     v12_pilot()
     v12_load()
+    v12_review()

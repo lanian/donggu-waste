@@ -14,6 +14,7 @@ import contextvars
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sys
 import uuid
@@ -25,6 +26,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import dgproto as P  # noqa: E402
 
 KST = dt.timezone(dt.timedelta(hours=9))
+
+
+# CSV 수식 주입 막기: 이름·주소·사유 칸이 = + - @ 로 시작하면 엑셀이 수식으로 실행한다 → 앞에 ' 를 붙인다(숫자·'-'는 그대로)
+def _csv_cell(v):
+    if isinstance(v, str) and v and v[0] in "=+-@\t\r" and v != "-" and not re.fullmatch(r"-?\d+(\.\d+)?", v):
+        return "'" + v
+    return v
+
+
+class _SafeCsv:
+    def __init__(self, buf):
+        import csv as _csv
+        self._w = _csv.writer(buf)
+
+    def writerow(self, row):
+        return self._w.writerow([_csv_cell(x) for x in row])
+
+    def writerows(self, rows_):
+        for r in rows_:
+            self.writerow(r)
+
+
+def safe_csv_writer(buf):
+    return _SafeCsv(buf)
 ROOT = Path(__file__).resolve().parent.parent.parent
 FEE_TABLE = json.loads((ROOT / "data" / "fee_table.json").read_text(encoding="utf8"))
 FEE_ROWS = {r["id"]: r for r in FEE_TABLE["rows"]}
@@ -88,6 +113,12 @@ def _audit_fields(r: dict) -> list:
 def audit(con, entity, entity_id, action, detail=None):
     prev = con.execute("SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
     prev = prev[0] if prev else (get_setting(con, "audit_chain_anchor", "") or "")
+    note = note_sha = None
+    if isinstance(detail, dict) and isinstance(detail.get("reason"), str) and detail["reason"].strip():
+        # 사람이 적은 사유 글은 변경 이력 본문(지울 수 없는 해시 사슬) 대신 따로 두고 그 해시만 넣는다 → 보유기간 파기 때 글만 지울 수 있음
+        note = detail["reason"][:300]
+        note_sha = hashlib.sha256(note.encode()).hexdigest()[:16]
+        detail = {**{k: v for k, v in detail.items() if k != "reason"}, "note_sha": note_sha}
     d = json.dumps(detail, ensure_ascii=False) if detail is not None else None
     at, actor = now(), ACTOR.get()
     cur = con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor, prev_hash, legacy) VALUES (?,?,?,?,?,?,?,0)",
@@ -95,6 +126,9 @@ def audit(con, entity, entity_id, action, detail=None):
     rid = cur.lastrowid
     con.execute("UPDATE audit_log SET hash=? WHERE id=?",
                 (chain_hash(prev, _audit_fields({"id": rid, "entity": entity, "entity_id": entity_id, "action": action, "detail": d, "at": at, "actor": actor})), rid))
+    if note is not None:
+        req = entity_id if entity == "request" else (detail.get("request") if isinstance(detail, dict) else None)
+        con.execute("INSERT INTO audit_note (audit_id, request_id, note, note_sha) VALUES (?,?,?,?)", (rid, req, note, note_sha))
 
 
 # ------------------------------------------------------------------ PC 키 (암호화 DB 안에 보관)
@@ -121,17 +155,49 @@ def registration_text(con) -> str:
 
 
 # ------------------------------------------------------------------ 기기·팀
-def register_device(con, code: str, label: str = "") -> dict:
+def device_fingerprint(con, dev_id: str, kex: bytes, sig: bytes) -> str:
+    return P.fingerprint(P.pub_raw(pc_key(con, "sign")), P.pub_raw(pc_key(con, "kex")), uuid.UUID(dev_id).bytes, kex, sig)
+
+
+def register_device(con, code: str, label: str = "", confirm: bool = False) -> dict:
+    """기기 등록: 공개키를 넣되 '지문 확인 대기'. 담당자가 두 화면의 9자리 지문이 같음을 확인(confirm_device)해야 목록을 보낼 수 있다."""
     try:
         dev, kex, sig = P.parse_device_code(code)
     except P.ProtocolError as e:
         raise UserError(f"기기 코드가 올바르지 않습니다 ({e.code}).")
     dev_id = str(uuid.UUID(bytes=dev))
+    old = one(con, "SELECT * FROM device WHERE id=?", (dev_id,))
+    if old and old["status"] != "ACTIVE":  # 분실·중지 기기를 같은 코드로 되살리지 않는다
+        raise UserError("분실·사용 중지 처리한 기기입니다. 다시 쓰려면 휴대폰에서 [모든 자료 지우기] 후 새로 등록하세요.")
+    if old and (bytes(old["kex_pub"]), bytes(old["sign_pub"])) != (kex, sig):
+        raise UserError("같은 기기 번호에 다른 키가 들어왔습니다. 등록하지 않았습니다(바꿔치기 의심). 휴대폰에서 다시 시작하세요.")
     with tx(con):
-        con.execute("INSERT OR REPLACE INTO device (id, kex_pub, sign_pub, status, registered_at, label) VALUES (?,?,?,'ACTIVE',?,?)",
-                    (dev_id, kex, sig, now(), label))
-        audit(con, "device", dev_id, "REGISTER", {"label": label})
-    return {"device_id": dev_id, "fingerprint": P.fingerprint(P.pub_raw(pc_key(con, "sign")), kex, sig)}
+        if not old:
+            con.execute("INSERT INTO device (id, kex_pub, sign_pub, status, registered_at, label, confirmed_at) VALUES (?,?,?,'ACTIVE',?,?,NULL)",
+                        (dev_id, kex, sig, now(), label))
+            audit(con, "device", dev_id, "REGISTER", {"label": label})
+        elif label and label != old["label"]:
+            con.execute("UPDATE device SET label=? WHERE id=?", (label, dev_id))
+    if confirm:
+        confirm_device(con, dev_id)
+    cur = one(con, "SELECT confirmed_at FROM device WHERE id=?", (dev_id,))
+    return {"device_id": dev_id, "fingerprint": device_fingerprint(con, dev_id, kex, sig), "confirmed": bool(cur["confirmed_at"])}
+
+
+def confirm_device(con, dev_id: str):
+    """두 화면의 지문이 같다고 담당자가 확인 → 사용 시작."""
+    d = one(con, "SELECT status, confirmed_at FROM device WHERE id=?", (dev_id,))
+    if not d or d["status"] != "ACTIVE":
+        raise UserError("확인할 기기가 없습니다.")
+    if d["confirmed_at"]:
+        return
+    with tx(con):
+        con.execute("UPDATE device SET confirmed_at=? WHERE id=?", (now(), dev_id))
+        audit(con, "device", dev_id, "CONFIRM", None)
+
+
+def device_ready(dev) -> bool:
+    return bool(dev) and dev["status"] == "ACTIVE" and bool(dev.get("confirmed_at"))
 
 
 def set_device_status(con, dev_id: str, status: str):
@@ -143,7 +209,12 @@ def set_device_status(con, dev_id: str, status: str):
 
 
 def list_devices(con):
-    return rows(con, "SELECT id, status, registered_at, label FROM device ORDER BY registered_at")
+    out = rows(con, "SELECT id, status, registered_at, label, confirmed_at, kex_pub, sign_pub FROM device ORDER BY registered_at")
+    for d in out:
+        kex, sig = bytes(d.pop("kex_pub")), bytes(d.pop("sign_pub"))
+        if not d["confirmed_at"] and d["status"] == "ACTIVE":  # 지문 확인 대기: 화면을 다시 그려도 지문이 보이게
+            d["fingerprint"] = device_fingerprint(con, d["id"], kex, sig)
+    return out
 
 
 def save_crew(con, data: dict) -> str:
@@ -158,6 +229,12 @@ def save_crew(con, data: dict) -> str:
         if not re.fullmatch(r"\d\d:\d\d", data.get(k) or "09:00"):
             raise UserError("근무 시간은 HH:MM 형식으로 적어 주세요.")
     try:
+        m3 = float(data.get("capacity_m3") or 8)
+    except (TypeError, ValueError):
+        raise UserError("적재 용량은 숫자(m³)로 적어 주세요.")
+    if not 0.5 <= m3 <= 100:
+        raise UserError("적재 용량은 0.5~100m³ 사이로 적어 주세요.")
+    try:
         kg = float(data.get("capacity_kg") or 0)
     except (TypeError, ValueError):
         raise UserError("최대 적재 중량은 숫자(kg)로 적어 주세요.")
@@ -167,7 +244,7 @@ def save_crew(con, data: dict) -> str:
         con.execute("""INSERT INTO crew (id, name, device_id, capacity_m3, capacity_kg, shift_start, shift_end, active) VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_id=excluded.device_id, capacity_m3=excluded.capacity_m3,
             capacity_kg=excluded.capacity_kg, shift_start=excluded.shift_start, shift_end=excluded.shift_end, active=excluded.active""",
-                    (cid, name, dev, float(data.get("capacity_m3") or 8), kg, data.get("shift_start") or "09:00",
+                    (cid, name, dev, m3, kg, data.get("shift_start") or "09:00",
                      data.get("shift_end") or "17:00", 1 if data.get("active", True) else 0))
         audit(con, "crew", cid, "SAVE", {"name": name, "device_id": dev})
     return cid
@@ -462,9 +539,12 @@ def build_items(items: list[dict], con=None) -> list[dict]:
     ver = fee_state(con)["version_id"] if con is not None else FEE_TABLE["version_id"]
     out = []
     for it in items:
-        qty = int(it.get("qty") or 0)
-        if qty <= 0:
-            raise UserError("품목 수량은 1 이상이어야 합니다.")
+        try:
+            qty = int(str(it.get("qty") or 0).strip())
+        except ValueError:
+            raise UserError("품목 수량은 1 이상의 정수로 적어 주세요.")
+        if qty <= 0 or qty > 9999:
+            raise UserError("품목 수량은 1~9999 사이의 정수여야 합니다.")
         rid = it.get("fee_rate_id")
         line_id = it.get("line_id") or str(uuid.uuid4())
         if rid:
@@ -543,7 +623,9 @@ def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | Non
     """접수 한 건 넣기(트랜잭션은 호출하는 쪽). 접수번호는 오늘 날짜의 다음 번호. rid: 휴대폰 현장 접수처럼 ID가 정해진 경우."""
     rid, ts = rid or str(uuid.uuid4()), now()
     day = today_kst().replace("-", "")
-    n = con.execute("SELECT COUNT(*) FROM request WHERE receipt_no LIKE ?", (f"DG-{day}-%",)).fetchone()[0] + 1
+    # 그날 가장 큰 번호 + 1 (건수 + 1은 단독 휴대폰에서 옮겨 온 번호와 겹칠 수 있음)
+    prefix = f"DG-{day}-"
+    n = (con.execute("SELECT MAX(CAST(substr(receipt_no, ?) AS INTEGER)) FROM request WHERE receipt_no LIKE ?", (len(prefix) + 1, prefix + "%")).fetchone()[0] or 0) + 1
     receipt = f"DG-{day}-{n:04d}"
     from dgpc import store as _store
     dcode = (one(con, "SELECT code FROM dong WHERE name=?", (dong,)) or {}).get("code") if dong else None
@@ -572,7 +654,7 @@ def create_request(con, data: dict) -> dict:
         audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": d["channel"], **({"dong": dong} if dong else {}),
                                               **({"reduction": red["reduction_code"], "rate": red["reduction_rate"], "proof": red["reduction_proof"]} if red else {}),
                                               **_secs("intake_secs", data.get("intake_secs"))})
-    warn = address_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
+    warn = address_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid, _area().request_volume(con, rid))
     return {"id": rid, "receipt_no": receipt, "dong": dong, "warnings": warn, "levy_no": one(con, "SELECT levy_no FROM request WHERE id=?", (rid,))["levy_no"]}
 
 
@@ -644,15 +726,25 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
                 con.execute("UPDATE request_item SET removed=1 WHERE line_id=?", (lid,))
         for it in items:
             if it["line_id"] in old_items:
-                con.execute("UPDATE request_item SET qty=?, amount=?, unit_price=?, price_status=? WHERE line_id=?",
-                            (it["qty"], it["amount"], it["unit_price"], it["price_status"], it["line_id"]))
+                o = old_items[it["line_id"]]
+                if o["fee_rate_id"] and o["fee_rate_id"] == it["fee_rate_id"] and o["price_status"] == "CONFIRMED":
+                    # 이미 받은 품목은 접수 때 단가·수수료표 버전을 그대로 둔다(그 뒤 개정으로 바뀌지 않음). 수량만 바뀌면 같은 단가로 다시 셈
+                    con.execute("UPDATE request_item SET qty=?, amount=? WHERE line_id=?", (it["qty"], o["unit_price"] * it["qty"], it["line_id"]))
+                else:
+                    con.execute("UPDATE request_item SET qty=?, amount=?, unit_price=?, price_status=?, fee_version_id=? WHERE line_id=?",
+                                (it["qty"], it["amount"], it["unit_price"], it["price_status"], it["fee_version_id"], it["line_id"]))
             else:
                 _insert_item(con, rid, it)
-        audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"], **flag})
+        released = False
+        if (d["planned_date"] or None) != cur["planned_date"]:  # 예정일을 바꾸면 옛 날짜 배정을 푼다(일괄 예정일 변경과 같게)
+            released = bool(con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,)).rowcount)
+            if released and cur["status"] == "ASSIGNED":
+                con.execute("UPDATE request SET status='RECEIVED' WHERE id=?", (rid,))
+        audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"], **({"released": True} if released else {}), **flag})
     warn = address_warnings(con, d["address"]) + dwarn
     if (d["planned_date"] or None) != cur["planned_date"] or dong != cur["dong"]:
-        warn += _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
-    return {"id": rid, "resend_needed": bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
+        warn += _area().capacity_warnings(con, d["planned_date"] or None, dong, rid, _area().request_volume(con, rid))
+    return {"id": rid, "resend_needed": released or bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
             "warnings": warn, "after_close": bool(flag)}
 
 
@@ -1055,7 +1147,7 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
             if revisit and l["remaining"] == 0:
                 continue
             items.append({"line_id": l["line_id"], "line_kind": l["kind"], "fee_rate_id": l["fee_rate_id"], "name": l["name"], "spec": l["spec"],
-                          "unit": l["unit"], "unit_label": l["unit_label"], "qty": l["qty_confirmed"],
+                          "unit": l["unit"], "unit_label": l["unit_label"], "qty": l["qty_confirmed"], "qty_received": l["qty_received"],
                           "prior_collected": l["qty_collected"] if revisit else 0,
                           "unit_price": l["price"] if l["price"] is not None else None,
                           "amount": l["amount_received"] if l["kind"] == "RECEIVED" else 0,
@@ -1090,6 +1182,8 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
     dev = one(con, "SELECT * FROM device WHERE id=?", (device_id,))
     if not dev or dev["status"] != "ACTIVE":
         raise UserError("휴대폰이 등록되어 있지 않거나 사용 중지 상태입니다.")
+    if not dev["confirmed_at"]:
+        raise UserError("지문 확인 전인 휴대폰입니다. 설정 → 기기에서 두 화면의 지문이 같은지 보고 [지문 같음 · 사용 시작]을 누르세요.")
     bundle_id = uuid.uuid4().bytes
     sign = pc_key(con, "sign")
     head = P.Header(P.TYPE_DAYLIST, bundle_id, uuid.UUID(device_id).bytes, payload["assign_ver"], 1, P.key_id(P.pub_raw(sign)))
@@ -1112,7 +1206,7 @@ def confirm_receipt(con, bundle: str, code: str) -> str:
     if re.sub(r"\s", "", code or "").upper() != r[0]["receipt_code"]:
         raise UserError("확인 코드가 맞지 않습니다. 수신이 확인되지 않았습니다.")
     with tx(con):
-        con.execute("UPDATE transfer_bundle SET receipt_confirmed_at=? WHERE id=?", (now(), r[0]["id"]))
+        con.execute("UPDATE transfer_bundle SET receipt_confirmed_at=?, frames_json=NULL WHERE id=?", (now(), r[0]["id"]))  # 받은 것이 확인되면 QR 조각(암호문)은 더 둘 까닭이 없다
         audit(con, "bundle", r[0]["id"], "RECEIPT", None)
     return r[0]["id"]
 
@@ -1129,6 +1223,8 @@ def _open_from_device(con, data: bytes, expect_type: int):
         raise UserError("등록되지 않은 휴대폰의 파일입니다. 반영하지 않았습니다.")
     if dev["status"] != "ACTIVE":
         raise UserError(f"휴대폰 상태가 {dev['status']}입니다. 분실·중지 기기의 파일은 반영하지 않습니다.")
+    if not dev["confirmed_at"]:
+        raise UserError("지문 확인 전인 휴대폰의 파일입니다. 설정 → 기기에서 지문을 확인한 뒤 다시 가져오세요.")
     try:
         head, payload, release = P.open_envelope(data, P.pub_from_raw(dev["sign_pub"]), pc_key(con, "kex"))
     except P.ProtocolError as e:
@@ -1168,10 +1264,10 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
     touched = set()
     with tx(con):
         con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,?)", (imp, channel, dev_id, sha, now(), release))
-        for ev in payload.get("events", []):
+        def one_event(ev):
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (ev["event_id"],)):
                 counts["skipped_duplicate"] += 1
-                continue
+                return
             if ev["kind"] == "UNLOAD":  # 휴대폰에서 기록한 하차 (접수와 무관, 팀 단위)
                 b = ev.get("body", {})
                 ok_ = bool(crew) and (b.get("volume_m3") or b.get("weight_kg"))
@@ -1186,7 +1282,7 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                                                          float(b["volume_m3"]) if b.get("volume_m3") else None, float(b["weight_kg"]) if b.get("weight_kg") else None,
                                                          ("휴대폰 기록 " + (b.get("note") or "")).strip()[:200], now()))
                     counts["unloads"] = counts.get("unloads", 0) + 1
-                continue
+                return
             ev.setdefault("request_id", "")
             if not isinstance(ev.get("body"), dict):
                 ev["body"] = {}
@@ -1207,7 +1303,7 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                             (ev["event_id"], imp, dev_id, ev["seq"], ev["request_id"], 0, None, "FIELD_INTAKE",
                              json.dumps(ev["body"] if reason else _strip_request_pii("FIELD_INTAKE", ev["body"]), ensure_ascii=False),
                              "CONFLICT" if reason else "APPLIED", reason or note, ev.get("device_ts")))
-                continue
+                return
             if not ev["request_id"] and ev.get("kind") not in KNOWN_KINDS:
                 # 앞으로 생길 팀 단위 기록(알 수 없는 종류): 접수와 무관하게 보관만 하고 병합을 막지 않는다
                 con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
@@ -1215,7 +1311,7 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                             (ev["event_id"], imp, dev_id, ev["seq"], "", ev.get("assign_ver") or 0, None, str(ev.get("kind") or "?")[:40],
                              json.dumps(ev["body"], ensure_ascii=False), ev.get("device_ts")))
                 counts["stored_other"] = counts.get("stored_other", 0) + 1
-                continue
+                return
             req = one(con, "SELECT status, req_ver, origin_device FROM request WHERE id=?", (ev["request_id"],))
             reason = None
             # 이 휴대폰이 현장에서 접수한 건: PC 목록에 들어오기 전(갱신본 0)에 남긴 결과는 배정 기록 없이도 받는다
@@ -1226,17 +1322,29 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                 reason = "취소된 접수의 결과"
             elif ev["kind"] in REVIEW_KINDS:
                 reason = REVIEW_KINDS[ev["kind"]]
-            elif ev["kind"] in ("ITEM_RESULT", "FIELD_ITEM_ADD", "ATTEMPT"):
+            elif ev["kind"] in ("ITEM_RESULT", "FIELD_ITEM_ADD", "ATTEMPT", "LOCATION_FIX", "REVISIT_APPT"):
+                # 위치 보정·재방문 약속(예정일 변경)도 수거 결과와 같은 팀·갱신본 검사를 거친다
                 act = one(con, """SELECT b.assign_ver, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
                     WHERE a.request_id=?""", (ev["request_id"],))
                 done_before = req and req["status"] in FINAL
-                if act and crew and act["crew_id"] != crew["id"]:
+                if not crew and not own:
+                    reason = "팀에 연결되지 않은 휴대폰의 결과"
+                elif act and crew and act["crew_id"] != crew["id"]:
                     reason = "다른 팀에 다시 배정된 접수"
                 elif act and ev.get("assign_ver") is not None and ev["assign_ver"] < act["assign_ver"] and not (own and not ev["assign_ver"]):
                     reason = f"오래된 목록(갱신본 {ev['assign_ver']} < 현재 {act['assign_ver']})의 결과"
                 elif not act and not done_before and not own and not one(con, """SELECT 1 AS x FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
                         WHERE s.request_id=? AND b.crew_id=?""", (ev["request_id"], crew["id"] if crew else "")):
                     reason = "이 팀에 배정된 적 없는 접수"
+                elif not act and not done_before and not own and crew and ev.get("assign_ver"):
+                    # 그 목록(갱신본) 뒤에 같은 날 새 갱신본이 나왔는데 이 접수가 빠졌으면, 옛 목록의 결과는 사무실이 확인
+                    b0 = one(con, """SELECT b.work_date FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
+                        WHERE s.request_id=? AND b.crew_id=? AND b.assign_ver=? ORDER BY b.created_at DESC LIMIT 1""", (ev["request_id"], crew["id"], ev["assign_ver"]))
+                    newer = b0 and one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (crew["id"], b0["work_date"]))
+                    if newer and (newer["v"] or 0) > ev["assign_ver"]:
+                        reason = f"새 목록(갱신본 {newer['v']})에서 빠진 접수의 옛 목록 결과"
+            if not reason and ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):
+                _sanitize_item_event(con, ev["kind"], ev["body"])
             status = "CONFLICT" if reason else "APPLIED"
             note = reason or (f"접수 수정(버전 {ev.get('base_req_ver')}→{req['req_ver']}) 뒤에 기록된 결과" if req and ev.get("base_req_ver") and ev["base_req_ver"] != req["req_ver"] else None)
             if reason and ev["kind"] in REVIEW_KINDS:
@@ -1257,11 +1365,55 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                 touched.add(ev["request_id"])
                 if ev["kind"] == "REVISIT_APPT":
                     _apply_revisit(con, ev["request_id"], ev.get("body", {}))
+        for ev in payload.get("events", []):
+            # 기록 하나가 DB 제약에 걸려도 같은 파일의 다른 결과까지 버리지 않는다: 기록마다 저장점, 실패한 기록은 충돌함으로
+            con.execute("SAVEPOINT ev1")
+            try:
+                one_event(ev)
+                con.execute("RELEASE ev1")
+            except Exception as ex:  # noqa: BLE001
+                con.execute("ROLLBACK TO ev1"); con.execute("RELEASE ev1")
+                counts["conflict"] += 1
+                try:
+                    con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                        body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,'CONFLICT',?,?)""",
+                                (str(ev.get("event_id") or uuid.uuid4()), imp, dev_id, -int.from_bytes(os.urandom(4), "big") - 1, str(ev.get("request_id") or ""),
+                                 int(ev.get("assign_ver") or 0), ev.get("base_req_ver"), str(ev.get("kind") or "?")[:40],
+                                 json.dumps(ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
+                                 f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts")))
+                except Exception:  # noqa: BLE001
+                    counts["failed"] = counts.get("failed", 0) + 1
         for rid in touched:
             _refresh_status(con, rid)
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
+
+
+def _int_clamp(v, lo=0, hi=9999) -> int:
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return lo
+
+
+def _sanitize_item_event(con, kind: str, b: dict):
+    """휴대폰이 보낸 현장 품목·수량을 그대로 믿지 않는다: 수량은 0~9999 정수, 현장 추가 단가는 PC 수수료표로 다시 정한다."""
+    if kind == "ITEM_RESULT":
+        for k in ("qty_confirmed", "qty_collected"):
+            if k in b:
+                b[k] = _int_clamp(b[k])
+        if b.get("qty_collected", 0) > b.get("qty_confirmed", 0):
+            b["qty_collected"] = b.get("qty_confirmed", 0)
+        return
+    b["qty"] = _int_clamp(b.get("qty"))
+    r = fee_rows(con).get(b.get("fee_rate_id") or "")
+    if r:
+        ok_ = r["status"] == "CONFIRMED"
+        b.update(name=r["name"], spec=r["spec"], unit=r["unit"], unit_label=r["unit_label"], unit_price=r["price"],
+                 price_status="CONFIRMED" if ok_ else "PENDING", fee_version_id=fee_state(con)["version_id"])
+    else:  # 표에 없는 품목: 휴대폰 단가를 쓰지 않고 금액 확인 대기
+        b.update(fee_rate_id=None, unit_price=None, price_status="PENDING")
 
 
 def _apply_revisit(con, rid: str, b: dict):
@@ -1277,7 +1429,12 @@ def _apply_revisit(con, rid: str, b: dict):
     con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
                 (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), "현장 통화로 재방문 약속(휴대폰 기록)", now()))
     con.execute("UPDATE request SET req_ver=req_ver+1, planned_date=?, appt_start=?, appt_end=?, updated_at=? WHERE id=?", (date, start, end, now(), rid))
-    audit(con, "request", rid, "REVISIT_APPT", {"date": date, "start": start, "end": end})
+    released = False
+    if date != r["planned_date"]:  # 날짜가 바뀌면 옛 날짜 배정을 푼다(그날 마감 점검·새 날짜 배정이 막히지 않게)
+        released = bool(con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,)).rowcount)
+        if released and r["status"] == "ASSIGNED":
+            con.execute("UPDATE request SET status='RECEIVED' WHERE id=?", (rid,))
+    audit(con, "request", rid, "REVISIT_APPT", {"date": date, "start": start, "end": end, **({"released": True} if released else {})})
 
 
 def fee_usage(con, limit: int = 10) -> list[str]:
@@ -1638,6 +1795,8 @@ def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
     팀장(검토자)이 approve_close 로 확인한다."""
     if not re.fullmatch(r"\d{4}-\d\d-\d\d", work_date or ""):
         raise UserError("마감할 날짜를 골라 주세요.")
+    if work_date > today_kst():  # 미래 날짜를 마감하면 배정이 풀리고 예정일이 옮겨진다
+        raise UserError("아직 오지 않은 날은 마감할 수 없습니다.")
     s = day_summary(con, work_date)
     carry = s["carry"]
     for k in ("closed", "closes", "post_close_edits", "dongs"):
@@ -1687,7 +1846,7 @@ def make_qr_test(con, device_id: str, count: int, addr_style: str = "mixed", chu
     from sample_data import make_daylist
     if count not in (20, 50, 100) or addr_style not in ("mixed", "short", "medium", "long") or chunk not in (400, 600, 800, 1200) or ec not in ("L", "M", "Q"):
         raise UserError("실측 조건 값이 올바르지 않습니다.")
-    dev = one(con, "SELECT * FROM device WHERE id=? AND status='ACTIVE'", (device_id,))
+    dev = one(con, "SELECT * FROM device WHERE id=? AND status='ACTIVE' AND confirmed_at IS NOT NULL", (device_id,))
     if not dev:
         raise UserError("사용 중인 휴대폰을 골라 주세요.")
     sample = make_daylist(count, today_kst(), 1, seed=count * 7 + chunk, addr_style=addr_style)
@@ -1745,6 +1904,11 @@ def payment_status(con, rid: str) -> dict:
     recs = rows(con, "SELECT * FROM payment WHERE request_id=? ORDER BY recorded_at", (rid,))
     live = [x for x in recs if not x["void_reason"]]
     paid = sum(x["amount"] for x in live if x["kind"] == "PAY") - sum(x["amount"] for x in live if x["kind"] == "REFUND")
+    # 결재를 거쳐 지급한 '일부 수거 차액' 환불은 부과 금액을 그만큼 줄인 것으로 본다(차액을 돌려준 뒤 '부족'으로 남지 않게)
+    adj = (one(con, "SELECT COALESCE(SUM(amount),0) AS n FROM refund_case WHERE request_id=? AND status='PAID' AND cause='PARTIAL'", (rid,)) or {}).get("n") or 0
+    if owed is not None and adj:
+        owed = max(0, owed - adj)
+        fs = {**fs, "partial_refund": adj, "levied_after_partial": owed}
     if r["status"] == "CANCELLED" and paid == 0:
         status = "NONE"
     elif r["status"] == "CANCELLED":  # 납부 뒤 취소: 돌려줄 돈이 남아 있음 (마감 수납 확인·'환불 필요' 목록)
@@ -1775,7 +1939,9 @@ def add_payment(con, rid: str, data: dict) -> dict:
     amount = int(data.get("amount") or 0)
     method = data.get("method") or ""
     paid_on = data.get("paid_on") or today_kst()
-    if kind not in ("PAY", "REFUND") or amount <= 0:
+    if kind == "REFUND":  # 환불은 결재선(신청 → 다른 사람 결재 → 지급 기록)으로만
+        raise UserError("환불은 [환불] 화면에서 신청·결재한 뒤 지급 기록으로 남깁니다. 여기서는 납부만 기록합니다.")
+    if kind != "PAY" or amount <= 0:
         raise UserError("금액을 1원 이상으로 적어 주세요.")
     if method not in PAY_METHODS + LEGACY_PAY_METHODS + (REFUND_PAY_METHODS if kind == "REFUND" else ()):
         raise UserError("납부 방법을 골라 주세요.")
@@ -2039,8 +2205,23 @@ def _audit_where(entity="", date="", actor="", date_from="", date_to="", action=
 def list_audit(con, entity: str = "", date: str = "", actor: str = "", limit: int = 300, date_from: str = "", date_to: str = "",
                action: str = "", offset: int = 0) -> list[dict]:
     w, args = _audit_where(entity, date, actor, date_from, date_to, action)
-    return rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT ? OFFSET ?",
-                args + [int(limit), int(offset)])
+    out = rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT ? OFFSET ?",
+               args + [int(limit), int(offset)])
+    return [_with_note(con, a) for a in out]
+
+
+def _with_note(con, a: dict) -> dict:
+    """따로 둔 사유 글을 이력 내용에 다시 붙여 보여 준다(파기된 글은 '(파기)')."""
+    if a.get("detail") and '"note_sha"' in a["detail"]:
+        n = one(con, "SELECT note FROM audit_note WHERE audit_id=?", (a["id"],))
+        try:
+            d = json.loads(a["detail"])
+            d.pop("note_sha", None)
+            d["reason"] = (n["note"] if n and n["note"] is not None else "(파기)")
+            a = {**a, "detail": json.dumps(d, ensure_ascii=False)}
+        except ValueError:
+            pass
+    return a
 
 
 def audit_page(con, f: dict) -> dict:
@@ -2073,10 +2254,11 @@ def audit_csv(con, f: dict) -> bytes:
     import io
     w, args = _audit_where(f.get("entity", ""), f.get("date", ""), f.get("actor", ""), f.get("date_from", ""), f.get("date_to", ""), f.get("action", ""))
     buf = io.StringIO()
-    wr = csv.writer(buf)
+    wr = safe_csv_writer(buf)
     wr.writerow(["번호", "시각(한국시간)", "작업자", "대상", "작업", "대상 번호", "내용"])
     n = 0
     for a in rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT 100000", args):
+        a = _with_note(con, a)
         t = dt.datetime.fromisoformat(a["at"].replace("Z", "+00:00")).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
         wr.writerow([a["id"], t, a["actor"] or "", AUDIT_ENTITIES.get(a["entity"], a["entity"]), a["action"], (a["entity_id"] or "")[:8], _audit_detail_text(a["detail"])])
         n += 1
@@ -2229,7 +2411,7 @@ def export_requests(con, ids, include_pii: bool = False) -> bytes:
     import io
     ids = _ids(con, ids)
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = safe_csv_writer(buf)
     w.writerow(EXPORT_COLS + (["이름", "연락처", "배출 주소", "상세 위치"] if include_pii else []))
     with tx(con):
         for rid in ids:
@@ -2268,7 +2450,7 @@ def import_template() -> bytes:
     import csv
     import io
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = safe_csv_writer(buf)
     w.writerow(IMPORT_COLS)
     w.writerow(["가상신청", "010-0000-0000", "가상시 동구 예시로 1", "1층 현관 앞", "", "", "단체(공동주택)", "가상 예시 행(지우고 쓰세요)",
                 "의자", "고정식 의자", "2", "장롱", "120cm 이상 1쪽당", "1"] + [""] * 9)
@@ -2449,7 +2631,7 @@ def verify_backup(con, name: str, passphrase: str) -> dict:
 def _active_revision(con, today: str | None = None):
     t = today or today_kst()
     return one(con, """SELECT * FROM fee_revision WHERE status='APPROVED' AND base_version=? AND (effective_from IS NULL OR effective_from<=?)
-        ORDER BY rev_no DESC LIMIT 1""", (FEE_TABLE["version_id"], t))
+        ORDER BY effective_from DESC, rev_no DESC LIMIT 1""", (FEE_TABLE["version_id"], t))
 
 
 def fee_state(con, today: str | None = None) -> dict:
@@ -2496,8 +2678,15 @@ def review_rows() -> list[dict]:
 def save_fee_draft(con, data: dict) -> str:
     """개정안 작성: 시행일·확인자·행별 확정 단가(사유 필수). 같은 사람이 승인할 수 없다."""
     eff = (data.get("effective_from") or "").strip()
-    if not re.fullmatch(r"\d{4}-\d\d-\d\d", eff):
-        raise UserError("시행일(적용 시작일)을 날짜로 적어 주세요.")
+    try:
+        dt.date.fromisoformat(eff)
+    except ValueError:
+        raise UserError("시행일(적용 시작일)을 날짜로 적어 주세요 (예: 2027-01-01).")
+    later = one(con, """SELECT rev_no, effective_from FROM fee_revision WHERE status='APPROVED' AND base_version=? AND effective_from>?
+        ORDER BY effective_from DESC LIMIT 1""", (FEE_TABLE["version_id"], eff))
+    if later:  # 시행일이 뒤섞이면 나중 개정이 앞선 개정의 바뀐 단가를 모른 채 적용된다
+        raise UserError(f"이미 승인된 더 나중 시행 개정(r{later['rev_no']}, {later['effective_from']} 시행)이 있습니다. 그보다 앞선 날짜의 개정은 만들 수 없습니다. "
+                        "필요하면 두 내용을 합친 새 개정을 그 날짜 이후로 만드세요.")
     who = (data.get("confirmed_by") or "").strip()
     if not who:
         raise UserError("원문을 대조한 확인자 이름을 적어 주세요.")
@@ -2516,7 +2705,8 @@ def save_fee_draft(con, data: dict) -> str:
             raise UserError(f"{FEE_ROWS[rid]['name']} {FEE_ROWS[rid]['spec']}: 확정 근거(사유)를 적어 주세요.")
         ov[rid] = {"price": price, "reason": reason[:200]}
     # 이전 승인본의 확정값은 이어받는다(명시적으로 빼지 않는 한)
-    prev = one(con, "SELECT overrides_json FROM fee_revision WHERE status='APPROVED' AND base_version=? ORDER BY rev_no DESC LIMIT 1", (FEE_TABLE["version_id"],))
+    prev = one(con, """SELECT overrides_json FROM fee_revision WHERE status='APPROVED' AND base_version=? AND (effective_from IS NULL OR effective_from<=?)
+        ORDER BY effective_from DESC, rev_no DESC LIMIT 1""", (FEE_TABLE["version_id"], eff))  # 그 시행일에 적용 중일 승인본
     merged = {**(json.loads(prev["overrides_json"]) if prev else {}), **ov}
     for rid in data.get("remove") or []:
         merged.pop(rid, None)
@@ -2539,6 +2729,8 @@ def approve_fee_revision(con, rev_id: str, approve: bool = True, reason: str = "
         raise UserError("작성한 사람은 승인할 수 없습니다. 다른 담당자가 원문과 대조해 승인해 주세요.")
     if not approve and not reason.strip():
         raise UserError("반려 사유를 적어 주세요.")
+    if approve and one(con, "SELECT 1 AS x FROM fee_revision WHERE status='APPROVED' AND base_version=? AND effective_from>?", (r["base_version"], r["effective_from"])):
+        raise UserError("이 개정안보다 나중 시행 개정이 이미 승인되어 있어 승인할 수 없습니다. 반려하고 그 날짜 이후로 다시 만드세요.")
     with tx(con):
         if approve:
             con.execute("UPDATE fee_revision SET status='APPROVED', approved_by=?, approved_at=? WHERE id=?", (ACTOR.get(), now(), rev_id))
@@ -2806,7 +2998,7 @@ def stats_csv(con, start: str, end: str, kind: str = "requests", basis: str = "p
     import csv
     import io
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = safe_csv_writer(buf)
     if kind == "days":
         s = stats(con, start, end, basis)
         w.writerow(["날짜", "접수", "수거 예정", "수거 완료", "일부 수거", "미수거", "취소", "계산 금액(원)", "부과 금액(원)", "납부 기록(원)", "하차 부피(m3)", "하차 중량(kg)"])
@@ -2876,6 +3068,9 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
     events = state.get("events") or []
     photos = obj.get("photos") or {}
     new = [r for r in reqs if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (r["request_id"],))]
+    # 단독 휴대폰마다 기기 표시를 따로(순번이 1부터라 여러 대를 가져오면 겹친다): 가장 이른 기록 ID로 만든 고정 값
+    first = min(events, key=lambda e: e.get("seq") or 0)["event_id"] if events else ",".join(sorted(r["request_id"] for r in reqs))
+    solo_dev = "SOLO:" + hashlib.sha256(str(first).encode()).hexdigest()[:12]
     info = {"requests": len(reqs), "new": len(new), "already": len(reqs) - len(new), "events": len(events),
             "photos": len(photos), "unloads": sum(1 for e in events if e.get("kind") == "UNLOAD"), "created_at": obj.get("created_at")}
     if preview:
@@ -2938,7 +3133,7 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                 ok_ = bool(crew_id) and (b.get("volume_m3") or b.get("weight_kg"))
                 con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                     body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (e["event_id"], imp, "SOLO", e.get("seq") or 0, "", 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
+                            (e["event_id"], imp, solo_dev, e.get("seq") or 0, "", 0, None, "UNLOAD", json.dumps(b, ensure_ascii=False),
                              "APPLIED" if ok_ else "REJECTED", None if ok_ else "수거팀을 고르지 않아 하차 기록을 붙일 곳이 없음", e.get("ts")))
                 if ok_:
                     con.execute("""INSERT OR IGNORE INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at)
@@ -2953,7 +3148,7 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                 e = {**e, "body": {**e["body"], "line_id": line_map[(e["request_id"], e["body"]["line_id"])]}}
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (e["event_id"], imp, "SOLO", e.get("seq") or 0, e["request_id"], 0, e.get("base_req_ver"), e["kind"],
+                        (e["event_id"], imp, solo_dev, e.get("seq") or 0, e["request_id"], 0, e.get("base_req_ver"), e["kind"],
                          json.dumps(e.get("body") or {}, ensure_ascii=False), "APPLIED", None, e.get("ts")))
             counts["events"] += 1
             if e["kind"] == "PHOTO_META":
@@ -2999,6 +3194,7 @@ def link_similar(con, rid: str, line_id: str, fee_rate_id: str, reason: str, con
     with tx(con):
         con.execute("INSERT INTO item_link (id, request_id, line_id, fee_rate_id, fee_version_id, unit_price, reason, confirmed_by, actor, at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (lid, rid, line_id, fee_rate_id, fee_state(con)["version_id"], int(row["price"]), reason.strip()[:200], confirmed_by.strip()[:40], ACTOR.get(), now()))
+        con.execute("UPDATE request SET updated_at=? WHERE id=?", (now(), rid))  # 목록 전송 뒤 단가가 정해지면 '재전송 필요'
         audit(con, "request", rid, "LINK_SIMILAR", {"line": line_id[:8], "fee_rate_id": fee_rate_id, "price": row["price"], "confirmed_by": confirmed_by.strip()[:40],
                                                     "reason": reason.strip()[:200], **_after_close(con, rid)})
     return lid
@@ -3240,7 +3436,7 @@ def pilot_csv(con, start=None, end=None, crew_id=None) -> bytes:
     import io
     r = pilot_report(con, start, end, crew_id)
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = safe_csv_writer(buf)
     w.writerow(["시범 운영 비교", f"{r['start']}~{r['end']}", r["crew"] or "전체 팀", f"기존 방식: {r['base_period'] or '-'}"])
     w.writerow(["지표", "단위", "기존 방식", "시범 운영", "차이", "판단", "근거 건수"])
     for x in r["rows"]:

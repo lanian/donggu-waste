@@ -180,3 +180,9 @@ export function guessDong(addr, history = [], known = []) {
 }
 /** 고른 동이 아는 행정동 목록에 있는지(오타 확인). 비어 있으면 true */
 export const isKnownDong = (dong, known = []) => !sq(dong) || [...known.map(sq), ...DONGGU_DONGS].includes(sq(dong));
+
+// 검색어 안전장치(PC pc/dgpc/external.py keyword_guard와 같은 규칙): 전화번호 모양·숫자 8자리 이상이면 보내지 않는다
+const PHONE_RE = /(?<!\d)0\d{1,2}[-\s.]?\d{3,4}[-\s.]?\d{4}(?!\d)/;
+const LONG_DIGITS = /\d[\d\s.-]{7,}\d/;
+export function phoneLike(q) { return PHONE_RE.test(q || '') || LONG_DIGITS.test(q || ''); }
+

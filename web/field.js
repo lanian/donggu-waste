@@ -107,6 +107,7 @@ export function purgeEventPII(e) {
   // 현장 접수·정정 요청(PC 연결 방식)에는 이름·연락처·주소가 들어 있다: 칸 이름만 남기고 값은 지운다
   if (e.kind === 'FIELD_INTAKE') for (const k of [...PII, 'dong']) if (k in b) { delete b[k]; hit = true; }
   if (e.kind === 'CORRECTION' && b.fields && typeof b.fields === 'object' && !Array.isArray(b.fields)) { b.fields = Object.keys(b.fields); hit = true; }
+  if (e.kind === 'CORRECTION' && b.reason) { delete b.reason; hit = true; }  // 사유 글에 새 번호·이름을 적는 일이 있다
   if (hit) b.pii_purged = true;
   return hit;
 }

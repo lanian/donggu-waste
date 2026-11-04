@@ -152,7 +152,7 @@ def main():
             ok(qr_text == code and code.startswith("DGD1."), "기기 등록: 기기 코드를 QR로 표시 (읽으면 같은 코드, 복사는 웹캠 없을 때 예비)")
             fp_phone = page.locator(".fp").inner_text().replace(" ", "")
             page.screenshot(path=SHOTS / "02_register.png", full_page=True)
-            out = py("register-device", code)
+            out = py("register-device", code, "--confirm")
             ok(fp_phone in out, f"카메라로 등록 QR 인식, PC·휴대폰 지문 일치 ({fp_phone})")
             page.get_by_role("button", name="완료").click()
             dev_short = re.search(r"등록 완료: ([0-9a-f]{8})", out).group(1)
@@ -1174,7 +1174,7 @@ def solo(pw, url, video):
     # 백업 → 전체 삭제 → 복원
     ok(page.get_by_text("마지막 백업: 없음").count() == 1, "백업 전 경고 표시")
     page.get_by_role("button", name="지금 백업").click()
-    page.get_by_placeholder("백업 비밀번호 (8자 이상)").fill("backup-pass-1")
+    page.get_by_placeholder("백업 비밀번호 (12자 이상)").fill("backup-pass-1")
     page.get_by_placeholder("한 번 더").fill("backup-pass-1")
     with page.expect_download() as dl:
         page.get_by_role("button", name="암호화 백업 파일 만들기").click()
@@ -1201,6 +1201,11 @@ def solo(pw, url, video):
     page.goto(url + "#/settings")
     page.get_by_role("button", name="이 휴대폰의 모든 자료 지우기").click()
     page.get_by_role("button", name="모두 지우기").click()
+    again_btn = page.get_by_role("button", name="그래도 지우기")
+    page.wait_for_timeout(800)
+    if again_btn.count():  # 보내지 않은 기록·회수 안 된 사진이 있으면 한 번 더 묻는다
+        ok("어디에도 남지 않습니다" in page.locator("dialog.sheet[open]").last.inner_text(), "모든 자료 지우기: 보내지 않은 기록·회수 안 된 사진이 있으면 한 번 더 확인")
+        again_btn.click()
     page.wait_for_load_state()
     expect(page.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
     other.reload()

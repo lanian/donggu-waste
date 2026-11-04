@@ -34,4 +34,15 @@ ok(first('ㅈㄹ').name === '장롱', "초성 'ㅈㄹ' → 장롱");
 ok(first('ㅅㅍㄱ').name === '선풍기' && searchFees(T, '3ㅇㅇ ㅅㅍ').some((r) => r.spec === '3인용 소파'), "초성 'ㅅㅍㄱ' → 선풍기, '3ㅇㅇ ㅅㅍ' → 3인용 소파");
 ok(searchFees(T, 'ㅁㅌㄹㅅ 2인').length >= 1, "초성과 일반 낱말 섞어 검색 'ㅁㅌㄹㅅ 2인'");
 ok(chosungOf('가상하나 동구') === 'ㄱㅅㅎㄴ ㄷㄱ' && matchText('가상하나 동구 시험로', 'ㄱㅅㅎ 시험'), '초성 변환·혼합 일치');
+// 재방문: 목록을 받은 시점(since_seq) 전 기록은 오늘 방문 상태에 섞이지 않음
+const rv = { request_id: 'r2', req_ver: 1, since_seq: 10, items: [{ line_id: 'x', name: '의자', spec: '', unit: 'EA', unit_label: '개', qty: 2, prior_collected: 1, unit_price: 2000, amount: 4000, price_status: 'CONFIRMED' }] };
+const old = [{ seq: 3, request_id: 'r2', kind: 'ATTEMPT', body: { outcome: 'PARTIAL' } }, { seq: 4, request_id: 'r2', kind: 'CONTACT', body: { result: 'REACHED' } }];
+const dr = deriveStop(rv, old);
+ok(dr.outcome === null && dr.contact === 'NOT_CONTACTED' && dr.lines[0].qty_collected === 1, '재방문: 전날 결과·연락 기록은 오늘 상태로 안 셈(이전 수거분은 prior_collected로만)');
+// 같은 날 다시 받은 목록에 이미 있는 현장 추가 줄은 두 번 넣지 않음
+const rs = { request_id: 'r3', req_ver: 1, items: [{ line_id: 'F1', line_kind: 'FIELD', name: '식탁', spec: '', unit: 'EA', unit_label: '개', qty: 1, unit_price: 6000, amount: 0, price_status: 'CONFIRMED' }] };
+const dup = deriveStop(rs, [{ seq: 1, request_id: 'r3', kind: 'FIELD_ITEM_ADD', body: { line_id: 'F1', name: '식탁', unit: 'EA', unit_label: '개', unit_price: 6000, price_status: 'CONFIRMED', qty: 1 } }]);
+ok(dup.lines.length === 1, '다시 받은 목록의 현장 추가 줄 + 현장 추가 기록 → 한 줄(금액 두 배 안 됨)');
+// 현장 접수·정정·취소 요청 기록만으로는 '처리 중'이 아님
+ok(deriveStop({ request_id: 'r4', req_ver: 1, items: [] }, [{ seq: 1, request_id: 'r4', kind: 'FIELD_INTAKE', body: {} }]).progress !== 'STARTED', '현장 접수 기록만 있으면 처리 중으로 세지 않음');
 console.log(`\n통과 ${n}개`);

@@ -11,7 +11,7 @@
 - 결과 파일 형식(`dg.result/1`)·봉투·서명은 **바뀌지 않았습니다.** 기록(`events[]`)의 `kind`가 7개 늘고, 기존 기록 본문에 선택 필드가 몇 개 붙습니다.
 - 현재 PC 코드(`import_result`)는 모르는 `kind`를 `result_event`에 `APPLIED`로 저장하고 `derive()`에서는 무시합니다(읽어서 확인함). 그래서 **지금 PC로도 가져오기는 실패하지 않습니다.** 아래 표의 "PC 권장 처리"는 화면에 보여 주려면 할 일입니다.
 - 주의: `request_id`가 빈 기록 중 `UNLOAD`가 아닌 것은 지금 PC에서 "PC에 없는 접수" 충돌이 됩니다. 그래서 휴대폰은 **새 팀 단위 기록을 만들지 않습니다**(작업자 교대도 기록이 아니라 각 기록 본문의 `worker`로만 남김).
-- 주의: 취소된 접수의 기록은 지금 PC에서 `CONTACT`·`DIAL_INTENT`·`PHOTO_META`만 충돌에서 빠집니다. `ARRIVE`·`SMS_INTENT`·`NAV_INTENT`·`STICKER_CHECK`·`FEE_NOTICE`는 취소 건이면 충돌함으로 갑니다. 충돌 예외 목록에 `ARRIVE`, `SMS_INTENT`, `NAV_INTENT`를 더하는 것을 권장합니다.
+- (해결됨) 취소된 접수의 `ARRIVE`·`SMS_INTENT`·`NAV_INTENT`·`STICKER_CHECK`·`FEE_NOTICE`도 지금 PC는 충돌함으로 보내지 않습니다(`service.py` `CANCELLED_OK_KINDS`).
 - 목록 묶음: 지점에 선택 키 `"d"`(행정동 이름) 추가. **형식 번호는 그대로 `dg.daylist/2`.** `pc/dgproto.py`의 `compact_daylist`/`expand_daylist`에 이미 반영했습니다(지점 dict에 `dong`이 있으면 실림, 없으면 생략).
 
 ## 1. 모든 기록 공통
@@ -194,7 +194,7 @@ v0.10.0까지는 "바탕 지도 서버 하나만, 주소 검색·길찾기 미�
 | 기본 지도 앱 | Android `geo:{위도},{경도}?q={위도},{경도}({N번 수거지})`, iOS `maps://?daddr={위도},{경도}&dirflg=d` | (없음) |
 
 - 표시 이름은 순번에서만 만들고, `N번 수거지`·`반입지` 꼴이 아니면 `수거지`로 바꿉니다(`safeLabel`) — 이름이 끼어들 수 없습니다.
-- 위치가 없는 곳은 [길안내]가 꺼지고 "위치 없음 — 위치 지정 필요"가 보입니다.
+- 위치가 없는 곳의 [길안내]는 누르면 "위치 없음 — 위치 지정 필요"와 함께 지도에서 위치를 정하는 창이 뜹니다(0.12.9부터).
 
 ### 8.3 PC 서버의 행안부 주소 검색 대행 (v0.11, `pc/dgpc/external.py`)
 

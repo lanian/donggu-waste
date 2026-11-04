@@ -109,10 +109,11 @@ def key_id(sign_pub_raw: bytes) -> bytes:
     return hashlib.sha256(sign_pub_raw).digest()[:8]
 
 
-def fingerprint(*raws: bytes) -> str:
-    """사람이 두 화면에서 대조하는 6자리 지문."""
-    h = hashlib.sha256(b"".join(raws)).digest()
-    return f"{int.from_bytes(h[:4], 'big') % 1_000_000:06d}"
+def fingerprint(pc_sign: bytes, pc_kex: bytes, device_id: bytes, dev_kex: bytes, dev_sign: bytes) -> str:
+    """사람이 두 화면에서 대조하는 9자리 지문. PC 서명·키 합의 공개키, 기기 번호·두 공개키를 모두 덮는다
+    (등록 QR의 키 합의 키만 바꿔치기하거나 기기 코드를 바꿔치기하면 숫자가 달라진다)."""
+    h = hashlib.sha256(b"DGFP2" + pc_sign + pc_kex + device_id + dev_kex + dev_sign).digest()
+    return f"{int.from_bytes(h[:5], 'big') % 1_000_000_000:09d}"
 
 
 def sign_raw(priv: ec.EllipticCurvePrivateKey, data: bytes) -> bytes:
@@ -353,8 +354,10 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
             row_status = "CONFIRMED" if row and row["status"] == "CONFIRMED" else "PENDING"
             if not row:
                 extra.update(n=it["name"], s=it.get("spec", ""), u=it["unit"], ul=it["unit_label"])
-            if row and it.get("unit_price") is not None and it["unit_price"] != row["price"]:
-                extra["pp"] = it["unit_price"]  # 접수 당시 단가가 현재 표와 다르면 그대로 보냄
+            if it.get("unit_price") is not None and (not row or it["unit_price"] != row["price"]):
+                extra["pp"] = it["unit_price"]  # 접수 당시 단가가 현재 표와 다르거나, 표 밖 품목에 유사 품목 단가를 적용했으면 그대로 보냄
+            if (it.get("line_kind") or "RECEIVED") == "RECEIVED" and it.get("qty_received") not in (None, it["qty"]):
+                extra["qr"] = it["qty_received"]  # 재방문: 확인 수량이 바뀌면 접수 수량을 따로
             if it.get("price_status", "PENDING") != row_status:
                 extra["ps"] = it.get("price_status", "PENDING")[0]
             if extra:
@@ -390,7 +393,8 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
                           "name": x.get("n", row["name"] if row else ""), "spec": x.get("s", row["spec"] if row else ""),
                           "unit": x.get("u", row["unit"] if row else "EA"), "unit_label": x.get("ul", row["unit_label"] if row else "개"),
                           "qty": qty, "prior_collected": x.get("c", 0), "unit_price": price,
-                          "amount": price * qty if status == "CONFIRMED" and price is not None and kind == "RECEIVED" else (0 if kind == "FIELD" else None),
+                          "qty_received": 0 if kind == "FIELD" else x.get("qr", qty),
+                          "amount": price * x.get("qr", qty) if status == "CONFIRMED" and price is not None and kind == "RECEIVED" else (0 if kind == "FIELD" else None),
                           "price_status": status})
         y = c.get("y")
         stops.append({"seq": c["q"], "request_id": _uid(c["i"]), "receipt_no": c["r"], "req_ver": c["v"], "name": c["n"], "phone": c["p"],

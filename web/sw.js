@@ -1,7 +1,7 @@
 // 서비스 워커: 앱 파일을 저장해 오프라인으로 실행하고, 바탕 지도 조각을 크기 한도 안에서 보관한다. 업무 자료는 다루지 않는다.
 // 주소 검색(business.juso.go.kr) 응답은 저장하지 않는다(다른 출처 요청은 아래에서 그대로 통과).
 // 새 버전은 자동 적용하지 않고, 앱 화면의 [업데이트]를 눌러야 바뀐다.
-const VERSION = '0.12.16';
+const VERSION = '0.12.17';
 const CACHE = 'dg-app-' + VERSION;
 const FILES = ['./', './index.html', './style.css', './app.js', './proto.js', './store.js', './fees.js', './fees-data.js', './load.js', './backup.js', './map.js',
   './field.js', './bio.js', './nav.js', './juso.js',
@@ -74,6 +74,7 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
-  e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((hit) => hit ||
-    (e.request.mode === 'navigate' ? caches.match('./index.html') : fetch(e.request))));
+  // 이 앱의 캐시에서만 찾는다(같은 출처의 다른 페이지가 넣은 캐시 응답을 쓰지 않게)
+  e.respondWith(caches.open(CACHE).then((c) => c.match(e.request, { ignoreSearch: true }).then((hit) => hit ||
+    (e.request.mode === 'navigate' ? c.match('./index.html') : fetch(e.request)))));
 });

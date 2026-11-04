@@ -59,6 +59,12 @@ def main(argv=None) -> int:
     for name, v in (("APP_VERSION", app_v), ("sw.js VERSION", sw_v)):
         if not SEMVER.match(v):
             errors.append(f"{name} '{v}' 가 x.y.z 형식이 아닙니다")
+    pc_init = (ROOT / "pc" / "dgpc" / "__init__.py").read_text(encoding="utf8") if (ROOT / "pc" / "dgpc" / "__init__.py").exists() else ""
+    m_pc = re.search(r'__version__\s*=\s*"([^"]+)"', pc_init)
+    pc_v = m_pc.group(1) if m_pc else ""
+    print(f"pc/dgpc  __version__ = {pc_v}")
+    if pc_v and pc_v != app_v:
+        errors.append(f"PC __version__({pc_v}) 과 APP_VERSION({app_v}) 이 다릅니다 — 같은 번호로 맞추세요")
     if app_v != sw_v:
         errors.append(f"APP_VERSION({app_v}) 과 sw.js VERSION({sw_v}) 이 다릅니다 — 두 파일을 같은 버전으로 맞추세요")
     if tag:
@@ -72,6 +78,20 @@ def main(argv=None) -> int:
     missing = [f for f in precache_files(web / "sw.js") if not (web / f.removeprefix("./")).exists() and f != "./"]
     if missing:
         errors.append("sw.js 미리 저장 목록에 있지만 web/ 에 없는 파일: " + ", ".join(missing))
+
+    # 거꾸로: 앱이 불러오는 파일(import·script src·link href·manifest·아이콘)이 미리 저장 목록에 다 있는가 — 빠지면 오프라인에서 멈춤
+    import re as _re
+    pre = {f.removeprefix("./") for f in precache_files(web / "sw.js")}
+    used = set()
+    for src in [web / "index.html", *web.glob("*.js")]:
+        if src.name == "sw.js":
+            continue
+        t = src.read_text(encoding="utf8")
+        for m in _re.finditer(r"""(?:import\s[^'"]*?from\s*|import\(\s*|src=|href=)['"](\./)?([\w./-]+\.(?:m?js|css|webmanifest|svg|png))['"]""", t):
+            used.add(m.group(2))
+    lack = sorted(u for u in used if u not in pre and not u.startswith(("http", "/")) and (web / u).exists())
+    if lack:
+        errors.append("앱이 쓰지만 sw.js 미리 저장 목록에 없는 파일(오프라인에서 멈춤): " + ", ".join(lack))
 
     for e in errors:
         print("::error::" + e)

@@ -113,6 +113,7 @@ def set_reduction(con, rid: str, data: dict) -> dict:
         else:
             con.execute("UPDATE request SET reduction_code=NULL, reduction_rate=NULL, reduction_label=NULL, reduction_proof=NULL, reduction_checker=NULL, reduction_at=? WHERE id=?",
                         (S.now(), rid))
+        con.execute("UPDATE request SET updated_at=? WHERE id=?", (S.now(), rid))  # 목록 전송 뒤 바뀌면 '재전송 필요'
         S.audit(con, "request", rid, "REDUCTION" if vals else "REDUCTION_CLEAR",
                 {**({"code": vals["reduction_code"], "rate": vals["reduction_rate"], "proof": vals["reduction_proof"], "checker": vals["reduction_checker"]} if vals else {}),
                  **({"reason": why[:200]} if why else {}), **flag})
@@ -167,7 +168,7 @@ def revenue(con, start: str, end: str, unit: str = "day") -> dict:
 def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "method") -> bytes:
     """세외수입 담당자용 CSV(엑셀 BOM). 이름·연락처·주소 없음."""
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = S.safe_csv_writer(buf)
     per = "월" if unit == "month" else "납부일"
     if kind == "detail":
         w.writerow(["납부일", "부과번호", "접수번호", "행정동", "구분", "납부 방법", "금액(원)", "영수번호·거래번호", "기록 출처", "기록 시각"])
@@ -191,7 +192,7 @@ def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "metho
 # ------------------------------------------------------------------ 대사 (세외수입 납부 자료 CSV: 부과번호·금액·납부일)
 def recon_template() -> bytes:
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = S.safe_csv_writer(buf)
     w.writerow(["부과번호", "금액", "납부일", "영수번호", "납부방법"])
     w.writerow(["2026-00-00001", "12000", "2026-11-03", "가상-0001", "가상계좌"])
     return ("﻿" + buf.getvalue()).encode("utf-8")
@@ -220,7 +221,7 @@ def parse_recon(con, raw: bytes) -> dict:
         if re.fullmatch(r"\d{8}", date):
             date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
         try:
-            amount = int(get(r, "amount").replace(",", ""))
+            amount = int(re.sub(r"[,\s]|원$", "", get(r, "amount")))  # '15,000원'·'15 000'도 받는다
         except ValueError:
             amount = None
         row = {"line": n, "levy_no": levy, "amount": amount, "paid_on": date, "ref": ref, "method": method}
@@ -237,7 +238,9 @@ def parse_recon(con, raw: bytes) -> dict:
             out.append(row); continue
         seen[levy] = n
         dup = S.one(con, """SELECT 1 AS x FROM payment WHERE request_id=? AND void_reason IS NULL AND kind='PAY' AND source='대사'
-            AND ((receipt_ref IS NOT NULL AND receipt_ref!='' AND receipt_ref=?) OR (amount=? AND paid_on=?))""", (q["id"], ref, amount, date))
+            AND ((receipt_ref IS NOT NULL AND receipt_ref!='' AND receipt_ref=?)
+                 OR (amount=? AND paid_on=? AND (?='' OR receipt_ref IS NULL OR receipt_ref='')))""", (q["id"], ref, amount, date, ref))
+        # 영수번호가 서로 다르면 금액·날짜가 같아도 다른 납부로 본다(같은 날 같은 금액을 두 번 낸 경우)
         ps = S.payment_status(con, q["id"])
         row.update(levied=ps["levied"], paid=ps["paid"])
         if dup:
@@ -441,6 +444,9 @@ def pay_refund(con, cid: str, data: dict) -> dict:
         raise S.UserError("계좌 끝 4자리만 숫자로 적어 주세요 (전체 계좌번호는 저장하지 않습니다).")
     if method == "계좌 이체" and not checked:
         raise S.UserError("계좌 이체는 예금주·계좌를 확인했는지 '계좌 확인함'을 표시해 주세요.")
+    left = S.payment_status(con, c["request_id"])["paid"]
+    if c["amount"] > left:  # 결재 뒤 원 납부가 정정됐을 수 있다: 남은 납부액보다 많이 돌려주지 않는다
+        raise S.UserError(f"남은 납부 확인 금액({left:,}원)이 결재된 환불액({c['amount']:,}원)보다 적습니다(수납 기록이 바뀜). 이 환불 건을 취소하고 다시 신청하세요.")
     pid = str(uuid.uuid4())
     with S.tx(con):
         con.execute("""INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, source) VALUES (?,?,?,?,?,?,?,?,'환불 결재')""",

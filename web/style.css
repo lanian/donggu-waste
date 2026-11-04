@@ -521,3 +521,10 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 /* 기기 등록: 기기 코드 QR (PC 웹캠으로 읽음) */
 .qrwrap { max-width: 320px; margin: 8px auto; padding: 8px; background: #fff; border-radius: var(--radius-sm); }
 .devcode-alt { margin-top: 8px; } .devcode-alt summary { cursor: pointer; font-weight: 700; color: var(--muted); padding: 8px 0; }
+/* 저장 실패 띠: 다시 저장될 때까지 계속 보인다 */
+.save-fail { position: fixed; left: 8px; right: 8px; top: 8px; z-index: 90; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--bad); color: var(--on-bad); font-weight: 700; box-shadow: var(--shadow); }
+/* 앱이 가려지면(최근 앱 미리보기) 화면 내용을 숨김 */
+.veil body > * { visibility: hidden; }
+.veil body { background: var(--bg); }
+/* 아주 좁은 화면 + 아주 큰 글자: 아래 단추가 화면 밖으로 나가지 않게 */
+@media (max-width: 340px) { .dock { gap: 4px; padding-left: 6px; padding-right: 6px; } .dock .btn { white-space: normal; padding: 8px 4px; font-size: 0.9rem; line-height: 1.2; } }

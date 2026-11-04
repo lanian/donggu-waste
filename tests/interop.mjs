@@ -45,9 +45,13 @@ const deviceId = P.randomBytes(16);
 const kexRaw = await P.exportRaw(dev.kex.publicKey);
 const signRaw = await P.exportRaw(dev.sign.publicKey);
 const code = await P.deviceCode(deviceId, kexRaw, signRaw);
-const regOut = py('register-device', code);
-const fp = await P.fingerprint(reg.pcSignPub, kexRaw, signRaw);
-ok(regOut.includes(fp), `기기 등록 후 양쪽 지문 일치 (${fp})`);
+const regOut0 = py('register-device', code);
+const fp = await P.fingerprint(reg.pcSignPub, reg.pcKexPub, deviceId, kexRaw, signRaw);
+ok(regOut0.includes(fp) && fp.length === 9 && regOut0.includes('--confirm'), `기기 등록: 양쪽 9자리 지문 일치, 확인 전에는 사용 대기 (${fp})`);
+const fakeKex = (await P.generateDeviceKeys()).kex;
+ok((await P.fingerprint(reg.pcSignPub, await P.exportRaw(fakeKex.publicKey), deviceId, kexRaw, signRaw)) !== fp, '등록 QR의 키 합의 키만 바꿔치기해도 지문이 달라짐');
+const regOut = py('register-device', code, '--confirm');
+ok(regOut.includes('사용 시작'), '지문 확인 뒤 사용 시작');
 const pcSignPub = await P.importEcdsaPub(reg.pcSignPub);
 const pcKexPub = await P.importEcdhPub(reg.pcKexPub);
 

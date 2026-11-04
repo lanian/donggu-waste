@@ -115,11 +115,12 @@ def cmd_reg_qr(_):
 
 def cmd_register_device(a):
     try:
-        r = S.register_device(con(), a.code, a.label or "")
+        r = S.register_device(con(), a.code, a.label or "", confirm=bool(getattr(a, "confirm", False)))
     except S.UserError as e:
         sys.exit(str(e))
     print("등록 완료:", r["device_id"])
     print("지문:", r["fingerprint"], "← 휴대폰 화면의 숫자와 같은지 확인하세요")
+    print("사용 시작(지문 확인함)" if r["confirmed"] else "지문이 같으면 --confirm 을 붙여 다시 실행하거나 PC 화면 설정 → 기기에서 [지문 같음 · 사용 시작]")
 
 
 def cmd_make_bundle(a):
@@ -192,10 +193,12 @@ def cmd_import_photos(a):
 
 
 def cmd_status(_):
+    import dgpc
     c = con()
+    print("[프로그램] 버전", dgpc.__version__)
     print("[기기]")
     for r in S.list_devices(c):
-        print("  ", r["id"][:8], r["status"], r["registered_at"], r["label"] or "")
+        print("  ", r["id"][:8], r["status"] if r.get("confirmed_at") or r["status"] != "ACTIVE" else "지문 확인 대기", r["registered_at"], r["label"] or "")
     print("[목록 묶음]")
     for r in S.rows(c, "SELECT id, device_id, work_date, assign_ver, chunk_count, receipt_confirmed_at FROM transfer_bundle ORDER BY displayed_at"):
         print("  ", r["id"][:8], r["device_id"][:8], r["work_date"], r["assign_ver"], r["chunk_count"], "수신 확인" if r["receipt_confirmed_at"] else "수신 미확인")
@@ -242,7 +245,7 @@ def cmd_restore(a):
 
 
 def cmd_reset_admin(a):
-    """관리자 비밀번호를 잊었을 때: DB 키를 아는 사람만 이 PC에서 실행할 수 있다."""
+    """관리자 비밀번호를 잊었을 때: 이 PC의 업무용 Windows 계정(키 저장소에 DB 키가 있는 계정)에서만 열린다. 변경 이력에 남는다."""
     import getpass
     c = con()
     S.migrate_legacy_login(c)
@@ -253,7 +256,9 @@ def cmd_reset_admin(a):
     S.ACTOR.set("cli")
     try:
         S.set_password(c, u["id"], pw, must_change=True)
-        c.execute("UPDATE app_user SET active=1 WHERE id=?", (u["id"],))
+        with S.tx(c):
+            c.execute("UPDATE app_user SET active=1 WHERE id=?", (u["id"],))
+            S.audit(c, "user", u["id"], "RESET_ADMIN_CLI", {"username": a.username, "os_user": getpass.getuser()[:40]})
     except S.UserError as e:
         sys.exit(str(e))
     print("재설정했습니다. 다음 로그인 때 새 비밀번호로 바꾸게 됩니다.")
@@ -377,7 +382,8 @@ def main(argv=None):
     sv.add_argument("--host", help="LAN 모드에서 묶을 주소 (기본 0.0.0.0)"); sv.add_argument("--hostname", help="Host 헤더로 허용할 서버 이름 (기본: 이 PC 이름)")
     sv.set_defaults(fn=cmd_serve)
     s.add_parser("reg-qr").set_defaults(fn=cmd_reg_qr)
-    r = s.add_parser("register-device"); r.add_argument("code"); r.add_argument("--label"); r.set_defaults(fn=cmd_register_device)
+    r = s.add_parser("register-device"); r.add_argument("code"); r.add_argument("--label")
+    r.add_argument("--confirm", action="store_true", help="두 화면의 지문이 같음을 확인했으면 바로 사용 시작"); r.set_defaults(fn=cmd_register_device)
     m = s.add_parser("make-bundle")
     m.add_argument("--device", required=True); m.add_argument("--count", type=int, default=20)
     m.add_argument("--date"); m.add_argument("--chunk", type=int, default=700)

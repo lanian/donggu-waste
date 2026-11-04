@@ -44,12 +44,14 @@ export const won = (n) => (n == null ? '미확정' : n.toLocaleString('ko-KR') +
 
 // 한 접수 건의 현재 상태를 이벤트에서 계산한다 (이벤트는 추가만, 최신 값이 현재 값).
 export function deriveStop(stop, events) {
-  const mine = events.filter((e) => e.request_id === stop.request_id);
+  // since_seq: 새 날짜 목록을 받은 시점. 그 전 기록(전날 방문)은 재방문 상태 계산에 넣지 않는다(이전 수거분은 prior_collected로 옴)
+  const from = stop.since_seq || 0;
+  const mine = events.filter((e) => e.request_id === stop.request_id && !(e.seq <= from));
   // 재방문 목록은 남은 품목만 오며, 이전 방문에서 이미 수거한 수량(prior_collected)에서 이어서 센다.
   const lines = stop.items.map((it) => ({
     line_id: it.line_id, kind: it.line_kind || 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,
     fee_rate_id: it.fee_rate_id, price: it.price_status === 'CONFIRMED' ? it.unit_price : null,
-    qty_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' ? it.qty : 0,
+    qty_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' ? (it.qty_received ?? it.qty) : 0,
     amount_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' && it.price_status === 'CONFIRMED' ? it.amount : 0,
     qty_confirmed: it.qty, qty_collected: it.prior_collected || 0, reason: '',
   }));
@@ -60,7 +62,7 @@ export function deriveStop(stop, events) {
   for (const e of mine) {
     const b = e.body || {};
     if (e.kind === 'CONTACT') contact = b.result;
-    else if (e.kind === 'FIELD_ITEM_ADD') {
+    else if (e.kind === 'FIELD_ITEM_ADD' && !byId[b.line_id]) {  // 같은 날 다시 받은 목록에 이미 그 줄이 있으면 두 번 넣지 않음
       const l = { line_id: b.line_id, kind: 'FIELD', name: b.name, spec: b.spec || '', unit: b.unit, unit_label: b.unit_label,
         fee_rate_id: b.fee_rate_id || null, price: b.price_status === 'CONFIRMED' ? b.unit_price : null,
         qty_received: 0, amount_received: 0, qty_confirmed: b.qty, qty_collected: 0, reason: '' };
@@ -85,7 +87,7 @@ export function deriveStop(stop, events) {
     progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
 }
 // 수거 진행으로 세지 않는 기록 (연락·안내·위치 같은 것)
-export const NON_PROGRESS = ['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO', 'SMS_INTENT', 'NAV_INTENT'];
+export const NON_PROGRESS = ['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO', 'SMS_INTENT', 'NAV_INTENT', 'FIELD_INTAKE', 'CORRECTION', 'CANCEL_REQUEST'];
 
 // 현장 금액 변경 고지: 확인된 소계가 접수 당시 금액보다 커졌는데, 그 금액 이상으로 안내한 기록이 없으면 안내가 필요하다.
 export function feeExtra(d) { return Math.max(0, d.fee.confirmedSubtotal - d.fee.received); }

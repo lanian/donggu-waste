@@ -49,8 +49,11 @@ def handling_of(item: dict) -> dict:
 
 
 def _qty(item: dict) -> int:
+    q = item.get("qty")
+    if q is None or q == "":
+        return 1
     try:
-        return max(0, int(item.get("qty") or 1))
+        return max(0, int(q))
     except (TypeError, ValueError):
         return 1
 
@@ -115,7 +118,8 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
         coords = ";".join(f"{lon},{lat}" for lat, lon in points)
         url = osrm_url.rstrip("/") + f"/table/v1/driving/{coords}?annotations=duration"
         try:
-            with urllib.request.urlopen(url, timeout=10) as r:  # 이 PC 안의 OSRM에만 요청 (설정에서 127.0.0.1만 허용)
+            # 이 PC 안의 OSRM에만 요청. 기관망 프록시 설정(환경변수·Windows 레지스트리)을 타지 않게 프록시를 끈다(좌표가 프록시로 나가지 않음)
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as r:
                 data = json.load(r)
             if data.get("code") == "Ok":
                 return [[int(math.ceil((d or 0) / 60)) for d in row] for row in data["durations"]], "OSRM"
@@ -345,13 +349,17 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         its = r.get("items", [])
         info[r["id"]] = {"m3": sum(volume_of(i, volume_overrides) for i in its), "kg": sum(weight_of(i) for i in its),
                          "svc": work_min(its, service_base, service_per_item), "tags": tags_of(its)}
+    min_cap = max(0.01, min(float(c.get("capacity_m3", 8)) for c in crews))
+    kg_caps = [float(c.get("capacity_kg") or 0) for c in crews]
+    min_kg = min(kg_caps) if all(kg_caps) else 0
     # 같은 장소(25m 이내)이고 방문 시간창이 겹치는 접수는 한 지점으로 묶어 연속 방문한다
     groups: list[dict] = []
     for r in reqs:
         lo, hi = to_min(r.get("appt_start"), min(starts)), to_min(r.get("appt_end"), max(ends))
         x = info[r["id"]]
+        # 묶음 합계가 가장 작은 차량 1대에 들어갈 때만 묶는다(넘으면 따로 방문 → 반입지 경유로 나눠 실을 수 있게)
         g = next((g for g in groups if haversine_km((g["lat"], g["lon"]), (r["lat"], r["lon"])) <= SAME_PLACE_KM
-                  and max(g["lo"], lo) < min(g["hi"], hi)), None)
+                  and max(g["lo"], lo) < min(g["hi"], hi) and g["volume"] + x["m3"] <= min_cap and (not min_kg or g["kg"] + x["kg"] <= min_kg)), None)
         if g:
             g["members"].append((r, x["svc"])); g["lo"], g["hi"] = max(g["lo"], lo), min(g["hi"], hi)
             g["service"] += x["svc"]; g["volume"] += x["m3"]; g["kg"] += x["kg"]; g["must"] = g["must"] or bool(r.get("must_today"))
@@ -361,9 +369,9 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                            "volume": x["m3"], "kg": x["kg"], "must": bool(r.get("must_today")), "base": "BASE" in x["tags"]})
     points = [(depot["lat"], depot["lon"])] + [(g["lat"], g["lon"]) for g in groups]
     scale = 100  # 부피를 정수로 (0.01m³ 단위)
-    caps = [int(float(c.get("capacity_m3", 8)) * scale) for c in crews]
+    caps = [max(1, int(float(c.get("capacity_m3", 8)) * scale)) for c in crews]  # 0·음수 용량은 계산기를 멈추게 하므로 막는다
     use_kg = any(float(c.get("capacity_kg") or 0) > 0 for c in crews)
-    kcaps = [int(float(c.get("capacity_kg") or 0)) or 10 ** 6 for c in crews]
+    kcaps = [max(0, int(float(c.get("capacity_kg") or 0))) or 10 ** 6 for c in crews]
     use_unload = bool(unload_site and unload_site.get("lat") is not None and unload_site.get("lon") is not None and max_unloads > 0)
     n_groups = len(groups)
     unload_nodes = list(range(1 + n_groups, 1 + n_groups + (len(crews) * max_unloads if use_unload else 0)))

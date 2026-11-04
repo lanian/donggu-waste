@@ -115,8 +115,8 @@ def allowed(role: str, method: str, p: str) -> bool:
         return (method == "GET" and head not in LEAD_GET_DENY) or (method == "POST" and (p in LEAD_POST or bool(APPROVE_RE.match(p))))
     if p == "close/approve" or APPROVE_RE.match(p):  # 마감 확인·환불 결재는 팀장(검토자)·관리자만
         return False
-    if role == "FIELD" and method == "POST" and head == "requests":
-        return False
+    if role == "FIELD" and method == "POST" and (head == "requests" or p.startswith("import/solo")):
+        return False  # 수거팀 계정은 접수를 만들 수 없다(단독 휴대폰 자료 옮기기도 접수를 만든다)
     if role == "INTAKE" and method == "POST" and p == "fee-revisions":  # 개정안 작성은 관리자, 승인은 다른 담당자도 가능
         return False
     return head in PERM.get(role, {}).get(method, set())
@@ -252,7 +252,12 @@ class Handler(BaseHTTPRequestHandler):
         return t
 
     def body(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise S.UserError("요청 길이가 올바르지 않습니다.")
+        if n < 0:  # 음수면 연결이 끊길 때까지 읽어 크기 제한을 넘는다
+            raise S.UserError("요청 길이가 올바르지 않습니다.")
         if n > MAX_BODY:
             raise S.UserError("파일이 너무 큽니다.")
         return self.rfile.read(n) if n else b""
@@ -394,7 +399,9 @@ class Handler(BaseHTTPRequestHandler):
                     with S.tx(CON):
                         S.audit(CON, "user", good["id"], "LOGIN", None)
                 else:
-                    S.ACTOR.set((d.get("username") or "?")[:30])
+                    # 아이디 칸에 비밀번호를 잘못 넣는 일이 있어, 있는 아이디일 때만 그대로 적고 아니면 가린다(변경 이력은 지울 수 없음)
+                    un = (d.get("username") or "").strip()[:30]
+                    S.ACTOR.set(un if un and S.one(CON, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)) else "(없는 아이디)")
                     with S.tx(CON):
                         S.audit(CON, "user", "-", "LOGIN_FAIL", None)
             if not good:
@@ -433,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
                                        "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
                                        "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
-                                       "addr_count": S.addr_stats(c)["count"]})
+                                       "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__})
             if p == "calendar":
                 start = qs.get("start") or S.today_kst()
                 dong = qs.get("dong") or None
@@ -540,16 +547,23 @@ class Handler(BaseHTTPRequestHandler):
                 out = S.list_batches(c, qs["date"])
                 if self.crew_scope() is not None:
                     out = [b for b in out if b["crew_id"] == self.crew_scope()]
+                if out:  # 배정 목록(이름·주소 포함): 건수만 접속기록
+                    PV.record_access(c, "LIST", "", sum(b.get("count") or len(b.get("stops") or []) for b in out), f"배정 목록 {qs['date']}")
                 return self.send_json(out)
             if p == "conflicts":
-                return self.send_json(S.list_conflicts(c))
+                out = S.list_conflicts(c)
+                if out:  # 현장 접수·정정 요청 원문(개인정보)이 들어 있다
+                    PV.record_access(c, "LIST", "", len(out), "충돌함·현장 요청")
+                return self.send_json(out)
             if p == "field-intakes":
                 out = S.field_intakes(c)
                 if out:
                     PV.record_access(c, "SEARCH", "", len(out), "현장 접수 확인 목록")
                 return self.send_json(out)
             if p == "close":
-                return self.send_json(S.day_summary(c, qs["date"], self.crew_scope()))
+                out = S.day_summary(c, qs["date"], self.crew_scope())
+                PV.record_access(c, "LIST", "", len(out.get("no_result") or []) + len(out.get("revisit") or []), f"마감 점검 {qs['date']}")
+                return self.send_json(out)
             if p == "registration-qr":
                 from pc_tool import qr_png_data_uri
                 return self.send_json({"image": qr_png_data_uri(S.registration_text(c), "M")[0]})
@@ -647,7 +661,9 @@ class Handler(BaseHTTPRequestHandler):
                 S.set_location(c, parts[1], d["lat"], d["lon"])
                 return self.send_json({"ok": True})
             if p == "route":
-                return self.send_json(self.route_plan(self.json_body()))
+                out = self.route_plan(self.json_body())
+                PV.record_access(c, "LIST", "", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")
+                return self.send_json(out)
             if p == "assign":
                 d = self.json_body()
                 return self.send_json(S.confirm_plan(c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted"))))
@@ -699,6 +715,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "devices/register":
                 d = self.json_body()
                 return self.send_json(S.register_device(c, d.get("code", ""), d.get("label", "")))
+            if parts[0] == "devices" and len(parts) == 3 and parts[2] == "confirm":
+                S.confirm_device(c, parts[1])
+                return self.send_json({"ok": True})
             if parts[0] == "devices" and len(parts) == 3 and parts[2] == "status":
                 S.set_device_status(c, parts[1], self.json_body().get("status", ""))
                 return self.send_json({"ok": True})
@@ -1019,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "없음"}, 404)
         b = r[0]
         if not b["frames_json"]:
-            return self.send_json({"error": "보관 기간이 지나 정리된 전송 자료입니다."}, 404)
+            return self.send_json({"error": "수신이 확인됐거나 보관 기간이 지나 정리된 전송 자료입니다. 필요하면 목록 전송에서 다시 만드세요."}, 404)
         frames = json.loads(b["frames_json"])
         imgs = [qr_png_data_uri(f, "M")[0] for f in frames]
         n = S.one(CON, "SELECT COUNT(*) AS n FROM assignment_stop WHERE batch_id=?", (b["batch_id"],))["n"] if b["batch_id"] else ""

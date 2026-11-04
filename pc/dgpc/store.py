@@ -184,7 +184,14 @@ def _keyring_get() -> str | None:
 def _keyring_set(value: str) -> bool:
     try:
         import keyring
-        keyring.set_password(KEYRING_SERVICE, "db-key", value)
+        kr = keyring.get_keyring()
+        # Windows 자격 증명 관리자 기본값(ENTERPRISE)은 도메인 로밍 프로필로 키가 복제될 수 있다 → 이 PC에만(LOCAL_MACHINE = 2)
+        if type(kr).__name__ == "WinVaultKeyring" and hasattr(kr, "persist"):
+            try:
+                kr.persist = 2
+            except Exception:  # noqa: BLE001
+                pass
+        kr.set_password(KEYRING_SERVICE, "db-key", value)
         return keyring.get_password(KEYRING_SERVICE, "db-key") == value
     except Exception:
         return False
@@ -277,6 +284,8 @@ def migrate(con):
     migrate_v11(con)
     migrate_v12(con)
     migrate_v12_load(con)
+    migrate_v12_note(con)
+    migrate_v12_device(con)
     if not con.execute("SELECT 1 FROM day_close_log LIMIT 1").fetchone():  # 이전 마감 기록(날짜별 1행) → 1회차
         for wd, at, sj, note in con.execute("SELECT work_date, closed_at, summary_json, note FROM day_close").fetchall():
             con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note) VALUES (?,?,1,?,NULL,?,?)",
@@ -322,6 +331,19 @@ def migrate_v12(con):
     for col, decl in (("origin_device", "TEXT"), ("field_checked_at", "TEXT"), ("field_checked_by", "TEXT")):
         if col not in _cols(con, "request"):
             con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
+
+
+def migrate_v12_device(con):
+    """v0.12.17: 기기 등록 뒤 지문 대조를 확인해야 사용(confirmed_at). 이미 쓰던 기기는 확인된 것으로 둔다."""
+    if "confirmed_at" not in _cols(con, "device"):
+        con.execute("ALTER TABLE device ADD COLUMN confirmed_at TEXT")
+        con.execute("UPDATE device SET confirmed_at=registered_at")
+
+
+def migrate_v12_note(con):
+    """v0.12.17: 변경 이력의 자유 글(사유)을 따로 보관 — 이름·번호가 적혀도 보유기간 파기 때 지울 수 있게. 해시 사슬에는 글의 해시만 들어감."""
+    con.execute("CREATE TABLE IF NOT EXISTS audit_note (audit_id INTEGER PRIMARY KEY, request_id TEXT, note TEXT, note_sha TEXT NOT NULL)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_audit_note_req ON audit_note(request_id)")
 
 
 def migrate_v12_load(con):

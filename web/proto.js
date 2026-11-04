@@ -88,9 +88,11 @@ export const importEcdsaPub = (raw) => subtle.importKey('raw', raw, ECDSA, false
 export const sha256 = async (b) => new Uint8Array(await subtle.digest('SHA-256', b));
 export const keyId = async (signPubRaw) => (await sha256(signPubRaw)).slice(0, 8);
 
-export async function fingerprint(...raws) {
-  const h = await sha256(concat(...raws));
-  return String(rd32(h, 0) % 1000000).padStart(6, '0');
+// 9자리 지문: PC 서명·키 합의 공개키, 기기 번호·두 공개키를 모두 덮는다(pc/dgproto.py fingerprint와 같음)
+export async function fingerprint(pcSign, pcKex, deviceId, devKex, devSign) {
+  const h = await sha256(concat(new TextEncoder().encode('DGFP2'), pcSign, pcKex, deviceId, devKex, devSign));
+  const n = h[0] * 2 ** 32 + ((h[1] << 24) >>> 0) + (h[2] << 16) + (h[3] << 8) + h[4];
+  return String(n % 1e9).padStart(9, '0');
 }
 
 export async function deviceCode(deviceId, kexRaw, signRaw) {
@@ -233,7 +235,9 @@ export function expandDaylist(p, feeTable) {
       return {
         line_id: fromSid(sid), line_kind: kind, fee_rate_id: rid, name: x.n ?? (row ? row.name : ''), spec: x.s ?? (row ? row.spec : ''),
         unit: x.u ?? (row ? row.unit : 'EA'), unit_label: x.ul ?? (row ? row.unit_label : '개'), qty, prior_collected: x.c || 0, unit_price: price,
-        amount: kind === 'FIELD' ? 0 : status === 'CONFIRMED' && price != null ? price * qty : null, price_status: status,
+        // qr: 접수 수량(현장에서 확인 수량이 바뀐 재방문 목록은 qty가 확인 수량이라 접수 당시 금액은 접수 수량으로 셈)
+        qty_received: kind === 'FIELD' ? 0 : (x.qr ?? qty),
+        amount: kind === 'FIELD' ? 0 : status === 'CONFIRMED' && price != null ? price * (x.qr ?? qty) : null, price_status: status,
       };
     }),
   }));

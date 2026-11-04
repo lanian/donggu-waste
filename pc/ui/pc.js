@@ -1027,7 +1027,8 @@ function contactCard(r) {
 function paymentCard(r) {
   const p = r.payment;
   const msg = h('span', { class: 'msg' });
-  const kind = h('select', {}, h('option', { value: 'PAY' }, '납부'), h('option', { value: 'REFUND' }, '환불'));
+  // 환불은 [환불] 화면의 결재선(신청 → 다른 사람 결재 → 지급 기록)으로만 남긴다
+  const kind = h('select', { 'aria-label': '기록 종류' }, h('option', { value: 'PAY' }, '납부'));
   const remain = p.levied != null ? Math.max(0, p.levied - p.paid) : '';
   const amount = h('input', { type: 'number', min: 1, value: remain || '', placeholder: '금액(원)', style: 'width:120px', 'aria-label': '금액' });
   const methods = () => (kind.value === 'REFUND' ? boot.settings.refund_methods : boot.settings.pay_methods) || ['기타'];
@@ -1038,7 +1039,7 @@ function paymentCard(r) {
   const paidOn = h('input', { type: 'date', value: boot.today });
   const note = h('input', { placeholder: '메모(입금자명 등)', style: 'flex:1' });
   const why = r.closed ? h('input', { placeholder: '마감 후 수정 사유 (필수)', style: 'flex:1', 'aria-label': '마감 후 수정 사유' }) : null;
-  if (p.status === 'REFUND_NEEDED') { kind.value = 'REFUND'; amount.value = p.paid; fillMethods(); }
+  if (p.status === 'REFUND_NEEDED') amount.value = '';
   const cls = { PAID: 'ok', UNPAID: 'bad', UNDERPAID: 'warn', OVERPAID_REVIEW: 'warn', AMOUNT_PENDING: 'warn', PAID_AMOUNT_PENDING: 'warn', REFUND_NEEDED: 'bad', OVERREFUNDED_REVIEW: 'warn' }[p.status] || '';
   const openRefund = (r.refunds || []).find((f) => ['DRAFT', 'REQUESTED', 'APPROVED'].includes(f.status));
   return h('div', { class: 'card' }, h('h2', {}, '수납 기록 ', chip(PAY[p.status], cls)),
@@ -1705,6 +1706,7 @@ async function screenSettings(tab) {
     fees: settingsFees, addr: () => [addrCard(), externalCard()], backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
   return h('div', {}, pagehead('설정'), tabs, ...[].concat(body));
 }
+const fp9 = (f) => (f.length === 9 ? `${f.slice(0, 3)} ${f.slice(3, 6)} ${f.slice(6)}` : f);
 function settingsDevices() {
   const devMsg = h('p', { class: 'msg' }), regMsg = h('p', { class: 'msg' });
   const regImg = h('img', { alt: '기기 등록 QR', style: 'width:260px;image-rendering:pixelated' });
@@ -1712,7 +1714,7 @@ function settingsDevices() {
   const code = h('textarea', { placeholder: '휴대폰 화면의 기기 코드 (DGD1.…) — 웹캠이 없을 때만 붙여 넣기', rows: 3, style: 'width:100%' });
   const label = h('input', { placeholder: '기기 이름 (예: 1팀 업무폰)' });
   const fp = h('p', { class: 'big' });
-  const register = wrap(async () => { const r = await post('devices/register', { code: code.value, label: label.value }); fp.textContent = `지문 ${r.fingerprint.slice(0, 3)} ${r.fingerprint.slice(3)}`; toast('등록했습니다. 지문을 휴대폰과 대조하세요.'); boot = null; setTimeout(() => { if (location.hash.startsWith('#/settings')) render(); }, 2500); }, regMsg);
+  const register = wrap(async () => { const r = await post('devices/register', { code: code.value, label: label.value }); fp.textContent = `지문 ${fp9(r.fingerprint)}`; toast(r.confirmed ? '이미 등록된 기기입니다.' : '등록했습니다. 지문이 휴대폰과 같으면 아래 목록에서 [지문 같음 · 사용 시작]을 누르세요.'); boot = null; setTimeout(() => { if (location.hash.startsWith('#/settings')) render(); }, 2500); }, regMsg);
   // 휴대폰 화면의 기기 코드 QR을 이 PC 웹캠으로 읽어 바로 등록 (코드를 옮겨 적거나 보낼 필요 없음)
   const camVideo = h('video', { playsinline: true, muted: true, class: 'regcam', hidden: true });
   const camBtn = btn('휴대폰 QR 웹캠으로 읽기', wrap(async () => {
@@ -1724,14 +1726,18 @@ function settingsDevices() {
       await register();
     } finally { camBtn.textContent = '휴대폰 QR 웹캠으로 읽기'; }
   }, regMsg), 'primary');
-  const devs = grid(['기기', '이름', '상태', '등록', ''], boot.devices.map((d) => [d.id.slice(0, 8), d.label || '', d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),
-    d.registered_at.slice(0, 10), h('span', { class: 'row' }, ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
+  const pending = (d) => d.status === 'ACTIVE' && !d.confirmed_at;
+  const devs = grid(['기기', '이름', '상태', '등록', ''], boot.devices.map((d) => [d.id.slice(0, 8), d.label || '',
+    pending(d) ? h('span', {}, chip('지문 확인 대기', 'warn'), h('br'), h('b', { class: 'fp-inline' }, fp9(d.fingerprint || ''))) : d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),
+    d.registered_at.slice(0, 10), h('span', { class: 'row' },
+      pending(d) ? btn('지문 같음 · 사용 시작', wrap(async () => { await post(`devices/${d.id}/confirm`); toast('사용을 시작했습니다'); boot = null; render(); }, devMsg), 'small primary') : null,
+      ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
       btn(t, wrap(async () => { if (k !== 'ACTIVE' && !(await confirmDlg(`휴대폰 ${t}`, `${d.id.slice(0, 8)} 기기를 '${t}'합니다. 이 기기로는 목록을 보낼 수 없고 결과도 받지 않습니다. 계속할까요?`, { ok: t, danger: true }))) return; await post(`devices/${d.id}/status`, { status: k }); boot = null; render(); }, devMsg), 'small')))]), { empty: '등록된 휴대폰이 없습니다.' });
   return [h('div', { class: 'grid2' },
     h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'),
       h('ol', { class: 'steps-list' }, h('li', {}, '휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음).'),
         h('li', {}, '휴대폰에 나온 기기 코드 QR을 [휴대폰 QR 웹캠으로 읽기]로 이 PC 웹캠에 비춥니다. 읽으면 바로 등록됩니다.'),
-        h('li', {}, '양쪽 6자리 지문이 같은지 확인합니다.')),
+        h('li', {}, '양쪽 9자리 지문이 같은지 확인하고, 아래 목록에서 [지문 같음 · 사용 시작]을 누릅니다. 그 전에는 이 휴대폰으로 목록을 보낼 수 없습니다.')),
       regImg, label, h('div', { class: 'row' }, camBtn), camVideo, fp, regMsg,
       h('details', { class: 'free' }, h('summary', {}, '웹캠이 없을 때: 기기 코드 붙여 넣기'),
         h('p', { class: 'small muted' }, '휴대폰의 [코드 복사]로 복사한 코드를 업무 메일 등 승인된 경로로 이 PC에 옮겨 붙여 넣습니다(공개키만 들어 있어 비밀은 아니지만, 지문 대조로 바꿔치기를 막습니다).'),
@@ -2350,7 +2356,7 @@ async function render(fromNav) {
       view = h('div', { class: 'shell' + (navOpen ? ' nav-open' : '') + (render.rail ? ' rail' : '') },
         h('header', { class: 'topbar' },
           h('button', { type: 'button', class: 'menu-btn', 'aria-label': '메뉴 열기·닫기', 'aria-expanded': navOpen ? 'true' : 'false', 'aria-controls': 'side-nav', onclick: toggleNav }, '☰'),
-          h('a', { class: 'brand', href: '#/home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '동'), h('span', { class: 'bt' }, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, '접수·배차·수거 업무 (PC)'))),
+          h('a', { class: 'brand', href: '#/home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '동'), h('span', { class: 'bt' }, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, `접수·배차·수거 업무 (PC)${boot.version ? ' · v' + boot.version : ''}`))),
           h('span', { class: 'grow' }),
           h('span', { class: 'tb-date' }, h('span', { class: 'sr-only' }, '업무 기준일 '), dayTxt),
           prefsControls(),
