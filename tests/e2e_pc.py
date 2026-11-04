@@ -8,6 +8,7 @@ PC 서버를 띄우고 헤드리스 Chrome으로 실제 화면을 조작한다. 
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -175,16 +176,7 @@ def main():
                 break
             except Exception:
                 time.sleep(0.2)
-        try:
-            run()
-        except Exception:
-            for pg in LAST_PAGE[-1:]:
-                try:
-                    pg.screenshot(path=SHOTS / "fail.png", full_page=True)
-                    print("실패 화면:", SHOTS / "fail.png", flush=True)
-                except Exception:
-                    pass
-            raise
+        run()
     finally:
         srv.terminate()
         out = srv.communicate(timeout=5)[0]
@@ -206,7 +198,7 @@ def run():
     con = store.connect()
     phone = Phone(S.registration_text(con))
     today = S.today_kst()
-    with sync_playwright() as pw:
+    with playwright_with_fail_shot() as pw:
         b = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True,
                                args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", *([f"--proxy-server={PROXY}", "--proxy-bypass-list=127.0.0.1"] if PROXY else [])])
         ctx = b.new_context(viewport={"width": 1400, "height": 950}, ignore_https_errors=True)
@@ -954,6 +946,22 @@ def run():
        "브라우저는 주소 API·길찾기 API(가짜 서버)에 직접 연결하지 않음 (PC 서버만 연결)")
     secrets = ["가상하나", "가상둘", "가상셋", "01000005001", "01000005003", "시험로"]
     ok(not [s for s in secrets if any(s in urllib.parse.unquote(u) for u in external)], "외부 요청에 이름·연락처·주소 없음")
+
+
+@contextlib.contextmanager
+def playwright_with_fail_shot():
+    """실패하면 Playwright를 닫기 전에 마지막 화면을 SHOTS/fail.png로 남긴다(닫힌 뒤에는 캡처할 수 없음)."""
+    with sync_playwright() as pw:
+        try:
+            yield pw
+        except BaseException:
+            for pg in LAST_PAGE[-1:]:
+                try:
+                    pg.screenshot(path=SHOTS / "fail.png", full_page=True)
+                    print("실패 화면:", SHOTS / "fail.png", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print("실패 화면 캡처 못 함:", e, flush=True)
+            raise
 
 
 def settled(pg):
