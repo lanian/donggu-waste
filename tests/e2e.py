@@ -543,8 +543,16 @@ def pc_field(pw, url):
     page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
     page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
     page.locator(".btn.result").first.click()
-    page.locator(".card", has=page.get_by_placeholder(re.compile("품목명"))).locator(".stepper .btn.step").last.click()
-    page.get_by_role("button", name="품목 추가", exact=True).click()
+    page.locator(".btn.result").first.click()
+    expect(page.locator(".rcount.on").first).to_have_text("✓ 2")
+    page.get_by_role("button", name="검색어 지우기").click()
+    page.get_by_placeholder(re.compile("품목명")).fill("2인용 매트리스")
+    page.locator(".btn.result").first.click()
+    expect(page.locator(".pick-status")).to_contain_text("담은 품목 2종 · 3개")
+    ok(page.locator(".line.orig").count() == 2 and "고정식 의자" in page.locator(".line.orig").first.inner_text(),
+       "여러 품목 담기: 결과를 누를 때마다 1개(같은 품목은 수량 +1, '✓ 2' 표시), 검색어 지우기, 담은 요약 '2종 · 3개'")
+    page.locator(".line.orig").nth(1).get_by_role("button", name="삭제").click()
+    expect(page.locator(".pick-status")).to_contain_text("담은 품목 1종 · 2개")
     page.get_by_placeholder("품목 이름 (예: 안마기)").fill("표에없는물건")
     page.get_by_role("button", name="확인 대기로 추가").click()
     page.screenshot(path=SHOTS / "30_pc_field_intake.png", full_page=True)
@@ -638,7 +646,6 @@ def lock_and_bio(pw, port):
     page.get_by_label("배출 주소").fill("가상시 동구 잠금로 3")
     page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
     page.locator(".btn.result").first.click()
-    page.get_by_role("button", name="품목 추가", exact=True).click()
     page.get_by_role("button", name="접수 등록").click()
     expect(page.get_by_role("button", name=re.compile("내일 1"))).to_be_visible()
     # 지문·얼굴 등록: PIN 확인 → 가상 인증기(PRF)
@@ -818,7 +825,6 @@ def juso_flow(pw, url):
        "주소 고르기 → 도로명 주소·좌표(건물 출입구)·행정동 '계림2동' 채움")
     page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
     page.locator(".btn.result").first.click()
-    page.get_by_role("button", name="품목 추가", exact=True).click()
     page.get_by_role("button", name="접수 등록").click()
     page.get_by_role("button", name=re.compile("내일 1")).click()
     page.locator(".stop", has_text="가상주소").click()
@@ -890,10 +896,8 @@ def solo(pw, url, video):
             page.get_by_label("동 (행정동, 선택)").fill(dong)
         for q, n in items:
             page.get_by_placeholder(re.compile("품목명")).fill(q)
-            page.locator(".btn.result").first.click()
-            for _ in range(n - 1):
-                page.locator(".card", has=page.get_by_placeholder(re.compile("품목명"))).locator(".stepper .btn.step").last.click()
-            page.get_by_role("button", name="품목 추가", exact=True).click()
+            for _ in range(n):  # 누를 때마다 1개씩 담김
+                page.locator(".btn.result").first.click()
         if free:
             page.get_by_placeholder("품목 이름 (예: 안마기)").fill(free)
             page.get_by_role("button", name="확인 대기로 추가").click()

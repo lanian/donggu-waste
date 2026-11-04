@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.2';
+export const APP_VERSION = '0.12.3';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -1231,8 +1231,11 @@ async function savePhoto(stop, phase, file, lineId = null, meta = {}) {
 
 // ------------------------------------------------------------ 품목 고르기 (현장 추가·접수 등록 공용)
 // 검색어가 바뀌면 선택을 해제해 이전 단가가 잘못 쓰이지 않게 한다. 목록에 없는 품목은 "확인 대기"로만 추가한다.
-function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
+// multi: 접수 화면처럼 여러 품목을 담을 때. 결과를 누를 때마다 1개씩 담고(같은 품목은 수량 +1) 화면에 머문다.
+//   count(id) = 지금 담긴 수량(결과에 '✓ N개'로 표시), status() = 담은 품목 요약(검색칸 아래 표시).
+function itemPicker(table, state, { onPick, onFree, addLabel = '추가', multi = false, count = () => 0, status = () => '' }) {
   const results = h('div', { class: 'results' });
+  const statusLine = h('p', { class: 'pick-status', 'aria-live': 'polite' });
   const qtyBox = h('div', { class: 'row' });
   const addBtn = btn(addLabel, null, 'primary big');
   const drawQty = () => { qtyBox.replaceChildren(h('span', {}, '수량'), stepper(state.qty, (n) => { state.qty = n; drawQty(); }, 1)); };
@@ -1254,12 +1257,24 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
     results.replaceChildren(
       ...(quick && rows.length ? [h('p', { class: 'small' }, '즐겨찾기·자주 쓴 품목')] : []),
       ...(state.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
-      ...rows.map((r) => h('div', { class: 'rrow' },
+      ...rows.map((r) => { const n = multi ? count(r.id) : 0; return h('div', { class: 'rrow' },
         btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`),
           h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`), r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 추가: ' + (r.note || '')) : null),
-          () => { state.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (state.sel && state.sel.id === r.id ? ' on' : '')),
-        btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' }))));
+          multi ? () => pickOne(r) : () => { state.sel = { id: r.id, price: r.price }; drawResults(); },
+          'result' + (multi ? (n ? ' on' : '') : state.sel && state.sel.id === r.id ? ' on' : ''),
+          multi ? { 'aria-label': `${r.name} ${r.spec} ${n ? `(${n}개 담김) ` : ''}1개 더 담기` } : {}),
+        multi ? h('span', { class: 'rcount' + (n ? ' on' : ''), 'aria-hidden': 'true' }, n ? `✓ ${n}` : '+') : null,
+        btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' })); }));
     addBtn.disabled = !state.sel;
+    statusLine.textContent = multi ? status() : '';
+  };
+  // 여러 품목 담기: 누를 때마다 1개. 검색어는 그대로 두어 같은 검색에서 다른 규격도 바로 담을 수 있게.
+  const pickOne = async (r) => {
+    st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 };
+    await onPick(r, 1);
+    if (navigator.vibrate) navigator.vibrate(15);
+    toast(`${r.name} ${r.spec} — ${count(r.id)}개 담음`);
+    drawResults();
   };
   const q = h('input', { type: 'search', placeholder: '품목명·규격·초성 (예: 2인용 매트리스, ㅈㄹ)', class: 'search', value: state.q, autocomplete: 'off' });
   q.addEventListener('input', () => { state.q = q.value; state.sel = null; drawResults(); });
@@ -1286,8 +1301,13 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
       await onFree(freeName.value.trim(), unitSel.value, unitSel.selectedOptions[0].textContent, freeQty);
       freeName.value = ''; freeQty = 1; drawFreeQty();
     }, 'big'));
-  const search = h('section', { class: 'card' }, q, results, qtyBox, addBtn, h('p', { class: 'small' }, `수수료표: ${table.label}`));
-  return { search, free, focus: () => q.focus(), pick: (r, qty) => onPick(r, qty) };
+  const clearQ = btn('지우기', () => { state.q = ''; q.value = ''; drawResults(); q.focus(); }, 'ghost q-clear', { 'aria-label': '검색어 지우기' });
+  const search = multi
+    ? h('section', { class: 'card picker multi' }, h('h2', {}, '품목 담기'), h('div', { class: 'qrow' }, q, clearQ), statusLine,
+      h('p', { class: 'small' }, '누를 때마다 1개씩 담깁니다(같은 품목은 수량 +1). 수량 고치기·빼기는 위 [버릴 물건]에서.'), results,
+      h('p', { class: 'small' }, `수수료표: ${table.label}`))
+    : h('section', { class: 'card' }, q, results, qtyBox, addBtn, h('p', { class: 'small' }, `수수료표: ${table.label}`));
+  return { search, free, focus: () => q.focus(), pick: (r, qty) => onPick(r, qty), refresh: drawResults };
 }
 
 // ------------------------------------------------------------ 현장 품목 추가
@@ -1577,6 +1597,7 @@ function screenIntake(id) {
   };
   const itemsBox = h('div', {});
   const totalBox = h('p', { class: 'small' });
+  let refreshPick = () => {};  // 위 목록에서 수량을 고치면 아래 담기 표시(✓ N개·요약)도 맞춘다
   const drawItems = () => {
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
       h('div', { class: 'lhead' }, h('div', { class: 'lname' }, h('strong', {}, `${it.name} ${it.spec}`)),
@@ -1590,13 +1611,30 @@ function screenIntake(id) {
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.amount, 0);
     totalBox.textContent = `접수 금액: ${won(sum)}${pend ? ` + 확인 대기 ${pend}건 (최종 금액 미확정)` : ''}`;
+    refreshPick();
   };
   drawItems();
+  // 같은 품목을 또 누르면 새 줄이 아니라 그 줄 수량 +1 (현장 기록이 있어 잠긴 줄은 건드리지 않음)
+  const qtyOf = (rid) => f.items.filter((x) => x.fee_rate_id === rid).reduce((a, x) => a + x.qty, 0);
   const picker = itemPicker(table, f.pick, {
-    addLabel: '품목 추가',
-    onPick: async (r, qty) => { f.items.push(lineFromRow(r, qty, table)); drawItems(); saveDraft(); },
+    multi: true,
+    count: qtyOf,
+    status: () => {
+      if (!f.items.length) return '아직 담은 품목이 없습니다.';
+      const n = f.items.reduce((a, x) => a + x.qty, 0);
+      const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
+      const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.unit_price * x.qty, 0);
+      return `담은 품목 ${f.items.length}종 · ${n}개 · ${won(sum)}${pend ? ` + 확인 대기 ${pend}건` : ''}`;
+    },
+    onPick: async (r, qty) => {
+      const same = f.items.find((x) => x.fee_rate_id === r.id && !locked.has(x.line_id));
+      if (same) { same.qty += qty; same.amount = same.price_status === 'CONFIRMED' ? same.unit_price * same.qty : null; }
+      else f.items.push(lineFromRow(r, qty, table));
+      drawItems(); saveDraft();
+    },
     onFree: async (name, unit, unit_label, qty) => { f.items.push({ line_id: crypto.randomUUID(), fee_rate_id: null, name, spec: '', unit, unit_label, qty, unit_price: null, amount: null, price_status: 'PENDING' }); drawItems(); saveDraft(); },
   });
+  refreshPick = picker.refresh;
   const msg = h('p', { class: 'msg' });
   const dupBox = h('div', {});
   const save = btn(editing ? '수정 저장' : onField ? '현장 접수 저장' : '접수 등록', async () => {
