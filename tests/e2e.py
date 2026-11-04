@@ -175,6 +175,13 @@ def main():
             # 작업자: 설정에서 이름 → 첫 화면에서 교대(PIN 없이)
             page.goto(url + "#/settings")
             ok(page.get_by_role("button", name="← 목록").count() == 0, "탭 화면(설정)에는 [← 목록] 중복 없음")
+            expect(page.locator(".install-card h2")).to_have_text("앱 설치 — 지금은 브라우저에서 실행 중")
+            ok("브라우저 탭" in page.locator("main").inner_text(), "설정: 지금 실행 위치(브라우저 탭/설치한 앱)를 분명히 표시")
+            page.evaluate("""() => { const e = new Event('beforeinstallprompt', { cancelable: true }); e.prompt = async () => { window.__dgPrompted = true; };
+              e.userChoice = Promise.resolve({ outcome: 'accepted' }); dispatchEvent(e); }""")
+            page.get_by_role("button", name="홈 화면에 앱 설치").click()
+            page.wait_for_function("() => window.__dgPrompted === true")
+            ok(True, "브라우저가 설치를 제안하면 [홈 화면에 앱 설치] → 설치 창")
             page.get_by_label("작업자 1 이름").fill("김수거")
             page.get_by_label("작업자 2 이름").fill("이수거")
             page.get_by_role("button", name="작업자 저장").click()

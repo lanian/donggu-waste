@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.1';
+export const APP_VERSION = '0.12.2';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -331,6 +331,7 @@ function screenSetup() {
     h('h1', {}, '동구 대형폐기물 수거'),
     h('p', {}, '이 휴대폰에서 쓸 잠금 PIN을 정하세요. 업무 자료는 이 PIN으로 잠긴 채 휴대폰 안에만 저장됩니다.'),
     p1, p2, ok, msg,
+    isIOS() && !runningAsApp() ? h('p', { class: 'notice small' }, '아이폰은 Safari와 홈 화면 앱이 자료를 따로 보관합니다. 먼저 공유 단추(□↑) → [홈 화면에 추가]로 설치하고, 설치한 앱에서 PIN을 정하세요.') : null,
     h('p', { class: 'small' }, '시제품입니다. 가상 자료로만 사용하세요.'));
 }
 
@@ -446,6 +447,9 @@ async function batteryInfo() {
 // 홈 위 알림: 미전송(PC), 배터리, 보관 기간(단독)
 async function homeBanners() {
   const out = [];
+  if (!runningAsApp() && installEvt && !st.installHintOff) out.push(h('section', { class: 'card notice install-hint' },
+    h('p', {}, '지금은 브라우저에서 실행 중입니다. 앱으로 설치하면 홈 화면 아이콘으로 바로 엽니다(자료는 그대로).'),
+    h('div', { class: 'grid2' }, btn('앱 설치', doInstall, 'primary'), btn('다음에', async () => { st.installHintOff = true; await commit(); render(); }, 'ghost'))));
   const u = F.unsentInfo(st.events, st.releasedSeq);
   if (!isSolo() && u.count && (u.ageH >= (st.unsentWarnH || 3) || kstHour() >= END_OF_DAY_H)) {
     const late = kstHour() >= END_OF_DAY_H;
@@ -2069,8 +2073,10 @@ async function screenSettings() {
       h('div', { class: 'fld-label' }, '야외 고대비'),
       h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
       choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
+    await installCard(),
     h('section', { class: 'card' }, h('dl', {},
       h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
+      h('dt', {}, '실행 위치'), h('dd', {}, runningAsApp() ? '설치한 앱' : '브라우저 탭'),
       h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
       h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
       h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
@@ -2137,6 +2143,40 @@ function applyTextSize() {
   const r = document.documentElement, k = st && TEXT_SIZES.some(([x]) => x === st.textSize) ? st.textSize : '';
   for (const [x] of TEXT_SIZES) if (x) r.classList.toggle('fs-' + x, x === k);
   r.classList.toggle('text-big', k === 'xl');
+}
+
+// ------------------------------------------------------------ 앱 설치 상태 (PWA)
+// 이 웹 앱은 브라우저 탭에서도 그대로 동작하고 같은 자료를 쓴다(Android). 그래서 설치하지 않아도 '설치된 앱처럼' 보일 수 있어
+// 지금 어디서 실행 중인지(브라우저 탭 / 설치한 앱)를 화면에 분명히 보여 주고, 설치할 수 있으면 설치 단추를 준다.
+const runningAsApp = () => matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: fullscreen)').matches
+  || matchMedia('(display-mode: minimal-ui)').matches || navigator.standalone === true;
+let installEvt = null;  // 브라우저가 설치를 제안할 수 있을 때만 생김(Android Chrome·Samsung 인터넷). 이미 설치돼 있으면 생기지 않음
+addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); installEvt = e;
+  if (S.isUnlocked() && ['#/settings', '#/home', ''].includes(location.hash)) render();
+});
+addEventListener('appinstalled', () => { installEvt = null; toast('설치했습니다. 홈 화면의 "동구 수거"로 여세요'); if (S.isUnlocked() && location.hash === '#/settings') render(); });
+// 같은 앱이 이 휴대폰에 설치돼 있는지(Android Chrome만 답함, 모르면 null)
+async function appInstalled() {
+  try { if (!navigator.getInstalledRelatedApps) return null; return (await navigator.getInstalledRelatedApps()).length > 0; } catch { return null; }
+}
+async function doInstall() {
+  if (!installEvt) return;
+  const e = installEvt; installEvt = null;
+  try { await e.prompt(); const c = await e.userChoice; if (c && c.outcome !== 'accepted') toast('설치를 취소했습니다'); } catch {}
+  render();
+}
+async function installCard() {
+  if (runningAsApp()) return h('section', { class: 'card install-card' }, h('h2', {}, '앱 설치'),
+    h('p', {}, '✓ 설치한 앱으로 실행 중입니다.'),
+    h('p', { class: 'small' }, isIOS() ? '아이폰: 홈 화면 앱과 Safari는 자료를 따로 보관합니다. 업무는 이 앱에서만 하세요.' : '브라우저에서 같은 주소를 열어도 같은 자료가 보입니다. 업무는 이 앱으로 하세요.'));
+  const inst = installEvt ? false : await appInstalled();
+  return h('section', { class: 'card install-card notice' }, h('h2', {}, '앱 설치 — 지금은 브라우저에서 실행 중'),
+    h('p', { class: 'small' }, '브라우저 탭에서도 똑같이 동작하지만, 설치해 두면 홈 화면 아이콘으로 바로 열리고 주소창 없이 전체 화면으로 씁니다. ' + (isIOS() ? '' : '설치해도 자료는 그대로입니다(같은 자료를 씀).')),
+    installEvt ? btn('홈 화면에 앱 설치', doInstall, 'primary big')
+      : inst ? h('p', {}, '이 휴대폰에 이미 설치되어 있습니다. 홈 화면이나 앱 목록의 "동구 수거"로 여세요. 홈 화면 아이콘만 지웠다면 앱은 남아 있습니다(휴대폰 설정 → 애플리케이션에서 지울 수 있음).')
+      : isIOS() ? h('p', {}, 'Safari 아래 공유 단추(□↑) → [홈 화면에 추가]. ', h('strong', {}, '아이폰은 Safari에서 쓰던 자료가 설치한 앱으로 옮겨 가지 않습니다'), ' — 보내지 않은 결과를 먼저 보내고, 설치한 앱에서 PIN 설정·기기 등록을 새로 하세요.')
+      : h('p', {}, '브라우저 메뉴(⋮)에서 [앱 설치] 또는 [홈 화면에 추가]를 누르세요. 메뉴에 [앱 열기]만 보이면 이미 설치된 것입니다.'));
 }
 
 // ------------------------------------------------------------ 라우팅
