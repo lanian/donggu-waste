@@ -181,6 +181,9 @@ def main():
               e.userChoice = Promise.resolve({ outcome: 'accepted' }); dispatchEvent(e); }""")
             page.get_by_role("button", name="홈 화면에 앱 설치").click()
             page.wait_for_function("() => window.__dgPrompted === true")
+            # 설치 창이 닫히면 설정 화면을 다시 그린다 — 다 그려진 뒤에 입력(그 전에 넣으면 다시 그리기가 지움)
+            expect(page.get_by_role("button", name="홈 화면에 앱 설치")).to_have_count(0)
+            page.wait_for_timeout(300)
             ok(True, "브라우저가 설치를 제안하면 [홈 화면에 앱 설치] → 설치 창")
             page.get_by_label("작업자 1 이름").fill("김수거")
             page.get_by_label("작업자 2 이름").fill("이수거")
@@ -798,6 +801,7 @@ def juso_flow(pw, url):
     ok(page.get_by_role("button", name="직접", exact=True).get_attribute("aria-pressed") == "true", "설정: 주소 검색 승인키·좌표 승인키 저장, 단독 방식 경로 기본 '직접'")
 
     page.goto(url + "#/intake")
+    expect(page.locator("h1", has_text="전화 접수 등록")).to_be_visible()
     page.get_by_label("이름").fill("가상주소")
     page.get_by_label("연락처").fill("01000003333")
     # 검색어에 주민 이름이 들어가면 보내지 않음
