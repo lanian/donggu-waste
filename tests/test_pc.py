@@ -1605,9 +1605,41 @@ def v12_field():
     print(f"\n통과 {passed}개 (v0.12 포함)")
 
 
+def v12_pilot():
+    """시범 운영 비교: 이 시스템 기록으로 계산한 지표 ↔ 담당자가 적은 기존 방식 수치(100건당으로 맞춤)."""
+    print("\n— v0.12 시범 운영 비교 —")
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-pilot-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    today = S.today_kst()
+    fid = next(r["id"] for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED")
+    ids = [S.create_request(con, {"name": f"시범{i}", "phone": f"010000060{i:02d}", "address": f"가상시 동구 예시로 {i}", "planned_date": today,
+                                  "items": [{"fee_rate_id": fid, "qty": 1}], "intake_secs": 60 * (i + 1)})["id"] for i in range(4)]
+    S.create_request(con, {"name": "자리비움", "phone": "01000006099", "address": "가상시 동구 예시로 99", "planned_date": today, "items": [{"fee_rate_id": fid, "qty": 1}], "intake_secs": 99999})
+    con.execute("UPDATE request SET status='DONE', completed_at=received_at WHERE id=?", (ids[0],))
+    S.add_contact(con, ids[1], {"kind": "독촉", "content": "언제 오나요"})
+    raises(lambda: S.pilot_report(con), "기간", "시범 운영 기간을 정하기 전에는 비교표 없음")
+    raises(lambda: S.save_pilot(con, {"start": today, "end": today, "base": {"missed": "열"}}), "숫자", "기존 방식 수치는 숫자만")
+    S.save_pilot(con, {"start": today, "end": today, "base_period": "2026년 9월 종이 대장",
+                       "base": {"requests": 100, "missed": 10, "complaints": 8, "lead_days": 5, "intake_min": 6, "close_min": 40}})
+    S.close_day(con, today, "", close_secs=1800)
+    r = {x["key"]: x for x in S.pilot_report(con)["rows"]}
+    ok(r["requests"]["pilot"] == 5 and r["missed"]["base"] == 10.0 and r["missed"]["count"] == 4 and r["missed"]["pilot"] == 80.0 and r["missed"]["verdict"] == "나빠짐",
+       f"누락: 마감 때 '미배정'으로 넘어간 건 → 100건당 {r['missed']['pilot']} (기존 10 → 나빠짐)")
+    ok(r["complaints"]["pilot"] == 20.0 and r["complaints"]["base"] == 8.0 and r["lead_days"]["pilot"] == 0 and r["lead_days"]["verdict"] == "좋아짐",
+       "독촉·불만 100건당·평균 처리 일수 비교")
+    ok(r["intake_min"]["pilot"] == 2.5 and r["intake_min"]["count"] == 4 and r["intake_min"]["verdict"] == "좋아짐" and r["close_min"]["pilot"] == 30.0,
+       "접수 1건 처리 시간(화면에서 잰 값, 자리 비움 같은 이상값 제외) 2.5분 · 하루 마감 30분")
+    csvb = S.pilot_csv(con).decode("utf-8-sig")
+    ok("누락(약속한 날 처리 못 함)" in csvb and not re.search(r"시범\d|자리비움", csvb) and "010" not in csvb, "시범 운영 비교 CSV(이름·연락처 없음)")
+    con.close()
+    print(f"\n통과 {passed}개 (시범 운영 비교 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
     v11()
     v11_external()
     v12_field()
+    v12_pilot()

@@ -92,9 +92,9 @@ def login_succeeded(username: str):
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
                        "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
-                       "refunds", "recon-template", "recon-history", "field-intakes"},
+                       "refunds", "recon-template", "recon-history", "field-intakes", "pilot", "pilot.csv"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
-                        "fee-revisions", "geocode", "links", "refunds", "recon", "stats"}},
+                        "fee-revisions", "geocode", "links", "refunds", "recon", "stats", "pilot"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
               "POST": {"import", "unloads", "qrtest", "password"}},
 }
@@ -452,6 +452,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(S.audit_csv(c, qs), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-audit.csv"'})
             if p == "stats":
                 return self.send_json(S.stats(c, qs.get("start", ""), qs.get("end", ""), qs.get("basis") or "planned"))
+            if p == "pilot":
+                return self.send_json({"settings": S.pilot_settings(c), "base_keys": S.PILOT_BASE, "report": S.pilot_report(c, qs.get("start") or None, qs.get("end") or None, qs.get("crew"))
+                                       if (qs.get("start") or S.pilot_settings(c)["start"]) else None})
+            if p == "pilot.csv":
+                body = S.pilot_csv(c, qs.get("start") or None, qs.get("end") or None, qs.get("crew"))
+                return self.send_bytes(body, "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-pilot.csv"'})
             if p == "stats.csv":
                 kind = qs.get("kind") if qs.get("kind") in ("days", "dongs", "items", "categories", "months", "reductions", "channels") else "requests"
                 body = S.stats_csv(c, qs.get("start", ""), qs.get("end", ""), kind, qs.get("basis") or "planned")
@@ -659,9 +665,11 @@ class Handler(BaseHTTPRequestHandler):
                 d = self.json_body()
                 S.resolve_conflict(c, parts[1], d.get("action", ""), d.get("reason", ""))
                 return self.send_json({"ok": True})
+            if p == "pilot":
+                return self.send_json(S.save_pilot(c, self.json_body()))
             if p == "close":
                 d = self.json_body()
-                return self.send_json(S.close_day(c, d.get("date", ""), d.get("note", "")))
+                return self.send_json(S.close_day(c, d.get("date", ""), d.get("note", ""), d.get("close_secs")))
             if p == "close/approve":
                 d = self.json_body()
                 return self.send_json(S.approve_close(c, d.get("date", ""), d.get("note", "")))

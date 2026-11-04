@@ -399,6 +399,20 @@ def run():
         ok(S.get_request(store.connect(), fid)["field_checked_at"] and S.get_request(store.connect(), fid)["channel"] == "현장", "현장 접수 상세: 안내 → [확인 완료] (경로 '현장')")
         page.goto(URL + "#/home")
         expect(page.locator("h1", has_text="오늘 현황")).to_be_visible()
+        # 시범 운영 비교: 기간·기존 방식 수치 저장 → 비교표(100건당, 좋아짐/나빠짐)
+        page.goto(URL + "#/pilot")
+        expect(page.get_by_text("시범 운영 기간을 정하고 저장하면")).to_be_visible()
+        page.get_by_label("시범 운영 시작").fill(today)
+        page.get_by_label("시범 운영 끝").fill(today)
+        page.get_by_label("접수 건수").fill("100")
+        page.get_by_label("누락 건수(약속한 날 처리 못 하고 넘어간 건)").fill("10")
+        page.get_by_label("접수 1건 처리 시간(분)").fill("6")
+        page.get_by_role("button", name="저장").click()
+        expect(page.locator("table.pilot")).to_contain_text("누락(약속한 날 처리 못 함)")
+        ok("10" in page.locator("table.pilot tr", has_text="누락").inner_text() and page.locator("table.pilot tr", has_text="누락").locator(".chip").count() == 1
+           and "6분" in page.locator("table.pilot tr", has_text="접수 1건 처리 시간").inner_text(),
+           "시범 운영 비교: 기존 방식 수치 저장 → 비교표(누락 100건당·판단, 접수 1건 처리 시간 기존 값)")
+        page.screenshot(path=SHOTS / "pc_05c_pilot.png", full_page=True)
 
         # 현장 결과 확인
         page.goto(URL + f"#/request/{s1['request_id']}")

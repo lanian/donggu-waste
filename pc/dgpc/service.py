@@ -537,7 +537,8 @@ def create_request(con, data: dict) -> dict:
     with tx(con):
         rid, receipt = _insert_request(con, d, items, data, dong)
         audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": d["channel"], **({"dong": dong} if dong else {}),
-                                              **({"reduction": red["reduction_code"], "rate": red["reduction_rate"], "proof": red["reduction_proof"]} if red else {})})
+                                              **({"reduction": red["reduction_code"], "rate": red["reduction_rate"], "proof": red["reduction_proof"]} if red else {}),
+                                              **_secs("intake_secs", data.get("intake_secs"))})
     warn = address_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
     return {"id": rid, "receipt_no": receipt, "dong": dong, "warnings": warn, "levy_no": one(con, "SELECT levy_no FROM request WHERE id=?", (rid,))["levy_no"]}
 
@@ -1580,7 +1581,16 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
             "closes": closes, "closed": closes[-1] if closes else None}
 
 
-def close_day(con, work_date: str, note: str = "") -> dict:
+def _secs(key: str, v) -> dict:
+    """시범 운영 비교용 걸린 시간(초). 화면에서 잰 값 중 5초~2시간만 남긴다(자리 비움 등 이상값 제외)."""
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        return {}
+    return {key: n} if 5 <= n <= 7200 else {}
+
+
+def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
     """마감 기록(담당자). 끝나지 않은 건은 다음 업무일로 예정일을 옮기고(마감 이월), 기록은 회차로 쌓는다(덮어쓰지 않음).
     팀장(검토자)이 approve_close 로 확인한다."""
     if not re.fullmatch(r"\d{4}-\d\d-\d\d", work_date or ""):
@@ -1599,7 +1609,7 @@ def close_day(con, work_date: str, note: str = "") -> dict:
             VALUES (?,?,?,?,?,?,?,?,'RECORDED')""", (str(uuid.uuid4()), work_date, seq, now(), ACTOR.get(), json.dumps(s, ensure_ascii=False), (note or "")[:300],
                                                    json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
         audit(con, "day", work_date, "CLOSE", {"seq": seq, "open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"],
-                                               "carried": len(carry)})
+                                               "carried": len(carry), **_secs("close_secs", close_secs)})
     return {**s, "seq": seq, "carried": carry}
 
 
@@ -2996,3 +3006,163 @@ def jurisdiction_warnings(con, address: str) -> list[str]:
     if units and area not in units:
         return [f"주소의 '{units[0]}'이(가) 관할({area})과 다릅니다. 관할 구역을 확인하세요."]
     return []
+
+
+# ------------------------------------------------------------------ 시범 운영 비교 (기존 방식 수치 ↔ 이 시스템으로 운영한 기간)
+PILOT_BASE = {  # 기존 방식에서 담당자가 직접 적는 수치(같은 길이의 기간 권장)
+    "requests": "접수 건수", "missed": "누락 건수(약속한 날 처리 못 하고 넘어간 건)", "revisit": "재방문·미수거 건수",
+    "complaints": "독촉·불만 건수", "lead_days": "평균 처리 일수(접수 → 수거)", "intake_min": "접수 1건 처리 시간(분)", "close_min": "하루 마감 시간(분)"}
+PILOT_MISS_KINDS = ("미배정", "결과 없음", "최종 결과 없음")
+
+
+def pilot_settings(con) -> dict:
+    p = get_setting(con, "pilot", {}) or {}
+    return {"start": p.get("start") or "", "end": p.get("end") or "", "crew_id": p.get("crew_id") or "", "base": p.get("base") or {},
+            "base_period": p.get("base_period") or "", "note": p.get("note") or ""}
+
+
+def save_pilot(con, data: dict) -> dict:
+    """시범 운영 기간·팀과 기존 방식 수치 저장(개인정보 없음)."""
+    out = pilot_settings(con)
+    for k in ("start", "end"):
+        v = (data.get(k) or "").strip()
+        if v and not re.fullmatch(r"\d{4}-\d\d-\d\d", v):
+            raise UserError("시범 운영 기간을 날짜로 골라 주세요.")
+        out[k] = v
+    if out["start"] and out["end"] and out["start"] > out["end"]:
+        raise UserError("시작일이 끝일보다 늦습니다.")
+    cid = (data.get("crew_id") or "").strip()
+    if cid and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (cid,)):
+        raise UserError("없는 수거팀입니다.")
+    out["crew_id"] = cid
+    base = {}
+    for k in PILOT_BASE:
+        v = (data.get("base") or {}).get(k)
+        if v in (None, ""):
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise UserError(f"{PILOT_BASE[k]}는 숫자로 적어 주세요.")
+        if f < 0:
+            raise UserError(f"{PILOT_BASE[k]}는 0 이상이어야 합니다.")
+        base[k] = round(f, 2)
+    out["base"] = base
+    out["base_period"] = (data.get("base_period") or "").strip()[:60]
+    out["note"] = (data.get("note") or "").strip()[:300]
+    with tx(con):
+        set_setting(con, "pilot", out)
+        audit(con, "settings", "pilot", "SAVE", {"start": out["start"], "end": out["end"], "crew": bool(cid), "base_keys": sorted(base)})
+    return out
+
+
+def pilot_report(con, start: str | None = None, end: str | None = None, crew_id: str | None = None) -> dict:
+    """시범 운영 기간의 지표를 이 시스템 기록으로 계산하고, 담당자가 적은 기존 방식 수치와 나란히 둔다.
+    건수 지표는 기간 길이·물량이 달라도 비교되게 100건당으로 바꾼다. 이름·연락처·주소는 쓰지 않는다."""
+    cfg = pilot_settings(con)
+    start, end = start or cfg["start"], end or cfg["end"]
+    crew_id = cfg["crew_id"] if crew_id is None else crew_id
+    if not (start and end):
+        raise UserError("시범 운영 기간(시작·끝)을 먼저 정해 주세요.")
+    if start > end:
+        raise UserError("시작일이 끝일보다 늦습니다.")
+    scope = None
+    if crew_id:  # 그 팀에 배정됐거나 그 팀 휴대폰에서 받은 접수만
+        dev = (one(con, "SELECT device_id FROM crew WHERE id=?", (crew_id,)) or {}).get("device_id")
+        scope = {r["request_id"] for r in rows(con, "SELECT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id WHERE b.crew_id=?", (crew_id,))}
+        if dev:
+            scope |= {r["id"] for r in rows(con, "SELECT id FROM request WHERE origin_device=?", (dev,))}
+    def in_scope(rid):
+        return scope is None or rid in scope
+    today = today_kst()
+    reqs = [r for r in rows(con, "SELECT id, status, received_at, completed_at, planned_date FROM request WHERE status!='CANCELLED'")
+            if in_scope(r["id"]) and start <= (_kst_date(r["received_at"]) or "") <= end]
+    n = len(reqs)
+    ids = {r["id"] for r in reqs}
+    # 누락: 마감 때 '미배정·결과 없음·최종 결과 없음'으로 이월된 건 + 예정일이 지났는데 아직 결과가 없는 건(중복 없이)
+    missed = set()
+    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CARRY'"):
+        dj = json.loads(a["detail"] or "{}")
+        if a["entity_id"] in ids and dj.get("kind") in PILOT_MISS_KINDS:
+            missed.add(a["entity_id"])
+    for r in reqs:
+        if r["planned_date"] and r["planned_date"] < today and r["status"] in ("RECEIVED", "ASSIGNED", "IN_PROGRESS"):
+            missed.add(r["id"])
+    revisit = sum(r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD") for r in reqs)
+    done = [r for r in reqs if r["status"] == "DONE"]
+    leads = []
+    for r in done:
+        a, b = _kst_date(r["received_at"]), _kst_date(r["completed_at"])
+        if a and b:
+            leads.append((dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days)
+    complaints = 0
+    if ids:
+        for c in rows(con, "SELECT request_id, kind FROM contact_log WHERE kind IN ('독촉','불만')"):
+            complaints += c["request_id"] in ids
+    isecs = []
+    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='request' AND action='CREATE'"):
+        if a["entity_id"] in ids:
+            v = json.loads(a["detail"] or "{}").get("intake_secs")
+            if v:
+                isecs.append(v)
+    csecs = []
+    for a in rows(con, "SELECT entity_id, detail FROM audit_log WHERE entity='day' AND action='CLOSE'"):
+        if start <= (a["entity_id"] or "") <= end:
+            v = json.loads(a["detail"] or "{}").get("close_secs")
+            if v:
+                csecs.append(v)
+    # 당일 결과 회수: 최종 결과가 있는 건 중 그 결과가 수거 예정일 당일에 PC로 들어온 비율
+    sameday = total_final = 0
+    for r in reqs:
+        if r["status"] not in FINAL or not r["planned_date"]:
+            continue
+        first = one(con, """SELECT MIN(i.imported_at) AS t FROM result_event e JOIN result_import i ON i.id=e.import_id
+            WHERE e.request_id=? AND e.kind='ATTEMPT' AND e.apply_status='APPLIED'""", (r["id"],))
+        if first and first["t"]:
+            total_final += 1
+            sameday += _kst_date(first["t"]) == r["planned_date"]
+    pending = sum(derive(con, one(con, "SELECT * FROM request WHERE id=?", (r["id"],)))["fee"]["final"] is None for r in reqs)
+    avg = lambda xs: round(sum(xs) / len(xs), 1) if xs else None
+    per100 = lambda x, base_n: round(x * 100 / base_n, 1) if base_n else None
+    B = cfg["base"]
+    rows_ = [
+        {"key": "requests", "label": "접수 건수", "unit": "건", "base": B.get("requests"), "pilot": n, "better": None},
+        {"key": "missed", "label": "누락(약속한 날 처리 못 함)", "unit": "100건당", "base": per100(B["missed"], B.get("requests")) if "missed" in B else None,
+         "pilot": per100(len(missed), n), "better": "lower", "count": len(missed)},
+        {"key": "revisit", "label": "재방문·미수거", "unit": "100건당", "base": per100(B["revisit"], B.get("requests")) if "revisit" in B else None,
+         "pilot": per100(revisit, n), "better": "lower", "count": revisit},
+        {"key": "complaints", "label": "독촉·불만 전화", "unit": "100건당", "base": per100(B["complaints"], B.get("requests")) if "complaints" in B else None,
+         "pilot": per100(complaints, n), "better": "lower", "count": complaints},
+        {"key": "lead_days", "label": "평균 처리 일수(접수 → 수거 완료)", "unit": "일", "base": B.get("lead_days"), "pilot": avg(leads), "better": "lower", "count": len(leads)},
+        {"key": "intake_min", "label": "접수 1건 처리 시간", "unit": "분", "base": B.get("intake_min"),
+         "pilot": round(sum(isecs) / len(isecs) / 60, 1) if isecs else None, "better": "lower", "count": len(isecs)},
+        {"key": "close_min", "label": "하루 마감 시간", "unit": "분", "base": B.get("close_min"),
+         "pilot": round(sum(csecs) / len(csecs) / 60, 1) if csecs else None, "better": "lower", "count": len(csecs)},
+        {"key": "sameday", "label": "당일 결과 회수", "unit": "%", "base": None, "pilot": per100(sameday, total_final), "better": "higher", "count": total_final},
+        {"key": "pending_fee", "label": "금액 확인 대기", "unit": "%", "base": None, "pilot": per100(pending, n), "better": "lower", "count": pending},
+    ]
+    for r in rows_:
+        b, v = r["base"], r["pilot"]
+        r["diff"] = round(v - b, 1) if b is not None and v is not None and r["better"] else None  # 접수 건수는 물량이라 차이를 판단하지 않음
+        if r["diff"] is None or not r["better"] or r["diff"] == 0:
+            r["verdict"] = "같음" if r["diff"] == 0 and r["better"] else None
+        else:
+            r["verdict"] = "좋아짐" if (r["diff"] < 0) == (r["better"] == "lower") else "나빠짐"
+    crew_name = (one(con, "SELECT name FROM crew WHERE id=?", (crew_id,)) or {}).get("name") if crew_id else None
+    return {"start": start, "end": end, "crew_id": crew_id or "", "crew": crew_name, "rows": rows_, "base_period": cfg["base_period"], "note": cfg["note"],
+            "days": (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days + 1, "base_keys": PILOT_BASE}
+
+
+def pilot_csv(con, start=None, end=None, crew_id=None) -> bytes:
+    import csv
+    import io
+    r = pilot_report(con, start, end, crew_id)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["시범 운영 비교", f"{r['start']}~{r['end']}", r["crew"] or "전체 팀", f"기존 방식: {r['base_period'] or '-'}"])
+    w.writerow(["지표", "단위", "기존 방식", "시범 운영", "차이", "판단", "근거 건수"])
+    for x in r["rows"]:
+        w.writerow([x["label"], x["unit"], "" if x["base"] is None else x["base"], "" if x["pilot"] is None else x["pilot"],
+                    "" if x["diff"] is None else x["diff"], x["verdict"] or "", x.get("count", "")])
+    audit(con, "report", "pilot", "EXPORT", {"start": r["start"], "end": r["end"]})
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")

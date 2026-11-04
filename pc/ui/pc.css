@@ -542,3 +542,6 @@ nav.side a .ic { display: none; }
 .mapbox .maplibregl-ctrl-group, .mapbox .maplibregl-ctrl button { background: #fff; color: #333; border-color: #ccc; }
 .mapbox .maplibregl-ctrl-attrib { background: rgba(255, 255, 255, .8); color: #333; } .mapbox .maplibregl-ctrl-attrib a { color: #333; }
 .card > p.msg:empty, .card > div > p.msg:empty { display: none; }
+/* 시범 운영 비교: 기존 방식 수치 입력 */
+.pilot-base label.f { grid-template-columns: minmax(160px, 1fr) auto; }
+table.pilot td:first-child { font-weight: 600; }

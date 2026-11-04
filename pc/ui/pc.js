@@ -661,10 +661,14 @@ async function importDlg() {
 // ------------------------------------------------------------ 접수 등록·수정
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
+// 시범 운영 비교용: 새 접수 양식을 연 때부터 저장까지 걸린 시간(초). 자리 비움 같은 이상값은 서버가 거른다.
+let intakeT0 = null;
+const closeT0 = {};
 let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
 const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
+  if (isNew && !intakeT0) intakeT0 = Date.now();
   const blank = { name: '', phone: '', address: '', spot_note: '', memo: '', planned_date: '', appt_start: '', appt_end: '', must_today: 0, urgent: 0, priority: 0, lat: null, lon: null,
     items: [], versions: [], locked_lines: [], status: 'RECEIVED', dong: null, channel: '전화', contacts: [] };
   const fromDraft = isNew && intakeDraft;
@@ -843,8 +847,8 @@ async function screenRequest(id) {
         await checkDup();
         if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
       }
-      const res = await post('requests', data());
-      intakeDraft = null; dupAckKey = null;
+      const res = await post('requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
+      intakeDraft = null; dupAckKey = null; intakeT0 = null;
       toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
     } else {
       const res = await post('requests/' + id, { ...data(), reason: reason.value });
@@ -920,7 +924,7 @@ async function screenRequest(id) {
         !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => { const t = await post(`requests/${id}/receipt-print`); window.open('/print/doc/' + t.token, 'dg-print'); toast('접수증을 열었습니다 (출력 기록이 남습니다)'); }), 'small') : null,
         !isNew && canWork() && r.status !== 'CANCELLED' ? btn('배출 표지 인쇄', wrap(async () => { const t = await post('requests/labels', { ids: [id] }); window.open('/print/doc/' + t.token, 'dg-print'); toast('배출 표지를 열었습니다'); }), 'small') : null,
         btn('← 목록', () => go('#/requests')))),
-    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; render(true); }, 'small')) : null,
+    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; intakeT0 = Date.now(); render(true); }, 'small')) : null,
     !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn') }, h('strong', {}, '휴대폰 현장 접수 '),
       r.field_checked_at ? `— ${kst(r.field_checked_at)} 사무실 확인 (${r.field_checked_by || '-'})` : '— 수거팀이 현장에서 받은 접수입니다. 주소·동·품목·금액을 확인하고 필요하면 고친 뒤 [확인 완료]를 누르세요. ',
       !r.field_checked_at && canWork() ? btn('확인 완료', wrap(async () => { await post(`requests/${id}/field-check`); toast('현장 접수를 확인했습니다'); render(true); }), 'small primary') : null) : null,
@@ -1284,6 +1288,45 @@ function eventBody(kind, raw) {
     h('dd', {}, k === 'line_id' ? String(v).slice(0, 8) : typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : (BODY_VAL[v] || String(v)).slice(0, 80))]));
 }
 
+
+// ------------------------------------------------------------ 시범 운영 비교 (기존 방식 ↔ 이 시스템)
+async function screenPilot() {
+  const canEdit = ['ADMIN', 'INTAKE'].includes(boot.me.role);
+  const d = await api('pilot');
+  const cfg = d.settings, R = d.report;
+  const inp = (v, attrs = {}) => h('input', { value: v ?? '', ...attrs });
+  const F = { start: inp(cfg.start, { type: 'date', 'aria-label': '시범 운영 시작' }), end: inp(cfg.end, { type: 'date', 'aria-label': '시범 운영 끝' }),
+    crew: h('select', { 'aria-label': '시범 운영 팀' }, h('option', { value: '' }, '전체 팀'), ...boot.crews.map((c) => h('option', { value: c.id, selected: c.id === cfg.crew_id }, c.name))),
+    base_period: inp(cfg.base_period, { placeholder: '예: 2026년 9월(종이 대장)', 'aria-label': '기존 방식 기간' }),
+    note: h('textarea', { rows: 2, 'aria-label': '메모' }, cfg.note || '') };
+  const BK = d.base_keys;  // 기존 방식에서 적는 수치(서버가 정한 이름)
+  const B = Object.fromEntries(Object.keys(BK).map((k) => [k, inp(cfg.base[k], { type: 'number', min: 0, step: 'any', style: 'width:110px', 'aria-label': BK[k] })]));
+  if (!canEdit) [...Object.values(F), ...Object.values(B)].forEach((x) => { x.disabled = true; });
+  const save = wrap(async () => {
+    await post('pilot', { start: F.start.value, end: F.end.value, crew_id: F.crew.value, base_period: F.base_period.value, note: F.note.value,
+      base: Object.fromEntries(Object.entries(B).map(([k, x]) => [k, x.value])) });
+    toast('저장했습니다'); render(true);
+  });
+  const fmt = (v, unit) => (v == null ? h('span', { class: 'muted' }, '-') : `${Number(v).toLocaleString('ko-KR')}${unit === '건' ? '건' : unit === '%' ? '%' : unit === '일' ? '일' : unit === '분' ? '분' : ''}`);
+  const verdict = (v) => (v ? chip(v, v === '좋아짐' ? 'ok' : v === '나빠짐' ? 'bad' : '') : h('span', { class: 'muted' }, '-'));
+  const table = R ? grid(['지표', '단위', '기존 방식', '시범 운영', '차이', '판단', '근거'],
+    R.rows.map((x) => [x.label, x.unit, fmt(x.base, x.unit), fmt(x.pilot, x.unit), x.diff == null ? h('span', { class: 'muted' }, '-') : (x.diff > 0 ? '+' : '') + x.diff,
+      verdict(x.verdict), x.count != null ? `${x.count}건` : '']), { num: [2, 3, 4, 6], cls: 'pilot' }) : h('p', { class: 'empty' }, '시범 운영 기간을 정하고 저장하면 비교표가 나옵니다.');
+  return h('div', {}, pagehead('시범 운영 비교', R ? btn('CSV', wrap(async () => { await download(`pilot.csv?start=${R.start}&end=${R.end}&crew=${R.crew_id}`, `동구-시범운영-${R.start}_${R.end}.csv`); toast('내려받았습니다'); }), 'small') : null),
+    h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, R ? `${R.start} ~ ${R.end} (${R.days}일) · ${R.crew || '전체 팀'}` : '비교표'),
+      h('span', { class: 'muted small' }, '건수는 기간·물량이 달라도 비교되게 100건당. 이름·연락처·주소는 쓰지 않음')),
+      table,
+      h('p', { class: 'muted small' }, '누락 = 마감 때 미배정·결과 없음으로 넘어간 건 + 예정일이 지났는데 결과가 없는 건. 접수·마감 시간은 이 PC 화면을 연 때부터 저장까지(5초~2시간만). 당일 결과 회수 = 최종 결과가 수거 예정일 당일 PC에 들어온 비율.')),
+    h('div', { class: 'card formtable' }, h('h2', {}, '시범 운영 기간과 기존 방식 수치'),
+      h('div', { class: 'grid2' }, h('label', { class: 'f' }, '시범 운영 시작', F.start), h('label', { class: 'f' }, '끝', F.end)),
+      h('label', { class: 'f' }, '팀', F.crew),
+      h('label', { class: 'f' }, '기존 방식 기간', F.base_period),
+      h('p', { class: 'muted small' }, '기존 방식(종이 대장·전화 등)으로 같은 길이의 기간에 실제로 센 값을 적습니다. 모르는 칸은 비워 두면 비교에서 빠집니다.'),
+      h('div', { class: 'pilot-base' }, ...Object.entries(BK).map(([k, t]) => h('label', { class: 'f' }, t, B[k]))),
+      h('label', { class: 'f' }, '메모', F.note),
+      canEdit ? btn('저장', save, 'primary') : h('p', { class: 'muted small' }, '저장은 운영 관리자·접수 담당자만 할 수 있습니다.')));
+}
+
 // 정정 요청: 고칠 칸마다 지금 PC 원본 값 → 요청 값
 const FIX_LABEL = { name: '이름', phone: '연락처', address: '주소', spot_note: '상세 위치', planned_date: '예정일' };
 function correctionBody(c) {
@@ -1378,6 +1421,7 @@ async function screenClose() {
   let lastWant = null, seq = 0;
   const load = wrap(async (force) => {
     const want = date.value;
+    if (!closeT0[want]) closeT0[want] = Date.now();
     if (force !== true && want === lastWant) return;  // 같은 날짜로 두 번 불러와 입력 중인 칸을 덮지 않게
     lastWant = want; const my = ++seq;
     s.date = want;
@@ -1417,7 +1461,7 @@ async function screenClose() {
           h('td', {}, c.status === 'APPROVED' ? `${c.approved_by} · ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : chip('확인 전', 'warn'))))))) : null,
       h('div', { class: 'card row' }, ['ADMIN', 'INTAKE'].includes(role) ? [note, btn(last ? '마감 다시 기록' : '마감 기록', wrap(async () => {
         if (!(await confirmDlg(last ? '마감 다시 기록' : '마감 기록', `${s.date} 마감을 기록합니다.` + (d.carry.length ? ` 미처리 ${d.carry.length}건의 예정일이 다음 업무일로 옮겨집니다.` : '') + ' 기록은 회차로 쌓이며 팀장 확인을 받아야 합니다.', { ok: '마감 기록' }))) return;
-        const r = await post('close', { date: s.date, note: note.value }); toast(`마감을 기록했습니다 (${r.seq}회차${r.carried.length ? ` · 이월 ${r.carried.length}건` : ''})`); load(true);
+        const r = await post('close', { date: s.date, note: note.value, close_secs: closeT0[s.date] ? Math.round((Date.now() - closeT0[s.date]) / 1000) : null }); delete closeT0[s.date]; toast(`마감을 기록했습니다 (${r.seq}회차${r.carried.length ? ` · 이월 ${r.carried.length}건` : ''})`); load(true);
       }), 'primary')] : null,
         ['ADMIN', 'LEAD'].includes(role) && last && last.status === 'RECORDED' ? btn('팀장 확인', wrap(async () => {
           const why = await modal({ title: `${s.date} 마감 확인 (${last.seq}회차)`, ok: '확인 기록', body: [h('p', {}, '담당자가 기록한 마감 내용(이월·수납 확인·마감 후 수정)을 검토했으면 확인을 기록합니다. 기록한 사람은 확인할 수 없습니다.'), h('label', { class: 'f' }, '메모', h('input', { id: 'approve-note', class: 'fill' }))],
@@ -2153,12 +2197,12 @@ async function render(fromNav) {
       const [, route, arg] = (location.hash || '#/home').split('/');
       const role = boot.me.role;
       applyPrefs(boot.me.prefs);
-      const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, fees: screenFees, stats: screenStats,
+      const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, fees: screenFees, stats: screenStats, pilot: screenPilot,
         settings: () => screenSettings(arg), users: screenUsers, me: screenMe, revenue: screenRevenue, refunds: screenRefunds, access: screenAccess };
       // 역할별 메뉴 (서버도 같은 기준으로 막는다)
       const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
         ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD LEAD'], ['revenue', '세입·대사', 'ADMIN INTAKE LEAD'], ['refunds', '환불', 'ADMIN INTAKE LEAD'],
-        ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['stats', '통계·보고서', 'ADMIN INTAKE LEAD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD LEAD'], ['settings', '설정', 'ADMIN'],
+        ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['stats', '통계·보고서', 'ADMIN INTAKE LEAD'], ['pilot', '시범 운영 비교', 'ADMIN INTAKE LEAD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD LEAD'], ['settings', '설정', 'ADMIN'],
         ['users', role === 'ADMIN' ? '사용자·이력' : '변경 이력', 'ADMIN LEAD'], ['access', '접속기록', 'ADMIN LEAD']];
       const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
       let cur = route || 'home';
@@ -2167,7 +2211,7 @@ async function render(fromNav) {
       const content = await (screens[cur] || screenHome)();
       const active = cur === 'request' ? 'requests' : cur;
       // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
-      const GROUPS = [['업무 현황', ['home']], ['접수 업무', ['requests']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
+      const GROUPS = [['업무 현황', ['home']], ['접수 업무', ['requests']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
       const ICON = { home: '현', requests: '접', dispatch: '배', send: '전', results: '결', close: '마', revenue: '세', refunds: '환', stats: '통', fees: '수', qrtest: 'Q', settings: '설', users: '이', access: '기' };
       const navLabel = Object.fromEntries(NAV.map(([k, t]) => [k, t]));
       const group = GROUPS.find(([, ks]) => ks.includes(active));
