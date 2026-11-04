@@ -5,7 +5,9 @@
 - 업무 비밀번호 로그인(scrypt), 세션 쿠키(HttpOnly, SameSite=Strict), 30분 무조작 시 만료
 - 모든 API 요청에 사용자 지정 헤더(X-DG-CSRF) 필수 → 다른 웹사이트가 이 PC의 API를 부를 수 없음
 - 응답에 CSP·nosniff·no-referrer·no-store
-- 외부로 나가는 요청은 없다(화면의 바탕 지도 조각만 브라우저가 지도 서버에서 받음, 개인정보 미포함)
+- 브라우저가 직접 여는 외부 연결은 바탕 지도 조각뿐(개인정보 미포함). v0.11부터 이 서버가 설정된 경우에만 대신 묻는다:
+  행안부 도로명주소 API(검색어·건물 식별 번호만), 카카오모빌리티 길찾기(좌표만) — external.py. 서버 로그에는 검색어가 남지 않는다
+  (경로 틀만 남기고 조건(query)은 버림).
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ from . import area as A, backup as BK, finance as FN, privacy as PV, routing, se
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
-WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
+WEB_ALLOWED = {"fees.js", "fees-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
 UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/pc.css": "pc.css", "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -89,7 +91,7 @@ def login_succeeded(username: str):
 #  LEAD(팀장·검토자): 모든 조회(변경 이력 포함) + 마감 확인. 사용자·설정 관리와 업무 변경은 못 함
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
-                       "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "revenue", "revenue.csv",
+                       "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
                        "refunds", "recon-template", "recon-history"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
                         "fee-revisions", "geocode", "links", "refunds", "recon", "stats"}},
@@ -98,7 +100,7 @@ PERM = {
 }
 
 
-LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr"}
+LEAD_GET_DENY = {"backups", "photo-purge", "registration-qr", "juso-search", "juso-coord"}
 LEAD_POST = {"password", "close/approve", "access/check", "stats/print"}
 APPROVE_RE = re.compile(r"^refunds/[^/]+/(approve|reject)$")
 
@@ -459,6 +461,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(S.geocode(c, qs.get("address", "")) or {"none": True})
             if p == "addr-search":
                 return self.send_json(S.addr_search(c, qs.get("q", "")))
+            if p == "juso-search":  # 행안부 주소 검색(서버가 대신 물음). 검색어는 로그·접속기록에 남기지 않는다
+                return self.send_json(S.juso_search(c, qs.get("q", ""), qs.get("name", "")))
+            if p == "juso-coord":
+                return self.send_json(S.juso_coord(c, {k: qs.get(k, "") for k in ("admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno")}))
             if p == "privacy":
                 return self.send_json({"preview": PV.purge_preview(c), "log": PV.purge_log(c), "retention_years": PV.retention_years(c),
                                        "access_retention_years": PV.access_retention_years(c), "backup": BK.status(c)})
@@ -750,6 +756,8 @@ class Handler(BaseHTTPRequestHandler):
             if p == "settings":
                 S.save_settings(c, self.json_body())
                 return self.send_json(S.settings(c))
+            if p == "external/test":
+                return self.send_json(S.external_test(c, self.json_body().get("service", "")))
         return self.send_json({"error": "없음"}, 404)
 
     def route_plan(self, d):
@@ -769,11 +777,18 @@ class Handler(BaseHTTPRequestHandler):
         dongs = {x["name"]: x for x in A.list_dongs(c)}
         pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
             if st["capacity"]["prefer_dong_crew"] else {}
+        method = S.travel_method(c)
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
+                           travel_method=method, kakao_key=S.secret(c, "kakao_rest_key") if method == "KAKAO" else "",
+                           travel_cache=routing.TravelCache(c) if method == "KAKAO" else None,
                            service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
                            volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref)
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
+        if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만)
+            mi = res.get("matrix_info") or {}
+            with S.tx(c):
+                S.audit(c, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "cache": mi.get("cache_hits", 0), "estimated": mi.get("fallback_pairs", 0)})
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"])} for r in reqs}

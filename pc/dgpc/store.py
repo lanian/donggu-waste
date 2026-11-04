@@ -27,6 +27,9 @@ KEYRING_SERVICE = "dongu-bulky-waste-pc"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+-- 카카오모빌리티 이동시간 캐시: 좌표(소수 5자리) 쌍 → 자동차 소요 시간(초), 30일 보관. 이름·주소 없음.
+CREATE TABLE IF NOT EXISTS travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL,
+  PRIMARY KEY (origin, dest));
 CREATE TABLE IF NOT EXISTS pc_key (name TEXT PRIMARY KEY, pem BLOB NOT NULL, created_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS device (

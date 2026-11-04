@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.10.1';
+export const APP_VERSION = '0.11.0';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -836,7 +836,8 @@ async function stickerCheck(stop, l, result) {
 async function feeNotice(stop, d) {
   const x = feeExtra(d), f = d.fee;
   const v = await sheet({ title: `추가 금액 ${won(x)}`,
-    text: `접수 당시 ${won(f.received)} → 현장 확인 ${won(f.confirmedSubtotal)}${f.pendingCount ? ` (금액 확인 대기 ${f.pendingCount}건 제외)` : ''}. 주민에게 안내하고 결과를 고르세요.`,
+    text: `접수 당시 ${won(f.received)} → 현장 확인 ${won(f.confirmedSubtotal)}${f.pendingCount ? ` (금액 확인 대기 ${f.pendingCount}건 제외)` : ''}.`
+      + (f.reductionRate ? ` 감면 ${f.reductionRate}% 적용 시 늘어나는 부과 금액은 ${won(x - Math.floor((x * f.reductionRate) / 100))}입니다.` : '') + ' 주민에게 안내하고 결과를 고르세요.',
     choices: [{ label: LABEL.feeResponse.AGREED, value: 'AGREED', cls: 'primary' }, { label: LABEL.feeResponse.NOTIFIED, value: 'NOTIFIED' },
       { label: LABEL.feeResponse.REFUSED, value: 'REFUSED', cls: 'danger' }] });
   if (v == null) return false;
@@ -889,6 +890,7 @@ async function screenStop(id) {
     stop.spot_note ? h('p', { class: 'spot' }, '배출 위치: ' + stop.spot_note) : null,
     stop.memo ? h('p', { class: 'memo' }, '요청: ' + stop.memo) : null,
     h('p', { class: 'small' }, stop.eta ? `${stop.receipt_no} · 도착 예정 ${stop.eta}` : stop.receipt_no),
+    stop.levy_no ? h('p', { class: 'small levy-no' }, `부과번호 ${stop.levy_no}`) : null,
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
     stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
     stop.revisit ? h('p', { class: 'notice' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
@@ -950,9 +952,13 @@ async function screenStop(id) {
       h('dt', {}, '확인된 소계'), h('dd', {}, won(f.confirmedSubtotal)),
       h('dt', {}, '접수 대비 증감'), h('dd', {}, (f.diff > 0 ? '+' : '') + won(f.diff)),
       h('dt', {}, '금액 확인 대기'), h('dd', {}, f.pendingCount + '건')),
-    h('div', { class: 'total-box' + (f.final == null ? ' pending' : ''), role: 'group', 'aria-label': '총 수수료' },
-      h('span', { class: 'tb-label' }, '총 수수료', h('small', {}, f.final == null ? '최종 금액 · 금액 확인 대기 있음' : '최종 금액')),
-      h('strong', { class: 'tb-val' }, f.final == null ? '미확정' : won(f.final))),
+    // 감면(PC 목록의 "rd"): 계산 금액 → 감면(율) → 부과 금액. 감면액은 원 단위 버림(PC와 같은 규칙), 현장 추가 품목에도 적용.
+    f.reductionRate ? h('dl', { class: 'reduction', 'aria-label': '감면' },
+      h('dt', {}, '계산 금액'), h('dd', {}, won(f.final)),
+      h('dt', {}, `감면 (${f.reductionRate}%)`), h('dd', {}, f.reduction == null ? '미확정' : '−' + won(f.reduction))) : null,
+    h('div', { class: 'total-box' + (f.final == null ? ' pending' : ''), role: 'group', 'aria-label': f.reductionRate ? '부과 금액' : '총 수수료' },
+      h('span', { class: 'tb-label' }, f.reductionRate ? '부과 금액' : '총 수수료', h('small', {}, f.final == null ? '최종 금액 · 금액 확인 대기 있음' : f.reductionRate ? `감면 ${f.reductionRate}% 적용 · 주민이 낼 금액` : '최종 금액')),
+      h('strong', { class: 'tb-val' }, f.final == null ? '미확정' : won(f.levied))),
     noticeLine,
     extra > 0 && needsFeeNotice(d) ? btn(`추가 금액 ${won(extra)} 안내 기록`, () => feeNotice(stop, d), 'big warn') : null,
     h('p', { class: 'small' }, `수량(단위별): ${units}. 금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다.`));
@@ -1551,7 +1557,7 @@ const addrRoute = () => st.addrRoute || (isSolo() ? 'direct' : 'pc');
 function addrSearch({ onPick, forbid = () => [] }) {
   const box = h('div', { class: 'addr-search' }, h('div', { class: 'fld-label' }, '주소 검색'));
   if (addrRoute() === 'pc') {
-    box.append(h('p', { class: 'small addr-status' }, '주소 검색 경로가 "PC 경유"입니다. PC 연결 방식에서는 주소·위치를 PC에서 정해 목록으로 보냅니다. 여기서는 직접 적거나 지도에서 위치를 지정하세요.'));
+    box.append(h('p', { class: 'small addr-status' }, '주소 검색 경로가 "PC 경유"입니다. PC 연결 방식에서는 PC 접수 화면의 [주소 찾기](PC의 주소 자료 + PC가 대신 묻는 행안부 검색)로 주소·위치를 정해 목록으로 보냅니다. 여기서는 직접 적거나 지도에서 위치를 지정하세요.'));
     return box;
   }
   const input = h('input', { type: 'search', class: 'search', placeholder: '도로명·건물명·지번 (예: 서남로 1)', 'aria-label': '주소 검색어', autocomplete: 'off', enterkeyhint: 'search', disabled: !st.jusoKey });
@@ -1907,7 +1913,7 @@ async function screenSettings() {
     h('p', { class: 'small' }, '행정안전부 도로명주소 검색·좌표제공 API(business.juso.go.kr)를 씁니다. 보내는 것은 검색칸에 적은 주소 낱말과 승인키, 고른 건물의 식별 번호뿐이며 이름·연락처는 보내지 않습니다. 승인키는 주소정보누리집에서 기관이 발급받아 넣습니다(이 휴대폰에 암호화 저장).'),
     h('div', { class: 'fld-label' }, '주소 검색 경로'),
     choice([['direct', '직접'], ['pc', 'PC 경유']], addrRoute(), (v) => set({ addrRoute: v })),
-    h('p', { class: 'small' }, addrRoute() === 'pc' ? 'PC 경유: 휴대폰에서는 검색하지 않습니다. PC 연결 방식에서는 PC가 주소·위치를 정해 목록으로 보냅니다(휴대폰과 PC는 실시간으로 연결되지 않음).'
+    h('p', { class: 'small' }, addrRoute() === 'pc' ? 'PC 경유: 휴대폰에서는 검색하지 않습니다. PC 연결 방식에서는 PC 접수 화면의 [주소 찾기](PC의 주소 자료 + PC 서버가 대신 묻는 행안부 검색)로 주소·좌표를 정해 목록에 실어 보냅니다. 휴대폰과 PC는 실시간으로 연결되지 않으므로 휴대폰에서 PC로 검색을 보내지는 않습니다.'
       : '직접: 이 휴대폰이 주소 서버에 바로 묻습니다. 브라우저가 주소 서버 응답을 막으면(CORS) 검색이 되지 않으니, 그때는 직접 적고 지도에서 위치를 지정하거나 PC에서 주소 작업을 하세요.'),
     h('label', { class: 'fld' }, h('span', {}, '주소 검색 승인키'), kIn),
     h('label', { class: 'fld' }, h('span', {}, '좌표 승인키'), cIn),

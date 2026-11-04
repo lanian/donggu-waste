@@ -79,7 +79,7 @@ export function deriveStop(stop, events) {
   for (const l of lines) l.remaining = Math.max(0, l.qty_confirmed - l.qty_collected);
   // 위치: 현장에서 고친 위치(LOCATION_FIX) 우선, 없으면 접수 자료의 좌표
   if (!loc && stop.lat != null && stop.lon != null) loc = { lat: stop.lat, lon: stop.lon };
-  const fee = calcFee(lines);
+  const fee = calcFee(lines, stop.reduction ? stop.reduction.rate : 0);
   const notice = notices.length ? notices[notices.length - 1] : null;
   return { lines, contact, outcome, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
     progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
@@ -95,20 +95,33 @@ export function needsFeeNotice(d) {
   return x > 0 && !d.notices.some((n) => n.extra >= x);
 }
 
+// 감면(v0.11): PC finance.fee_summary 와 같은 규칙 — 감면액 = floor(계산 금액 × 감면율 / 100) (원 단위 버림), 부과 금액 = 계산 금액 − 감면액.
+// 현장 추가 품목도 계산 금액에 들어가므로 같은 감면율이 적용된다.
+export function applyReduction(amount, rate) {
+  const r = Math.max(0, Math.min(100, Math.trunc(Number(rate) || 0)));
+  if (amount == null) return { rate: r, reduction: null, levied: null };
+  const reduction = Math.floor((amount * r) / 100);
+  return { rate: r, reduction, levied: amount - reduction };
+}
+
 // 수수료: 산정 수량 = 현장 확인 수량. 실제 수거 수량은 금액에 쓰지 않는다. 단위가 다른 행은 합산하지 않는다.
-export function calcFee(lines) {
+export function calcFee(lines, reductionRate = 0) {
   const received = lines.filter((l) => l.kind === 'RECEIVED').reduce((s, l) => s + (l.amount_received || 0), 0);
   const pending = lines.filter((l) => l.price == null && l.qty_confirmed > 0);
   const confirmedSubtotal = lines.filter((l) => l.price != null).reduce((s, l) => s + l.price * l.qty_confirmed, 0);
   const fieldAdded = lines.filter((l) => l.kind === 'FIELD' && l.price != null).reduce((s, l) => s + l.price * l.qty_confirmed, 0);
   const qtyByUnit = {};
   for (const l of lines) qtyByUnit[l.unit_label] = (qtyByUnit[l.unit_label] || 0) + l.qty_confirmed;
+  const final = pending.length ? null : confirmedSubtotal;
+  const red = applyReduction(final, reductionRate);
   return {
     received, confirmedSubtotal, fieldAdded,
     diff: confirmedSubtotal - received,
     pendingCount: pending.length,
-    final: pending.length ? null : confirmedSubtotal,
+    final,
     qtyByUnit,
+    // 감면: reductionRate(%), reduction(감면액), levied(부과 금액 = 주민이 낼 금액). 감면이 없으면 levied = final. 금액 확인 대기가 있으면 null.
+    reductionRate: red.rate, reduction: red.reduction, levied: red.levied,
   };
 }
 

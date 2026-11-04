@@ -246,6 +246,8 @@ section[id^="st-"] { scroll-margin-top: 150px; }
 /* ---- 계산 내역 + 총 수수료 상자 ---- */
 .fee dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; }
 .fee dt { color: var(--muted); } .fee dd { margin: 0; text-align: right; font-weight: 750; }
+.fee dl.reduction { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.levy-no { font-variant-numeric: tabular-nums; }
 .fee .total { font-size: 1.133rem; color: var(--ink); border-top: 1px solid var(--line); padding-top: 8px; }
 .total-box { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 14px 0 6px; padding: 16px 18px; border-radius: 14px;
   background: var(--brand-soft); color: var(--brand-soft-ink); }

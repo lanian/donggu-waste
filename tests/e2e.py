@@ -151,7 +151,7 @@ def main():
             ctx.close()
 
             # 2) 목록 QR 수신 ----------------------------------------------------------
-            mk = py("make-bundle", "--device", dev_short, "--count", "20", "--date", "2026-11-03")
+            mk = py("make-bundle", "--device", dev_short, "--count", "20", "--date", "2026-11-03", "--reduce", "2")
             short = re.search(r"묶음 ([0-9a-f]{8})", mk).group(1)
             frames = json.loads((WORK / "out" / f"bundle_{short}.frames.json").read_text())
             print("  ·", mk.splitlines()[0])
@@ -309,6 +309,22 @@ def main():
             page.screenshot(path=SHOTS / "05_stop_top.png")
             page.locator(".fee").scroll_into_view_if_needed()
             page.screenshot(path=SHOTS / "06_stop_fee.png")
+
+            # 3-0) 감면 건(2번, PC에서 차상위 50%): 부과번호와 계산 금액 → 감면 → 부과 금액 (v0.11 "rd"·"lv")
+            page.goto(url + "#/home")
+            page.locator(".stop .seq").filter(has_text=re.compile(r"^2(?!\d)")).first.click()
+            expect(page.locator(".who .levy-no")).to_have_text(re.compile(r"^부과번호 2026-"))
+            red = page.locator(".fee dl.reduction")
+            expect(red).to_contain_text("감면 (50%)")
+            won_ = lambda t: int(re.sub(r"\D", "", t))
+            calc = won_(red.locator("dd").nth(0).inner_text())
+            cut = won_(red.locator("dd").nth(1).inner_text())
+            levied = won_(page.locator(".fee .tb-val").inner_text())
+            ok(calc > 0 and cut == calc * 50 // 100 and levied == calc - cut and "부과 금액" in page.locator(".fee .tb-label").inner_text()
+               and "차상위" not in page.locator("#app").inner_text(),
+               f"감면 건: 부과번호 표시, 계산 {calc:,}원 → 감면(50%) −{cut:,}원 → 부과 금액 {levied:,}원 (감면 사유 이름은 휴대폰에 없음)")
+            page.locator(".fee").scroll_into_view_if_needed()
+            page.screenshot(path=SHOTS / "06b_stop_reduction.png")
 
             # 3-1) 지도: 20개 핀, 핀을 누르면 상세로
             page.goto(url + "#/map")

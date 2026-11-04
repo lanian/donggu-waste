@@ -186,6 +186,7 @@ def settings(con) -> dict:
     return {
         "depot": get_setting(con, "depot", {"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}),
         "osrm_url": get_setting(con, "osrm_url", ""),
+        "external": external_settings(con),
         "service_min_base": get_setting(con, "service_min_base", 5),
         "service_min_per_item": get_setting(con, "service_min_per_item", 3),
         "photo_retention_days": get_setting(con, "photo_retention_days", 90),
@@ -252,6 +253,8 @@ def save_settings(con, data: dict):
         if "depot" in data:
             d = data["depot"]
             set_setting(con, "depot", {"lat": float(d["lat"]), "lon": float(d["lon"]), "label": str(d.get("label", "차고지"))})
+        if "external" in data:
+            _save_external(con, data["external"] or {})
         if "osrm_url" in data:
             u = (data["osrm_url"] or "").strip()
             if u and not re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/?$", u):
@@ -286,6 +289,129 @@ def save_settings(con, data: dict):
             if b and not Path(b).is_absolute():
                 raise UserError("백업 폴더는 이 PC의 전체 경로로 적어 주세요 (예: D:\\동구백업).")
             set_setting(con, "backup_dir", b)
+
+
+# ------------------------------------------------------------------ 외부 서비스 설정 (v0.11): 행안부 주소 API 승인키·카카오모빌리티 키
+# 키는 암호화 DB(meta)에만 두고, 화면(브라우저)에는 저장 뒤 가린 값만 보낸다.
+EXTERNAL_KEYS = {"juso_search_key": "주소 검색 승인키", "juso_coord_key": "좌표 승인키", "kakao_rest_key": "카카오모빌리티 REST 키"}
+TRAVEL_METHODS = ("ESTIMATE", "OSRM", "KAKAO")
+
+
+def secret(con, name: str) -> str:
+    return get_setting(con, "ext_" + name, "") or ""
+
+
+def travel_method(con) -> str:
+    m = get_setting(con, "travel_method", None)
+    if m in TRAVEL_METHODS:
+        return m
+    return "OSRM" if get_setting(con, "osrm_url", "") else "ESTIMATE"  # 이전 설정 그대로(OSRM 주소가 있으면 OSRM)
+
+
+def external_settings(con) -> dict:
+    from dgpc import external as X
+    return {"keys": {k: {"set": bool(secret(con, k)), "mask": X.mask(secret(con, k)), "label": lab} for k, lab in EXTERNAL_KEYS.items()},
+            "travel_method": travel_method(con)}
+
+
+def _save_external(con, d: dict):
+    from dgpc import external as X
+    for k, lab in EXTERNAL_KEYS.items():
+        if k not in (d.get("keys") or {}):
+            continue
+        v = ((d.get("keys") or {})[k] or "").strip()
+        if v and not X.KEY_RE.match(v):
+            raise UserError(f"{lab} 형식이 올바르지 않습니다 (영문·숫자 8자 이상).")
+        set_setting(con, "ext_" + k, v)
+        audit(con, "settings", "external", "KEY_SET" if v else "KEY_CLEAR", {"key": k})  # 키 값은 남기지 않는다
+    if "travel_method" in d:
+        m = d["travel_method"]
+        if m not in TRAVEL_METHODS:
+            raise UserError("이동시간 계산 방식을 골라 주세요.")
+        if m == "KAKAO" and not secret(con, "kakao_rest_key"):
+            raise UserError("카카오모빌리티 REST 키를 먼저 저장하세요.")
+        set_setting(con, "travel_method", m)
+
+
+def _known_names(con) -> list[str]:
+    return [r["name"] for r in rows(con, "SELECT DISTINCT name FROM request WHERE pii_purged_at IS NULL AND name IS NOT NULL AND length(name) >= 2")]
+
+
+def _dong_for_juso(con, it: dict) -> str | None:
+    area = _area()
+    for n in (it.get("hemdNm"), it.get("emdNm")):
+        if n and area.get_dong(con, n):
+            return n
+    addr = f'{it.get("road_part1") or it.get("road") or ""} {it.get("emdNm") or ""} {it.get("hemdNm") or ""}'
+    return area.detect_dong(con, addr).get("dong")
+
+
+def juso_search(con, q: str, name: str = "") -> dict:
+    """PC가 대신 묻는 행정안전부 도로명주소 검색. 보내는 것은 검색어와 승인키뿐.
+    검색어가 전화번호·신청인 이름·저장된 주민 이름을 담고 있으면 보내지 않는다. 접속기록에는 검색어 없이 건수만 남긴다."""
+    from dgpc import external as X, privacy as _pv
+    key = secret(con, "juso_search_key")
+    if not key:
+        return {"configured": False, "items": []}
+    kw = X.clean_keyword(q)
+    if len(kw) < 2:
+        return {"configured": True, "items": []}
+    why = X.keyword_guard(kw, name, _known_names(con))
+    if why:
+        return {"configured": True, "items": [], "blocked": why}
+    try:
+        res = X.juso_search(key, kw)
+    except X.ExternalError as e:
+        _pv.record_access(con, "SEARCH", "", 0, "행안부 주소 검색 실패 (검색어 기록 안 함)")
+        return {"configured": True, "items": [], "error": str(e), "code": e.code}
+    items = []
+    for it in res["items"]:
+        addr = it["road_part1"] + (f' ({", ".join(x for x in (it["emdNm"], it["bdNm"]) if x)})' if it["emdNm"] or it["bdNm"] else "")
+        items.append({"kind": "행안부", "address": addr, "label": addr + (f' · 지번 {it["jibun"]}' if it["jibun"] else ""), "zip": it["zip"],
+                      "dong": _dong_for_juso(con, it), "emdNm": it["emdNm"], "hemdNm": it["hemdNm"], "bname": it["bdNm"], "ref": it["ref"],
+                      "lat": None, "lon": None})
+    _pv.record_access(con, "SEARCH", "", len(items), "행안부 주소 검색 (검색어 기록 안 함)")
+    return {"configured": True, "items": items, "total": res["total"], "coord": bool(secret(con, "juso_coord_key"))}
+
+
+def juso_coord(con, ref: dict) -> dict:
+    """고른 행안부 검색 결과의 출입구 좌표(WGS84). 보내는 것은 좌표 승인키와 건물 식별 번호뿐."""
+    from dgpc import external as X
+    key = secret(con, "juso_coord_key")
+    if not key:
+        return {"none": True, "reason": "좌표 승인키가 없어 위치는 지도에서 지정하세요."}
+    try:
+        lat, lon = X.juso_coord(key, ref)
+    except X.ExternalError as e:
+        return {"none": True, "reason": str(e), "code": e.code}
+    return {"lat": lat, "lon": lon}
+
+
+def external_test(con, service: str) -> dict:
+    """설정 화면 [연결 시험]: 개인정보 없는 고정 값으로 한 번 묻는다."""
+    from dgpc import external as X
+    try:
+        if service == "juso":
+            key = secret(con, "juso_search_key")
+            if not key:
+                raise UserError("주소 검색 승인키를 먼저 저장하세요.")
+            r = X.juso_search(key, "동구청", per=1)
+            msg = f"주소 검색 정상 (시험 검색 '동구청' {r['total']}건)"
+            if secret(con, "juso_coord_key") and r["items"]:
+                X.juso_coord(secret(con, "juso_coord_key"), r["items"][0]["ref"])
+                msg += " · 좌표 정상"
+            return {"ok": True, "message": msg}
+        if service == "kakao":
+            key = secret(con, "kakao_rest_key")
+            if not key:
+                raise UserError("카카오모빌리티 REST 키를 먼저 저장하세요.")
+            d = get_setting(con, "depot", {"lat": 35.1462, "lon": 126.9233})
+            o = (float(d["lat"]), float(d["lon"]))
+            sec = X.kakao_direction(key, o, (o[0] + 0.005, o[1] + 0.005))
+            return {"ok": sec is not None, "message": f"카카오모빌리티 정상 (차고지 부근 시험 경로 {sec}초)" if sec is not None else "응답은 왔으나 경로가 없습니다."}
+    except X.ExternalError as e:
+        return {"ok": False, "message": str(e), "code": e.code}
+    raise UserError("알 수 없는 서비스입니다.")
 
 
 # ------------------------------------------------------------------ 접수
@@ -903,7 +1029,8 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
         else:
             extra_u = {}
         # "dong": 행정동 이름(문자열). 휴대폰 목록 형식(dgproto)이 아직 모르면 압축할 때 빠진다.
-        # "reduction": 감면율(%)·사유. 휴대폰 목록 형식(dgproto)이 아직 실어 나르지 않아 압축할 때 빠진다(문서 요청 참고).
+        # "reduction": 감면율(%)·사유. 휴대폰 목록 압축 형식에는 감면율만 "rd"로 싣는다(사유 이름은 복지 정보라 휴대폰에 보내지 않음).
+        # "levy_no": 부과번호 → "lv"
         red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or ""}} if r.get("reduction_code") else {}
         stops.append({**extra_u, **red_, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],

@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import * as P from '../web/proto.js';
 import { BUILTIN_FEES } from '../web/fees-data.js';
 import * as F from '../web/field.js';
-import { deriveStop, needsFeeNotice, feeExtra } from '../web/fees.js';
+import { deriveStop, needsFeeNotice, feeExtra, applyReduction } from '../web/fees.js';
 import { tilesForBbox, isAllowedMapUrl, bboxAround, DONGGU_BBOX } from '../web/map.js';
 import * as NAV from '../web/nav.js';
 import * as J from '../web/juso.js';
@@ -277,5 +277,56 @@ print(json.dumps(P.compact_daylist(p, S.FEE_ROWS), ensure_ascii=False))`));
 const e16 = P.expandDaylist(pc16, BUILTIN_FEES);
 ok(pc16.s[0].u.length === 6 && pc16.s[1].u.length === 4 && e16.stops[0].unload_after.lat === 35.13 && e16.stops[0].unload_after.lon === 126.95 && e16.stops[1].unload_after.lat === null,
   'PC 목록 묶음: 반입지 좌표가 있으면 "u" 5·6번째 값으로 싣고 휴대폰이 읽음(없으면 이전 형식)');
+
+// 17) 감면율 "rd"·부과번호 "lv" (v0.11 선택 키) — PC → 휴대폰 ---------------------------------
+ok(/^\d{4}-/.test(s0.levy_no) && s0.reduction === null, `실제 PC 목록 묶음: 부과번호 "lv" 받음(${s0.levy_no}), 감면 없는 건은 reduction 없음`);
+const pc17 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+row = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["unit"] == "EA")
+it = {"line_id": "00000000-0000-0000-0000-0000000000a1", "fee_rate_id": row["id"], "name": row["name"], "spec": row["spec"], "unit": row["unit"], "unit_label": row["unit_label"],
+      "qty": 3, "unit_price": row["price"], "amount": row["price"] * 3, "price_status": "CONFIRMED"}
+base = {"req_ver": 1, "name": "가", "phone": "01000000000", "address": "가상로 1", "items": [it]}
+p = {"schema": "dg.daylist/1", "work_date": "2026-11-05", "crew": "가상", "assign_ver": 1, "fee_table": {"version_id": S.FEE_TABLE["version_id"]},
+     "stops": [{**base, "seq": 1, "request_id": "00000000-0000-0000-0000-000000000011", "receipt_no": "DG-1", "levy_no": "2026-01-00007", "reduction": {"rate": 50, "label": "차상위계층"}},
+               {**base, "seq": 2, "request_id": "00000000-0000-0000-0000-000000000012", "receipt_no": "DG-2", "levy_no": "2026-01-00008"},
+               {**base, "seq": 3, "request_id": "00000000-0000-0000-0000-000000000013", "receipt_no": "DG-3"}]}
+print(json.dumps({"c": P.compact_daylist(p, S.FEE_ROWS), "price": row["price"]}, ensure_ascii=False))`));
+const c17 = pc17.c, e17 = P.expandDaylist(c17, BUILTIN_FEES);
+ok(c17.s[0].rd === 50 && c17.s[0].lv === '2026-01-00007' && !('rd' in c17.s[1]) && c17.s[1].lv === '2026-01-00008' && !('lv' in c17.s[2]) && !JSON.stringify(c17).includes('차상위'),
+  'PC 압축: 감면 건만 "rd"(정수 %), 부과번호 있으면 "lv", 감면 사유 이름은 싣지 않음');
+ok(e17.stops[0].reduction.rate === 50 && e17.stops[0].levy_no === '2026-01-00007' && e17.stops[1].reduction === null && e17.stops[2].levy_no === '', '휴대폰이 "rd"·"lv"를 읽음 (없으면 감면 없음·부과번호 빈 값)');
+const old17 = { ...c17, s: c17.s.map(({ rd, lv, ...x }) => x) };
+ok(P.expandDaylist(old17, BUILTIN_FEES).stops.every((x) => x.reduction === null && x.levy_no === ''), '이전 형식(rd·lv 없음)도 그대로 읽음');
+// 휴대폰 쪽 v2 자료(rd·lv 포함)를 PC(Python) expand_daylist 가 같은 뜻으로 읽음 — 반대 방향
+const jsSide = { ...c17, s: c17.s.map((x, i) => (i === 2 ? { ...x, rd: 30, lv: '2026-01-00009' } : x)) };
+const py17 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+c = json.loads(${JSON.stringify(JSON.stringify(jsSide))})
+o = json.loads(${JSON.stringify(JSON.stringify(old17))})
+e, eo = P.expand_daylist(c, S.FEE_ROWS), P.expand_daylist(o, S.FEE_ROWS)
+print(json.dumps({"red": [s.get("reduction") for s in e["stops"]], "lv": [s["levy_no"] for s in e["stops"]], "oldred": [s.get("reduction") for s in eo["stops"]], "oldlv": [s["levy_no"] for s in eo["stops"]],
+                  "rt": P.compact_daylist(e | {"fee_table": {"version_id": e["fee_table"]["version_id"]}}, S.FEE_ROWS)["s"][2]}))`));
+ok(JSON.stringify(py17.red) === JSON.stringify([{ rate: 50 }, null, { rate: 30 }]) && py17.lv.join() === '2026-01-00007,2026-01-00008,2026-01-00009'
+  && py17.oldred.every((x) => x === null) && py17.oldlv.every((x) => x === ''), 'PC(Python) expand_daylist 도 "rd"·"lv"를 같은 뜻으로 읽음 (이전 형식 포함)');
+ok(py17.rt.rd === 30 && py17.rt.lv === '2026-01-00009', 'PC 풀기 → 다시 압축해도 "rd"·"lv" 유지 (왕복)');
+// 금액: 계산 금액 → 감면(원 단위 버림) → 부과 금액, PC finance.fee_summary 와 같은 결과
+const pairs = [[1001, 50], [3333, 30], [12345, 100], [999, 0], [7, 33], [45670, 50]];
+const pyRed = JSON.parse(pyEval(`import json
+from dgpc import finance as FN
+print(json.dumps([[FN.fee_summary({"reduction_code": "X", "reduction_rate": r}, a)["reduction"], FN.fee_summary({"reduction_code": "X", "reduction_rate": r}, a)["levied"]] for a, r in ${JSON.stringify(pairs)}]))`));
+ok(pairs.every(([a, r], i) => { const x = applyReduction(a, r); return x.reduction === pyRed[i][0] && x.levied === pyRed[i][1]; }), `감면 계산이 PC와 같음 (1,001원 50% → 감면 ${applyReduction(1001, 50).reduction}원, 부과 ${applyReduction(1001, 50).levied}원)`);
+const st17 = e17.stops[0];
+const d17 = deriveStop(st17, []);
+const price = pc17.price;
+ok(d17.fee.final === price * 3 && d17.fee.reductionRate === 50 && d17.fee.reduction === Math.floor((price * 3) / 2) && d17.fee.levied === price * 3 - Math.floor((price * 3) / 2),
+  `휴대폰 금액: 계산 ${price * 3} → 감면 50% → 부과 ${d17.fee.levied}`);
+const fieldRow = BUILTIN_FEES.rows.find((r) => r.status === 'CONFIRMED' && r.unit === 'EA' && r.price % 200 === 100) || BUILTIN_FEES.rows.find((r) => r.status === 'CONFIRMED');
+const d17b = deriveStop(st17, [{ request_id: st17.request_id, kind: 'FIELD_ITEM_ADD', body: { line_id: 'f1', name: fieldRow.name, spec: fieldRow.spec, unit: fieldRow.unit, unit_label: fieldRow.unit_label, fee_rate_id: fieldRow.id, qty: 1, unit_price: fieldRow.price, price_status: 'CONFIRMED' } }]);
+const tot = price * 3 + fieldRow.price;
+ok(d17b.fee.final === tot && d17b.fee.reduction === Math.floor((tot * 50) / 100) && d17b.fee.levied === tot - Math.floor((tot * 50) / 100) && d17b.fee.fieldAdded === fieldRow.price,
+  `현장 추가 품목에도 감면 적용: 계산 ${tot} → 부과 ${d17b.fee.levied}`);
+ok(deriveStop(e17.stops[1], []).fee.levied === price * 3 && deriveStop(e17.stops[1], []).fee.reductionRate === 0, '감면 없는 건: 부과 금액 = 계산 금액');
+const pend = deriveStop({ ...st17, items: [{ ...st17.items[0], price_status: 'PENDING', unit_price: null, amount: null }] }, []);
+ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction === null, '금액 확인 대기가 있으면 감면·부과 금액도 미확정');
 
 console.log(`\n통과 ${passed}개`);

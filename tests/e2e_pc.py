@@ -99,6 +99,55 @@ def write_y4m(path, frames, hold=4, loops=4, w=1280, h=720):
                     fh.write(b"FRAME\n" + fr)
 
 
+# 행안부 주소 API·카카오모빌리티 가짜 서버 (이 PC 안). PC 서버가 DG_JUSO_BASE·DG_KAKAO_NAVI_BASE 로 여기에 묻는다.
+FAKE: dict = {"juso": [], "kakao": []}
+
+
+def start_fake_external() -> int:
+    import http.server
+    import threading
+    from dgpc import geo
+    ent = geo.wgs84_to_utmk(35.1555, 126.9311)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def reply(self, obj, code=200):
+            b = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def do_GET(self):
+            u = urllib.parse.urlsplit(self.path)
+            q = dict(urllib.parse.parse_qsl(u.query))
+            if u.path.startswith("/addrlink/"):
+                FAKE["juso"].append({"path": u.path, "q": q, "headers": dict(self.headers)})
+                if u.path.endswith("addrLinkApi.do"):
+                    return self.reply({"results": {"common": {"errorCode": "0", "errorMessage": "정상", "totalCount": "1"}, "juso": [
+                        {"roadAddr": "가상광역시 동구 서남로 1 (가상동)", "roadAddrPart1": "가상광역시 동구 서남로 1", "jibunAddr": "가상광역시 동구 가상동 1-1", "bdNm": "가상청사",
+                         "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상1동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0"}]}})
+                return self.reply({"results": {"common": {"errorCode": "0", "totalCount": "1"}, "juso": [{"entX": f"{ent[0]:.6f}", "entY": f"{ent[1]:.6f}"}]}})
+            if u.path == "/v1/directions":
+                FAKE["kakao"].append({"path": u.path, "q": q, "auth": self.headers.get("Authorization"), "body": None})
+                return self.reply({"routes": [{"result_code": 0, "summary": {"distance": 900, "duration": 240}}]})
+            self.reply({"error": "없음"}, 404)
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            FAKE["kakao"].append({"path": self.path, "q": {}, "auth": self.headers.get("Authorization"), "body": body})
+            if self.headers.get("Authorization") != "KakaoAK E2EKAKAOKEY-777777":
+                return self.reply({"msg": "unauthorized"}, 401)
+            return self.reply({"trans_id": "e2e", "routes": [{"result_code": 0, "key": d["key"], "summary": {"distance": 1200, "duration": 420}} for d in body.get("destinations", [])]})
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv.server_address[1]
+
+
 def raw_get(path, headers=None):
     req = urllib.request.Request(URL.rstrip("/") + path, headers=headers or {})
     try:
@@ -111,6 +160,9 @@ def raw_get(path, headers=None):
 def main():
     print("작업 폴더:", WORK)
     subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "init"], env=ENV, check=True, capture_output=True)
+    fake = f"http://127.0.0.1:{start_fake_external()}"
+    ENV.update(DG_JUSO_BASE=fake, DG_KAKAO_NAVI_BASE=fake)
+    FAKE["base"] = fake
     srv = subprocess.Popen([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "serve", "--port", str(PORT)], env=ENV,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -473,6 +525,71 @@ def run():
            and len(S.list_audit(c_, entity="request", action="RESCHEDULE")) == 2, f"일괄 예정일 변경: 2건 → {later}, 사유 코드·건별 이력")
         page.keyboard.press("Escape")
 
+        # 외부 서비스(v0.11): 행안부 주소 검색·카카오모빌리티 — PC 서버가 대신 묻고(가짜 서버), 브라우저는 직접 연결하지 않음
+        page.goto(URL + "#/settings/addr")
+        xc = page.locator(".card", has=page.get_by_role("heading", name=re.compile("^외부 서비스")))
+        xc.get_by_label("주소 검색 승인키").fill("E2EJUSOKEY-123456")
+        xc.get_by_label("좌표 승인키").fill("E2ECOORDKEY-654321")
+        xc.get_by_label("카카오모빌리티 REST 키").fill("E2EKAKAOKEY-777777")
+        xc.get_by_label("이동시간 계산 방식").select_option("KAKAO")
+        xc.get_by_role("button", name="저장", exact=True).click()
+        expect(xc.get_by_text("저장됨 ••••3456").first).to_be_visible()
+        boot_txt = page.evaluate("async () => (await fetch('/api/bootstrap', {headers: {'X-DG-CSRF': '1'}})).text()")
+        ok("E2EJUSOKEY-123456" not in boot_txt and "E2EKAKAOKEY-777777" not in boot_txt and "••••7777" in boot_txt and xc.get_by_label("주소 검색 승인키").input_value() == ""
+           and xc.get_by_label("이동시간 계산 방식").input_value() == "KAKAO", "설정 → 주소·외부 서비스: 승인키·REST 키 저장 후 화면(브라우저)에는 가린 값만, 이동시간 방식 카카오모빌리티")
+        xc.get_by_role("button", name="주소 검색 연결 시험").click()
+        expect(xc.get_by_text(re.compile("✓ 주소 검색 정상.*좌표 정상"))).to_be_visible()
+        xc.get_by_role("button", name="카카오모빌리티 연결 시험").click()
+        expect(xc.get_by_text(re.compile("✓ 카카오모빌리티 정상"))).to_be_visible()
+        ok(True, "설정 [연결 시험]: 행안부 주소(검색·좌표)·카카오모빌리티 (개인정보 없는 고정 값)")
+        later2 = (dt.date.fromisoformat(today) + dt.timedelta(days=45)).isoformat()
+        page.goto(URL + "#/request/new")
+        expect(page.locator(".calday").first).to_be_visible()
+        page.wait_for_load_state("networkidle")
+        page.get_by_label("이름").fill("가상주소")
+        page.get_by_label("연락처").fill("01000005009")
+        n_juso = len(FAKE["juso"])
+        page.get_by_label("주소 찾기").fill("010-1234-5678")
+        expect(page.locator(".addr-sug .jusonote")).to_contain_text("전화번호")
+        page.get_by_label("주소 찾기").fill("가상주소")
+        expect(page.locator(".addr-sug .jusonote")).to_contain_text("이름")
+        ok(len(FAKE["juso"]) == n_juso, "주소 찾기 검색어에 전화번호·신청인 이름이 있으면 PC 서버가 행안부로 보내지 않고 안내")
+        page.get_by_label("주소 찾기").fill("서남로 1")
+        jb = page.locator(".addr-sug button", has_text="행안부")
+        expect(jb.first).to_be_visible()
+        page.screenshot(path=SHOTS / "pc_11_juso.png")
+        jb.first.click()
+        expect(page.get_by_label("배출 주소")).to_have_value(re.compile("서남로 1 \\(가상동, 가상청사\\)"))
+        expect(page.locator("input[readonly]").first).not_to_have_value("")
+        ok(abs(float(page.locator("input[readonly]").first.input_value()) - 35.1555) < 1e-5 and page.get_by_label("행정동").input_value() == "가상1동",
+           "주소 찾기: 이 PC 자료 다음에 '행안부' 결과 → 고르면 주소·좌표(좌표 API, UTM-K→WGS84)·동(행정동) 채움")
+        kws = [c["q"].get("keyword") for c in FAKE["juso"] if c["path"].endswith("addrLinkApi.do")]
+        ok(set(kws) <= {"서남로 1", "동구청"} and all(set(c["q"]) <= {"confmKey", "currentPage", "countPerPage", "keyword", "resultType", "admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno"} for c in FAKE["juso"])
+           and not any(k.lower() in ("cookie", "referer") for c in FAKE["juso"] for k in c["headers"]), f"행안부로 간 것: 검색어({', '.join(sorted(set(kws)))})·승인키·건물 식별 번호뿐, 쿠키·Referer 없음")
+        page.get_by_label("수거 예정일").fill(later2)
+        page.get_by_placeholder(re.compile("품목명·규격")).fill("3인용 소파")
+        page.locator(".results button").first.click()
+        page.get_by_role("button", name="품목 추가", exact=True).click()
+        page.get_by_role("button", name="접수 등록").click()
+        expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
+        dismiss(page)
+        page.goto(URL + "#/dispatch")
+        page.get_by_label("수거일").fill(later2)
+        page.get_by_role("button", name="노선 계산").click()
+        expect(page.locator(".matrix-note")).to_contain_text("도로 시간: 카카오모빌리티", timeout=30000)
+        km = page.locator("a.maplink").first
+        href = km.get_attribute("href")
+        ok(href.startswith("https://map.kakao.com/link/to/") and urllib.parse.unquote(href).startswith("https://map.kakao.com/link/to/1번 수거지,35.1555") and "가상주소" not in urllib.parse.unquote(href)
+           and km.get_attribute("target") == "_blank" and "noreferrer" in km.get_attribute("rel"), f"배정·노선: 지점마다 카카오맵 링크(좌표와 'N번 수거지'만) {urllib.parse.unquote(href)}")
+        kb = [c for c in FAKE["kakao"] if c["body"] or c["q"]]
+        ok(kb and all(c["auth"] == "KakaoAK E2EKAKAOKEY-777777" for c in kb) and not re.search(r"[가-힣]", json.dumps([c["body"] or c["q"] for c in kb], ensure_ascii=False)),
+           f"카카오모빌리티로 간 것: 좌표·키 머리글뿐 ({len(kb)}회)")
+        page.screenshot(path=SHOTS / "pc_12_dispatch_kakao.png")
+        slog = (WORK / "state" / "logs" / "server.log").read_text(encoding="utf-8")
+        ok("/api/juso-search" in slog and "서남로" not in slog and "가상주소" not in slog and "E2EJUSOKEY" not in slog, "서버 로그: 주소 검색 경로만 남고 검색어·이름·키 없음")
+        acc = S.rows(store.connect(), "SELECT filter, count FROM access_log WHERE filter LIKE '%행안부%'")
+        ok(acc and not any("서남로" in (a["filter"] or "") for a in acc), "접속기록: 행안부 주소 검색은 건수만 (검색어 없음)")
+
         # 오늘 현황
         page.goto(URL + "#/home")
         expect(page.locator(".kpi").first).to_be_visible()
@@ -648,7 +765,7 @@ def run():
         expect(page.locator(".kpi").first).to_be_visible()
         ok(page.locator(".todo-a", has_text="이번 달 접속기록 점검").count() == 0, "점검 완료 뒤 오늘 현황 알림 사라짐")
         page.goto(URL + "#/settings/basic")
-        ok(page.locator("nav.tabs a").count() == 10 and page.locator("nav.tabs a.on").inner_text() == "기본", "설정: 기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소 자료·백업·개인정보 탭")
+        ok(page.locator("nav.tabs a").count() == 10 and page.locator("nav.tabs a.on").inner_text() == "기본", "설정: 기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소·외부 서비스·백업·개인정보 탭")
         page.screenshot(path=SHOTS / "pc_24_settings.png", full_page=True)
 
         # 통계·보고서 + 배차표 인쇄
@@ -808,7 +925,9 @@ def run():
 
     external = [u for u, _ in REQUESTS if not u.startswith(("http://127.0.0.1", "data:", "blob:"))]
     hosts = sorted({u.split("/")[2] for u in external})
-    ok(all(h == "tiles.openfreemap.org" for h in hosts), f"PC 화면의 외부 요청은 지도 서버만 ({', '.join(hosts) or '없음'})")
+    ok(all(h == "tiles.openfreemap.org" for h in hosts), f"PC 화면(브라우저)의 외부 요청은 지도 서버만 ({', '.join(hosts) or '없음'}) — 행안부·카카오는 PC 서버가 물음")
+    ok(FAKE.get("base") and not any(u.startswith(FAKE["base"]) for u, _ in REQUESTS) and FAKE["juso"] and FAKE["kakao"],
+       "브라우저는 주소 API·길찾기 API(가짜 서버)에 직접 연결하지 않음 (PC 서버만 연결)")
     secrets = ["가상하나", "가상둘", "가상셋", "01000005001", "01000005003", "시험로"]
     ok(not [s for s in secrets if any(s in urllib.parse.unquote(u) for u in external)], "외부 요청에 이름·연락처·주소 없음")
 

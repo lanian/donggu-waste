@@ -6,7 +6,10 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import hashlib
+import json
+import math
 import os
+import time
 import re
 import sys
 import tempfile
@@ -1213,7 +1216,252 @@ def v11():
     print(f"\n통과 {passed}개 (v0.11 포함)")
 
 
+class FakeResp:
+    def __init__(self, body):
+        self.body = json.dumps(body, ensure_ascii=False).encode() if not isinstance(body, bytes) else body
+
+    def read(self, n=-1):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def v11_external():
+    """v0.11 외부 서비스: PC 서버가 대신 묻는 행안부 주소 API, 카카오모빌리티 이동시간 행렬(가짜 HTTP), 휴대폰 목록 감면·부과번호."""
+    print("\n— v0.11 외부 서비스 (네트워크 없이 가짜 HTTP) —")
+    import socket
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from dgpc import area as A, external as X, finance as FN, geo, privacy as PV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-ext-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    calls: list[dict] = []
+    real_urlopen = X.urlopen
+    utm = geo.wgs84_to_utmk(35.1462, 126.9233)
+
+    def juso_fake(req, timeout):
+        u = urllib.parse.urlsplit(req.full_url)
+        q = dict(urllib.parse.parse_qsl(u.query))
+        calls.append({"url": req.full_url, "path": u.path, "q": q, "timeout": timeout, "headers": dict(req.header_items()), "body": req.data})
+        if q.get("confmKey") == "BADKEY-0000":
+            return FakeResp({"results": {"common": {"errorCode": "E0001", "errorMessage": "승인되지 않은 KEY 입니다."}}})
+        if u.path.endswith("addrLinkApi.do"):
+            return FakeResp({"results": {"common": {"errorCode": "0", "totalCount": "2"}, "juso": [
+                {"roadAddr": "광주광역시 동구 서남로 1 (가상동)", "roadAddrPart1": "광주광역시 동구 서남로 1", "jibunAddr": "광주광역시 동구 가상동 1-1", "bdNm": "가상빌딩",
+                 "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상9동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0"},
+                {"roadAddr": "광주광역시 동구 서남로 3", "roadAddrPart1": "광주광역시 동구 서남로 3", "jibunAddr": "", "bdNm": "", "zipNo": "61401", "emdNm": "모르는동", "hemdNm": "",
+                 "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "3", "buldSlno": "0"}]}})
+        return FakeResp({"results": {"common": {"errorCode": "0", "totalCount": "1"}, "juso": [{"entX": f"{utm[0]:.6f}", "entY": f"{utm[1]:.6f}"}]}})
+
+    X.urlopen = juso_fake
+    try:
+        # 설정: 키는 DB에만, 화면에는 가린 값
+        ok(S.juso_search(con, "서남로 1")["configured"] is False and not calls, "승인키 없으면 외부로 묻지 않음 (configured=false)")
+        raises(lambda: S.save_settings(con, {"external": {"keys": {"juso_search_key": "짧음"}}}), "형식", "승인키 형식 검사")
+        raises(lambda: S.save_settings(con, {"external": {"travel_method": "KAKAO"}}), "REST 키", "카카오 방식은 REST 키가 있어야 고를 수 있음")
+        S.save_settings(con, {"external": {"keys": {"juso_search_key": "JUSOSEARCHKEY-123456", "juso_coord_key": "JUSOCOORDKEY-654321"}}})
+        st_txt = json.dumps(S.settings(con), ensure_ascii=False)
+        ex = S.settings(con)["external"]
+        ok("JUSOSEARCHKEY-123456" not in st_txt and "JUSOCOORDKEY" not in st_txt and ex["keys"]["juso_search_key"]["set"] and ex["keys"]["juso_search_key"]["mask"] == "••••3456"
+           and not ex["keys"]["kakao_rest_key"]["set"] and ex["travel_method"] == "ESTIMATE", "승인키는 암호화 DB에만 저장, 설정 응답(브라우저)에는 가린 값(••••3456)만")
+        ok(not [r for r in S.rows(con, "SELECT detail FROM audit_log") if "JUSOSEARCHKEY" in (r["detail"] or "")], "변경 이력에 키 값 없음 (키 이름만)")
+        # 검색: 검색어·승인키·쪽수·json만, 동은 행정동으로
+        A.save_dong(con, {"name": "가상9동", "keywords": []})
+        res = S.juso_search(con, "서남로 1 <script>", name="가상주민")
+        c0 = calls[-1]
+        ok(c0["path"] == "/addrlink/addrLinkApi.do" and sorted(c0["q"]) == ["confmKey", "countPerPage", "currentPage", "keyword", "resultType"] and c0["q"]["keyword"] == "서남로 1 script"
+           and c0["q"]["resultType"] == "json" and c0["url"].startswith("https://business.juso.go.kr/") and c0["timeout"] == 5 and c0["body"] is None
+           and not any(k.lower() in ("cookie", "referer") for k in c0["headers"]), "행안부 검색 요청: business.juso.go.kr, 검색어(특수문자 제거)·승인키·쪽수·json만, 5초 제한, 쿠키·Referer 없음")
+        ok(res["items"][0]["kind"] == "행안부" and res["items"][0]["dong"] == "가상9동" and res["items"][0]["address"] == "광주광역시 동구 서남로 1 (가상동, 가상빌딩)"
+           and res["items"][1]["dong"] is None and res["coord"], "검색 결과: '행안부' 표시, 행정동(hemdNm) → 동 자동 선택, 모르는 동은 비움")
+        acc = S.rows(con, "SELECT * FROM access_log ORDER BY id DESC LIMIT 1")[0]
+        ok(acc["action"] == "SEARCH" and acc["count"] == 2 and "서남로" not in json.dumps(acc, ensure_ascii=False) and "행안부" in acc["filter"], "접속기록: 행안부 검색 1줄(건수만, 검색어 없음)")
+        co = S.juso_coord(con, res["items"][0]["ref"])
+        c1 = calls[-1]
+        ok(c1["path"] == "/addrlink/addrCoordApi.do" and sorted(c1["q"]) == ["admCd", "buldMnnm", "buldSlno", "confmKey", "resultType", "rnMgtSn", "udrtYn"]
+           and c1["q"]["confmKey"] == "JUSOCOORDKEY-654321" and abs(co["lat"] - 35.1462) < 1e-6 and abs(co["lon"] - 126.9233) < 1e-6,
+           f"좌표 요청: 건물 식별 번호·좌표 승인키만, UTM-K → WGS84 ({co['lat']}, {co['lon']})")
+        n = len(calls)
+        ok(S.juso_coord(con, {**res["items"][0]["ref"], "admCd": "가상하나"})["none"] and len(calls) == n, "건물 식별 번호가 숫자 형식이 아니면 보내지 않음")
+        # 검색어 안전장치: 전화번호·이름 칸 값·저장된 주민 이름
+        S.create_request(con, {"name": "홍길가상", "phone": "01000007777", "address": "가상시 동구 예시로 7", "planned_date": "2026-11-05",
+                               "items": [{"fee_rate_id": S.FEE_TABLE["rows"][0]["id"], "qty": 1}]})
+        n = len(calls)
+        b1 = S.juso_search(con, "010-1234-5678")
+        b2 = S.juso_search(con, "서남로 김가상", name="김가상")
+        b3 = S.juso_search(con, "홍길가상 서남로")
+        b4 = S.juso_search(con, "서남로 01012345678")
+        ok(all(b.get("blocked") for b in (b1, b2, b3, b4)) and len(calls) == n and "전화번호" in b1["blocked"] and "이름" in b2["blocked"] and "주민 이름" in b3["blocked"],
+           "검색어에 전화번호·신청인 이름(이름 칸)·저장된 주민 이름이 있으면 외부로 보내지 않음")
+        ok(X.keyword_guard("서남로 12-3") is None and X.keyword_guard("지산1동 123-45") is None and X.keyword_guard("동명로 14 101동 1203호") is None, "보통 주소(번지·동·호)는 막지 않음")
+        S.save_settings(con, {"external": {"keys": {"juso_search_key": "BADKEY-0000"}}})
+        e = S.juso_search(con, "서남로 1")
+        ok(e["code"] == "E0001" and "승인키" in e["error"] and "BADKEY" not in e["error"], "틀린 승인키 → 안내 문구(키 값 없음)")
+        S.save_settings(con, {"external": {"keys": {"juso_search_key": "JUSOSEARCHKEY-123456"}}})
+        ok(S.external_test(con, "juso")["ok"] and "동구청" in calls[-2]["q"]["keyword"], "설정 [연결 시험]: 개인정보 없는 고정 검색어(동구청)로 검색·좌표 확인")
+
+        # 오류: 시간 초과·HTTP 오류는 일반 문구 (검색어·주소 없음)
+        def boom(exc):
+            def f(req, timeout):
+                raise exc
+            return f
+        X.urlopen = boom(urllib.error.URLError(socket.timeout("timed out")))
+        e = S.juso_search(con, "서남로 99")
+        ok(e["code"] == "TIMEOUT" and "서남로" not in e["error"], f"시간 초과 → '{e['error']}'")
+        X.urlopen = boom(urllib.error.URLError(ConnectionRefusedError("refused")))
+        ok(S.juso_search(con, "서남로 99")["code"] == "NETWORK", "연결 실패 → NETWORK (인터넷·프록시 확인 안내)")
+        X.urlopen = boom(urllib.error.HTTPError("https://x/?keyword=서남로", 500, "err", {}, None))
+        e = S.juso_search(con, "서남로 99")
+        ok(e["code"] == "HTTP_500" and "서남로" not in e["error"] and "keyword" not in e["error"], "HTTP 오류 문구에 요청 주소·검색어 없음")
+    finally:
+        X.urlopen = real_urlopen
+
+    # 프록시·받는 곳 바꾸기
+    saved = {k: os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy")}
+    os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = "http://proxy.example:3128"
+    try:
+        ph = [hd for hd in X._opener("https://business.juso.go.kr/addrlink/addrLinkApi.do").handlers if isinstance(hd, urllib.request.ProxyHandler)]
+        pl = [hd for hd in X._opener("http://127.0.0.1:9/x").handlers if isinstance(hd, urllib.request.ProxyHandler)]
+        ok(ph and ph[0].proxies.get("https") == "http://proxy.example:3128" and not any(x.proxies for x in pl), "기관망 프록시(HTTPS_PROXY) 따름, 이 PC 안 주소(시험용 가짜 서버)는 프록시 안 거침")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    os.environ["DG_JUSO_BASE"], os.environ["DG_KAKAO_NAVI_BASE"] = "http://127.0.0.1:1/", "http://127.0.0.1:2"
+    ok(X.juso_base() == "http://127.0.0.1:1" and X.kakao_base() == "http://127.0.0.1:2", "DG_JUSO_BASE·DG_KAKAO_NAVI_BASE 로 받는 곳 바꾸기(자동 시험용)")
+    del os.environ["DG_JUSO_BASE"], os.environ["DG_KAKAO_NAVI_BASE"]
+
+    # 카카오모빌리티 이동시간 행렬
+    kc: list[dict] = []
+    fail_keys: set[str] = set()
+
+    def kakao_fake(req, timeout):
+        u = urllib.parse.urlsplit(req.full_url)
+        rec = {"path": u.path, "q": dict(urllib.parse.parse_qsl(u.query)), "auth": req.get_header("Authorization"), "method": req.get_method(),
+               "body": json.loads(req.data) if req.data else None, "url": req.full_url}
+        kc.append(rec)
+        if rec["auth"] != "KakaoAK KAKAOKEY-0000-1111":
+            raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {}, None)
+        if u.path == "/v1/destinations/directions":
+            b = rec["body"]
+            ox, oy = float(b["origin"]["x"]), float(b["origin"]["y"])
+            routes = []
+            for d in b["destinations"]:
+                km = routing.haversine_km((oy, ox), (float(d["y"]), float(d["x"])))
+                if f'{d["y"]},{d["x"]}' in fail_keys:
+                    routes.append({"result_code": 104, "result_msg": "출발지와 도착지가 너무 가까움", "key": d["key"]})
+                else:
+                    routes.append({"result_code": 0, "key": d["key"], "summary": {"distance": int(km * 1000), "duration": int(km * 100) + 60}})
+            return FakeResp({"trans_id": "t", "routes": routes})
+        if u.path == "/v1/directions":
+            (ox, oy), (dx, dy) = [map(float, rec["q"][k].split(",")) for k in ("origin", "destination")]
+            km = routing.haversine_km((oy, ox), (dy, dx))
+            return FakeResp({"routes": [{"result_code": 0, "summary": {"duration": int(km * 100) + 60}}]})
+        raise AssertionError(u.path)
+
+    X.urlopen = kakao_fake
+    try:
+        import random as _r
+        rng = _r.Random(3)
+        pts = [(35.1462, 126.9233)] + [(round(35.14 + rng.uniform(-0.02, 0.02), 6), round(126.92 + rng.uniform(-0.02, 0.02), 6)) for _ in range(33)] + [(35.30, 126.92)]  # 마지막: 17km 밖
+        cache = routing.TravelCache(con)
+        mat, info = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", cache, min_interval_s=0)
+        posts = [c for c in kc if c["path"] == "/v1/destinations/directions"]
+        gets = [c for c in kc if c["path"] == "/v1/directions"]
+        ok(all(len(c["body"]["destinations"]) <= 30 and c["body"]["radius"] <= 10000 for c in posts) and len(posts) == 34 * 2 and all(c["method"] == "POST" for c in posts),
+           f"다중 목적지 API: 출발지마다 30곳씩 나눠 묻고(반경 10km), 행 단위로 채움 (POST {len(posts)}회)")
+        ok(len(gets) == 34 * 2 and all(set(c["q"]) == {"origin", "destination", "priority"} for c in gets), f"반경 10km 밖 지점은 1:1 길찾기(GET {len(gets)}회)")
+        body_txt = json.dumps([c["body"] for c in posts], ensure_ascii=False)
+        ok(set(posts[0]["body"]) == {"origin", "destinations", "radius", "priority"} and all(set(d) == {"x", "y", "key"} for c in posts for d in c["body"]["destinations"])
+           and all(c["auth"] == "KakaoAK KAKAOKEY-0000-1111" for c in kc) and not re.search(r"[가-힣]", body_txt), "카카오모빌리티에는 좌표(경도 x·위도 y)와 'KakaoAK 키' 머리글만, 이름·주소 없음")
+        ok(info["fallback_pairs"] == 0 and info["road_pairs"] == 35 * 34 and mat[0][1] == math.ceil((int(routing.haversine_km(pts[0], pts[1]) * 100) + 60) / 60) and mat[3][3] == 0,
+           f"N×N 행렬(35×35) 모두 도로 시간, 분 단위 올림 (API {info['api_calls']}회)")
+        kc.clear()
+        mat2, info2 = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", cache, min_interval_s=0)
+        ok(not kc and info2["cache_hits"] == 35 * 34 and mat2 == mat, "두 번째 계산: DB 캐시(좌표 소수 5자리 쌍)로 API 호출 없음")
+        ok(S.one(con, "SELECT COUNT(*) AS n FROM travel_cache")["n"] == 35 * 34 and not S.rows(con, "SELECT origin FROM travel_cache WHERE origin GLOB '*[가-힣]*'"),
+           "캐시 표에는 좌표 쌍과 초만 (이름·주소 없음)")
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=31)).isoformat(timespec="seconds")
+        con.execute("UPDATE travel_cache SET fetched_at=? WHERE origin=?", (old, routing._ck(pts[0])))
+        kc.clear()
+        routing.kakao_matrix(pts[:3], "KAKAOKEY-0000-1111", cache, min_interval_s=0)
+        ok(len(kc) == 1 and kc[0]["body"]["origin"]["y"] == "35.14620", "30일 지난 캐시는 쓰지 않고 다시 물음 (지난 것은 정리)")
+        # 일부 실패 → 그 쌍만 직선 추정
+        kc.clear()
+        fail_keys.add(f"{pts[2][0]:.5f},{pts[2][1]:.5f}")
+        sub = [(35.15, 126.93), pts[2], (35.151, 126.931), (35.152, 126.935)]
+        mat3, info3 = routing.kakao_matrix(sub, "KAKAOKEY-0000-1111", routing.TravelCache(con), min_interval_s=0)
+        est = routing._estimate_min(sub[0], sub[1])
+        ok(info3["fallback_pairs"] == 3 and mat3[0][1] == est and routing.matrix_note("KAKAO", info3) == "도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)",
+           "경로를 못 받은 쌍만 직선거리 추정 → '도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)'")
+        # 시간 초과: 더 묻지 않고 전부 추정
+        X.urlopen = lambda req, timeout: (_ for _ in ()).throw(urllib.error.URLError(socket.timeout("timed out")))
+        far = [(35.16, 126.94), (35.161, 126.941), (35.163, 126.945)]
+        m4, s4, i4 = routing.build_matrix(far, method="KAKAO", kakao_key="KAKAOKEY-0000-1111", cache=routing.TravelCache(con))
+        ok(s4 == "ESTIMATE" and i4["api_calls"] == 1 and m4 == routing.estimate_matrix(far) and "카카오모빌리티로 구하지 못함" in routing.matrix_note(s4, i4),
+           "시간 초과 → 첫 실패에서 멈추고 전부 직선거리 추정, 화면 문구에 표시")
+        X.urlopen = kakao_fake
+        kc.clear()
+        _m, s5, i5 = routing.build_matrix(far, method="KAKAO", kakao_key="WRONGKEY-000000", cache=None)
+        ok(s5 == "ESTIMATE" and len(kc) == 1 and "인증" in i5["error"], "틀린 키(401) → 한 번만 묻고 직선거리 추정")
+        _m, s6, i6 = routing.build_matrix(far, method="KAKAO", kakao_key="", cache=None)
+        ok(s6 == "ESTIMATE" and "REST 키" in routing.matrix_note(s6, i6), "키 없이 카카오 방식 → 직선거리 추정과 이유 표시")
+        kc.clear()
+        mm, _ = routing.kakao_matrix([(35.15 + i * 1e-3, 126.93) for i in range(6)], "KAKAOKEY-0000-1111", None, max_calls=2, min_interval_s=0)
+        ok(len(kc) == 2, "호출 수 한도(max_calls)를 넘으면 더 묻지 않음 (나머지 직선 추정)")
+        t0 = time.monotonic()
+        routing.kakao_matrix([(35.17 + i * 1e-3, 126.93) for i in range(3)], "KAKAOKEY-0000-1111", None, min_interval_s=0.15)
+        ok(time.monotonic() - t0 >= 0.3, "호출 사이 최소 간격(초당 호출 수 제한)")
+        # 노선 계산 전체: 카카오 방식
+        S.save_settings(con, {"external": {"keys": {"kakao_rest_key": "KAKAOKEY-0000-1111"}, "travel_method": "KAKAO"}})
+        ok(S.travel_method(con) == "KAKAO" and S.settings(con)["external"]["keys"]["kakao_rest_key"]["mask"] == "••••1111", "설정: 이동시간 계산 방식 카카오모빌리티 + REST 키(가린 값)")
+        crew = {"id": "c1", "name": "가상", "capacity_m3": 20, "shift_start": "09:00", "shift_end": "17:00"}
+        reqs = [{"id": f"r{i}", "lat": 35.145 + i * 2e-3, "lon": 126.92 + i * 1e-3, "items": [{"name": "의자", "qty": 1}]} for i in range(4)]
+        pl = routing.plan(reqs, [crew], {"lat": 35.1462, "lon": 126.9233}, travel_method="KAKAO", kakao_key=S.secret(con, "kakao_rest_key"),
+                          travel_cache=routing.TravelCache(con), time_limit_s=1)
+        ok(pl["matrix_source"] == "KAKAO" and pl["matrix_note"].startswith("도로 시간: 카카오모빌리티") and len(pl["routes"][0]["stops"]) == 4, f"노선 계산: {pl['matrix_note']}")
+        S.save_settings(con, {"external": {"travel_method": "ESTIMATE"}})
+        ok(routing.plan(reqs, [crew], {"lat": 35.1462, "lon": 126.9233}, travel_method=S.travel_method(con), time_limit_s=1)["matrix_source"] == "ESTIMATE", "기본(직선거리 추정)으로 되돌리면 외부 호출 없음")
+    finally:
+        X.urlopen = real_urlopen
+
+    # 휴대폰 목록: 감면율(rd)·부과번호(lv)
+    reg = S.registration_text(con)
+    ph = Phone(reg)
+    dev = S.register_device(con, ph.code(), "감면폰")["device_id"]
+    cid = S.save_crew(con, {"name": "감면 시험팀", "device_id": dev})
+    base = {"phone": "01000008888", "address": "가상시 동구 예시로 8", "planned_date": "2026-11-06", "lat": 35.15, "lon": 126.92,
+            "items": [{"fee_rate_id": next(r["id"] for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED"), "qty": 1}]}
+    ra = S.create_request(con, {**base, "name": "감면가상", "reduction_code": "NEAR_POOR", "reduction_proof": "서류 확인", "reduction_checker": "확인자"})
+    rb = S.create_request(con, {**base, "name": "보통가상"})
+    bt = S.confirm_plan(con, "2026-11-06", {cid: [{"request_id": ra["id"], "eta": "09:00"}, {"request_id": rb["id"], "eta": "09:30"}]})[0]
+    payload, _ = S.build_daylist(con, bt["batch_id"])
+    comp = P.compact_daylist(payload, S.FEE_ROWS)
+    ok(comp["s"][0]["rd"] == 50 and comp["s"][0]["lv"] == ra["levy_no"] and "rd" not in comp["s"][1] and comp["s"][1]["lv"] == rb["levy_no"]
+       and "차상위" not in json.dumps(comp, ensure_ascii=False), f"목록 압축: 감면 건 'rd'=50·'lv'={ra['levy_no']}, 감면 없는 건은 'rd' 없음, 감면 사유 이름은 보내지 않음")
+    bun = S.make_bundle(con, bt["batch_id"])
+    _h, got, _r = ph.receive(bun["frames"])
+    ok(got["stops"][0]["reduction"] == {"rate": 50} and got["stops"][0]["levy_no"] == ra["levy_no"] and "reduction" not in got["stops"][1], "휴대폰(흉내)이 감면율·부과번호를 받음")
+    old = {**comp, "s": [{k: v for k, v in x.items() if k not in ("rd", "lv")} for x in comp["s"]]}
+    eo = P.expand_daylist(old, S.FEE_ROWS)
+    ok(all("reduction" not in x and x["levy_no"] == "" for x in eo["stops"]), "이전 형식(rd·lv 없음)도 그대로 읽음 → 감면 없음")
+    calc = sum(i["amount"] or 0 for i in payload["stops"][0]["items"])
+    fs = FN.fee_summary(S.one(con, "SELECT * FROM request WHERE id=?", (ra["id"],)), calc)
+    ok(fs["reduction"] == calc * 50 // 100 and fs["levied"] == calc - fs["reduction"], f"PC 감면 규칙(감면액 원 단위 버림): 계산 {calc} → 감면 {fs['reduction']} → 부과 {fs['levied']}")
+    con.close()
+    print(f"\n통과 {passed}개 (v0.11 외부 서비스 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
     v11()
+    v11_external()

@@ -134,9 +134,11 @@ def cmd_make_bundle(a):
     work_date = a.date or dt.datetime.now(KST).date().isoformat()
     sample = make_daylist(a.count, work_date, 1, seed=a.seed)
     stops = []
+    reduce = {int(x) for x in (a.reduce or "").split(",") if x.strip().isdigit()}
     for s in sample["stops"]:
+        red = {"reduction_code": "NEAR_POOR", "reduction_proof": "서류 확인", "reduction_checker": "시험 확인자"} if s["seq"] in reduce else {}
         r = S.create_request(c, {"name": s["name"], "phone": s["phone"], "address": s["address"], "spot_note": s["spot_note"],
-                                 "memo": s["memo"], "planned_date": work_date, "lat": s["lat"], "lon": s["lon"],
+                                 "memo": s["memo"], "planned_date": work_date, "lat": s["lat"], "lon": s["lon"], **red,
                                  "items": [{"fee_rate_id": i["fee_rate_id"], "qty": i["qty"]} for i in s["items"]]})
         stops.append({"request_id": r["id"], "eta": s["eta"]})
     batch = S.confirm_plan(c, work_date, {cid: stops})[0]
@@ -381,6 +383,7 @@ def main(argv=None):
     m.add_argument("--date"); m.add_argument("--chunk", type=int, default=700)
     m.add_argument("--ec", choices=["L", "M", "Q"], default="M"); m.add_argument("--fps", type=int, default=3)
     m.add_argument("--seed", type=int, default=7)
+    m.add_argument("--reduce", default="", help="감면(차상위 50%%)을 줄 순번들, 예: 2,5 (시험용)")
     m.set_defaults(fn=cmd_make_bundle)
     c = s.add_parser("confirm-receipt"); c.add_argument("bundle"); c.add_argument("code"); c.set_defaults(fn=cmd_confirm_receipt)
     i = s.add_parser("import-result"); i.add_argument("file")

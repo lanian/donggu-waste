@@ -14,6 +14,7 @@ function FEES() {
 }
 import * as M from '/web/map.js';
 import { Collector } from '/web/proto.js';
+import * as NAV from '/web/nav.js';
 
 const $app = document.getElementById('app');
 let boot = null;       // 설정·팀·기기
@@ -747,20 +748,50 @@ async function screenRequest(id) {
   const addrQ = h('input', { type: 'search', placeholder: '도로명·지번·건물명·아파트 (초성 가능, 예: ㄱㅅㅇㅍㅌ)', autocomplete: 'off', 'aria-label': '주소 찾기', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': 'addr-sug' });
   const addrSug = h('div', { class: 'results addr-sug', id: 'addr-sug', role: 'listbox', hidden: true });
   let addrT = null;
-  const pickAddr = (x) => {
-    F.address.value = x.address; F.lat.value = x.lat; F.lon.value = x.lon; geoSource = 'ADDR';
-    if (x.dong && [...F.dong.options].some((o) => o.value === x.dong)) { F.dong.value = x.dong; dongTouched = true; dongMsg.textContent = '주소 자료의 행정동으로 정했습니다.'; dongMsg.className = 'muted small'; }
-    geoMsg.textContent = `${x.kind} 찾기: ${x.address} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.`;
-    if (setPin) setPin(x.lat, x.lon, true);
-    addrSug.hidden = true; addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
+  // 행안부 결과(kind '행안부')는 PC 서버가 대신 물어 온 것: 고르면 서버가 좌표 API로 출입구 좌표를 받아 온다(좌표 승인키가 있을 때)
+  let jusoSeq = 0;
+  const pickAddr = wrap(async (x) => {
+    const ext = x.kind === '행안부';
+    let lat = x.lat, lon = x.lon, note = '';
+    if (ext) {
+      const c = await api('juso-coord?' + new URLSearchParams(x.ref));
+      if (c.none) note = c.reason || '좌표를 받지 못했습니다. 지도에서 위치를 지정하세요.';
+      else { lat = c.lat; lon = c.lon; }
+    }
+    F.address.value = x.address;
+    if (lat != null) { F.lat.value = lat; F.lon.value = lon; geoSource = 'ADDR'; }
+    if (x.dong && [...F.dong.options].some((o) => o.value === x.dong)) { F.dong.value = x.dong; dongTouched = true; dongMsg.textContent = ext ? '행안부 주소의 행정동으로 정했습니다.' : '주소 자료의 행정동으로 정했습니다.'; dongMsg.className = 'muted small'; }
+    geoMsg.textContent = lat != null ? `${x.kind} 찾기: ${x.address} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.` : `${x.kind} 찾기: ${x.address} — ${note}`;
+    if (setPin && lat != null) setPin(lat, lon, true);
+    addrSug.hidden = true; addrSug.replaceChildren(); jusoSeq++; addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
     checkDup(); loadCal(); saveDraft(); F.spot_note.focus();
-  };
-  const drawSug = (list) => {
-    addrSug.replaceChildren(...list.map((x) => h('button', { type: 'button', role: 'option', onclick: () => pickAddr(x) }, chip(x.kind, 'info'), ` ${x.label}`, x.dong ? h('span', { class: 'p' }, x.dong) : null)));
-    if (!list.length && addrQ.value.trim().length >= 2) addrSug.replaceChildren(h('p', { class: 'muted pad-s' }, '주소 자료에서 찾지 못했습니다. 배출 주소 칸에 직접 적고 지도로 위치를 지정하세요.'));
+  });
+  const sugBtn = (x) => h('button', { type: 'button', role: 'option', onclick: () => pickAddr(x) }, chip(x.kind, x.kind === '행안부' ? 'warn' : 'info'), ` ${x.label}`, x.dong ? h('span', { class: 'p' }, x.dong) : null);
+  // 이 PC의 주소 자료 결과를 먼저, 그 아래 행안부 결과(설정에 승인키가 있을 때). ext: 행안부 응답 또는 { loading: true }
+  const drawSug = (list, ext = null) => {
+    // 같은 건물(도로명+건물번호)이 이 PC 자료에 이미 있으면 행안부 결과에서 뺀다
+    const roadKey = (a) => { const m = /([가-힣A-Za-z0-9·.]+(?:대로|로|길))\s*(\d+(?:-\d+)?)/.exec(a || ''); return m ? m[1] + m[2] : a; };
+    const seen = new Set(list.map((x) => roadKey(x.address)));
+    const extItems = ((ext && ext.items) || []).filter((x) => !seen.has(roadKey(x.address)));
+    const kids = [...list.map(sugBtn), ...extItems.map(sugBtn)];
+    if (ext && ext.loading) kids.push(h('p', { class: 'muted pad-s small' }, '행안부 주소 검색 중…'));
+    if (ext && (ext.blocked || ext.error)) kids.push(h('p', { class: 'muted pad-s small jusonote' }, '행안부 검색: ' + (ext.blocked || ext.error)));
+    if (!kids.length && addrQ.value.trim().length >= 2) kids.push(h('p', { class: 'muted pad-s' }, '주소 자료에서 찾지 못했습니다. 배출 주소 칸에 직접 적고 지도로 위치를 지정하세요.'));
+    addrSug.replaceChildren(...kids);
     addrSug.hidden = !addrQ.value.trim(); addrQ.setAttribute('aria-expanded', addrSug.hidden ? 'false' : 'true');
   };
-  addrQ.addEventListener('input', () => { clearTimeout(addrT); addrT = setTimeout(wrap(async () => { const q0 = addrQ.value.trim(); if (q0.length < 2) return drawSug([]); drawSug(await api('addr-search?q=' + encodeURIComponent(q0))); }), 250); });
+  const jusoOn = () => !!(boot.settings.external && boot.settings.external.keys.juso_search_key.set);
+  addrQ.addEventListener('input', () => { clearTimeout(addrT); addrT = setTimeout(wrap(async () => {
+    const q0 = addrQ.value.trim(), seq = ++jusoSeq;
+    if (q0.length < 2) return drawSug([]);
+    const local = await api('addr-search?q=' + encodeURIComponent(q0));
+    if (seq !== jusoSeq) return;
+    if (!jusoOn()) return drawSug(local);
+    drawSug(local, { loading: true });
+    // 서버가 검색어에 전화번호·신청인 이름이 있으면 보내지 않는다(이름 칸 값을 함께 넘겨 대조)
+    const j = await api('juso-search?' + new URLSearchParams({ q: q0, name: F.name.value.trim() }));
+    if (seq === jusoSeq) drawSug(local, j);
+  }), 300); });
   addrQ.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { const b = addrSug.querySelector('button'); if (b) { e.preventDefault(); b.focus(); } } else if (e.key === 'Escape') { addrSug.hidden = true; } else if (e.key === 'Enter') { e.preventDefault(); const b = addrSug.querySelector('button'); if (b) b.click(); } });
   addrSug.addEventListener('keydown', (e) => { const bs = [...addrSug.querySelectorAll('button')], i = bs.indexOf(document.activeElement); if (e.key === 'ArrowDown' && bs[i + 1]) { e.preventDefault(); bs[i + 1].focus(); } else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? bs[i - 1] : addrQ).focus(); } });
   // 수수료 감면(새 접수): 사유·증빙 확인 방법·확인자 (식별번호는 적지 않음)
@@ -903,7 +934,7 @@ async function screenRequest(id) {
           h('div', { class: 'grid2' }, lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),
-        h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
+        h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
           h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'), geoMsg),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
     actionbar,
@@ -1009,6 +1040,13 @@ function photoImg(pid) {
 }
 
 // ------------------------------------------------------------ 배정·노선
+// 카카오맵 웹 길찾기 링크(지점마다): 좌표와 "N번 수거지"만 담는다. 이름·주소는 넣지 않는다. (휴대폰 web/nav.js와 같은 형식)
+function kakaoLink(q, n) {
+  if (!q || !NAV.hasCoord(q)) return null;
+  const label = NAV.navLabel(n);
+  return h('a', { class: 'small maplink', href: NAV.navUrls('kakao', { lat: q.lat, lon: q.lon, label }).fallback, target: '_blank', rel: 'noopener noreferrer',
+    title: `카카오맵에서 ${label}까지 길찾기 (좌표만 전달)`, 'aria-label': `${label} 카카오맵 길찾기` }, ' 카카오맵');
+}
 async function screenDispatch() {
   const s = (screenDispatch.s ||= { date: boot.today, crews: new Set(), seen: new Set(), plan: null });
   const date = h('input', { type: 'date', id: 'dp-date', value: s.date });
@@ -1046,7 +1084,8 @@ async function screenDispatch() {
         h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${x.load_m3 != null ? ` · 누적 적재(추정) ${x.load_m3}m³` : ''}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
           R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null,
           R[x.request_id].dong ? chip(R[x.request_id].dong) : null,
-          R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null),
+          R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null,
+          kakaoLink(R[x.request_id], i + 1)),
         h('span', { class: 'ctl' }, btn('▲', () => move(ri, i, -1), 'small', { 'aria-label': `${i + 1}번 위로`, disabled: i === 0 }), btn('▼', () => move(ri, i, 1), 'small', { 'aria-label': `${i + 1}번 아래로`, disabled: i === rt.stops.length - 1 }),
           h('select', { class: 'small', 'aria-label': '다른 팀으로 이동', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기')))),
         x.unload_after ? h('div', { class: 'stopline unload' }, h('span', { class: 's' }, '⇩'), h('span', { class: 't' }, `${x.unload_after.label} 하차`, h('br'),
@@ -1075,7 +1114,8 @@ async function screenDispatch() {
     const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
     const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
-    out.replaceChildren(h('div', { class: 'notice' }, `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
+    const note = p.res.matrix_source === 'KAKAO' ? p.res.matrix_note : `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`;
+    out.replaceChildren(h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
         ['반입지 경유', `${p.routes.reduce((a, rt) => a + (rt.unloads || 0), 0)}회`, ''], ['마지막 예상 종료', lastEnd || '—', '']].map(([k, v, c]) => h('div', { class: 'kpi ' + c }, h('span', { class: 'k' }, k), h('b', { class: 'v' }, v)))),
       h('div', { class: 'dispatch-grid' }, h('div', { class: 'mapcol' }, h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '지도'), h('span', { class: 'legend small' }, ...p.routes.map((rt, ri) => h('span', { class: `lg route c${(ri % 4) + 1}` }, rt.crew_name)))), mapBox,
@@ -1491,12 +1531,12 @@ async function screenQrTest() {
 }
 
 // ------------------------------------------------------------ 설정 (탭: 기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소 자료·백업·개인정보)
-const SETTING_TABS = [['basic', '기본'], ['crews', '수거팀'], ['devices', '기기'], ['dongs', '행정동'], ['capacity', '한도'], ['holidays', '휴무일'], ['fees', '수수료·감면'], ['addr', '주소 자료'], ['backup', '백업'], ['privacy', '개인정보']];
+const SETTING_TABS = [['basic', '기본'], ['crews', '수거팀'], ['devices', '기기'], ['dongs', '행정동'], ['capacity', '한도'], ['holidays', '휴무일'], ['fees', '수수료·감면'], ['addr', '주소·외부 서비스'], ['backup', '백업'], ['privacy', '개인정보']];
 async function screenSettings(tab) {
   tab = SETTING_TABS.some(([k]) => k === tab) ? tab : 'basic';
   const tabs = h('nav', { class: 'tabs', 'aria-label': '설정 묶음' }, ...SETTING_TABS.map(([k, t]) => h('a', { href: '#/settings/' + k, class: k === tab ? 'on' : '', 'aria-current': k === tab ? 'page' : null }, t)));
   const body = await ({ basic: settingsBasic, crews: settingsCrews, devices: settingsDevices, dongs: () => [dongCard()], capacity: () => [capacityCard()], holidays: () => [holidayCard()],
-    fees: settingsFees, addr: () => [addrCard()], backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
+    fees: settingsFees, addr: () => [addrCard(), externalCard()], backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
   return h('div', {}, pagehead('설정'), tabs, ...[].concat(body));
 }
 function settingsDevices() {
@@ -1531,7 +1571,7 @@ function settingsBasic() {
   const routeMsg = h('p', { class: 'msg' }), infoMsg = h('p', { class: 'msg' });
   const st = boot.settings;
   const dlat = h('input', { value: st.depot.lat, class: 'w-s', 'aria-label': '차고지 위도' }), dlon = h('input', { value: st.depot.lon, class: 'w-s', 'aria-label': '차고지 경도' }), dlabel = h('input', { value: st.depot.label, 'aria-label': '차고지 이름' });
-  const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (비우면 직선거리 추정)', class: 'w-l', 'aria-label': '로컬 OSRM' });
+  const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (이동시간 방식이 로컬 OSRM일 때 사용)', class: 'w-l', 'aria-label': '로컬 OSRM' });
   const sb = h('input', { type: 'number', value: st.service_min_base, class: 'w-xs', 'aria-label': '지점당 기본 작업(분)' }), sp = h('input', { type: 'number', value: st.service_min_per_item, class: 'w-xs', 'aria-label': '품목당 작업(분)' });
   const us = st.unload_site || {}, es = st.end_site || {};
   const jur = h('input', { value: st.jurisdiction || '', placeholder: '예: 동구', class: 'w-s', 'aria-label': '관할 구역' });
@@ -1961,6 +2001,36 @@ function addrCard() {
     h('p', { class: 'muted' }, '행정안전부 도로명주소 "위치정보요약DB" 파일을 이 PC에 넣으면 접수 화면에서 주소로 위치를 찾습니다. 모든 처리는 이 PC 안에서 하며 외부로 보내지 않습니다. 큰 파일은 명령으로 가져오세요: ', h('code', {}, 'python pc/pc_tool.py import-addr <파일·폴더> --region 동구')),
     h('div', { class: 'row' }, '저장된 자료', stat),
     h('div', { class: 'row' }, file, region, cols, btn('미리보기', prev, 'small')), out, msg);
+}
+
+// ------------------------------------------------------------ 외부 서비스 (운영 관리자, v0.11): 행안부 주소 API·카카오모빌리티
+// 키는 PC의 암호화 DB에만 저장하고 화면에는 가린 값만 돌아온다. 외부 호출은 PC 서버가 하며 브라우저는 직접 연결하지 않는다.
+function externalCard() {
+  const ex = boot.settings.external || { keys: {}, travel_method: 'ESTIMATE' };
+  const msg = h('p', { class: 'msg' });
+  const keyRow = (k) => {
+    const info = ex.keys[k] || { set: false, mask: '', label: k };
+    const inp = h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', class: 'w-l', 'aria-label': info.label, placeholder: info.set ? `저장됨 ${info.mask} (바꿀 때만 입력)` : '(없음)' });
+    const clr = info.set ? btn('지우기', wrap(async () => { await post('settings', { external: { keys: { [k]: '' } } }); toast(`${info.label}를 지웠습니다`); boot = null; render(); }, msg), 'small') : null;
+    return { k, inp, el: h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, info.label), h('div', { class: 'ft-v' }, inp, info.set ? chip('저장됨 ' + info.mask, 'ok') : chip('없음'), clr)) };
+  };
+  const rows = ['juso_search_key', 'juso_coord_key', 'kakao_rest_key'].map(keyRow);
+  const method = h('select', { 'aria-label': '이동시간 계산 방식' }, ...[['ESTIMATE', '직선거리 추정 (기본, 외부 전송 없음)'], ['OSRM', '로컬 OSRM (기본 설정의 OSRM 주소)'], ['KAKAO', '카카오모빌리티 API (REST 키)']]
+    .map(([v, t]) => h('option', { value: v, selected: v === ex.travel_method }, t)));
+  const testOut = h('span', { class: 'muted small', role: 'status' });
+  const test = (svc) => wrap(async () => { testOut.textContent = '연결 시험 중…'; const r = await post('external/test', { service: svc }); testOut.textContent = (r.ok ? '✓ ' : '✗ ') + r.message; }, msg);
+  return h('div', { class: 'card' }, h('h2', {}, '외부 서비스 (주소 검색·도로 이동시간)'),
+    h('p', { class: 'muted' }, '사용자 요청으로 더한 기능입니다. 이 PC 서버가 대신 묻고, 브라우저는 외부 서버에 직접 연결하지 않습니다. 이름·연락처는 보내지 않습니다.'),
+    h('ul', { class: 'small muted' },
+      h('li', {}, '행안부 도로명주소 API(business.juso.go.kr): 접수 화면 [주소 찾기]에 적은 검색어만 보냅니다. 전화번호 모양 값·신청인 이름이 든 검색어는 보내지 않습니다. 고른 결과의 좌표는 건물 식별 번호로 묻습니다.'),
+      h('li', {}, '카카오모빌리티 길찾기 API: 노선 계산 때 지점 좌표만 보냅니다. 받은 시간은 30일 동안 이 PC에 보관해 다시 묻지 않고, 못 받은 구간은 직선거리로 추정해 화면에 몇 쌍인지 표시합니다.'),
+      h('li', {}, '기관망 프록시는 PC 서버를 실행할 때의 HTTPS_PROXY 환경변수를 따릅니다. 검색어는 서버 로그·접속기록에 남지 않습니다(접속기록에는 검색했다는 사실과 건수만).')),
+    h('div', { class: 'ftable' }, ...rows.map((r) => r.el), h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '이동시간 계산 방식'), h('div', { class: 'ft-v' }, method))),
+    h('div', { class: 'row' }, btn('저장', wrap(async () => {
+      const keys = {}; rows.forEach((r) => { if (r.inp.value.trim()) keys[r.k] = r.inp.value.trim(); });
+      await post('settings', { external: { keys, travel_method: method.value } }); rows.forEach((r) => { r.inp.value = ''; });
+      toast('저장했습니다'); boot = null; render();
+    }, msg), 'primary'), btn('주소 검색 연결 시험', test('juso'), 'small'), btn('카카오모빌리티 연결 시험', test('kakao'), 'small'), testOut), msg);
 }
 
 // ------------------------------------------------------------ 백업·사진 보관 (운영 관리자)
