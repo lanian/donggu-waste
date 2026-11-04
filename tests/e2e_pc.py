@@ -8,6 +8,7 @@ PC 서버를 띄우고 헤드리스 Chrome으로 실제 화면을 조작한다. 
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -157,6 +158,9 @@ def raw_get(path, headers=None):
         return e.code
 
 
+LAST_PAGE: list = []  # 실패 시 화면 캡처용 (SHOTS/fail.png)
+
+
 def main():
     print("작업 폴더:", WORK)
     subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "init"], env=ENV, check=True, capture_output=True)
@@ -194,7 +198,7 @@ def run():
     con = store.connect()
     phone = Phone(S.registration_text(con))
     today = S.today_kst()
-    with sync_playwright() as pw:
+    with playwright_with_fail_shot() as pw:
         b = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True,
                                args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", *([f"--proxy-server={PROXY}", "--proxy-bypass-list=127.0.0.1"] if PROXY else [])])
         ctx = b.new_context(viewport={"width": 1400, "height": 950}, ignore_https_errors=True)
@@ -206,6 +210,7 @@ def run():
             REQUESTS.append((r.url, body))
         ctx.on("request", rec)
         page = ctx.new_page()
+        LAST_PAGE.append(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept(DIALOG["text"]) if d.type == "prompt" else d.accept())
@@ -283,7 +288,9 @@ def run():
 
         # 수정 이력
         page.goto(r1_url)
+        settled(page)
         page.get_by_label("상세 배출 위치").fill("101동 현관 앞")
+        expect(page.get_by_label("상세 배출 위치")).to_have_value("101동 현관 앞")
         page.get_by_role("button", name="수정 저장").click()
         expect(page.get_by_text("수정 사유를 적어 주세요.")).to_be_visible()
         page.get_by_placeholder("수정 사유 (필수)").fill("주민 요청: 위치 보완")
@@ -711,12 +718,21 @@ def run():
 
         # 자동 백업: 백업 키(개인키는 한 번만 내려받음) → 지금 자동 백업
         page.goto(URL + "#/settings/backup")
+        settled(page)
+        # 화면이 다 그려진 뒤(백업 키 상태가 보인 뒤) 누른다 — 늦은 다시 그리기가 대화 상자와 겹치지 않게
+        expect(page.get_by_text("없음 — 자동 백업 안 함")).to_be_visible()
+        dismiss(page)
         page.get_by_role("button", name="백업 키 만들기").click()
         kd = page.locator(".dlg")
+        expect(kd).to_be_visible()
         kd.get_by_label("개인키 보호 비밀번호 (12자 이상)").fill("backup-key-e2e-01")
         kd.get_by_label("한 번 더").fill("backup-key-e2e-01")
-        with page.expect_download() as kdl:
-            kd.get_by_role("button", name="만들고 개인키 내려받기").click()
+        try:
+            with page.expect_download(timeout=60000) as kdl:
+                kd.get_by_role("button", name="만들고 개인키 내려받기").click()
+        except Exception:
+            print("백업 키 내려받기 실패 — 대화 상자:", kd.all_inner_texts(), "알림:", page.locator(".toast").all_inner_texts(), flush=True)
+            raise
         pem = Path(kdl.value.path()).read_bytes()
         page.get_by_role("button", name="지금 자동 백업").click()
         expect(page.get_by_text(re.compile("자동 백업: donggu-auto-"))).to_be_visible()
@@ -930,6 +946,31 @@ def run():
        "브라우저는 주소 API·길찾기 API(가짜 서버)에 직접 연결하지 않음 (PC 서버만 연결)")
     secrets = ["가상하나", "가상둘", "가상셋", "01000005001", "01000005003", "시험로"]
     ok(not [s for s in secrets if any(s in urllib.parse.unquote(u) for u in external)], "외부 요청에 이름·연락처·주소 없음")
+
+
+@contextlib.contextmanager
+def playwright_with_fail_shot():
+    """실패하면 Playwright를 닫기 전에 마지막 화면을 SHOTS/fail.png로 남긴다(닫힌 뒤에는 캡처할 수 없음)."""
+    with sync_playwright() as pw:
+        try:
+            yield pw
+        except BaseException:
+            for pg in LAST_PAGE[-1:]:
+                try:
+                    pg.screenshot(path=SHOTS / "fail.png", full_page=True)
+                    print("실패 화면:", SHOTS / "fail.png", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print("실패 화면 캡처 못 함:", e, flush=True)
+            raise
+
+
+def settled(pg):
+    """화면이 다 그려질 때까지(늦게 오는 예약 현황 등) 기다린다 — 그 전에 입력하면 늦은 다시 그리기가 지울 수 있다."""
+    pg.wait_for_load_state("networkidle")
+    expect(pg.locator("main h1")).to_be_visible()
+    if pg.get_by_role("group", name="예약 현황").count():
+        expect(pg.get_by_role("group", name="예약 현황").get_by_role("button").first).to_be_visible()
+    pg.wait_for_load_state("networkidle")
 
 
 def dismiss(pg):

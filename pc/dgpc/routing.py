@@ -160,8 +160,8 @@ def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache
             stop = True
             info["error"] = info["error"] or "호출 한도·시간 한도에 닿아 나머지는 직선거리로 추정"
             return None
-        wait = min_interval_s - (time.monotonic() - last)
-        if wait > 0:  # 초당 호출 수 제한
+        # 초당 호출 수 제한. Windows의 sleep은 타이머 해상도 때문에 조금 일찍 깰 수 있어 간격이 찰 때까지 다시 잔다.
+        while (wait := min_interval_s - (time.monotonic() - last)) > 0:
             time.sleep(wait)
         last = time.monotonic()
         info["api_calls"] += 1
