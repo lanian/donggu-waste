@@ -249,11 +249,16 @@ def purge_preview(con, today: str | None = None) -> dict:
             "last": S.one(con, "SELECT at, count, actor FROM pii_purge_log ORDER BY at DESC LIMIT 1")}
 
 
-def _scrub_event_body(raw: str) -> str:
+_REQ_KINDS = ("FIELD_INTAKE", "CORRECTION")  # 휴대폰 현장 접수·정정 요청: 이름·연락처·주소가 본문에 들어 있음
+
+
+def _scrub_event_body(raw: str, kind: str | None = None) -> str:
     try:
         b = json.loads(raw)
     except ValueError:
         return "{}"
+    if isinstance(b, dict) and kind in _REQ_KINDS:
+        return json.dumps(S._strip_request_pii(kind, b), ensure_ascii=False)
     if isinstance(b, dict):
         for k in _PII_EVENT_KEYS:
             if k in b:
@@ -287,19 +292,38 @@ def pseudonymize(con, rid: str, ts: str):
         d["pii_purged"] = True
         con.execute("UPDATE request_version SET snapshot_json=? WHERE request_id=? AND req_ver=?", (json.dumps(d, ensure_ascii=False), rid, ver))
     con.execute("UPDATE contact_log SET content=? WHERE request_id=?", (PURGED, rid))
-    for eid, body in con.execute("SELECT event_id, body_json FROM result_event WHERE request_id=?", (rid,)).fetchall():
-        con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (_scrub_event_body(body), eid))
+    for eid, kind, body, status in con.execute("SELECT event_id, kind, body_json, apply_status FROM result_event WHERE request_id=?", (rid,)).fetchall():
+        con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (_scrub_event_body(body, kind), eid))
+        if status == "CONFLICT" and kind in _REQ_KINDS:  # 처리하지 않은 정정 요청은 값이 지워져 반영할 수 없으므로 정리
+            con.execute("UPDATE result_event SET apply_status='REJECTED', resolved_reason=?, resolved_at=? WHERE event_id=?", ("보유기간 경과로 개인정보 파기(미처리 요청)", ts, eid))
     con.execute("UPDATE photo SET data=NULL, lat=NULL, lon=NULL, purged_at=COALESCE(purged_at, ?) WHERE request_id=?", (ts, rid))
     con.execute("UPDATE payment SET note='' WHERE request_id=?", (rid,))
     con.execute("UPDATE refund_case SET account_last4=NULL, note='' WHERE request_id=?", (rid,))
+
+
+def _purge_orphan_requests(con, cutoff: str) -> int:
+    """접수를 만들지 못한(충돌함에 남은) 휴대폰 현장 접수 기록: 접수가 없어 위의 파기 대상에 잡히지 않으므로,
+    보유기간 기준일보다 오래된 것은 개인정보를 지우고 처리 끝(거부)으로 둔다."""
+    rows_ = con.execute("""SELECT e.event_id, e.kind, e.body_json FROM result_event e LEFT JOIN request r ON r.id=e.request_id
+        WHERE e.kind IN ('FIELD_INTAKE','CORRECTION') AND e.apply_status='CONFLICT' AND r.id IS NULL AND COALESCE(e.device_ts,'') < ?""", (cutoff,)).fetchall()
+    if not rows_:
+        return 0
+    ts = S.now()
+    with S.tx(con):
+        for eid, kind, body in rows_:
+            con.execute("UPDATE result_event SET body_json=?, apply_status='REJECTED', resolved_reason=?, resolved_at=? WHERE event_id=?",
+                        (_scrub_event_body(body, kind), "보유기간 경과로 개인정보 파기(접수 없는 현장 요청)", ts, eid))
+        S.audit(con, "privacy", "orphan-requests", "PURGE_PII", {"count": len(rows_), "cutoff": cutoff})
+    return len(rows_)
 
 
 def purge_pii(con, today: str | None = None, trigger: str = "MANUAL") -> dict:
     """보유기간 지난 접수 가명 처리 + 파기 대장 기록. 대상이 없어도 대장에는 남기지 않는다."""
     cands = purge_candidates(con, today)
     crit = purge_criteria(con, today)
+    orphans = _purge_orphan_requests(con, crit["cutoff"])
     if not cands:
-        return {"count": 0, **crit}
+        return {"count": 0, **crit, **({"orphan_requests": orphans} if orphans else {})}
     ids = {c["id"] for c in cands}
     ts = S.now()
     with S.tx(con):
@@ -318,7 +342,7 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL") -> dict:
         con.execute("INSERT INTO pii_purge_log (id, at, count, actor, criteria_json, trigger) VALUES (?,?,?,?,?,?)",
                     (pid, ts, len(ids), S.ACTOR.get(), json.dumps(crit, ensure_ascii=False), trigger))
         S.audit(con, "privacy", pid, "PURGE_PII", {"count": len(ids), "cutoff": crit["cutoff"], "years": crit["retention_years"], "trigger": trigger})
-    return {"count": len(ids), **crit}
+    return {"count": len(ids), **crit, **({"orphan_requests": orphans} if orphans else {})}
 
 
 def purge_log(con, limit: int = 200) -> list[dict]:

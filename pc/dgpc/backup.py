@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import shutil
+import time
 import struct
 from pathlib import Path
 
@@ -280,6 +281,8 @@ def apply_retention(con, c: dict | None = None, bdir: Path | None = None) -> lis
         files = sorted([*d.glob("donggu-backup-*.dgbak"), *d.glob("donggu-auto-*.dgabk")])
         for f in plan_retention(files, int(c["backup_keep_daily"]), int(c["backup_keep_monthly"]), int(c["backup_retention_days"])):
             try:
+                if time.time() - f.stat().st_mtime < 600:  # 방금 만든(또는 아직 봉인·복사 중인) 백업은 지우지 않는다
+                    continue
                 f.unlink()
                 out.append(f.name)
             except OSError:

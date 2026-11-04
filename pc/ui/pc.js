@@ -662,13 +662,14 @@ async function importDlg() {
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
 // 시범 운영 비교용: 새 접수 양식을 연 때부터 저장까지 걸린 시간(초). 자리 비움 같은 이상값은 서버가 거른다.
-let intakeT0 = null;
-const closeT0 = {};
+let intakeT0 = null, intakeSeen = 0;
+const closeT0 = {}, closeSeen = {};
+const IDLE_RESET_MS = 15 * 60 * 1000;  // 15분 넘게 그 화면을 떠나 있었으면 다시 잰다(다른 일 한 시간을 빼려고)
 let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
 const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
-  if (isNew && !intakeT0) intakeT0 = Date.now();
+  if (isNew) { if (!intakeT0 || Date.now() - intakeSeen > IDLE_RESET_MS) intakeT0 = Date.now(); intakeSeen = Date.now(); }
   const blank = { name: '', phone: '', address: '', spot_note: '', memo: '', planned_date: '', appt_start: '', appt_end: '', must_today: 0, urgent: 0, priority: 0, lat: null, lon: null,
     items: [], versions: [], locked_lines: [], status: 'RECEIVED', dong: null, channel: '전화', contacts: [] };
   const fromDraft = isNew && intakeDraft;
@@ -918,7 +919,7 @@ async function screenRequest(id) {
     btn(isNew ? '접수 등록' : '수정 저장', save, 'primary', { 'data-save': '1' }), h('span', { class: 'muted small' }, h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter')),
     barTotal, h('span', { class: 'grow' }), msg, isNew ? null : btn('접수 취소', cancel, 'danger')) : null;
   setTimeout(() => { loadCal(); if (isNew && !(fromDraft && r.dong)) detect(); }, 0);
-  const form = h('div', { class: 'reqform', oninput: () => saveDraft(), onchange: () => saveDraft() },
+  const form = h('div', { class: 'reqform', oninput: () => { intakeSeen = Date.now(); saveDraft(); }, onchange: () => saveDraft() },
     h('div', { class: 'pagehead' }, h('h1', {}, isNew ? '전화 접수 등록' : `접수 ${r.receipt_no}`),
       h('div', { class: 'row' }, !isNew && r.levy_no ? h('span', { class: 'chip' }, `부과번호 ${r.levy_no}`) : null,
         !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => { const t = await post(`requests/${id}/receipt-print`); window.open('/print/doc/' + t.token, 'dg-print'); toast('접수증을 열었습니다 (출력 기록이 남습니다)'); }), 'small') : null,
@@ -1316,7 +1317,7 @@ async function screenPilot() {
     h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, R ? `${R.start} ~ ${R.end} (${R.days}일) · ${R.crew || '전체 팀'}` : '비교표'),
       h('span', { class: 'muted small' }, '건수는 기간·물량이 달라도 비교되게 100건당. 이름·연락처·주소는 쓰지 않음')),
       table,
-      h('p', { class: 'muted small' }, '누락 = 마감 때 미배정·결과 없음으로 넘어간 건 + 예정일이 지났는데 결과가 없는 건. 접수·마감 시간은 이 PC 화면을 연 때부터 저장까지(5초~2시간만). 당일 결과 회수 = 최종 결과가 수거 예정일 당일 PC에 들어온 비율.')),
+      h('p', { class: 'muted small' }, '누락 = 마감 때 미배정·결과 없음으로 넘어간 건 + 예정일이 지났는데 결과가 없는 건. 접수·마감 시간은 이 PC 화면을 연 때부터 저장까지(5초~2시간만). 당일 결과 회수 = 수거 결과를 휴대폰에 남긴 날 PC에 들어온 비율.')),
     h('div', { class: 'card formtable' }, h('h2', {}, '시범 운영 기간과 기존 방식 수치'),
       h('div', { class: 'grid2' }, h('label', { class: 'f' }, '시범 운영 시작', F.start), h('label', { class: 'f' }, '끝', F.end)),
       h('label', { class: 'f' }, '팀', F.crew),
@@ -1417,11 +1418,12 @@ function webcamCard(onDone) {
 async function screenClose() {
   const s = (screenClose.s ||= { date: boot.today });
   const date = h('input', { type: 'date', value: s.date });
-  const body = h('div');
+  const body = h('div', { onclick: () => { closeSeen[date.value] = Date.now(); }, oninput: () => { closeSeen[date.value] = Date.now(); } });
   let lastWant = null, seq = 0;
   const load = wrap(async (force) => {
     const want = date.value;
-    if (!closeT0[want]) closeT0[want] = Date.now();
+    if (!closeT0[want] || Date.now() - (closeSeen[want] || 0) > IDLE_RESET_MS) closeT0[want] = Date.now();
+    closeSeen[want] = Date.now();
     if (force !== true && want === lastWant) return;  // 같은 날짜로 두 번 불러와 입력 중인 칸을 덮지 않게
     lastWant = want; const my = ++seq;
     s.date = want;

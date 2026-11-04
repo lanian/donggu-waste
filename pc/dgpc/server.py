@@ -453,8 +453,10 @@ class Handler(BaseHTTPRequestHandler):
             if p == "stats":
                 return self.send_json(S.stats(c, qs.get("start", ""), qs.get("end", ""), qs.get("basis") or "planned"))
             if p == "pilot":
-                return self.send_json({"settings": S.pilot_settings(c), "base_keys": S.PILOT_BASE, "report": S.pilot_report(c, qs.get("start") or None, qs.get("end") or None, qs.get("crew"))
-                                       if (qs.get("start") or S.pilot_settings(c)["start"]) else None})
+                ps = S.pilot_settings(c)
+                st_, en_ = qs.get("start") or ps["start"], qs.get("end") or ps["end"]
+                return self.send_json({"settings": ps, "base_keys": S.PILOT_BASE,
+                                       "report": S.pilot_report(c, st_, en_, qs.get("crew")) if st_ and en_ and st_ <= en_ else None})
             if p == "pilot.csv":
                 body = S.pilot_csv(c, qs.get("start") or None, qs.get("end") or None, qs.get("crew"))
                 return self.send_bytes(body, "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="donggu-pilot.csv"'})

@@ -360,7 +360,8 @@ ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction ===
   const J = await import('../web/juso.js');
   const w = (a) => J.checkAddress(a).warnings.join('|');
   ok(w('광주 동구 예시로 12') === '' && w('동구 대인동 34-5') === '' && /건물번호/.test(w('예시아파트 앞')) && /형식/.test(w('동구 12번지 근처'))
-     && /관할/.test(w('광주 서구 상무대로 1')) && /서울특별시/.test(w('서울특별시 강남구 테헤란로 1')) && /전화번호/.test(w('충장로 5 010-1234-5678')),
+     && /관할/.test(w('광주 서구 상무대로 1')) && /서울특별시/.test(w('서울특별시 강남구 테헤란로 1')) && /전화번호/.test(w('충장로 5 010-1234-5678'))
+     && J.checkAddress('충장로1가 12').kind === 'JIBUN' && J.jibunDongOf('금남로5가 4') === '금남로5가' && J.roadOf('충장로1가 12') === '',
      '주소 확인: 건물번호 없음·형식·관할(구) 밖·다른 시도·전화번호 섞임');
   const hist = [{ address: '광주 동구 예시로 3', dong: '충장동' }, { address: '예시로 9', dong: '충장동' }, { address: '대인동 1', dong: '충장동' }];
   ok(J.guessDong('동구 계림1동 12').dong === '계림1동' && J.guessDong('광주 동구 학동로 12').dong === '' && J.guessDong('예시로 15', hist).dong === '충장동'

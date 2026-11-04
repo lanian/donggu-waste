@@ -1163,7 +1163,7 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                     note = "이미 PC에 있는 접수(다시 만들지 않음)"
                 else:
                     try:
-                        _field_request(con, ev["request_id"], ev["body"], dev_id)
+                        _field_request(con, ev["request_id"], ev["body"], dev_id, ev.get("device_ts"))
                         counts["field_intakes"] = counts.get("field_intakes", 0) + 1
                         touched.add(ev["request_id"])
                     except UserError as e:
@@ -1282,7 +1282,7 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
             if e["kind"] == "FIELD_INTAKE" and not one(con, "SELECT 1 AS x FROM request WHERE id=?", (e["request_id"],)):
-                _field_request(con, e["request_id"], body, e["device_id"])
+                _field_request(con, e["request_id"], body, e["device_id"], e["device_ts"])
             if e["kind"] == "CORRECTION":
                 _apply_correction(con, e["request_id"], body, reason.strip())
             if e["kind"] == "CANCEL_REQUEST":
@@ -1308,15 +1308,19 @@ def _strip_request_pii(kind: str, b: dict) -> dict:
     """반영·거부한 요청 기록에 남길 내용(개인정보 없이). 실제 값은 접수 원본과 버전 이력에 있다."""
     keep = {k: b[k] for k in ("worker", "temp_no") if b.get(k)}
     if kind == "FIELD_INTAKE":
-        return {**keep, "planned_date": b.get("planned_date"), "items": len(b.get("items") or []), "pii_purged": True}
+        it = b.get("items")
+        return {**keep, "planned_date": b.get("planned_date"), "items": it if isinstance(it, int) else len(it or []), "pii_purged": True}
     if kind == "CORRECTION":
         f = b.get("fields") or {}
+        if not isinstance(f, dict):  # 이미 지운 기록(칸 이름만 남음): 그대로
+            return {**keep, "fields": f if isinstance(f, str) else ",".join(map(str, f)), **({"date": b["date"]} if b.get("date") else {}),
+                    "reason": (b.get("reason") or "")[:100], "pii_purged": True}
         return {**keep, "fields": ",".join(k for k in CORRECTABLE if k in f), **({"date": f["planned_date"]} if f.get("planned_date") else {}),
                 "reason": (b.get("reason") or "")[:100], "pii_purged": True}
     return b
 
 
-def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
+def _field_request(con, rid: str, b: dict, dev_id: str, device_ts: str | None = None) -> str:
     """휴대폰 현장 접수로 PC 원본 접수를 만든다(트랜잭션은 호출하는 쪽). 금액은 PC 수수료표로 다시 계산하고,
     PC 표에 없는 품목은 '확인 대기'로 둔다(0원·최저가로 두지 않음). 품목 행 ID는 휴대폰 것을 그대로 써서 현장 결과가 이어진다."""
     if not re.fullmatch(r"[0-9a-f-]{36}", rid or ""):
@@ -1341,6 +1345,9 @@ def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
     dong_s = str(b.get("dong") or "").strip()[:20]
     if dong_s and _area().get_dong(con, dong_s):
         data["dong"] = dong_s
+        det = _area().detect_dong(con, data["address"])  # PC 주소 자료(건물 단위)로 정한 동이 다르면 그쪽을 쓴다(사무실 확인 대상)
+        if det.get("source") == "ADDR" and det.get("dong") and det["dong"] != dong_s:
+            data["dong"] = det["dong"]
     d = validate(data)
     built = build_items(items, con)
     for it in built:
@@ -1349,6 +1356,9 @@ def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
     dong, _ = _resolve_dong(con, data, d["address"])
     _, receipt = _insert_request(con, d, built, data, dong, rid=rid)
     con.execute("UPDATE request SET origin_device=? WHERE id=?", (dev_id, rid))
+    # 접수 시각 = 휴대폰에서 받은 때(PC로 가져온 때가 아님) — 처리 일수·기간 집계가 맞게. 미래 시각은 쓰지 않는다
+    if device_ts and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z", str(device_ts)) and str(device_ts) <= now():
+        con.execute("UPDATE request SET received_at=? WHERE id=?", (device_ts, rid))
     audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": ch, "origin": "FIELD", "device": (dev_id or "")[:8],
                                           **({"temp_no": str(b["temp_no"])[:30]} if b.get("temp_no") else {}), **({"dong": dong} if dong else {})})
     return receipt
@@ -2977,7 +2987,7 @@ def device_crew(con, data: bytes) -> str | None:
 
 
 # ------------------------------------------------------------------ 관할 확인 (동별·구별 관할 불일치 경고, 막지는 않음)
-_ROAD_RE = re.compile(r"[가-힣A-Za-z0-9·.]+(?:대로|로|길)\s*\d")
+_ROAD_RE = re.compile(r"[가-힣A-Za-z0-9·.]+(?:대로|로|길)\s*\d+(?![\d가])")  # '충장로1가 12'는 지번(법정동)
 _JIBUN_RE = re.compile(r"[가-힣]+[0-9]*(?:동|리|가)\s*(?:산\s*)?\d")
 
 
@@ -3029,7 +3039,9 @@ def save_pilot(con, data: dict) -> dict:
         if v and not re.fullmatch(r"\d{4}-\d\d-\d\d", v):
             raise UserError("시범 운영 기간을 날짜로 골라 주세요.")
         out[k] = v
-    if out["start"] and out["end"] and out["start"] > out["end"]:
+    if bool(out["start"]) != bool(out["end"]):
+        raise UserError("시범 운영 기간은 시작일과 끝일을 함께 정해 주세요.")
+    if out["start"] and out["start"] > out["end"]:
         raise UserError("시작일이 끝일보다 늦습니다.")
     cid = (data.get("crew_id") or "").strip()
     if cid and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (cid,)):
@@ -3114,13 +3126,14 @@ def pilot_report(con, start: str | None = None, end: str | None = None, crew_id:
     # 당일 결과 회수: 최종 결과가 있는 건 중 그 결과가 수거 예정일 당일에 PC로 들어온 비율
     sameday = total_final = 0
     for r in reqs:
-        if r["status"] not in FINAL or not r["planned_date"]:
+        if r["status"] not in FINAL:
             continue
-        first = one(con, """SELECT MIN(i.imported_at) AS t FROM result_event e JOIN result_import i ON i.id=e.import_id
-            WHERE e.request_id=? AND e.kind='ATTEMPT' AND e.apply_status='APPLIED'""", (r["id"],))
-        if first and first["t"]:
+        # 마지막 수거 결과(ATTEMPT)를 휴대폰에 남긴 날 = 그 결과가 PC에 들어온 날이면 당일 회수(예정일이 재방문·이월로 바뀌어도 맞게)
+        last = one(con, """SELECT e.device_ts AS d, i.imported_at AS t FROM result_event e JOIN result_import i ON i.id=e.import_id
+            WHERE e.request_id=? AND e.kind='ATTEMPT' AND e.apply_status='APPLIED' ORDER BY e.device_ts DESC LIMIT 1""", (r["id"],))
+        if last and last["t"] and last["d"]:
             total_final += 1
-            sameday += _kst_date(first["t"]) == r["planned_date"]
+            sameday += _kst_date(last["d"]) == _kst_date(last["t"])
     pending = sum(derive(con, one(con, "SELECT * FROM request WHERE id=?", (r["id"],)))["fee"]["final"] is None for r in reqs)
     avg = lambda xs: round(sum(xs) / len(xs), 1) if xs else None
     per100 = lambda x, base_n: round(x * 100 / base_n, 1) if base_n else None

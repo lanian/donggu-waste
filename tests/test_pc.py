@@ -1531,6 +1531,7 @@ def v12_field():
     ok(items[l1]["unit_price"] == chair["price"] and items[l1]["amount"] == chair["price"] * 2 and items[l2]["price_status"] == "PENDING" and items[l2]["amount"] is None,
        "현장 접수 금액: 휴대폰 단가를 믿지 않고 PC 표로 다시 계산, 표에 없는 품목은 확인 대기(0원 아님)")
     ok(req["status"] == "DONE" and req["appt_start"] == "10:30", "현장 접수 건의 수거 결과 반영(수거 완료) · 방문 시각")
+    ok(req["received_at"] == intake["device_ts"], "현장 접수의 접수 시각 = 휴대폰에서 받은 때(PC로 가져온 때가 아님)")
     stored = json.loads(S.one(con, "SELECT body_json FROM result_event WHERE event_id=?", (intake["event_id"],))["body_json"])
     ok("현장가상" not in json.dumps(stored, ensure_ascii=False) and "0000-7002" not in json.dumps(stored) and stored.get("pii_purged"),
        "결과 기록에는 현장 접수의 이름·연락처·주소를 남기지 않음(원본은 접수에)")
@@ -1598,9 +1599,21 @@ def v12_field():
     ok(cr["status"] == "CANCELLED" and cr["cancel_code"] == "RESIDENT" and au and "현장 요청" in au[-1]["detail"], "취소 요청 반영: 사유 코드(주민 취소) + '현장 요청' 기록")
     d = S.derive(con, S.one(con, "SELECT * FROM request WHERE id=?", (rid,)))
     ok(not d["field"]["other_kinds"], "PC 화면의 '알 수 없는 기록'에 새 종류가 섞이지 않음")
+    # 보유기간 파기: 처리하지 않은 정정 요청·접수를 만들지 못한 현장 접수의 개인정보도 지운다
+    from dgpc import privacy as PV
+    pend = ph.ev(fstop, "CORRECTION", {"fields": {"phone": "010-0000-7777", "address": "가상시 동구 남은로 1"}, "reason": "남은 요청"}, assign_ver=0)
+    orphan_id = str(uuid.uuid4())
+    orphan = ph.ev({"request_id": orphan_id, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"name": "고아가상", "phone": "1", "address": "가상시 동구 고아로 1",
+                                                                                       "planned_date": day, "items": [{"line_id": str(uuid.uuid4()), "fee_rate_id": chair["id"], "qty": 1}]})
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [pend, orphan]}, P.TYPE_RESULT))
+    pr = PV.purge_pii(con, today="2031-12-31")
+    bodies = {e["event_id"]: e for e in S.rows(con, "SELECT event_id, body_json, apply_status FROM result_event WHERE event_id IN (?,?)", (pend["event_id"], orphan["event_id"]))}
+    ok(pr["count"] >= 1 and pr.get("orphan_requests") == 1 and "7777" not in bodies[pend["event_id"]]["body_json"] and "남은로" not in bodies[pend["event_id"]]["body_json"]
+       and "고아가상" not in bodies[orphan["event_id"]]["body_json"] and {b["apply_status"] for b in bodies.values()} == {"REJECTED"},
+       "보유기간 파기: 미처리 정정 요청·접수 없는 현장 접수 기록의 이름·연락처·주소도 지우고 처리 끝으로")
     aw = lambda a: " ".join(S.address_warnings(con, a))
     ok(aw("가상시 동구 예시로 12") == "" and "건물번호" in aw("예시아파트 앞") and "형식" in aw("동구 12번지 근처") and "전화번호" in aw("예시로 5 010-1234-5678")
-       and "관할" in aw("광주 서구 상무대로 1"), "PC 배출 주소 확인: 건물번호 없음·형식·전화번호 섞임·관할 밖(막지 않고 알림)")
+       and "관할" in aw("광주 서구 상무대로 1") and aw("동구 충장로1가 12") == "", "PC 배출 주소 확인: 건물번호 없음·형식·전화번호 섞임·관할 밖(막지 않고 알림), '충장로1가 12'는 지번")
     con.close()
     print(f"\n통과 {passed}개 (v0.12 포함)")
 
@@ -1620,6 +1633,7 @@ def v12_pilot():
     S.add_contact(con, ids[1], {"kind": "독촉", "content": "언제 오나요"})
     raises(lambda: S.pilot_report(con), "기간", "시범 운영 기간을 정하기 전에는 비교표 없음")
     raises(lambda: S.save_pilot(con, {"start": today, "end": today, "base": {"missed": "열"}}), "숫자", "기존 방식 수치는 숫자만")
+    raises(lambda: S.save_pilot(con, {"start": today, "end": ""}), "함께", "시범 운영 기간은 시작·끝을 함께(한쪽만 저장해 화면이 막히지 않게)")
     S.save_pilot(con, {"start": today, "end": today, "base_period": "2026년 9월 종이 대장",
                        "base": {"requests": 100, "missed": 10, "complaints": 8, "lead_days": 5, "intake_min": 6, "close_min": 40}})
     S.close_day(con, today, "", close_secs=1800)

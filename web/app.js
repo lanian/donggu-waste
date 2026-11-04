@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.13';
+export const APP_VERSION = '0.12.14';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -762,7 +762,11 @@ async function screenScan() {
         // 현장 접수: PC 목록에 들어왔으면(같은 접수 ID) PC 것을 쓰고, PC 반영이 확인된 다른 날 건은 이 휴대폰에서 내린다
         const inList = new Set(pl.stops.map((s) => s.request_id));
         const sentIntake = (s) => st.events.some((e) => e.kind === 'FIELD_INTAKE' && e.request_id === s.request_id && e.seq <= st.releasedSeq);
-        st.fieldStops = (st.fieldStops || []).filter((s) => !inList.has(s.request_id) && !(sentIntake(s) && s.planned_date !== pl.work_date));
+        const keepFs = (st.fieldStops || []).filter((s) => !inList.has(s.request_id) && !(sentIntake(s) && s.planned_date !== pl.work_date));
+        const dropped = new Set((st.fieldStops || []).filter((s) => !keepFs.includes(s)).map((s) => s.request_id));
+        // 내린 현장 접수의 보낸 기록(이름·연락처·주소)은 바로 지운다(PC가 원본을 가짐)
+        for (const e of st.events) if (dropped.has(e.request_id) && e.seq <= st.releasedSeq) F.purgeEventPII(e);
+        st.fieldStops = keepFs;
         // 이 휴대폰에서 바꾼 방문 순서는 새 목록(새 날짜·갱신본)에는 쓰지 않는다
         if (st.localOrder && (st.localOrder.work_date !== pl.work_date || st.localOrder.assign_ver !== pl.assign_ver)) st.localOrder = null;
         ui.diffSummary = diff && diff.summary ? diff.summary : '';
@@ -1669,7 +1673,8 @@ function screenIntake(id) {
   const editing = id ? (onField ? (fieldEdit && fieldEdit.stop) : findStop(id)) : null;
   if (id && !editing) { go('#/home'); return h('main'); }
   const table = (onField && feeTable()) || BUILTIN_FEES;
-  const locked = new Set(editing ? st.events.filter((e) => e.request_id === id && e.kind === 'ITEM_RESULT').map((e) => e.body.line_id) : []);
+  // 현장 기록(품목 결과·스티커 확인·품목 사진 등)이 가리키는 품목 줄은 고치기에서 빼거나 바꾸지 못한다
+  const locked = new Set(editing ? st.events.filter((e) => e.request_id === id && e.body && e.body.line_id).map((e) => e.body.line_id) : []);
   if (!ui.form || ui.form.id !== (id || null)) {
     const src = editing || st.intakeDraft || {};
     ui.form = { id: id || null, name: src.name || '', phone: src.phone || '', address: src.address || '', dong: src.dong || '', spot_note: src.spot_note || '', memo: src.memo || '',
@@ -1685,7 +1690,7 @@ function screenIntake(id) {
   const field = (key, label, attrs = {}) => {
     const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search', value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
     if (attrs.multiline) input.value = f[key];
-    input.addEventListener('input', () => { f[key] = input.value; f.dupAck = false; if (key === 'address' || key === 'dong') { f.addrAck = false; addrCheck(); } saveDraft(); });
+    input.addEventListener('input', () => { f[key] = input.value; f.dupAck = false; if (key === 'dong') f.dongAuto = false; if (key === 'address' || key === 'dong') { f.addrAck = false; addrCheck(); } saveDraft(); });
     if (key === 'address') input.addEventListener('blur', () => addrCheck(true));
     return h('label', { class: 'fld' }, h('span', {}, label), input);
   };
@@ -1699,21 +1704,20 @@ function screenIntake(id) {
     if (f.dong && !J.isKnownDong(f.dong, knownDongs())) out.push(`'${f.dong}'은(는) 동구 행정동 목록에 없는 이름입니다. 오타인지 확인하세요.`);
     return out;
   };
-  let dongAuto = false;  // 주소로 자동으로 채운 동인지(주소를 바꾸면 다시 추천)
   const addrCheck = (final = false) => {
     if (!f.address.trim()) { addrBox.replaceChildren(); dongBox.replaceChildren(); return; }
     const c = J.checkAddress(f.address);
     addrBox.replaceChildren(...((final || c.warnings.length && f.address.length > 6) ? c.warnings.map((w) => h('p', { class: 'small warnp' }, '⚠ ' + w)) : []));
     const g = J.guessDong(f.address, history(), knownDongs());
     const dongIn = document.querySelector('#intake-dong');
-    if (g.dong && (!f.dong || dongAuto) && f.dong !== g.dong) {
-      f.dong = g.dong; dongAuto = true; if (dongIn) dongIn.value = g.dong; saveDraft();
+    if (g.dong && (!f.dong || f.dongAuto) && f.dong !== g.dong) {
+      f.dong = g.dong; f.dongAuto = true; if (dongIn) dongIn.value = g.dong; saveDraft();
     }
     const kids = [];
     if (g.dong && f.dong === g.dong) kids.push(h('p', { class: 'small ok-note' }, `✓ 동: ${g.dong} (${g.reason})`));
     else if (g.candidates.length > 1 || (g.dong && f.dong !== g.dong)) {
       kids.push(h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 추천' }, h('span', { class: 'small' }, `동 후보${g.reason ? ` (${g.reason})` : ''}: `),
-        ...(g.candidates.length ? g.candidates : [g.dong]).map((x) => btn(x, () => { f.dong = x; dongAuto = false; f.addrAck = false; if (dongIn) dongIn.value = x; saveDraft(); addrCheck(); }, 'opt chipbtn' + (f.dong === x ? ' on' : '')))));
+        ...(g.candidates.length ? g.candidates : [g.dong]).map((x) => btn(x, () => { f.dong = x; f.dongAuto = false; f.addrAck = false; if (dongIn) dongIn.value = x; saveDraft(); addrCheck(); }, 'opt chipbtn' + (f.dong === x ? ' on' : '')))));
     } else if (!f.dong && final) kids.push(h('p', { class: 'small muted' }, onField ? '동을 고르지 않으면 PC가 주소로 정합니다.' : '동을 모르면 비워 두어도 됩니다.'));
     if (f.dong && !J.isKnownDong(f.dong, knownDongs())) kids.push(h('p', { class: 'small warnp' }, `⚠ '${f.dong}'은(는) 동구 행정동 목록에 없습니다. 오타인지 확인하세요.`));
     dongBox.replaceChildren(...kids);
@@ -1774,8 +1778,11 @@ function screenIntake(id) {
     if (fieldEdit) {
       // 보내기 전의 휴대폰 접수 고치기: PC는 아직 모르므로 보낼 기록(FIELD_INTAKE)과 목록을 함께 바꾼다
       const ch = FIELD_CHANNELS.includes(f.channel) ? f.channel : (editing.channel || '현장');
+      const moved = editing.address !== data.address && data.lat == null;  // 주소를 바꿨는데 새 좌표가 없으면 옛 위치를 버린다
       Object.assign(editing, data, { channel: ch, appt: data.eta ? [data.eta, null] : null, updated_at: now });
-      fieldEdit.ev.body = { ...fieldEdit.ev.body, ...withWorker({}), channel: ch, ...data,
+      const body0 = { ...fieldEdit.ev.body };
+      if (moved) { for (const k of ['lat', 'lon', 'geo_source']) { delete editing[k]; delete body0[k]; } }
+      fieldEdit.ev.body = { ...body0, ...withWorker({}), channel: ch, ...data,
         items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) };
       await commit(); ui.form = null; toast('접수를 고쳤습니다(보내기 전)'); go(`#/stop/${id}`);
       return;
