@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.9';
+export const APP_VERSION = '0.12.10';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -2227,7 +2227,7 @@ async function screenSettings() {
         const u = unsent().length;
         if (!(await ask((u ? `보내지 않은 기록 ${u}건이 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
         stopCamera();
-        try { await S.wipeAll(); } catch (e) { return toast(e.code === 'DB_BLOCKED' ? '이 앱이 열린 다른 창(브라우저 탭·설치한 앱)을 모두 닫고 다시 누르세요.' : '지우지 못했습니다: ' + errMsg(e), 'bad'); }
+        try { await S.wipeAll(); } catch (e) { return toast('지우지 못했습니다: ' + errMsg(e), 'bad'); }
         st = null; location.hash = ''; location.reload();
       }, 'danger')),
     tabBar('set'));
@@ -2311,7 +2311,11 @@ async function render() {
   if (liveMap) { try { liveMap.remove(); } catch {} liveMap = null; }
   let view;
   try {
-  if (!(await S.hasPin())) view = screenSetup();
+  if (!storeReady && !(await Promise.race([storeWait.then(() => true), new Promise((r) => setTimeout(() => r(false), 2500))]))) {
+    // 저장소가 아직 안 열림(다른 창이 붙잡고 있는 등): 멈춘 것처럼 두지 않고 안내하고, 열리면 저절로 계속한다
+    view = waitScreen();
+    storeWait.then(() => render(), () => render());
+  } else if (!(await S.hasPin())) view = screenSetup();
   else if (!S.isUnlocked()) view = screenLock();
   else {
     let [, route, arg] = (location.hash || '#/home').split('/');
@@ -2354,15 +2358,26 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
 }
 
-// 불러오다 멈추거나 오류가 나면 '불러오는 중…'에 머물지 않고 이유와 [다시 시도]를 보여 준다
+// 저장소 열림 기다리기: 대개 바로 열린다. 다른 창(특히 이전 버전 앱 창)이 붙잡고 있으면 놓는 즉시 저절로 계속한다.
+let storeReady = false;
+const storeWait = S.whenReady().then(() => { storeReady = true; });
+function waitScreen() {
+  return h('main', { class: 'center' }, appLogo('app-icon'), h('h1', {}, '자료를 여는 중…'),
+    h('p', {}, '잠시만 기다려 주세요. 열리면 저절로 계속합니다.'),
+    h('p', { class: 'small' }, '오래 걸리면: 이 앱이 다른 창(브라우저 탭이나 홈 화면 앱)에도 열려 있으면 그 창을 닫아 주세요.'),
+    btn('다시 시도', () => location.reload(), 'ghost'));
+}
+// 오류가 나면 '불러오는 중…'에 머물지 않고 이유와 [다시 시도]를 보여 준다
 function errorScreen(e) {
-  const stuck = e && (e.code === 'DB_TIMEOUT' || e.code === 'DB_BLOCKED');
   return h('main', { class: 'center' }, appLogo('app-icon'), h('h1', {}, '불러오지 못했습니다'),
-    h('p', {}, stuck ? '휴대폰 저장소가 열리지 않습니다. 이 앱이 열린 다른 창(브라우저 탭·설치한 앱)을 모두 닫고 [다시 시도]를 누르세요. 자료를 지운 직후라면 앱을 완전히 닫았다가 다시 여세요.'
-      : '오류가 났습니다. [다시 시도]를 누르고, 계속되면 이 화면을 담당자에게 보여 주세요.'),
+    h('p', {}, '오류가 났습니다. [다시 시도]를 누르고, 계속되면 이 화면을 담당자에게 보여 주세요.'),
     h('p', { class: 'small' }, `${(e && (e.code || e.name)) || '오류'}: ${(e && e.message) || ''} · 앱 ${APP_VERSION}`),
     btn('다시 시도', () => location.reload(), 'primary big'));
 }
-const bootWatch = setTimeout(() => { if (/불러오는 중/.test($app.textContent)) $app.replaceChildren(errorScreen({ code: 'DB_TIMEOUT', message: '10초 넘게 걸림' })); }, 10000);
+// 다른 창에서 '모든 자료 지우기'를 하면 이 창도 처음 화면으로
+try { new BroadcastChannel('dg-store').onmessage = (e) => { if (e.data === 'wiped') { st = null; location.hash = ''; location.reload(); } }; } catch {}
 // 화면 설정(테마·고대비)은 잠금 화면 전에 적용
-S.getRaw('prefs').then((p) => { if (p) prefs = { ...prefs, ...p }; }).catch(() => {}).finally(() => { applyPrefs(); render().finally(() => clearTimeout(bootWatch)); });
+let booted = false;
+const boot = () => { if (!booted) { booted = true; render(); } };
+storeWait.then(() => S.getRaw('prefs')).then((p) => { if (p) prefs = { ...prefs, ...p }; }).catch(() => {}).finally(() => { applyPrefs(); boot(); });
+setTimeout(boot, 2500);  // 저장소가 늦게 열리면 먼저 '자료를 여는 중' 안내

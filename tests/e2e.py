@@ -1160,6 +1160,16 @@ def solo(pw, url, video):
     other.reload()
     expect(other.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
     ok(True, "다른 창에 앱이 열린 채로 모든 자료 지우기 → '불러오는 중'에 멈추지 않고 두 창 모두 첫 화면")
+    # 이전 버전 창처럼 저장소를 놓지 않는 연결이 있고, 그 사이 저장소 삭제가 걸려 있는 경우:
+    # 멈춘 화면이 아니라 '자료를 여는 중' 안내 → 그 연결이 놓이는 즉시 저절로 계속
+    other.evaluate("""() => new Promise((r) => { const q = indexedDB.open('dg-proto'); q.onsuccess = () => { window.__hold = q.result; r(true); }; })""")
+    page.evaluate("() => { indexedDB.deleteDatabase('dg-proto'); }")
+    page.reload()
+    expect(page.get_by_text("자료를 여는 중…")).to_be_visible(timeout=10000)
+    ok(page.get_by_text("앱을 완전히 닫").count() == 0, "저장소가 막혀도 '자료를 여는 중… 열리면 저절로 계속' 안내(앱을 완전히 닫으라고 하지 않음)")
+    other.evaluate("() => window.__hold.close()")
+    expect(page.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
+    ok(True, "막던 연결이 놓이면 다시 시도를 누르지 않아도 저절로 첫 화면으로")
     other.close()
     page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
     page.get_by_placeholder("한 번 더").fill(PIN)
