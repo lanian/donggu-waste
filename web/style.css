@@ -501,3 +501,5 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .sheet-list { max-height: 55vh; overflow-y: auto; margin: 8px 0; }
 .pick-row .btn.pick-star { flex: none; width: 36px; min-height: 36px; margin: 0 -4px 0 -6px; padding: 0; border: 0; background: none; font-size: 1.2rem; }
 .pick-row .btn.pick-star.on { color: #8a6100; }
+/* 좌표가 없는 길안내 단추: 눌리지만(이유 안내) 흐리게 */
+.btn.nav-btn.no-loc { opacity: .75; border-style: dashed; }

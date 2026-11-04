@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.8';
+export const APP_VERSION = '0.12.9';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -884,8 +884,19 @@ async function openNav(stop, loc, label) {
   if (stop) await addEvent(stop, 'NAV_INTENT', { app: u.app });
   launchApp(u);
 }
-const navBtn = (text, stop, loc, label, cls = '') => btn(text, () => openNav(stop, loc, label), 'nav-btn ' + cls,
-  NAV.hasCoord(loc) ? { 'aria-label': `${text} (${NAV.NAV_APPS[st.navApp] || NAV.NAV_APPS.kakao})` } : { disabled: true, title: NO_LOC, 'aria-label': `${text}: ${NO_LOC}` });
+// 길안내 단추: 위치(좌표)가 없어도 꺼 두지 않는다(눌러도 반응 없는 것처럼 보임). 누르면 이유와 [지도에서 위치 정하기]를 보여 준다.
+// 지도 앱에는 좌표와 "N번 수거지"만 넘기므로, 좌표 없이 주소를 지도 앱으로 보내지는 않는다.
+const navBtn = (text, stop, loc, label, cls = '') => (NAV.hasCoord(loc)
+  ? btn(text, () => openNav(stop, loc, label), 'nav-btn ' + cls, { 'aria-label': `${text} (${NAV.NAV_APPS[st.navApp] || NAV.NAV_APPS.kakao})` })
+  : btn(text, () => noLocNav(stop), 'nav-btn no-loc ' + cls, { 'aria-label': `${text}: ${NO_LOC}` }));
+async function noLocNav(stop) {
+  const what = stop ? `${stop.seq}번 수거지` : '반입지';
+  const r = await sheet({ title: `${what} 위치가 없습니다`,
+    text: (stop ? 'PC 목록에 이 지점의 좌표가 없어 길안내를 열 수 없습니다. 지도에서 배출 위치를 정하면 바로 길안내할 수 있고, 정한 위치는 결과 보내기 때 PC로 갑니다.'
+      : 'PC 목록에 반입지 좌표가 없습니다. 지도에서 반입지 위치를 한 번 정해 두면 이 휴대폰에서 계속 씁니다.') + (st.mapEnabled ? '' : ' (지도가 꺼져 있습니다 — 설정에서 지도를 켜 주세요.)'),
+    choices: st.mapEnabled ? [{ label: '지도에서 위치 정하기', value: true, cls: 'primary' }] : [], cancel: '닫기' });
+  if (r) go(stop ? `#/pick/${stop.request_id}` : '#/pick/unload');
+}
 const unloadLoc = (u) => (u && u.lat != null && u.lon != null ? { lat: u.lat, lon: u.lon } : st.unloadSite);
 // 스티커·신고필증 확인 (품목별 3가지). 없음·불일치면 그 품목을 수거할지 바로 정한다.
 async function stickerCheck(stop, l, result) {
