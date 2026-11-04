@@ -14,6 +14,11 @@
   python pc_tool.py import-photos <파일.dgp>
   python pc_tool.py backup | restore <파일.dgbak> | reset-admin | purge-photos
   python pc_tool.py import-addr <위치정보요약DB 파일·폴더> --region 동구 [--preview]
+  python pc_tool.py purge-pii [--preview]        보유기간 지난 접수 개인정보 파기(가명 처리) · 파기 대장 기록
+  python pc_tool.py backup-auto                  백업 공개키로 자동 백업 1회 (비밀번호 불필요)
+  python pc_tool.py restore-auto <파일.dgabk> --key <개인키.pem>   자동 백업 복원 (업무 화면을 끄고)
+  python pc_tool.py serve --lan --cert cert.pem --key key.pem --allow 10.0.0.0/24 [--host 0.0.0.0] [--hostname 서버이름]
+                                                 (선택) 여러 접수 PC용 LAN 모드 — 정보화부서 승인 필요, HTTPS 전용
 
 자료는 SQLCipher로 암호화된 pc/state/pc.db 에 있고, PC 개인키도 그 안에 있다.
 DB 키는 운영체제 키 저장소(또는 DG_DB_KEY, 또는 시작할 때 입력)에서 가져온다.
@@ -308,14 +313,67 @@ def cmd_seed_dongs(_):
 
 def cmd_serve(a):
     from dgpc import server
-    server.serve(a.port)
+    lan = None
+    if a.lan:
+        try:
+            lan = server.lan_config(a.cert, a.key, a.allow, a.hostname)
+        except ValueError as e:
+            sys.exit(f"LAN 모드를 시작하지 않았습니다: {e}")
+    elif a.cert or a.key or a.allow:
+        sys.exit("--cert/--key/--allow 는 --lan 과 함께만 씁니다. (기본은 이 PC에서만 열림)")
+    server.serve(a.port, lan, a.host)
+
+
+def cmd_purge_pii(a):
+    from dgpc import privacy
+    c = con()
+    S.ACTOR.set("cli")
+    if a.preview:
+        p = privacy.purge_preview(c)
+        print(f"보유기간 {p['retention_years']}년 · 기준일 {p['cutoff']} 이전 {p['basis']} · 대상 {p['count']}건 (미리보기, 바꾸지 않음)")
+        return
+    r = privacy.purge_pii(c, trigger="CLI")
+    print(f"개인정보 파기(가명 처리) {r['count']}건 · 기준일 {r['cutoff']} (보유기간 {r['retention_years']}년). 파기 대장에 기록했습니다.")
+    print("※ 이전 백업 파일에는 그때의 개인정보가 남아 있습니다. 백업 보관 기간에 따라 지우세요.")
+
+
+def cmd_backup_auto(_):
+    from dgpc import backup
+    c = con()
+    S.ACTOR.set("cli")
+    r = backup.make_auto(c, "CLI")
+    if not r["ok"]:
+        sys.exit(r.get("error") or "자동 백업 실패")
+    print(f"자동 백업: {r['file']} ({r['bytes']:,}B, 키 지문 {r['fpr']})" + (f" · 두 번째 위치 {'확인' if r['dest2']['ok'] else '실패'}" if r.get("dest2") else ""))
+
+
+def cmd_restore_auto(a):
+    import getpass
+    from dgpc import backup
+    print("※ PC 업무 화면(serve)을 끈 상태에서 실행하세요. 기존 DB는 지우지 않고 옆에 보관합니다.")
+    if not a.yes and input("계속할까요? (yes 입력): ").strip() != "yes":
+        sys.exit("취소했습니다.")
+    pw = os.environ.get("DG_BACKUP_PASS") or getpass.getpass("백업 개인키 보호 비밀번호: ")
+    try:
+        r = backup.restore_auto(Path(a.file), Path(a.key).read_bytes(), pw)
+    except (S.UserError, ValueError) as e:
+        sys.exit(str(e))
+    c = store.connect()
+    S.ACTOR.set("cli")
+    with S.tx(c):
+        S.audit(c, "backup", os.path.basename(a.file), "RESTORE", {"file": os.path.basename(a.file), "requests": r["requests"], "auto": True})
+    print(f"복원 완료: 접수 {r['requests']}건." + (f" 이전 DB 보관: {r['kept']}" if r["kept"] else ""))
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="동구 대형폐기물 PC 프로그램")
     s = p.add_subparsers(dest="cmd", required=True)
     s.add_parser("init").set_defaults(fn=cmd_init)
-    sv = s.add_parser("serve"); sv.add_argument("--port", type=int, default=8765); sv.set_defaults(fn=cmd_serve)
+    sv = s.add_parser("serve"); sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--lan", action="store_true", help="(선택) 같은 망의 다른 접수 PC에 HTTPS로 열기 — 정보화부서 승인 필요")
+    sv.add_argument("--cert"); sv.add_argument("--key"); sv.add_argument("--allow", help="허용 IP 대역, 쉼표로 (예: 10.0.0.0/24,10.0.1.15/32)")
+    sv.add_argument("--host", help="LAN 모드에서 묶을 주소 (기본 0.0.0.0)"); sv.add_argument("--hostname", help="Host 헤더로 허용할 서버 이름 (기본: 이 PC 이름)")
+    sv.set_defaults(fn=cmd_serve)
     s.add_parser("reg-qr").set_defaults(fn=cmd_reg_qr)
     r = s.add_parser("register-device"); r.add_argument("code"); r.add_argument("--label"); r.set_defaults(fn=cmd_register_device)
     m = s.add_parser("make-bundle")
@@ -333,6 +391,10 @@ def main(argv=None):
     rs = s.add_parser("restore"); rs.add_argument("file"); rs.add_argument("--yes", action="store_true"); rs.set_defaults(fn=cmd_restore)
     ra = s.add_parser("reset-admin"); ra.add_argument("--username", default="admin"); ra.set_defaults(fn=cmd_reset_admin)
     s.add_parser("purge-photos").set_defaults(fn=cmd_purge_photos)
+    pp = s.add_parser("purge-pii"); pp.add_argument("--preview", action="store_true"); pp.set_defaults(fn=cmd_purge_pii)
+    s.add_parser("backup-auto").set_defaults(fn=cmd_backup_auto)
+    rsa = s.add_parser("restore-auto"); rsa.add_argument("file"); rsa.add_argument("--key", required=True); rsa.add_argument("--yes", action="store_true")
+    rsa.set_defaults(fn=cmd_restore_auto)
     ia = s.add_parser("import-addr"); ia.add_argument("path"); ia.add_argument("--region", default="", help="시군구명 거르기 (예: 동구)")
     ia.add_argument("--columns", help="열 번호 직접 지정 (예: road=7,main=9,sub=10,x=16,y=17,sigungu=4)")
     ia.add_argument("--preview", action="store_true"); ia.set_defaults(fn=cmd_import_addr)

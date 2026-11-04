@@ -333,6 +333,8 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
         if s.get("unload_after"):
             u = s["unload_after"]
             c["u"] = [u.get("eta", ""), u.get("label", "반입지"), u.get("minutes", 0), u.get("volume_m3", 0)]
+            if u.get("lat") is not None and u.get("lon") is not None:  # 반입지 좌표(선택, 5·6번째 값) — 휴대폰 v0.10.1 길안내용
+                c["u"] += [round(float(u["lat"]), 6), round(float(u["lon"]), 6)]
         items = []
         for it in s["items"]:
             row = fee_rows.get(it.get("fee_rate_id") or "")
@@ -388,7 +390,8 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
         stops.append({"seq": c["q"], "request_id": _uid(c["i"]), "receipt_no": c["r"], "req_ver": c["v"], "name": c["n"], "phone": c["p"],
                       "address": c["a"], "dong": c.get("d", ""), "spot_note": c.get("o", ""), "memo": c.get("m", ""), "lat": y[0] if y else None, "lon": y[1] if y else None,
                       "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items,
-                      **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3]}} if c.get("u") else {})})
+                      **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3],
+                                            "lat": c["u"][4] if len(c["u"]) > 5 else None, "lon": c["u"][5] if len(c["u"]) > 5 else None}} if c.get("u") else {})})
     ft = {"version_id": p["fee"]}
     if p.get("fb"):
         ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))

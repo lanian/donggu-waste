@@ -265,4 +265,17 @@ const u15 = { ...dj.c, s: dj.c.s.map((x, i) => (i === 0 ? { ...x, u: ['11:00', '
 const e15 = P.expandDaylist(u15, BUILTIN_FEES);
 ok(e15.stops[0].unload_after.lat === 35.13 && e15.stops[0].unload_after.lon === 126.95 && e15.stops[1].unload_after.lat === null, '반입지 좌표가 있으면 받고(길안내), 없는 이전 형식도 그대로');
 
+// 16) PC가 만든 목록 묶음에 반입지 좌표가 실리고(5·6번째 값), 휴대폰이 읽는다 -----------------------
+const pc16 = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+p = {"schema": "dg.daylist/1", "work_date": "2026-11-05", "crew": "가상", "assign_ver": 1, "fee_table": {"version_id": S.FEE_TABLE["version_id"]},
+     "stops": [{"seq": 1, "request_id": "00000000-0000-0000-0000-000000000001", "receipt_no": "DG-1", "req_ver": 1, "name": "가", "phone": "01000000000", "address": "가상로 1",
+                "items": [], "unload_after": {"eta": "11:00", "label": "가상 반입지", "minutes": 20, "volume_m3": 5.5, "lat": 35.13, "lon": 126.95}},
+               {"seq": 2, "request_id": "00000000-0000-0000-0000-000000000002", "receipt_no": "DG-2", "req_ver": 1, "name": "나", "phone": "01000000001", "address": "가상로 2",
+                "items": [], "unload_after": {"eta": "12:00", "label": "반입지", "minutes": 20, "volume_m3": 3}}]}
+print(json.dumps(P.compact_daylist(p, S.FEE_ROWS), ensure_ascii=False))`));
+const e16 = P.expandDaylist(pc16, BUILTIN_FEES);
+ok(pc16.s[0].u.length === 6 && pc16.s[1].u.length === 4 && e16.stops[0].unload_after.lat === 35.13 && e16.stops[0].unload_after.lon === 126.95 && e16.stops[1].unload_after.lat === null,
+  'PC 목록 묶음: 반입지 좌표가 있으면 "u" 5·6번째 값으로 싣고 휴대폰이 읽음(없으면 이전 형식)');
+
 console.log(`\n통과 ${passed}개`);

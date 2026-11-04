@@ -153,6 +153,9 @@ def save_dong(con, data: dict) -> str:
     kws = list(dict.fromkeys(k.strip()[:30] for k in kws if k and k.strip()))[:50]
     limit = _opt_int(data.get("daily_limit"), "동 일일 한도(건수)", 1)
     limit_m3 = _opt_float(data.get("daily_limit_m3"), "동 일일 한도(m³)", 0.1)
+    code = (data.get("code") or "").strip() if "code" in data else None
+    if code and not re.fullmatch(r"[0-9A-Za-z]{1,4}", code):
+        raise S.UserError("동 코드(부과번호용)는 숫자·영문 1~4자로 적어 주세요.")
     dup = S.one(con, "SELECT id FROM dong WHERE name=?", (name,))
     if dup and dup["id"] != did:
         raise S.UserError("같은 이름의 동이 이미 있습니다.")
@@ -167,6 +170,8 @@ def save_dong(con, data: dict) -> str:
             sort=excluded.sort, updated_at=excluded.updated_at""",
                     (did, name, 1 if data.get("active", True) else 0, crew, ",".join(map(str, days)), limit, limit_m3,
                      json.dumps(kws, ensure_ascii=False), int(data.get("sort") or 0), S.now()))
+        if code is not None:
+            con.execute("UPDATE dong SET code=? WHERE id=?", (code or None, did))
         renamed = 0
         if old and old["name"] != name:
             renamed = con.execute("UPDATE request SET dong=? WHERE dong=?", (name, old["name"])).rowcount

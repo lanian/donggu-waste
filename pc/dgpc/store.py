@@ -141,6 +141,28 @@ CREATE TABLE IF NOT EXISTS contact_log (
   id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES request(id), at TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
   actor TEXT, recorded_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_contact_req ON contact_log(request_id);
+-- 개인정보 파기 대장 (보유기간 지난 접수의 이름·연락처·주소·메모를 가명 처리한 기록)
+CREATE TABLE IF NOT EXISTS pii_purge_log (
+  id TEXT PRIMARY KEY, at TEXT NOT NULL, count INTEGER NOT NULL, actor TEXT, criteria_json TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'MANUAL');
+-- 개인정보 접속기록 (조회·목록·출력·내보내기). 해시 사슬로 위·변조 확인.
+CREATE TABLE IF NOT EXISTS access_log (
+  id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', count INTEGER,
+  filter TEXT NOT NULL DEFAULT '', client TEXT NOT NULL DEFAULT 'local', prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_access_at ON access_log(at);
+-- 접속기록 월 점검 기록
+CREATE TABLE IF NOT EXISTS access_check (
+  id TEXT PRIMARY KEY, month TEXT NOT NULL, at TEXT NOT NULL, actor TEXT NOT NULL, result_json TEXT NOT NULL, note TEXT);
+-- 환불 절차: 신청 → 결재(팀장·관리자, 신청자 아님) → 지급 기록. 계좌번호는 저장하지 않는다(확인 여부·끝 4자리만).
+CREATE TABLE IF NOT EXISTS refund_case (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES request(id), cause TEXT NOT NULL, amount INTEGER NOT NULL CHECK (amount > 0),
+  status TEXT NOT NULL CHECK (status IN ('DRAFT','REQUESTED','APPROVED','REJECTED','PAID','VOID')), auto INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, requested_by TEXT, requested_at TEXT, note TEXT,
+  approved_by TEXT, approved_at TEXT, approve_note TEXT,
+  paid_on TEXT, pay_method TEXT, account_checked INTEGER NOT NULL DEFAULT 0, account_last4 TEXT, paid_by TEXT, paid_at TEXT, payment_id TEXT, void_reason TEXT);
+CREATE INDEX IF NOT EXISTS ix_refund_req ON refund_case(request_id);
+-- 세외수입 대사 파일 가져오기 기록
+CREATE TABLE IF NOT EXISTS recon_import (
+  id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, at TEXT NOT NULL, actor TEXT, rows INTEGER NOT NULL, matched INTEGER NOT NULL, summary_json TEXT NOT NULL);
 """
 
 
@@ -249,10 +271,61 @@ def migrate(con):
         except BaseException:
             con.execute("ROLLBACK")
             raise
+    migrate_v11(con)
     if not con.execute("SELECT 1 FROM day_close_log LIMIT 1").fetchone():  # 이전 마감 기록(날짜별 1행) → 1회차
         for wd, at, sj, note in con.execute("SELECT work_date, closed_at, summary_json, note FROM day_close").fetchall():
             con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note) VALUES (?,?,1,?,NULL,?,?)",
                         (secrets.token_hex(16), wd, at, sj, note))
+
+
+def migrate_v11(con):
+    """v0.11: 개인정보 파기·접속기록 해시 사슬·감면·부과번호·수납 출처·환불·완료일·주소 자료 지번/건물명·사진 촬영 정보. 여러 번 실행해도 같다."""
+    for col, decl in (("reduction_code", "TEXT"), ("reduction_rate", "INTEGER"), ("reduction_label", "TEXT"), ("reduction_proof", "TEXT"),
+                      ("reduction_checker", "TEXT"), ("reduction_at", "TEXT"), ("levy_no", "TEXT"), ("completed_at", "TEXT"), ("pii_purged_at", "TEXT")):
+        if col not in _cols(con, "request"):
+            con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
+            if col == "completed_at":  # 이전 자료: 수거 완료·최종 결과 건은 마지막 변경 시각을 완료일로
+                con.execute("UPDATE request SET completed_at=updated_at WHERE status IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD')")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_request_levy ON request(levy_no) WHERE levy_no IS NOT NULL")
+    for col, decl in (("receipt_ref", "TEXT"), ("source", "TEXT NOT NULL DEFAULT '수기'")):
+        if col not in _cols(con, "payment"):
+            con.execute(f"ALTER TABLE payment ADD COLUMN {col} {decl}")
+    for col, decl in (("prev_hash", "TEXT"), ("hash", "TEXT"), ("legacy", "INTEGER NOT NULL DEFAULT 0")):
+        if col not in _cols(con, "audit_log"):
+            con.execute(f"ALTER TABLE audit_log ADD COLUMN {col} {decl}")
+            if col == "legacy":  # 해시 사슬 이전에 쌓인 기록은 '이전 기록'으로 표시(검사 대상 아님)
+                con.execute("UPDATE audit_log SET legacy=1 WHERE hash IS NULL")
+    for col, decl in (("bname", "TEXT"), ("bname_cho", "TEXT"), ("jibun_main", "INTEGER"), ("jibun_sub", "INTEGER")):
+        if col not in _cols(con, "addr_point"):
+            con.execute(f"ALTER TABLE addr_point ADD COLUMN {col} {decl}")
+    for col, decl in (("taken_at", "TEXT"), ("lat", "REAL"), ("lon", "REAL"), ("acc", "REAL")):
+        if col not in _cols(con, "photo"):
+            con.execute(f"ALTER TABLE photo ADD COLUMN {col} {decl}")
+    if "code" not in _cols(con, "dong"):
+        con.execute("ALTER TABLE dong ADD COLUMN code TEXT")
+    if "prefs_json" not in _cols(con, "app_user"):  # 사용자별 화면 설정(테마·글자 크기)
+        con.execute("ALTER TABLE app_user ADD COLUMN prefs_json TEXT")
+    # 부과번호가 없는 접수에 접수일 순서로 부과번호를 붙인다
+    todo = con.execute("""SELECT r.id, r.received_at, d.code FROM request r LEFT JOIN dong d ON d.name=r.dong
+        WHERE r.levy_no IS NULL ORDER BY r.received_at, r.receipt_no""").fetchall()
+    for rid, at, code in todo:
+        con.execute("UPDATE request SET levy_no=? WHERE id=?", (next_levy_no(con, levy_year(at), code), rid))
+
+
+def levy_year(received_at: str | None) -> str:
+    import datetime as _dt
+    try:
+        return (_dt.datetime.fromisoformat((received_at or "").replace("Z", "+00:00")) + _dt.timedelta(hours=9)).strftime("%Y")
+    except ValueError:
+        return _dt.date.today().strftime("%Y")
+
+
+def next_levy_no(con, year: str, dong_code: str | None) -> str:
+    """부과번호: 연도-동코드-일련번호(5자리). 동코드가 없으면 00. 연도·동코드마다 1부터."""
+    code = (dong_code or "00").strip() or "00"
+    prefix = f"{year}-{code}-"
+    row = con.execute("SELECT MAX(CAST(substr(levy_no, ?) AS INTEGER)) FROM request WHERE levy_no LIKE ?", (len(prefix) + 1, prefix + "%")).fetchone()
+    return f"{prefix}{(row[0] or 0) + 1:05d}"
 
 
 def _quote(s: str) -> str:
