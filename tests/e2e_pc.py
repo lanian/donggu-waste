@@ -319,6 +319,10 @@ def run():
         page.wait_for_timeout(2500)
         page.screenshot(path=SHOTS / "pc_03_dispatch.png")
         page.get_by_role("button", name="1번 아래로").first.click()
+        expect(page.locator(".route .stopline").nth(1)).to_contain_text("누적 적재(추정) 4.2m³")
+        first_load = page.locator(".route .stopline").nth(0).inner_text()
+        ok(("1.4m³" in first_load or "2.8m³" in first_load) and page.locator(".over-note").count() == 0,
+           "순서를 바꾸면 누적 적재(추정)를 화면에서 바로 다시 셈 (용량 안이면 초과 경고 없음)")
         page.get_by_role("button", name="2번 위로").first.click()  # 바꿨다 되돌림 → 조정한 것으로 보고 사유 요구
         page.get_by_role("button", name="배정 확정").click()
         expect(page.get_by_text("조정 사유를 적어 주세요")).to_be_visible()

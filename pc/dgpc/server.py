@@ -802,11 +802,12 @@ class Handler(BaseHTTPRequestHandler):
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            travel_method=method, kakao_key=S.secret(c, "kakao_rest_key") if method == "KAKAO" else "",
                            travel_cache=routing.TravelCache(c) if method == "KAKAO" else None,
-                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit", 5)),
+                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
                            volume_overrides=S.volume_overrides(c), unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
                            unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
+        ov = S.volume_overrides(c)
         if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만)
             mi = res.get("matrix_info") or {}
             with S.tx(c):
@@ -814,7 +815,10 @@ class Handler(BaseHTTPRequestHandler):
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]),
-                                     "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])]} for r in reqs}
+                                     "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])],
+                                     "m3": round(sum(routing.volume_of(i, ov) for i in r.get("items", [])), 2),
+                                     "kg": int(sum(routing.weight_of(i) for i in r.get("items", []))),
+                                     "tags": routing.tags_of(r.get("items", []))} for r in reqs}
         return res
 
     def bulk(self, d: dict) -> dict:

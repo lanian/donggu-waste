@@ -1111,16 +1111,30 @@ async function screenDispatch() {
     const TL = p.res.tag_labels || {};
     const tagChips = (x) => (x.tags || []).map((t) => chip(TL[t] || t, LOAD_TAG_CLS[t] || ''));
     const loadTxt = (x) => x.load_m3 == null ? '' : ` · 누적 적재(추정) ${x.load_m3}m³${p.res.uses_weight && x.load_kg != null ? ` · ${x.load_kg.toLocaleString()}kg` : ''}`;
+    // 누적 적재(추정)는 화면에서 다시 셈: 손으로 순서·팀을 바꾸거나 미배정에서 넣어도 바로 맞게, 차량 용량을 넘는 곳 표시
+    p.routes.forEach((rt) => {
+      let m = 0, kg = 0; rt.overAt = null;
+      rt.stops.forEach((x, i) => {
+        const q = R[x.request_id] || {};
+        m += Math.round((q.m3 || 0) * 100); kg += q.kg || 0;
+        x.load_m3 = m / 100; x.load_kg = kg; if (!x.tags) x.tags = q.tags || [];
+        x.over = m > Math.round((rt.capacity_m3 || 8) * 100) || (!!rt.capacity_kg && kg > rt.capacity_kg);
+        if (x.over && rt.overAt == null) rt.overAt = i;
+        if (x.unload_after) { m = 0; kg = 0; }
+      });
+      rt.end_load_m3 = m / 100; rt.end_load_kg = kg;
+    });
     const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
     const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); p.adjusted = true; draw(); };
     const toCrew = (ri, i, target) => { p.adjusted = true; clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
     const cols = p.routes.map((rt, ri) => h('div', { class: `card route c${(ri % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null,
         rt.lunch ? chip(`쉬는 시간 ${rt.lunch.start}부터 ${rt.lunch.minutes}분`) : null),
       rt.unloadStale ? h('div', { class: 'notice warn small' }, '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
+      rt.overAt != null ? h('div', { class: 'notice warn small over-note' }, `${rt.overAt + 1}번부터 누적 적재(추정)가 차량 용량(${rt.capacity_m3 || 8}m³${rt.capacity_kg ? ` · ${rt.capacity_kg.toLocaleString()}kg` : ''})을 넘습니다. 반입지에 들러야 하면 [노선 계산]을 다시 하거나 몇 곳을 다른 팀·다른 날로 옮기세요.`) : null,
       ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
         h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${loadTxt(x)}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
           (R[x.request_id].items || []).length ? h('span', { class: 'stop-items small' }, h('br'), R[x.request_id].items.join(', ')) : null, h('br'),
-          ...tagChips(x),
+          ...tagChips(x), x.over ? chip('적재 초과', 'bad') : null,
           R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null,
           R[x.request_id].dong ? chip(R[x.request_id].dong) : null,
           R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null,
@@ -1147,6 +1161,8 @@ async function screenDispatch() {
     const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
     const confirmBtn = btn('배정 확정', wrap(async () => {
       if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }
+      const overs = p.routes.filter((rt) => rt.overAt != null);
+      if (overs.length && !(await confirmDlg('적재 초과', `${overs.map((rt) => `${rt.crew_name} ${rt.overAt + 1}번부터`).join(', ')} 누적 적재(추정)가 차량 용량을 넘습니다. 그대로 확정할까요? (추정치이므로 현장에서 반입지를 더 들를 수 있습니다)`, { ok: '그대로 확정' }))) return;
       const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
       const res = await post('assign', { date: s.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
