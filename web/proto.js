@@ -221,7 +221,8 @@ export function expandDaylist(p, feeTable) {
     seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a, dong: c.d || '',
     spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
     appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
-    unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3] } : null,
+    // v0.10.1: "u"의 선택 5·6번째 값 = 반입지 위도·경도(길안내용). 없으면 null(이전 목록 그대로).
+    unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3], lat: c.u[4] ?? null, lon: c.u[5] ?? null } : null,
     items: c.it.map(([sid, rid, qty, x = {}]) => {
       const row = rows[rid || ''];
       const status = x.ps === 'C' ? 'CONFIRMED' : x.ps === 'P' ? 'PENDING' : row && row.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING';

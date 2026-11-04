@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 from functools import partial
+from urllib.parse import unquote
 from pathlib import Path
 
 from PIL import Image
@@ -84,9 +85,9 @@ def serve(directory: Path) -> int:
     return srv.server_address[1]
 
 
-def browser(pw, video: Path, profile: str = "profile"):
+def browser(pw, video: Path, profile: str = "profile", **extra):
     ctx = pw.chromium.launch_persistent_context(
-        str(WORK / profile), executable_path=CHROME, headless=True,
+        str(WORK / profile), executable_path=CHROME, headless=True, **extra,
         viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
         accept_downloads=True, permissions=["camera", "geolocation"], geolocation={"latitude": 35.1462, "longitude": 126.9233},
         ignore_https_errors=True,
@@ -222,6 +223,8 @@ def main():
             ok(len(opened) == 1 and opened[0].startswith("sms:" + phone.replace("-", "") + "?body=") and name not in __import__("urllib.parse").parse.unquote(opened[0]),
                "문자 앱에는 그 주민 번호와 문구(접수번호·시각)만, 이름 없음")
             ok(True, "[문자] 문구 선택 → sms: 열기, 문자 안내 기록(문구 종류만)")
+            # 길안내: 전화 옆 [길안내] → 설정에서 고른 지도 앱 (좌표와 '1번 수거지'만), 앱이 없으면 웹 지도·기본 지도 앱
+            check_nav_apps(page, url, [name, phone.replace("-", ""), phone, page.locator(".who .addr").inner_text()[:8]], "1번 수거지")
             page.locator("#cam-AFTER").set_input_files(str(ROOT / "web/icons/icon-512.png"))
             expect(page.locator(".thumbs img")).to_have_count(1, timeout=15000)
             ok(True, "현장 사진 촬영(파일 입력) → 앱 안에 암호화 저장, 찍은 시각 표시")
@@ -289,6 +292,13 @@ def main():
             ok("9,000원" in page.get_by_role("dialog").inner_text(), "현장 금액이 늘면 저장 전 '추가 금액 9,000원' 고지 창")
             page.get_by_role("button", name="동의", exact=True).click()
             expect(page.get_by_text("저장됨: 일부 수거")).to_be_visible()
+            # 결과를 저장하면 아래 고정 영역의 길안내가 '다음 지점 길안내'로 (다음 미완료 지점, 좌표와 '2번 수거지'만)
+            n0 = len(page.evaluate("window.__dgOpened"))
+            page.locator(".dock").get_by_role("button", name=re.compile("^다음 길안내")).click()
+            page.wait_for_timeout(2200)
+            nx = page.evaluate("window.__dgOpened")[n0:]
+            ok(len(nx) == 2 and nx[0].startswith("kakaomap://route?ep=") and "2번 수거지" in unquote(nx[1]) and name not in unquote(" ".join(nx)),
+               "결과 저장 뒤 아래 고정 영역 [다음 길안내] → 다음 미완료 지점(2번)으로 카카오맵, 앱 없으면 웹")
             ok(page.locator(".result-sum").get_by_text("추가 금액 9,000원: 동의").is_visible(), "고지 결과(동의)가 결과 요약에 표시")
             ok(page.locator(".line.field").last.locator(".row.left .val").inner_text().startswith("1"),
                "현장 추가 품목의 남은 대상 1 유지 (다른 품목 수거로 상쇄 안 됨)")
@@ -361,6 +371,9 @@ def main():
             kinds = {e["kind"] for e in evs}
             arr = [json.loads(e["body_json"]) for e in evs if e["kind"] == "ARRIVE"]
             ph = [json.loads(e["body_json"]) for e in evs if e["kind"] == "PHOTO_META"]
+            navs = [json.loads(e["body_json"]) for e in evs if e["kind"] == "NAV_INTENT"]
+            ok(len(navs) == 5 and {n["app"] for n in navs} == {"kakao", "tmap", "naver", "geo"} and all(set(n) <= {"app", "worker"} for n in navs),
+               f"길안내 기록 NAV_INTENT {len(navs)}건이 PC에 저장됨 (앱 종류만: {sorted({n['app'] for n in navs})})")
             ok({"ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "PHOTO_META"} <= kinds and arr and arr[0].get("acc") is not None and arr[0].get("worker") == "이수거"
                and ph and ph[0].get("taken_at"), f"새 기록 종류가 PC에 저장됨 ({', '.join(sorted(kinds))}) · 작업자·위치·촬영 시각 포함")
             sms = [json.loads(e["body_json"]) for e in evs if e["kind"] == "SMS_INTENT"]
@@ -432,6 +445,7 @@ def main():
 
             midday_update(pw, url)
             solo(pw, url, WORK / "reg.y4m")
+            juso_flow(pw, url)
             lock_and_bio(pw, port)
         except BaseException:
             if LAST_PAGE:
@@ -550,6 +564,35 @@ def lock_and_bio(pw, port):
     check_requests("잠금", ["가상삼", "01000005555", "잠금로"])
 
 
+def check_nav_apps(page, url, secrets: list[str], label: str):
+    """설정의 길안내 앱 4가지마다 상세 [길안내] → 앱 주소(와 웹·기본 지도 대체 주소)에 좌표와 표시 이름만 있는지."""
+    from urllib.parse import unquote
+    stop_url = page.url
+    page.goto(url + "#/settings")
+    ok(page.get_by_role("group", name="길안내 앱").get_by_role("button", name="카카오맵").get_attribute("aria-pressed") == "true"
+       and page.get_by_text("기관 승인").count() == 0 and page.get_by_text("좌표와 'N번 수거지'").count() == 1, "길안내 기본 켬·기본 앱 카카오맵 (승인 조건 없음, 넘기는 것 안내)")
+    expect_prefix = {"카카오맵": ("kakaomap://route?ep=", "https://map.kakao.com/link/to/"), "T맵": ("tmap://route?goalx=", "geo:"),
+                     "네이버지도": ("nmap://route/car?dlat=", "https://m.map.naver.com/route.nhn?"), "기본 지도 앱": ("geo:", None)}
+    for app, (pre, fb) in expect_prefix.items():
+        page.goto(url + "#/settings")
+        page.get_by_role("group", name="길안내 앱").get_by_role("button", name=app, exact=True).click()
+        page.goto(stop_url)
+        n0 = len(page.evaluate("window.__dgOpened"))
+        nav = page.locator(".dock .nav-btn")
+        ok(nav.bounding_box()["height"] >= 56 and nav.is_enabled(), f"[{app}] 상세 아래 고정 영역 전화 옆 [길안내] (높이 {nav.bounding_box()['height']:.0f}px)")
+        nav.click()
+        page.wait_for_timeout(2200)  # 앱이 없을 때 대체 주소까지(1.5초)
+        got = page.evaluate("window.__dgOpened")[n0:]
+        words = {w for u in got for w in re.findall(r"[가-힣]+", unquote(u))}
+        coord = all(re.search(r"35\.\d{6}", u) and re.search(r"12[67]\.\d{6}", u) for u in got)
+        ok(got and got[0].startswith(pre) and (got[1].startswith(fb) if fb else len(got) == 1) and coord and words <= {"번", "수거지"}
+           and label in unquote(got[0] if app != "카카오맵" else got[1]) and not any(x and x in unquote(u) for x in secrets for u in got),
+           f"[{app}] {got[0][:46]}… (+대체 {got[1][:28] + '…' if len(got) > 1 else '없음'}): 좌표·'{label}'만, 이름·연락처·주소 없음")
+    page.goto(url + "#/settings")
+    page.get_by_role("group", name="길안내 앱").get_by_role("button", name="카카오맵", exact=True).click()
+    page.goto(stop_url)
+
+
 def personal_from_bundle() -> list[str]:
     sys.path.insert(0, str(ROOT / "pc"))
     from sample_data import make_daylist
@@ -559,17 +602,140 @@ def personal_from_bundle() -> list[str]:
     return out
 
 
-def check_requests(label: str, secrets: list[str]):
-    """브라우저가 보낸 모든 요청: 외부로는 지도 서버만, 어떤 요청에도 개인정보·핀 좌표 없음."""
+def check_requests(label: str, secrets: list[str], allow=("tiles.openfreemap.org",)):
+    """브라우저가 보낸 모든 요청: 외부로는 허용한 곳(지도 서버, 주소 검색 서버)만, 어떤 요청에도 개인정보·핀 좌표 없음."""
     from urllib.parse import unquote
     external = [(u, b) for u, b in REQUESTS if not u.startswith(("http://127.0.0.1", "http://localhost")) and not u.startswith(("data:", "blob:"))]
     hosts = sorted({u.split("/")[2] for u, _ in external})
-    ok(all(h == "tiles.openfreemap.org" for h in hosts), f"[{label}] 외부 요청은 지도 서버만 ({', '.join(hosts) or '없음'}, {len(external)}건)")
+    ok(all(h in allow for h in hosts), f"[{label}] 외부 요청은 {'·'.join(allow)}만 ({', '.join(hosts) or '없음'}, {len(external)}건)")
     zs = [int(m.group(1)) for u, _ in external for m in [re.search(r"/(\d+)/\d+/\d+\.(?:pbf|png|mvt)", u)] if m]
     ok(not zs or max(zs) <= 14, f"[{label}] 지도 서버에는 넓은 범위(최대 줌 {max(zs) if zs else '-'}, 약 2km 단위) 조각만 요청 — 집 단위 위치 노출 없음")
     leaked = [x for x in secrets if any(x in unquote(u) or x in b for u, b in REQUESTS)]
     ok(not leaked, f"[{label}] 모든 요청 주소·본문에 이름·연락처·주소·접수번호·핀 좌표 없음" + (f" (발견: {leaked[:3]})" if leaked else ""))
     REQUESTS.clear()
+
+
+JUSO_ITEM = {"roadAddr": "광주광역시 동구 서남로 1 (계림동)", "roadAddrPart1": "광주광역시 동구 서남로 1", "roadAddrPart2": " (계림동)",
+             "jibunAddr": "광주광역시 동구 계림동 1-1 가상빌딩", "engAddr": "1, Seonam-ro, Dong-gu, Gwangju", "zipNo": "61400", "admCd": "2911010800",
+             "rnMgtSn": "291103166047", "bdMgtSn": "2911010800100010001000001", "detBdNmList": "", "bdNm": "가상빌딩", "bdKdcd": "0",
+             "siNm": "광주광역시", "sggNm": "동구", "emdNm": "계림동", "liNm": "", "rn": "서남로", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0",
+             "mtYn": "0", "lnbrMnnm": "1", "lnbrSlno": "1", "emdNo": "01", "hstryYn": "0", "relJibun": "", "hemdNm": "계림2동"}
+JUSO_LATLON = (35.153412, 126.921876)  # 좌표 API가 돌려주는 출입구 위치(가상) — UTM-K로 바꿔서 응답
+
+
+def juso_flow(pw, url):
+    """주소 검색(행정안전부 API를 가짜 응답으로) → 접수 주소·좌표·동 채우기 → 그 위치로 길안내, 반입지 위치·길안내."""
+    print("[주소 검색·길안내]")
+    from urllib.parse import parse_qs, urlsplit, unquote
+    sys.path.insert(0, str(ROOT / "pc"))
+    from dgpc import geo  # noqa: E402
+    ex, ey = geo.wgs84_to_utmk(*JUSO_LATLON)
+    calls: list[str] = []
+
+    def juso(route):
+        u = urlsplit(route.request.url)
+        calls.append(route.request.url)
+        common = {"errorCode": "0", "errorMessage": "정상", "totalCount": "1", "currentPage": "1", "countPerPage": "10"}
+        if u.path.endswith("/addrLinkApi.do"):
+            body = {"results": {"common": common, "juso": [JUSO_ITEM]}}
+        elif u.path.endswith("/addrCoordApi.do"):
+            body = {"results": {"common": common, "juso": [{"admCd": JUSO_ITEM["admCd"], "rnMgtSn": JUSO_ITEM["rnMgtSn"], "bdMgtSn": JUSO_ITEM["bdMgtSn"],
+                                                            "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0", "entX": f"{ex:.6f}", "entY": f"{ey:.6f}", "bdNm": "가상빌딩"}]}}
+        else:
+            return route.fulfill(status=404, body="")
+        route.fulfill(status=200, content_type="application/json;charset=UTF-8", headers={"Access-Control-Allow-Origin": "*"},
+                      body=json.dumps(body, ensure_ascii=False))
+
+    # 서비스 워커가 가로챈 요청은 route()가 못 보므로 이 시험에서는 끈다
+    ctx, page = browser(pw, WORK / "reg.y4m", "profile-juso", service_workers="block")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    ctx.route("https://business.juso.go.kr/**", juso)
+    page.goto(url)
+    page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
+    page.get_by_placeholder("한 번 더").fill(PIN)
+    page.get_by_role("button", name="PIN 설정").click()
+    page.get_by_role("button", name="이 휴대폰만으로 사용").click()
+    page.get_by_role("button", name="이 휴대폰만으로 시작").click()
+    page.get_by_role("button", name="+ 전화 접수 등록").click()
+    expect(page.locator(".addr-status")).to_contain_text("승인키를 설정에서 입력")
+    page.goto(url + "#/settings")
+    page.get_by_label("주소 검색 승인키").fill("TEST-SEARCH-KEY")
+    page.get_by_label("좌표 승인키").fill("TEST-COORD-KEY")
+    page.get_by_role("button", name="승인키 저장").click()
+    expect(page.get_by_text("승인키를 저장했습니다")).to_be_visible()
+    ok(page.get_by_role("button", name="직접", exact=True).get_attribute("aria-pressed") == "true", "설정: 주소 검색 승인키·좌표 승인키 저장, 단독 방식 경로 기본 '직접'")
+
+    page.goto(url + "#/intake")
+    page.get_by_label("이름").fill("가상주소")
+    page.get_by_label("연락처").fill("01000003333")
+    # 검색어에 주민 이름이 들어가면 보내지 않음
+    page.get_by_label("주소 검색어").fill("가상주소 집")
+    page.wait_for_timeout(700)
+    ok(not calls and "보내지 않았습니다" in page.locator(".addr-status").inner_text(), "검색어에 주민 이름·연락처가 있으면 주소 서버로 보내지 않음")
+    page.get_by_label("주소 검색어").fill("서")
+    page.wait_for_timeout(500)
+    ok(not calls, "한 글자는 검색하지 않음 (2자 이상, 300ms 뒤)")
+    page.get_by_label("주소 검색어").fill("서남로 1")
+    expect(page.locator(".addr-item")).to_have_count(1, timeout=10000)
+    item = page.locator(".addr-item").inner_text()
+    ok(all(x in item for x in ("광주광역시 동구 서남로 1", "지번 광주광역시 동구 계림동 1-1", "가상빌딩", "우편번호 61400")), "검색 결과: 도로명·지번·건물명·우편번호")
+    q = parse_qs(urlsplit(calls[0]).query)
+    ok(urlsplit(calls[0]).netloc == "business.juso.go.kr" and urlsplit(calls[0]).path == "/addrlink/addrLinkApi.do" and len(calls) == 1
+       and sorted(q) == ["confmKey", "countPerPage", "currentPage", "keyword", "resultType"] and q["keyword"] == ["서남로 1"] and q["resultType"] == ["json"],
+       f"검색 요청은 검색어·승인키·쪽수·json만 ({unquote(calls[0].split('?')[1])})")
+    page.screenshot(path=SHOTS / "20_juso_search.png")
+    page.locator(".addr-item").click()
+    expect(page.get_by_label("배출 주소")).to_have_value(JUSO_ITEM["roadAddr"], timeout=10000)
+    cq = parse_qs(urlsplit(calls[1]).query)
+    ok(urlsplit(calls[1]).path == "/addrlink/addrCoordApi.do" and sorted(cq) == ["admCd", "buldMnnm", "buldSlno", "confmKey", "resultType", "rnMgtSn", "udrtYn"]
+       and cq["confmKey"] == ["TEST-COORD-KEY"], "좌표 요청은 건물 식별 번호·좌표 승인키만")
+    ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동" and page.locator(".addr-geo").count() == 1,
+       "주소 고르기 → 도로명 주소·좌표(건물 출입구)·행정동 '계림2동' 채움")
+    page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
+    page.locator(".btn.result").first.click()
+    page.get_by_role("button", name="품목 추가", exact=True).click()
+    page.get_by_role("button", name="접수 등록").click()
+    page.get_by_role("button", name=re.compile("내일 1")).click()
+    page.locator(".stop", has_text="가상주소").click()
+    expect(page.locator(".who .name")).to_have_text("가상주소")
+    n0 = len(page.evaluate("window.__dgOpened"))
+    page.locator(".dock .nav-btn").click()
+    page.wait_for_timeout(2200)
+    got = page.evaluate("window.__dgOpened")[n0:]
+    want = f"{JUSO_LATLON[0]:.6f},{JUSO_LATLON[1]:.6f}"
+    ok(got and got[0] == f"kakaomap://route?ep={want}&by=CAR" and unquote(got[1]) == f"https://map.kakao.com/link/to/1번 수거지,{want}",
+       f"주소 검색 좌표(UTM-K→위도·경도 변환)로 길안내: {got[0]}")
+    # 위치 지정 화면에도 주소 검색 (같은 서버, 검색어만)
+    page.get_by_role("button", name="위치 고치기").click()
+    page.get_by_label("주소 검색어").fill("서남로 1")
+    expect(page.locator(".addr-item")).to_have_count(1, timeout=10000)
+    page.locator(".addr-item").click()
+    expect(page.locator(".gps-note")).to_contain_text("주소 검색")
+    page.get_by_role("button", name="이 위치로 저장").click()
+    expect(page.locator(".who .name")).to_have_text("가상주소")
+    ok(True, "위치 지정 화면: 주소 검색으로 지도 이동 → 저장")
+    # 반입지: 위치 지정 → 하차 화면·목록에서 [길안내] ('반입지'만)
+    page.goto(url + "#/unload")
+    ok(page.locator(".nav-btn").first.is_disabled() and "위치 없음 — 위치 지정 필요" in page.locator(".nav-none").inner_text(), "반입지 위치가 없으면 길안내 꺼짐 + 이유")
+    page.get_by_role("button", name="반입지 위치 지정").click()
+    page.get_by_role("button", name="지금 내 위치로 이동").click()
+    save = page.get_by_role("button", name="이 위치로 저장")
+    expect(save).to_be_enabled(timeout=20000)
+    save.click()
+    expect(page.get_by_role("button", name="반입지 위치 고치기")).to_be_visible()
+    n0 = len(page.evaluate("window.__dgOpened"))
+    page.locator(".nav-btn").first.click()
+    page.wait_for_timeout(2200)
+    got = [unquote(u) for u in page.evaluate("window.__dgOpened")[n0:]]
+    ok(len(got) == 2 and got[0].startswith("kakaomap://route?ep=35.") and got[1].startswith("https://map.kakao.com/link/to/반입지,35."),
+       "반입지 길안내: 좌표와 '반입지'만")
+    page.screenshot(path=SHOTS / "21_unload_nav.png")
+    ok(not errors, "주소 검색·길안내 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
+    ctx.close()
+    ext = [u for u, _ in REQUESTS if "juso.go.kr" in u]
+    ok(len(ext) == 4 and not any(x in unquote(u) for u in ext for x in ("가상주소", "01000003333", "0000-3333")), f"주소 서버 요청 {len(ext)}건 모두 이름·연락처 없음")
+    check_requests("주소 검색", ["가상주소", "01000003333", "0000-3333", "1층"], allow=("tiles.openfreemap.org", "business.juso.go.kr"))
 
 
 def solo(pw, url, video):
@@ -655,9 +821,19 @@ def solo(pw, url, video):
     ok(True, "단독 모드 현장 처리: 연락·수거·완료 저장")
     page.get_by_role("button", name="← 목록").first.click()
 
-    # 위치 지정 (지도 가운데 핀, 주소 검색 없음)
+    # 위치 지정 (승인키가 없으면 주소 검색 대신 지도·내 위치)
+    page.locator(".stop", has_text="가상일").click()
+    expect(page.locator(".nav-none")).to_contain_text("위치 없음 — 위치 지정 필요")
+    ok(page.locator(".dock .nav-btn").count() == 0, "위치 없는 곳: 이유 '위치 없음 — 위치 지정 필요' 표시 (마지막 곳·저장 뒤라 다음 길안내 없음)")
+    page.get_by_role("button", name="← 목록").first.click()
+    page.locator(".stop", has_text="가상이").click()
+    ok(page.locator(".dock .nav-btn").is_disabled() and page.locator(".dock .nav-btn").get_attribute("title") == "위치 없음 — 위치 지정 필요",
+       "결과 저장 전 위치 없는 곳: 전화 옆 [길안내] 꺼짐 + 이유")
+    page.get_by_role("button", name="← 목록").first.click()
     page.locator(".stop", has_text="가상일").click()
     page.get_by_role("button", name="위치 지정", exact=True).click()
+    expect(page.locator(".addr-status")).to_contain_text("승인키를 설정에서 입력")
+    ok(page.get_by_label("주소 검색어").is_disabled(), "승인키가 없으면 주소 검색칸은 '승인키를 설정에서 입력' 안내, 지도·내 위치로 지정")
     save = page.get_by_role("button", name="이 위치로 저장")
     # 지도 조각에 기대지 않는다: 배출 위치에 서서 휴대폰 위치(가짜 GPS)로 저장
     page.get_by_role("button", name="지금 내 위치로 이동").click()
@@ -701,9 +877,17 @@ def solo(pw, url, video):
     mline.get_by_placeholder(re.compile("^근거")).fill("가상 확인 11/3")
     mline.get_by_role("button", name="저장").click()
     expect(page.locator(".line", has_text="6인용 이상(대리석)").get_by_text("확정 15,000원")).to_be_visible()
-    page.get_by_role("button", name="크게").click()
-    big = page.evaluate("document.documentElement.classList.contains('text-big')")
-    page.get_by_role("button", name="보통").click()
+    fs = lambda: page.evaluate("[getComputedStyle(document.body).fontSize, document.documentElement.className]")
+    ok(fs()[0] == "15px", "글자 크기 기본 '보통' = 본문 15px")
+    page.get_by_role("button", name="크게", exact=True).click()
+    big_l = fs()
+    page.get_by_role("button", name="아주 크게", exact=True).click()
+    big = fs()
+    page.get_by_role("button", name="작게", exact=True).click()
+    small = fs()
+    ok(big_l[0] == "17px" and "fs-l" in big_l[1] and big[0] == "19px" and "text-big" in big[1] and small[0] == "14px",
+       f"글자 크기 4단계: 작게 {small[0]} · 크게 {big_l[0]} · 아주 크게 {big[0]} (뿌리 글자 크기 하나로 모두 바뀜)")
+    page.get_by_role("button", name="보통", exact=True).click()
     page.get_by_role("button", name="어둡게").click()
     scr = page.locator("section.card", has_text="야외 고대비")
     scr.get_by_role("button", name="켬").click()
@@ -712,12 +896,25 @@ def solo(pw, url, video):
     page.get_by_role("button", name="자동").click()
     page.locator("section.card", has_text="야외 고대비").get_by_role("button", name="끔").click()
     ok(theme == ["dark", True] and page.evaluate("document.documentElement.dataset.theme") is None, "테마 자동/밝게/어둡게 + 야외 고대비")
+    ok(page.locator("section.screen-card").count() == 1 and page.locator("main > section").first.get_attribute("class").count("screen-card") == 1
+       and page.locator(".theme-seg .tp").count() == 3, "설정 맨 위 '화면': 밝기 구분 단추(미리보기 3개)")
     page.goto(url + "#/intake")
     page.get_by_placeholder(re.compile("품목명")).fill("대리석")
     expect(page.locator(".btn.result", has_text="6인용 이상").first).to_be_visible()
-    ok("15,000" in page.locator(".btn.result", has_text="6인용 이상").first.inner_text() and big,
+    ok("15,000" in page.locator(".btn.result", has_text="6인용 이상").first.inner_text(),
        "단독: 하차 기록, 확인 필요 단가는 근거와 함께 정한 뒤 새 접수에 적용, 큰 글씨 설정")
     page.goto(url + "#/home")
+    # 첫 화면 위 ☀/🌙: 지금 보이는 것의 반대로 바로 바꾸기
+    page.get_by_role("button", name="어두운 화면으로").click()
+    expect(page.get_by_role("button", name="밝은 화면으로")).to_be_visible()
+    t1 = page.evaluate("document.documentElement.dataset.theme")
+    page.get_by_role("button", name="밝은 화면으로").click()
+    ok(t1 == "dark" and page.evaluate("document.documentElement.dataset.theme") == "light", "첫 화면 위 ☀/🌙로 밝기 바로 바꾸기")
+    page.goto(url + "#/settings")
+    page.get_by_role("button", name="자동", exact=True).click()
+    expect(page.get_by_role("button", name="자동", exact=True)).to_have_attribute("aria-pressed", "true")
+    page.goto(url + "#/home")
+    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible()
 
     # 백업 → 전체 삭제 → 복원
     ok(page.get_by_text("마지막 백업: 없음").count() == 1, "백업 전 경고 표시")

@@ -11,6 +11,8 @@ import { BUILTIN_FEES } from '../web/fees-data.js';
 import * as F from '../web/field.js';
 import { deriveStop, needsFeeNotice, feeExtra } from '../web/fees.js';
 import { tilesForBbox, isAllowedMapUrl, bboxAround, DONGGU_BBOX } from '../web/map.js';
+import * as NAV from '../web/nav.js';
+import * as J from '../web/juso.js';
 
 const require = createRequire(import.meta.url);
 const jsQR = require('jsqr');
@@ -206,5 +208,61 @@ const tl = tilesForBbox(DONGGU_BBOX);
 ok(tl.length > 0 && tl.length < 200 && Math.max(...tl.map((t) => t.z)) === 14 && tilesForBbox(DONGGU_BBOX, 15, 16).length === 0, `동구 범위 조각 ${tl.length}개 (줌 10~14, 15 이상 없음)`);
 const bb = bboxAround([{ lat: 35.15, lon: 126.92 }]);
 ok(bb[0] < 126.92 && bb[2] > 126.92 && isAllowedMapUrl('https://tiles.openfreemap.org/planet/x/14/1/1.pbf') && !isAllowedMapUrl('https://tiles.openfreemap.org/planet/x/15/1/1.pbf'), '범위 여유·줌 15 이상 차단');
+
+// 12) 길안내 주소: 좌표와 "N번 수거지"만 ------------------------------------
+const P12 = { lat: 35.146213, lon: 126.923301, label: NAV.navLabel(3) };
+const PII12 = ['가상하나', '01000001234', '예시로', 'DG-2026'];
+const u12 = Object.fromEntries(Object.keys(NAV.NAV_APPS).map((a) => [a, NAV.navUrls(a, P12, { appname: 'https://app.example' })]));
+ok(u12.kakao.url === 'kakaomap://route?ep=35.146213,126.923301&by=CAR' && u12.kakao.fallback === `https://map.kakao.com/link/to/${encodeURIComponent('3번 수거지')},35.146213,126.923301`, '카카오맵: kakaomap://route?ep=위도,경도&by=CAR, 없으면 map.kakao.com/link/to');
+ok(u12.tmap.url === `tmap://route?goalx=126.923301&goaly=35.146213&goalname=${encodeURIComponent('3번 수거지')}` && u12.tmap.fallback.startsWith('geo:35.146213,126.923301'), 'T맵: goalx=경도·goaly=위도, 웹 길안내가 없어 geo:로');
+ok(u12.naver.url.startsWith('nmap://route/car?dlat=35.146213&dlng=126.923301&dname=') && u12.naver.url.includes('appname=https%3A%2F%2Fapp.example') && u12.naver.fallback.startsWith('https://m.map.naver.com/route.nhn?'), '네이버지도: nmap://route/car?dlat·dlng·dname·appname, 없으면 모바일 웹');
+ok(u12.geo.url === `geo:35.146213,126.923301?q=35.146213,126.923301(${encodeURIComponent('3번 수거지')})` && u12.geo.fallback === null
+  && NAV.navUrls('geo', P12, { ios: true }).url === 'maps://?daddr=35.146213,126.923301&dirflg=d' && NAV.navUrls('geo', P12, { ios: true }).app === 'apple-maps', '기본 지도 앱: Android geo:, iOS Apple 지도');
+const all12 = Object.values(u12).flatMap((x) => [x.url, x.fallback]).filter(Boolean).map(decodeURIComponent);
+ok(all12.every((u) => !PII12.some((x) => u.includes(x)) && (u.match(/[가-힣]+/g) || []).every((w) => ['번', '수거지'].includes(w))), '모든 길안내 주소에 좌표·"3번 수거지" 외 글자(이름·연락처·주소·접수번호) 없음');
+ok(NAV.safeLabel('가상하나 집') === '수거지' && NAV.navLabel('UNLOAD') === '반입지' && NAV.navUrls('kakao', { lat: 35.1, lon: 126.9, label: '가상하나' }).fallback.includes(encodeURIComponent('수거지')), '정해진 표시 이름 외에는 "수거지"로 바꿈 (이름이 들어갈 수 없음)');
+let threw = false; try { NAV.navUrls('kakao', { lat: null, lon: null, label: '1번 수거지' }); } catch { threw = true; }
+ok(threw && !NAV.hasCoord({ lat: null, lon: 1 }) && NAV.hasCoord({ lat: 35.1, lon: 126.9 }), '좌표 없는 곳은 길안내 주소를 만들지 않음');
+
+// 13) UTM-K(EPSG:5179) → WGS84: 원점·Python(pc/dgpc/geo.py)과 비교 -----------
+const [ox, oy] = J.wgs84ToUtmk(38, 127.5);
+ok(Math.abs(ox - 1e6) < 1e-6 && Math.abs(oy - 2e6) < 1e-6, 'UTM-K 원점 (38°N, 127.5°E) = (1,000,000, 2,000,000)');
+const pts13 = [[35.1462, 126.9233], [37.5665, 126.978], [33.25, 126.56], [38.6, 128.4]];
+const pyPts = JSON.parse(pyEval(`import json; from dgpc import geo; print(json.dumps([geo.wgs84_to_utmk(a, b) for a, b in ${JSON.stringify(pts13)}]))`));
+const pyBack = JSON.parse(pyEval(`import json; from dgpc import geo; print(json.dumps([geo.utmk_to_wgs84(x, y) for x, y in ${JSON.stringify(pyPts)}]))`));
+ok(pts13.every(([a, b], i) => { const [x, y] = J.wgs84ToUtmk(a, b); return Math.abs(x - pyPts[i][0]) < 1e-3 && Math.abs(y - pyPts[i][1]) < 1e-3; }), 'WGS84→UTM-K: 휴대폰(JS)과 PC(Python) 1mm 이내 일치 (광주 동구청·서울시청·제주·강원)');
+ok(pyPts.every(([x, y], i) => { const [a, b] = J.utmkToWgs84(x, y); return Math.abs(a - pyBack[i][0]) < 1e-9 && Math.abs(b - pyBack[i][1]) < 1e-9 && Math.abs(a - pts13[i][0]) < 1e-8 && Math.abs(b - pts13[i][1]) < 1e-8; }), 'UTM-K→WGS84: Python과 일치, 왕복 오차 1mm 미만');
+const [sx, sy] = J.wgs84ToUtmk(37.5665, 126.978);
+ok(Math.abs(sx - 953901) < 50 && Math.abs(sy - 1952032) < 50, `서울시청 부근 UTM-K (${sx.toFixed(0)}, ${sy.toFixed(0)}) 알려진 값 범위`);
+
+// 14) 도로명주소 API: 요청에는 검색어·승인키만, 좌표 변환·동 제안 -----------
+const jusoCalls = [];
+const fakeFetch = async (url, o) => {
+  jusoCalls.push({ url, o });
+  const u = new URL(url);
+  const body = u.pathname.endsWith('addrLinkApi.do')
+    ? { results: { common: { errorCode: '0', errorMessage: '정상', totalCount: '1', currentPage: '1', countPerPage: '10' }, juso: [{ roadAddr: '광주광역시 동구 서남로 1 (계림동)', roadAddrPart1: '광주광역시 동구 서남로 1', jibunAddr: '광주광역시 동구 계림동 1-1', bdNm: '가상빌딩', zipNo: '61400', emdNm: '계림동', hemdNm: '', admCd: '2911010800', rnMgtSn: '291103166047', udrtYn: '0', buldMnnm: '1', buldSlno: '0' }] } }
+    : { results: { common: { errorCode: '0', errorMessage: '정상', totalCount: '1' }, juso: [{ entX: String(pyPts[0][0]), entY: String(pyPts[0][1]) }] } };
+  return { ok: true, status: 200, json: async () => body };
+};
+const sr = await J.searchAddress({ key: 'TESTKEY', keyword: '서남로 1', fetchFn: fakeFetch });
+const q14 = new URL(jusoCalls[0].url);
+ok(q14.origin === 'https://business.juso.go.kr' && q14.pathname === '/addrlink/addrLinkApi.do' && [...q14.searchParams.keys()].sort().join() === 'confmKey,countPerPage,currentPage,keyword,resultType'
+  && q14.searchParams.get('keyword') === '서남로 1' && q14.searchParams.get('resultType') === 'json' && jusoCalls[0].o.credentials === 'omit' && jusoCalls[0].o.referrerPolicy === 'no-referrer', '검색 요청: business.juso.go.kr/addrlink/addrLinkApi.do, 검색어·승인키·쪽수·json만, 쿠키·Referer 없음');
+ok(sr.total === 1 && sr.items[0].zip === '61400' && sr.items[0].bdNm === '가상빌딩', '검색 결과: 도로명·지번·건물명·우편번호');
+const co = await J.coordOf({ key: 'COORDKEY', item: sr.items[0], fetchFn: fakeFetch });
+const q14b = new URL(jusoCalls[1].url);
+ok(q14b.pathname === '/addrlink/addrCoordApi.do' && [...q14b.searchParams.keys()].sort().join() === 'admCd,buldMnnm,buldSlno,confmKey,resultType,rnMgtSn,udrtYn' && q14b.searchParams.get('confmKey') === 'COORDKEY', '좌표 요청: addrCoordApi.do, 건물 식별 번호와 좌표 승인키만');
+ok(Math.abs(co.lat - 35.1462) < 1e-6 && Math.abs(co.lon - 126.9233) < 1e-6, `좌표(UTM-K 출입구) → 위도·경도 ${co.lat}, ${co.lon}`);
+const dg = J.suggestDong(sr.items[0], []);
+ok(dg.dong === '' && dg.candidates.join() === '계림1동,계림2동' && J.suggestDong({ hemdNm: '계림2동', emdNm: '계림동' }).dong === '계림2동' && J.suggestDong({ emdNm: '가상1동' }, ['가상1동']).dong === '가상1동', '동 제안: 행정동이 있으면 그대로, 법정동 "계림동" → 계림1동·계림2동 후보, 접수에 쓴 동과도 맞춤');
+await throwsCode(() => J.searchAddress({ key: 'BAD', keyword: '서남로', fetchFn: async () => ({ ok: true, json: async () => ({ results: { common: { errorCode: 'E0001', errorMessage: '승인되지 않은 KEY 입니다.' } } }) }) }), 'E0001', '틀린 승인키');
+await throwsCode(() => J.searchAddress({ key: 'K', keyword: '서남로', fetchFn: async () => { throw new TypeError('Failed to fetch'); } }), 'NETWORK', 'CORS 차단·인터넷 끊김');
+ok(J.cleanKeyword(" 서남로 1 <script>% = [x]") === '서남로 1 script x', '검색어의 특수문자(서버가 거부하는 것) 제거');
+
+// 15) 반입지 좌표 (목록 묶음 "u"의 선택 5·6번째 값) -----------------------------
+const u15 = { ...dj.c, s: dj.c.s.map((x, i) => (i === 0 ? { ...x, u: ['11:00', '가상 반입지', 20, 5.5, 35.13, 126.95] } : i === 1 ? { ...x, u: ['12:00', '반입지', 20, 3] } : x)) };
+const e15 = P.expandDaylist(u15, BUILTIN_FEES);
+ok(e15.stops[0].unload_after.lat === 35.13 && e15.stops[0].unload_after.lon === 126.95 && e15.stops[1].unload_after.lat === null, '반입지 좌표가 있으면 받고(길안내), 없는 이전 형식도 그대로');
 
 console.log(`\n통과 ${passed}개`);

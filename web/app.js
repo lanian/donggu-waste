@@ -8,9 +8,11 @@ import * as BIO from './bio.js';
 import { BUILTIN_FEES } from './fees-data.js';
 import * as B from './backup.js';
 import * as M from './map.js';
+import * as NAV from './nav.js';
+import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.10.0';
+export const APP_VERSION = '0.10.1';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -118,7 +120,7 @@ const errMsg = (e) => ERR[e && e.code] || (e && e.message) || '처리하지 못�
 // ------------------------------------------------------------ 상태 저장
 const emptyState = () => ({ mode: null, daylist: null, events: [], seq: 0, releasedSeq: 0, exports: [], lastBundleHash: null,
   requests: [], receiptCounter: {}, lastBackupAt: null, intakeDraft: null, mapEnabled: true,
-  lockMin: 10, workers: [], worker: '', smsTemplates: null, navEnabled: false, unsentWarnH: 3, retentionDays: 90, listChanges: {}, recentDongs: [], geoEvidence: true });
+  lockMin: 10, workers: [], worker: '', smsTemplates: null, navApp: NAV.DEFAULT_NAV_APP, jusoKey: '', jusoCoordKey: '', addrRoute: '', unloadSite: null, unsentWarnH: 3, retentionDays: 90, listChanges: {}, recentDongs: [], geoEvidence: true });
 // 기기에 남겨 두는 화면 설정(업무 자료 아님, 잠금 화면에도 적용): 테마, 야외 고대비
 let prefs = { theme: 'auto', hc: false };
 function applyPrefs() {
@@ -126,9 +128,15 @@ function applyPrefs() {
   if (prefs.theme === 'light' || prefs.theme === 'dark') r.dataset.theme = prefs.theme; else delete r.dataset.theme;
   r.classList.toggle('hc', !!prefs.hc);
 }
+const isDark = () => prefs.theme === 'dark' || (prefs.theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+// 첫 화면 위 ☀/🌙: 지금 보이는 것의 반대로 바로 바꾼다(설정의 '자동'을 밝게/어둡게로 고정)
+const themeToggle = () => btn(isDark() ? '☀' : '🌙', async () => { await setPrefs({ theme: isDark() ? 'light' : 'dark' }); render(); }, 'ghost theme-toggle',
+  { 'aria-label': isDark() ? '밝은 화면으로' : '어두운 화면으로', title: '밝기 바꾸기 (설정에서 자동으로 되돌릴 수 있음)' });
 async function setPrefs(patch) { prefs = { ...prefs, ...patch }; applyPrefs(); try { await S.putRaw('prefs', prefs); } catch {} }
 async function loadState() {
   st = { ...emptyState(), ...((await S.getSecure('state')) || {}) };
+  if (st.textSize === 'big') st.textSize = 'l'; // v0.10.0까지의 '큰 글씨'는 '크게'로
+  if (!(st.navApp in NAV.NAV_APPS)) st.navApp = NAV.DEFAULT_NAV_APP; // v0.10.0의 '길안내 켬/끔'은 없어짐(항상 켬)
   applyTextSize();
   if (!st.mode && st.daylist) st.mode = 'PC'; // 0.1.0에서 쓰던 자료는 PC 연결 방식
   lockMs = (LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10) * 60000;
@@ -201,8 +209,10 @@ async function dial(stop) {
 }
 // 전화·문자·지도 앱 열기. (시험용: 자동 시험은 window.__dgExternal로 가로채 주소만 확인한다 —
 // 헤드리스 브라우저는 외부 앱 주소를 열면 그 뒤 입력을 받지 않기 때문)
-function openExternal(url) {
+function openExternal(url, { newTab = false } = {}) {
   if (typeof window.__dgExternal === 'function') return window.__dgExternal(url);
+  // 웹 지도(https)는 새 창으로: 앱 화면(입력 중인 내용)을 떠나지 않게. 막히면(팝업 차단) 이 창에서 연다.
+  if (newTab && window.open(url, '_blank', 'noopener,noreferrer')) return;
   location.href = url;
 }
 // 다른 앱(카메라·전화·문자·길안내)으로 넘어가는 동안은 잠금 기준을 늘린다
@@ -461,7 +471,7 @@ async function screenHome() {
   const registered = !!(await S.getRaw('pc')) && !!(await S.getRaw('device'));
   const n = unsent().length;
   const dl = st.daylist;
-  const top = h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), btn('잠금', lockNow, 'ghost'));
+  const top = h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), themeToggle(), btn('잠금', lockNow, 'ghost'));
   // 목록이 있으면 하루 한두 번 쓰는 버튼은 작게, 방문 순서가 먼저 보이게
   const stale = n && dl && dl.work_date < todayKST();
   const actions = dl
@@ -493,7 +503,8 @@ async function screenHome() {
     out.push(h('ul', { class: 'stops route' }, routeItems(list, ({ s, d }) => h('li', {},
       stopCard(s, d, { nowId }),
       s.unload_after && !ui.stopQ ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
-        h('span', {}, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`))) : null))));
+        h('span', { class: 'u-body' }, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`)),
+        navBtn('길안내', null, unloadLoc(s.unload_after), NAV.navLabel('UNLOAD'), 'u-nav')) : null))));
     const myUnloads = st.events.filter((e) => e.kind === 'UNLOAD');
     out.push(btn(myUnloads.length ? `하차 기록 (${myUnloads.length}회)` : '하차 기록', () => go('#/unload'), 'big'));
   }
@@ -505,6 +516,7 @@ async function screenHome() {
 function screenUnload() {
   const list = st.events.filter((e) => e.kind === 'UNLOAD');
   const plannedLabel = st.daylist && (st.daylist.stops.find((x) => x.unload_after) || {}).unload_after;
+  const uLoc = unloadLoc(plannedLabel);
   const now = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
   const place = h('input', { type: 'text', class: 'search', value: (list.length ? list[list.length - 1].body.place : (plannedLabel && plannedLabel.label)) || '' , placeholder: '반입지 이름' });
   const time = h('input', { type: 'time', value: now });
@@ -517,6 +529,11 @@ function screenUnload() {
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '하차 기록')),
     h('section', { class: 'card' }, fld('반입지', place), h('div', { class: 'grid2' }, fld('시각', time), fld('부피 (m³, 추정)', vol)), fld('중량 (kg)', kg), fld('메모', note),
       h('p', { class: 'small' }, isSolo() ? '이 휴대폰에 저장되고 백업 파일에 함께 들어갑니다. 부피나 중량 중 하나는 적어 주세요.' : '결과 보내기 때 PC로 함께 갑니다. 부피나 중량 중 하나는 적어 주세요.'), msg),
+    h('section', { class: 'card' }, h('h2', {}, '반입지 길안내'),
+      h('div', { class: 'grid2' }, navBtn('🧭 길안내', null, uLoc, NAV.navLabel('UNLOAD'), 'big'),
+        btn(uLoc ? '반입지 위치 고치기' : '반입지 위치 지정', () => go('#/pick/unload'), 'opt', { disabled: !st.mapEnabled })),
+      uLoc ? h('p', { class: 'small' }, (plannedLabel && plannedLabel.lat != null ? 'PC 목록의 반입지 위치' : '이 휴대폰에 지정한 반입지 위치') + '로 안내합니다. 지도 앱에는 좌표와 "반입지"만 넘깁니다.')
+        : h('p', { class: 'small nav-none' }, `길안내: ${NO_LOC}`)),
     list.length ? h('section', { class: 'card' }, h('h2', {}, `오늘 하차 ${list.length}회`),
       h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq > st.releasedSeq ? '(미전송)' : ''}`)))) : null,
     h('nav', { class: 'dock' }, h('span', {}), h('span', {}), btn('하차 기록', async () => {
@@ -774,15 +791,32 @@ async function smsSheet(stop, d) {
   openExternal(F.smsHref(stop.phone, F.fillSms(t.text, stop, d.appt)));
   render();
 }
-// [길안내] (기관 승인 뒤 설정에서 켬): 좌표만 넘긴다. 이름·주소는 넘기지 않는다.
-async function openNav(stop, d) {
-  if (!d.loc) return;
-  const ll = `${d.loc.lat},${d.loc.lon}`;
-  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
-  await addEvent(stop, 'NAV_INTENT', { app: ios ? 'apple-maps' : 'geo' });
+// [길안내]: 설정에서 고른 지도 앱(기본 카카오맵)을 목적지 좌표로 연다. 넘기는 것은 좌표와 "N번 수거지"(반입지는 "반입지")뿐 —
+// 이름·연락처·주소·접수번호는 넘기지 않는다(nav.js). 앱이 없으면(1.5초 안에 다른 앱으로 넘어가지 않으면) 웹 지도 또는 기본 지도 앱으로.
+const NO_LOC = '위치 없음 — 위치 지정 필요';
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function launchApp({ url, fallback }) {
   handoff();
-  openExternal(ios ? `maps://?daddr=${ll}` : `geo:${ll}?q=${ll}`);
+  let left = false;
+  const away = () => { if (document.hidden) left = true; };
+  const gone = () => { left = true; };
+  document.addEventListener('visibilitychange', away); addEventListener('pagehide', gone); addEventListener('blur', gone);
+  openExternal(url);
+  setTimeout(() => {
+    document.removeEventListener('visibilitychange', away); removeEventListener('pagehide', gone); removeEventListener('blur', gone);
+    if (fallback && !left && !document.hidden) openExternal(fallback, { newTab: fallback.startsWith('https:') });
+  }, NAV.NAV_FALLBACK_MS);
 }
+/** stop: 기록을 남길 접수(반입지는 null — 접수 없는 팀 기록은 PC에서 충돌이 되므로 남기지 않음), loc: {lat, lon}, label: "N번 수거지"|"반입지" */
+async function openNav(stop, loc, label) {
+  if (!NAV.hasCoord(loc)) { toast(NO_LOC, 'bad'); return; }
+  const u = NAV.navUrls(st.navApp || NAV.DEFAULT_NAV_APP, { lat: loc.lat, lon: loc.lon, label }, { ios: isIOS(), appname: location.origin });
+  if (stop) await addEvent(stop, 'NAV_INTENT', { app: u.app });
+  launchApp(u);
+}
+const navBtn = (text, stop, loc, label, cls = '') => btn(text, () => openNav(stop, loc, label), 'nav-btn ' + cls,
+  NAV.hasCoord(loc) ? { 'aria-label': `${text} (${NAV.NAV_APPS[st.navApp] || NAV.NAV_APPS.kakao})` } : { disabled: true, title: NO_LOC, 'aria-label': `${text}: ${NO_LOC}` });
+const unloadLoc = (u) => (u && u.lat != null && u.lon != null ? { lat: u.lat, lon: u.lon } : st.unloadSite);
 // 스티커·신고필증 확인 (품목별 3가지). 없음·불일치면 그 품목을 수거할지 바로 정한다.
 async function stickerCheck(stop, l, result) {
   if (result === 'OK') { await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result }); return render(); }
@@ -862,8 +896,8 @@ async function screenStop(id) {
     // 현장 동작: 도착 · 문자 · 길안내
     h('div', { class: 'grid2 field-acts' },
       btn(d.arrive ? `도착 ${hhmm(d.arrive.ts)} ✓` : '📍 도착', () => arrive(stop), 'opt arrive' + (d.arrive ? ' on' : ''), { 'aria-label': d.arrive ? `도착 기록됨 ${hhmm(d.arrive.ts)}, 다시 기록` : '도착' }),
-      btn('✉ 문자', () => smsSheet(stop, d), 'opt sms', { disabled: purged || !stop.phone, 'aria-label': '문자' }),
-      st.navEnabled ? btn('길안내', () => openNav(stop, d), 'opt nav', { disabled: !d.loc }) : null),
+      btn('✉ 문자', () => smsSheet(stop, d), 'opt sms', { disabled: purged || !stop.phone, 'aria-label': '문자' })),
+    d.loc ? null : h('p', { class: 'small nav-none' }, `길안내: ${NO_LOC}` + (st.mapEnabled ? ' (아래 [위치 지정])' : '')),
     d.arrive ? h('p', { class: 'small' }, `도착 기록 ${hhmm(d.arrive.ts)}` + (d.arrive.acc != null ? ` · 위치 오차 약 ${d.arrive.acc}m` : ' · 위치 없음')) : null,
     smsLog.length ? h('p', { class: 'small sms-log' }, '문자 안내: ' + smsLog.map((e) => `${(smsTemplates().find((t) => t.id === e.body.template) || { label: e.body.template }).label} ${hhmm(e.ts)}`).join(', ')) : null,
     st.mapEnabled ? h('div', { class: 'grid2' },
@@ -997,10 +1031,15 @@ async function screenStop(id) {
   const seqList = (isSolo() ? st.requests.filter((r) => r.planned_date === stop.planned_date && r.status !== 'CANCELLED').sort((a, b) => a.seq - b.seq) : (st.daylist ? st.daylist.stops.filter((x) => !x.removed) : []));
   const next = seqList.slice(seqList.indexOf(stop) + 1).find((x) => deriveStop(x, st.events).progress !== 'DONE');
   // 결과를 저장하기 전에는 "결과 저장 ↓", 저장한 뒤에는 "다음 N번 ▶" — 기록 없이 건너뛰지 않게
-  const dock = h('nav', { class: 'dock', 'aria-label': '빠른 동작' },
-    btn('← 목록', () => go('#/home'), 'dock-back'),
+  // 길안내는 전화 옆: 결과 저장 전에는 이 지점, 저장한 뒤에는 다음 미완료 지점
+  const saved = d.outcome || stop.status === 'CANCELLED';
+  const nextLoc = next ? deriveStop(next, st.events).loc : null;
+  const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
+    btn('←', () => go('#/home'), 'dock-back', { 'aria-label': '목록으로' }),
     btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
-    d.outcome || stop.status === 'CANCELLED'
+    saved ? (next ? navBtn('다음 길안내', next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
+      : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
+    saved
       ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : '#/home'), 'primary dock-next')
       : btn('결과 저장 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
@@ -1264,7 +1303,7 @@ async function screenExport() {
   const cleanup = btn('오늘 자료 정리', async () => {
     if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
     for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
-    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navEnabled', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage'].map((k) => [k, st[k]]));
+    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage'].map((k) => [k, st[k]]));
     st = { ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
@@ -1354,7 +1393,7 @@ async function screenHomeSolo() {
     await commit(); render();
   };
   const out = [
-    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'mode-tag' }, '단독'), btn('잠금', lockNow, 'ghost')),
+    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'mode-tag' }, '단독'), themeToggle(), btn('잠금', lockNow, 'ghost')),
     workerBar(), ...(await homeBanners()),
     needBackup ? h('section', { class: 'card notice' },
       h('p', {}, `마지막 백업: ${ago(st.lastBackupAt)}. 휴대폰을 잃어버리거나 고장 나면 접수 원본이 사라집니다.`),
@@ -1395,12 +1434,13 @@ function screenIntake(id) {
   if (!ui.form || ui.form.id !== (id || null)) {
     const src = editing || st.intakeDraft || {};
     ui.form = { id: id || null, name: src.name || '', phone: src.phone || '', address: src.address || '', dong: src.dong || '', spot_note: src.spot_note || '', memo: src.memo || '',
+      lat: src.addrLat ?? null, lon: src.addrLon ?? null, zip: src.zip || '', dongCands: [],
       planned_date: src.planned_date || todayKST(1), eta: src.eta || '', items: JSON.parse(JSON.stringify(src.items || [])), reason: '', dupAck: false,
       pick: { q: '', sel: null, qty: 1 } };
   }
   const f = ui.form;
   let draftTimer = null;
-  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, reason, id: _i, ...d } = f; st.intakeDraft = d; commit(); }, 600); };
+  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, reason, id: _i, lat, lon, dongCands, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
   const field = (key, label, attrs = {}) => {
     const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search', value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
     if (attrs.multiline) input.value = f[key];
@@ -1454,7 +1494,8 @@ function screenIntake(id) {
     const now = new Date().toISOString();
     const dong = (f.dong || '').trim().slice(0, 20);
     if (dong) st.recentDongs = [dong, ...(st.recentDongs || []).filter((x) => x !== dong)].slice(0, 12);
-    const data = { name: f.name.trim(), phone, address: f.address.trim(), dong, spot_note: f.spot_note.trim(), memo: f.memo.trim(), planned_date: f.planned_date, eta: f.eta, items: f.items };
+    const data = { name: f.name.trim(), phone, address: f.address.trim(), dong, spot_note: f.spot_note.trim(), memo: f.memo.trim(), planned_date: f.planned_date, eta: f.eta, items: f.items,
+      ...(f.lat != null && f.lon != null ? { lat: f.lat, lon: f.lon, geo_source: 'ADDR' } : {}) };
     if (editing) {
       const { versions = [], ...prev } = editing;
       versions.push({ req_ver: editing.req_ver, at: now, reason: f.reason.trim(), snapshot: prev });
@@ -1478,9 +1519,22 @@ function screenIntake(id) {
     h('section', { class: 'card' },
       field('name', '이름', { autocomplete: 'off' }),
       field('phone', '연락처', { type: 'tel', inputmode: 'tel', autocomplete: 'off', placeholder: '010-0000-0000' }),
+      addrSearch({
+        forbid: () => [f.name, f.phone],
+        onPick: (it, ll) => {
+          f.address = it.road; f.zip = it.zip; f.lat = ll ? ll.lat : null; f.lon = ll ? ll.lon : null; f.dupAck = false;
+          const sg = J.suggestDong(it, knownDongs());
+          if (sg.dong) f.dong = sg.dong;
+          f.dongCands = sg.dong ? [] : sg.candidates;
+          saveDraft(); render();
+          toast(ll ? '주소와 위치(건물 출입구)를 채웠습니다' : '주소를 채웠습니다. 위치는 접수 뒤 지도에서 지정하세요');
+        } }),
       field('address', '배출 주소', { autocomplete: 'off' }),
+      f.lat != null ? h('p', { class: 'small addr-geo' }, `위치: 주소 검색 좌표(건물 출입구)${f.zip ? ` · 우편번호 ${f.zip}` : ''}. 배출 위치가 다르면 접수 뒤 [위치 고치기]로 맞추세요.`) : null,
       field('dong', '동 (행정동, 선택)', { autocomplete: 'off', list: 'dong-list', placeholder: '예: 충장동' }),
-      h('datalist', { id: 'dong-list' }, ...[...new Set([...(st.recentDongs || []), ...st.requests.map((r) => dongOf(r)).filter(Boolean)])].map((x) => h('option', { value: x }))),
+      f.dongCands.length ? h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 제안' }, h('span', { class: 'small' }, '주소 검색 결과의 동 후보: '),
+        ...f.dongCands.map((x) => btn(x, () => { f.dong = x; f.dongCands = []; saveDraft(); render(); }, 'opt chipbtn'))) : null,
+      h('datalist', { id: 'dong-list' }, ...knownDongs().map((x) => h('option', { value: x }))),
       field('spot_note', '상세 배출 위치', { autocomplete: 'off', placeholder: '예: 101동 분리수거장 옆' }),
       field('memo', '요청 메모', { multiline: true }),
       h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
@@ -1489,6 +1543,61 @@ function screenIntake(id) {
     editing ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
 }
+const knownDongs = () => [...new Set([...(st.recentDongs || []), ...st.requests.map((r) => dongOf(r)).filter(Boolean)])];
+
+// ------------------------------------------------------------ 주소 검색 (행정안전부 도로명주소 API, juso.js)
+// 보내는 것은 검색칸에 적은 낱말과 승인키뿐. 이름·연락처가 검색어에 들어 있으면 보내지 않는다(forbid).
+const addrRoute = () => st.addrRoute || (isSolo() ? 'direct' : 'pc');
+function addrSearch({ onPick, forbid = () => [] }) {
+  const box = h('div', { class: 'addr-search' }, h('div', { class: 'fld-label' }, '주소 검색'));
+  if (addrRoute() === 'pc') {
+    box.append(h('p', { class: 'small addr-status' }, '주소 검색 경로가 "PC 경유"입니다. PC 연결 방식에서는 주소·위치를 PC에서 정해 목록으로 보냅니다. 여기서는 직접 적거나 지도에서 위치를 지정하세요.'));
+    return box;
+  }
+  const input = h('input', { type: 'search', class: 'search', placeholder: '도로명·건물명·지번 (예: 서남로 1)', 'aria-label': '주소 검색어', autocomplete: 'off', enterkeyhint: 'search', disabled: !st.jusoKey });
+  const status = h('p', { class: 'small addr-status', role: 'status' }, st.jusoKey ? '' : '승인키를 설정에서 입력해 주세요 (설정 → 주소 검색). 지금은 주소를 직접 적고 지도에서 위치를 지정하세요.');
+  const list = h('ul', { class: 'addr-results' });
+  let timer = null, seq = 0;
+  const leaks = (q) => {
+    const sq = q.replace(/\s+/g, ''), dq = q.replace(/\D/g, '');
+    return forbid().some((x) => { const v = String(x || ''); const dv = v.replace(/\D/g, ''); return (dv.length >= 8 && dq.includes(dv)) || (!dv && v.replace(/\s+/g, '').length >= 2 && sq.includes(v.replace(/\s+/g, ''))); });
+  };
+  const run = async () => {
+    const q = J.cleanKeyword(input.value), my = ++seq;
+    if (q.length < 2) return;
+    if (leaks(q)) { list.replaceChildren(); status.textContent = '검색어에 주민 이름·연락처가 들어 있어 보내지 않았습니다. 주소 낱말만 적어 주세요.'; return; }
+    status.textContent = '찾는 중…';
+    try {
+      const r = await J.searchAddress({ key: st.jusoKey, keyword: q });
+      if (my !== seq) return;
+      status.textContent = r.items.length ? `${r.total}건${r.total > r.items.length ? ` 중 ${r.items.length}건` : ''} — 고르면 주소와 위치를 채웁니다` : '찾은 주소가 없습니다. 도로명과 건물번호로 다시 찾아 보세요.';
+      list.replaceChildren(...r.items.map((it) => h('li', {}, h('button', { type: 'button', class: 'btn addr-item', onclick: async () => {
+        status.textContent = '위치를 받는 중…';
+        let ll = null;
+        if (st.jusoCoordKey) {
+          try { ll = await J.coordOf({ key: st.jusoCoordKey, item: it }); } catch (e) { toast(e.message || '위치를 받지 못했습니다', 'bad'); }
+        }
+        list.replaceChildren(); input.value = ''; status.textContent = st.jusoCoordKey ? '' : '좌표 승인키가 없어 위치는 채우지 않았습니다(설정 → 주소 검색).';
+        onPick(it, ll);
+      } },
+      h('span', { class: 'ai' }, h('strong', {}, it.road), it.jibun ? h('span', {}, '지번 ' + it.jibun) : null,
+        (it.bdNm || it.zip) ? h('span', { class: 'ai-meta' }, [it.bdNm, it.zip ? '우편번호 ' + it.zip : ''].filter(Boolean).join(' · ')) : null)))));
+    } catch (e) {
+      if (my !== seq) return;
+      list.replaceChildren(); status.textContent = e.message || '주소 검색에 실패했습니다. 직접 적어 주세요.';
+    }
+  };
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) { seq++; list.replaceChildren(); status.textContent = q ? '두 글자 이상 적어 주세요.' : ''; return; }
+    timer = setTimeout(run, 300);
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); } });
+  box.append(input, status, list, h('p', { class: 'small' }, '검색어만 행정안전부 주소 서버(business.juso.go.kr)로 보냅니다. 이름·연락처는 보내지 않습니다.'));
+  return box;
+}
+
 function nextSeq(date, exceptId) {
   return st.requests.filter((r) => r.planned_date === date && r.request_id !== exceptId).reduce((m, r) => Math.max(m, r.seq || 0), 0) + 1;
 }
@@ -1563,7 +1672,7 @@ async function screenBackup() {
 }
 
 // ------------------------------------------------------------ 지도 (온라인 바탕 지도, 개인정보는 보내지 않음)
-const mapNotice = () => h('p', { class: 'small' }, '바탕 지도 조각만 OpenFreeMap에서 받습니다. 이름·연락처·주소와 핀 위치는 휴대폰 밖으로 보내지 않습니다.');
+const mapNotice = () => h('p', { class: 'small' }, '바탕 지도 조각만 OpenFreeMap에서 받습니다. 이름·연락처·주소와 핀 위치는 지도 서버로 보내지 않습니다.');
 function mapStops() {
   if (isSolo()) {
     const view = ui.soloView || 'TODAY', today = todayKST(), tomorrow = todayKST(1);
@@ -1613,9 +1722,13 @@ async function screenMap(focusId) {
 }
 
 async function screenPick(id) {
-  const stop = findStop(id);
-  if (!stop) { go('#/home'); return h('main'); }
-  const d = deriveStop(stop, st.events);
+  // id === 'unload': 반입지 위치(이 휴대폰에만 저장, 길안내용)
+  const isUnload = id === 'unload';
+  const stop = isUnload ? null : findStop(id);
+  if (!isUnload && !stop) { go('#/home'); return h('main'); }
+  const back = isUnload ? '#/unload' : `#/stop/${id}`;
+  const d = isUnload ? { loc: st.unloadSite } : deriveStop(stop, st.events);
+  let found = null; // 주소 검색으로 받은 좌표
   const box = h('div', { class: 'mapbox pick', id: 'map' }, h('div', { class: 'crosshair', 'aria-hidden': 'true' }));
   const msg = h('p', { class: 'msg' });
   // 지도 조각을 받지 못해도(인터넷·지도 서버 문제) 휴대폰 위치로 저장할 수 있게: 내 위치를 잡으면 그 좌표를 쓴다
@@ -1624,13 +1737,24 @@ async function screenPick(id) {
   const save = btn('이 위치로 저장', async () => {
     let lat, lon, source = 'MANUAL';
     if (liveMap && mapReady) { const c = liveMap.getCenter(); lat = c.lat; lon = c.lng; }
+    else if (found) { lat = found.lat; lon = found.lon; }
     else if (gps) { lat = gps.lat; lon = gps.lon; source = 'GPS'; }
     else return;
     lat = Math.round(lat * 1e6) / 1e6; lon = Math.round(lon * 1e6) / 1e6;
+    if (found && Math.abs(lat - found.lat) < 2e-6 && Math.abs(lon - found.lon) < 2e-6) source = 'ADDR'; // 주소 검색 좌표 그대로
+    if (isUnload) { st.unloadSite = { lat, lon }; await commit(); toast('반입지 위치를 저장했습니다'); go(back); return; }
     if (isSolo()) { stop.lat = lat; stop.lon = lon; stop.geo_source = source; stop.updated_at = new Date().toISOString(); await commit(); }
     else await addEvent(stop, 'LOCATION_FIX', { lat, lon, source, ...(source === 'GPS' && gps.acc != null ? { acc: gps.acc } : {}) }); // PC 방식: 결과 파일로 PC에 전달
-    toast('위치를 저장했습니다'); go(`#/stop/${id}`);
+    toast('위치를 저장했습니다'); go(back);
   }, 'primary big', { disabled: true });
+  const search = addrSearch({
+    forbid: () => (stop ? [stop.name, stop.phone] : []),
+    onPick: (it, ll) => {
+      if (!ll) { msg.textContent = '이 주소의 좌표를 받지 못했습니다. 지도를 움직여 맞춰 주세요.'; return; }
+      found = ll; save.disabled = false;
+      gpsNote.textContent = `주소 검색: ${it.road} (건물 출입구 좌표). 배출 위치가 다르면 지도를 움직여 맞춘 뒤 저장하세요.`;
+      if (liveMap) liveMap.jumpTo({ center: [ll.lon, ll.lat], zoom: 18 });
+    } });
   const myLoc = btn('📍 지금 내 위치로 이동', async () => {
     msg.textContent = '휴대폰 위치를 찾는 중…';
     const fix = await M.myFix({ ask: true, timeout: 15000 });
@@ -1661,10 +1785,10 @@ async function screenPick(id) {
     } catch { msg.textContent = '지도를 불러오지 못했습니다.'; tilesFailed(); }
   }, 0);
   return h('main', {},
-    h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost'), h('h1', { class: 'bar-title' }, '배출 위치 지정')),
-    h('p', {}, stop.pii_purged ? stop.receipt_no : `${stop.name} · ${stop.address}`),
-    h('p', { class: 'small' }, '지도를 움직여 가운데 표시를 실제 배출 위치에 맞추거나, 배출 위치에 서서 [지금 내 위치로 이동]을 누르세요. 주소로 위치를 검색하지 않습니다(주소를 외부로 보내지 않기 위해).'),
-    box, myLoc, gpsNote, save, msg, mapNotice());
+    h('header', { class: 'bar' }, btn('← 취소', () => go(back), 'ghost'), h('h1', { class: 'bar-title' }, isUnload ? '반입지 위치 지정' : '배출 위치 지정')),
+    isUnload ? h('p', {}, '반입지(하차하는 곳)') : h('p', {}, stop.pii_purged ? stop.receipt_no : `${stop.name} · ${stop.address}`),
+    h('p', { class: 'small' }, '주소로 찾거나, 지도를 움직여 가운데 표시를 실제 위치에 맞추거나, 그 자리에 서서 [지금 내 위치로 이동]을 누르세요.'),
+    search, box, myLoc, gpsNote, save, msg, mapNotice());
 }
 
 // ------------------------------------------------------------ 결과 QR 표시 (역방향: 휴대폰 → PC 웹캠)
@@ -1765,30 +1889,51 @@ async function screenSettings() {
     prefetch.disabled = false;
   }, 'big', { disabled: !st.mapEnabled });
   const mapCard = h('section', { class: 'card' }, h('h2', {}, '지도'),
-    h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 보내지 않으며, 주소 검색·길찾기 서비스는 쓰지 않습니다.'),
+    h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 지도 서버로 보내지 않습니다.'),
     btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', async () => { st.mapEnabled = !st.mapEnabled; await commit(); render(); }, 'big'),
     h('p', { class: 'small' }, `인터넷이 약한 곳에 대비해 오늘 지점 주변(없으면 동구 전체)의 넓은 범위 지도(줌 14 이하)를 미리 받아 둡니다. 보관 ${tc.count}개 · ${(tc.bytes / 1048576).toFixed(1)}MB (최대 50MB, 오래 안 쓴 것부터 지움)`),
-    prefetch, pmsg,
-    h('div', { class: 'fld-label' }, '길안내 앱 연결 (기관 승인 필요)'),
-    h('p', { class: 'small' }, '켜면 상세 화면에 [길안내]가 생겨 휴대폰의 지도 앱에 좌표만 넘깁니다(이름·주소는 넘기지 않음). 외부 지도 앱 사용을 기관이 승인한 경우에만 켜세요.'),
-    choice([[false, '끔'], [true, '켬']], !!st.navEnabled, (v) => set({ navEnabled: v })));
+    prefetch, pmsg);
+
+  // 길안내 앱
+  const navCard = h('section', { class: 'card' }, h('h2', {}, '길안내 앱'),
+    h('div', { class: 'grid2', role: 'group', 'aria-label': '길안내 앱' }, ...Object.entries(NAV.NAV_APPS).map(([k, t]) =>
+      btn(t, () => set({ navApp: k }, `길안내는 ${t}로 엽니다`), (st.navApp || NAV.DEFAULT_NAV_APP) === k ? 'opt on' : 'opt'))),
+    h('p', { class: 'small' }, "지도 앱에는 목적지 좌표와 'N번 수거지'(반입지는 '반입지') 표시만 전달됩니다. 이름·연락처·주소는 넘기지 않습니다. 앱이 없으면 카카오맵·네이버지도는 웹 지도로, T맵은 기본 지도 앱으로 엽니다."));
+
+  // 주소 검색 (행정안전부 도로명주소 API)
+  const kIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '주소 검색 승인키', placeholder: '주소 검색 승인키 (confmKey)', value: st.jusoKey || '' });
+  const cIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '좌표 승인키', placeholder: '좌표제공 승인키 (confmKey)', value: st.jusoCoordKey || '' });
+  const jusoCard = h('section', { class: 'card' }, h('h2', {}, '주소 검색'),
+    h('p', { class: 'small' }, '행정안전부 도로명주소 검색·좌표제공 API(business.juso.go.kr)를 씁니다. 보내는 것은 검색칸에 적은 주소 낱말과 승인키, 고른 건물의 식별 번호뿐이며 이름·연락처는 보내지 않습니다. 승인키는 주소정보누리집에서 기관이 발급받아 넣습니다(이 휴대폰에 암호화 저장).'),
+    h('div', { class: 'fld-label' }, '주소 검색 경로'),
+    choice([['direct', '직접'], ['pc', 'PC 경유']], addrRoute(), (v) => set({ addrRoute: v })),
+    h('p', { class: 'small' }, addrRoute() === 'pc' ? 'PC 경유: 휴대폰에서는 검색하지 않습니다. PC 연결 방식에서는 PC가 주소·위치를 정해 목록으로 보냅니다(휴대폰과 PC는 실시간으로 연결되지 않음).'
+      : '직접: 이 휴대폰이 주소 서버에 바로 묻습니다. 브라우저가 주소 서버 응답을 막으면(CORS) 검색이 되지 않으니, 그때는 직접 적고 지도에서 위치를 지정하거나 PC에서 주소 작업을 하세요.'),
+    h('label', { class: 'fld' }, h('span', {}, '주소 검색 승인키'), kIn),
+    h('label', { class: 'fld' }, h('span', {}, '좌표 승인키'), cIn),
+    btn('승인키 저장', () => set({ jusoKey: kIn.value.trim(), jusoCoordKey: cIn.value.trim() }, kIn.value.trim() ? '승인키를 저장했습니다' : '승인키를 지웠습니다'), 'big'));
 
   return h('main', { class: 'with-tabs' },
     h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '설정·정보')),
+    // 화면(밝기·글자 크기)은 맨 위에: 자주 바꾸고, '자동'이 휴대폰의 어두운 화면을 따라가 어둡게만 보이는 경우가 있어 찾기 쉽게
+    h('section', { class: 'card screen-card' }, h('h2', {}, '화면'),
+      h('div', { class: 'fld-label' }, '밝기'),
+      h('div', { class: 'seg theme-seg', role: 'group', 'aria-label': '밝기 테마' }, ...[['auto', '자동'], ['light', '밝게'], ['dark', '어둡게']].map(([k, t]) =>
+        btn([h('span', { class: 'tp tp-' + k, 'aria-hidden': 'true' }, h('i'), h('i')), h('span', {}, t)], async () => { await setPrefs({ theme: k }); render(); },
+          'opt seg-opt' + ((prefs.theme || 'auto') === k ? ' on' : ''), { 'aria-label': t }))),
+      h('p', { class: 'small' }, (prefs.theme || 'auto') === 'auto' ? `자동: 휴대폰 설정을 따릅니다 (지금 ${isDark() ? '어둡게' : '밝게'}). 첫 화면 위 ☀/🌙로 바로 바꿀 수 있습니다.` : '첫 화면 위 ☀/🌙로도 바꿀 수 있습니다.'),
+      h('div', { class: 'fld-label' }, '글자 크기'),
+      h('div', { class: 'seg size-seg', role: 'group', 'aria-label': '글자 크기' }, ...TEXT_SIZES.map(([k, t, px]) =>
+        btn(t, async () => { st.textSize = k; applyTextSize(); await commit(); render(); }, 'opt seg-opt' + ((st.textSize || '') === k ? ' on' : ''), { 'data-px': px }))),
+      h('div', { class: 'fld-label' }, '야외 고대비'),
+      h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
+      choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
     h('section', { class: 'card' }, h('dl', {},
       h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
       h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
       h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
       h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
       h('dt', {}, '미전송 기록'), h('dd', {}, unsent().length + '건'))),
-    h('section', { class: 'card' }, h('h2', {}, '화면'),
-      h('div', { class: 'fld-label' }, '글씨 크기'),
-      h('div', { class: 'grid2' }, ...[['', '보통'], ['big', '크게']].map(([k, t]) => btn(t, async () => { st.textSize = k; applyTextSize(); await commit(); render(); }, (st.textSize || '') === k ? 'opt on' : 'opt'))),
-      h('div', { class: 'fld-label' }, '밝기 테마'),
-      choice([['auto', '자동'], ['light', '밝게'], ['dark', '어둡게']], prefs.theme || 'auto', async (v) => { await setPrefs({ theme: v }); render(); }),
-      h('div', { class: 'fld-label' }, '야외 고대비'),
-      h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
-      choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
     bioCard, workerCard,
     h('section', { class: 'card' }, h('h2', {}, '현장 기록'),
       h('div', { class: 'fld-label' }, '도착·사진에 휴대폰 위치 남기기'),
@@ -1801,7 +1946,7 @@ async function screenSettings() {
       isSolo() ? h('div', {}, h('div', { class: 'fld-label' }, '개인정보 보관 기간'),
         h('p', { class: 'small' }, '처리가 끝난 접수는 이 기간이 지나고 백업이 끝났으면 첫 화면에서 알린 뒤 이름·연락처·주소를 지웁니다.'),
         choice([[30, '30일'], [90, '90일'], [180, '180일']], st.retentionDays || 90, (v) => set({ retentionDays: v }))) : null),
-    smsCard, mapCard,
+    smsCard, navCard, jusoCard, mapCard,
     isSolo() ? soloFeeCard() : null,
     h('section', { class: 'card' },
       isSolo() ? null : btn('기기 등록 화면', () => go('#/register'), 'big'),
@@ -1845,7 +1990,13 @@ function soloFeeCard() {
           }, 'opt') : h('span')));
     }), msg);
 }
-function applyTextSize() { document.documentElement.classList.toggle('text-big', !!(st && st.textSize === 'big')); }
+// 글자 크기: 뿌리 글자 크기(--fs) 하나로 모든 글자가 함께 바뀐다(style.css). 아주 크게는 배치도 넓힌다(text-big).
+const TEXT_SIZES = [['s', '작게', 14], ['', '보통', 15], ['l', '크게', 17], ['xl', '아주 크게', 19]];
+function applyTextSize() {
+  const r = document.documentElement, k = st && TEXT_SIZES.some(([x]) => x === st.textSize) ? st.textSize : '';
+  for (const [x] of TEXT_SIZES) if (x) r.classList.toggle('fs-' + x, x === k);
+  r.classList.toggle('text-big', k === 'xl');
+}
 
 // ------------------------------------------------------------ 라우팅
 let renderSeq = 0;
