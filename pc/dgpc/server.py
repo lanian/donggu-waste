@@ -441,7 +441,7 @@ class Handler(BaseHTTPRequestHandler):
                     out["warnings"] = A.capacity_warnings(c, qs["date"], dong, ex)
                 return self.send_json(out)
             if p == "dong-detect":
-                return self.send_json(A.detect_dong(c, qs.get("address", "")))
+                return self.send_json({**A.detect_dong(c, qs.get("address", "")), "warnings": S.address_warnings(c, qs.get("address", ""))})
             if p == "dongs":
                 return self.send_json(A.list_dongs(c))
             if p == "holidays":

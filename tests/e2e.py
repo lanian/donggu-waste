@@ -568,7 +568,13 @@ def pc_field(pw, url):
        and page.get_by_role("group", name="접수 경로").get_by_role("button", name="전화").count() == 1, "PC 연결 방식 접수: 경로 현장(기본)·전화·방문 고르기")
     page.get_by_label("이름").fill("가상현장")
     page.get_by_label("연락처").fill("010-0000-6161")
-    page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
+    page.get_by_label("배출 주소").fill("가상시 동구 현장아파트")
+    page.get_by_label("이름").click()  # 칸을 벗어나면 확인
+    expect(page.locator(".addr-check")).to_contain_text("건물번호")
+    page.get_by_label("배출 주소").fill("가상시 동구 계림1동 현장길 3")
+    expect(page.locator(".dong-check")).to_contain_text("동: 계림1동")
+    ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림1동" and page.locator(".addr-check .warnp").count() == 0,
+       "배출 주소 확인: 건물번호 없으면 알림, 주소의 행정동 이름으로 동 자동 채움(✓ 표시)")
     # 품목 담기 화면: 연달아 담기 — 담기 단추를 눌러도 검색칸 포커스 유지·검색어 선택, 바로 다음 품목 입력
     page.get_by_role("button", name="+ 품목 담기").click()
     # 글자 없이: 분류 → 품목 이름 → 규격 고르기 창
@@ -985,7 +991,7 @@ def solo(pw, url, video):
     page.screenshot(path=SHOTS / "11_solo_intake.png", full_page=True)
     page.get_by_role("button", name="접수 등록").click()
     expect(page.get_by_role("button", name=re.compile("내일 1"))).to_be_visible()
-    intake("가상이", "01000007777", "가상시 동구 시험길 9", [("회전", 1)], free="안마기", dong="계림동")
+    intake("가상이", "01000007777", "가상시 동구 시험길 9", [("회전", 1)], free="안마기", dong="계림1동")
     ok(page.locator("#dong-list option[value='충장동']").count() == 1, "단독 접수: 동 입력칸에 최근 입력한 동 제안")
     page.get_by_role("button", name="접수 등록").click()
     ok(page.get_by_text("비슷한 접수가 1건").is_visible(), "같은 연락처 접수 → 중복 후보 경고 (자동 병합 없음)")

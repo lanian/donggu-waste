@@ -538,7 +538,7 @@ def create_request(con, data: dict) -> dict:
         rid, receipt = _insert_request(con, d, items, data, dong)
         audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": d["channel"], **({"dong": dong} if dong else {}),
                                               **({"reduction": red["reduction_code"], "rate": red["reduction_rate"], "proof": red["reduction_proof"]} if red else {})})
-    warn = jurisdiction_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
+    warn = address_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
     return {"id": rid, "receipt_no": receipt, "dong": dong, "warnings": warn, "levy_no": one(con, "SELECT levy_no FROM request WHERE id=?", (rid,))["levy_no"]}
 
 
@@ -615,7 +615,7 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
             else:
                 _insert_item(con, rid, it)
         audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"], **flag})
-    warn = jurisdiction_warnings(con, d["address"]) + dwarn
+    warn = address_warnings(con, d["address"]) + dwarn
     if (d["planned_date"] or None) != cur["planned_date"] or dong != cur["dong"]:
         warn += _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
     return {"id": rid, "resend_needed": bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
@@ -691,7 +691,7 @@ QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND", "FIELD")
 def _enrich(con, r: dict) -> dict:
     r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
     r["state"] = derive(con, r)
-    r["warnings"] = jurisdiction_warnings(con, r["address"])
+    r["warnings"] = address_warnings(con, r["address"])
     r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
         JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
     return r
@@ -2967,6 +2967,25 @@ def device_crew(con, data: bytes) -> str | None:
 
 
 # ------------------------------------------------------------------ 관할 확인 (동별·구별 관할 불일치 경고, 막지는 않음)
+_ROAD_RE = re.compile(r"[가-힣A-Za-z0-9·.]+(?:대로|로|길)\s*\d")
+_JIBUN_RE = re.compile(r"[가-힣]+[0-9]*(?:동|리|가)\s*(?:산\s*)?\d")
+
+
+def address_warnings(con, address: str) -> list[str]:
+    """배출 주소 확인(막지 않음): 관할 밖 + 건물번호(번지) 없음·도로명/지번 형식 아님·주소칸의 전화번호."""
+    a = re.sub(r"\(.*?\)", " ", address or "").strip()
+    out = []
+    if not a:
+        return out
+    if re.search(r"01[016789][-\s]?\d{3,4}[-\s]?\d{4}", address or ""):
+        out.append("주소칸에 전화번호가 들어 있습니다. 연락처 칸으로 옮기세요.")
+    if not re.search(r"\d", a):
+        out.append("건물번호(번지)가 없습니다. 예: 예시로 12, 대인동 34-5")
+    elif not (_ROAD_RE.search(a) or _JIBUN_RE.search(a)):
+        out.append("도로명(…로·…길 + 건물번호) 또는 지번(…동 + 번지) 형식인지 확인하세요.")
+    return jurisdiction_warnings(con, address) + out
+
+
 def jurisdiction_warnings(con, address: str) -> list[str]:
     area = (get_setting(con, "jurisdiction", "동구") or "").strip()
     if not area:

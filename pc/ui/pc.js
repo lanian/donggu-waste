@@ -684,9 +684,13 @@ async function screenRequest(id) {
   let dongTouched = !isNew && !!r.dong;
   const dongMsg = h('span', { class: 'muted small', 'aria-live': 'polite' });
   F.dong.addEventListener('change', () => { dongTouched = true; dongMsg.textContent = ''; loadCal(); });
+  // 배출 주소 확인(형식·관할·전화번호 섞임 — 막지 않고 알림)
+  const addrWarn = h('div', { class: 'addr-warn', 'aria-live': 'polite' });
   const detect = wrap(async () => {
-    if (dongTouched || !F.address.value.trim() || !boot.dongs.some((d) => d.active)) return;
+    if (!F.address.value.trim()) { addrWarn.replaceChildren(); return; }
     const d = await api('dong-detect?address=' + encodeURIComponent(F.address.value));
+    addrWarn.replaceChildren(...(d.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)));
+    if (dongTouched || !boot.dongs.some((x) => x.active)) return;
     if (d.dong) { F.dong.value = d.dong; dongMsg.textContent = d.source === 'ADDR' ? '주소 자료의 행정동으로 정했습니다.' : '주소 낱말로 추정했습니다. 맞는지 확인하세요.'; dongMsg.className = 'muted small'; }
     else { F.dong.value = ''; dongMsg.textContent = d.ambiguous ? `여러 동에 해당(${d.candidates.join(', ')}) — 골라 주세요.` : '주소로 동을 찾지 못했습니다. 골라 주세요.'; dongMsg.className = 'err small'; }
     loadCal();
@@ -927,7 +931,7 @@ async function screenRequest(id) {
         h('div', { class: 'card formtable' }, h('h2', {}, '신청자'),
           h('div', { class: 'grid2' }, lab('이름', F.name), lab('연락처', F.phone)),
           editable ? h('div', { class: 'addr-find' }, h('label', { class: 'f' }, '주소 찾기', addrQ), addrSug) : null,
-          lab('배출 주소', F.address),
+          lab('배출 주소', F.address), addrWarn,
           h('div', { class: 'grid2' }, lab('행정동', F.dong), lab('접수 경로', F.channel)), dongMsg && h('p', { class: 'dongmsg' }, dongMsg),
           lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo), dupBox),
         h('div', { class: 'card' }, h('h2', {}, '버릴 물건'), noticeBox, itemsBox, total, editable ? picker : null,

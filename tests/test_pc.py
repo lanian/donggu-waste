@@ -1586,6 +1586,9 @@ def v12_field():
     ok(cr["status"] == "CANCELLED" and cr["cancel_code"] == "RESIDENT" and au and "현장 요청" in au[-1]["detail"], "취소 요청 반영: 사유 코드(주민 취소) + '현장 요청' 기록")
     d = S.derive(con, S.one(con, "SELECT * FROM request WHERE id=?", (rid,)))
     ok(not d["field"]["other_kinds"], "PC 화면의 '알 수 없는 기록'에 새 종류가 섞이지 않음")
+    aw = lambda a: " ".join(S.address_warnings(con, a))
+    ok(aw("가상시 동구 예시로 12") == "" and "건물번호" in aw("예시아파트 앞") and "형식" in aw("동구 12번지 근처") and "전화번호" in aw("예시로 5 010-1234-5678")
+       and "관할" in aw("광주 서구 상무대로 1"), "PC 배출 주소 확인: 건물번호 없음·형식·전화번호 섞임·관할 밖(막지 않고 알림)")
     con.close()
     print(f"\n통과 {passed}개 (v0.12 포함)")
 

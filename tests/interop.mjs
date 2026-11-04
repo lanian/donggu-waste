@@ -355,4 +355,18 @@ ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction ===
     '지문·얼굴 등록: 등록 응답에 PRF가 없어도(Samsung Pass) 인증에서 나오면 등록, 끝내 없으면 PIN 안내');
 }
 
+// 19) 배출 주소 확인·행정동 추천(휴대폰 안 자료로만) ---------------------------------------------
+{
+  const J = await import('../web/juso.js');
+  const w = (a) => J.checkAddress(a).warnings.join('|');
+  ok(w('광주 동구 예시로 12') === '' && w('동구 대인동 34-5') === '' && /건물번호/.test(w('예시아파트 앞')) && /형식/.test(w('동구 12번지 근처'))
+     && /관할/.test(w('광주 서구 상무대로 1')) && /서울특별시/.test(w('서울특별시 강남구 테헤란로 1')) && /전화번호/.test(w('충장로 5 010-1234-5678')),
+     '주소 확인: 건물번호 없음·형식·관할(구) 밖·다른 시도·전화번호 섞임');
+  const hist = [{ address: '광주 동구 예시로 3', dong: '충장동' }, { address: '예시로 9', dong: '충장동' }, { address: '대인동 1', dong: '충장동' }];
+  ok(J.guessDong('동구 계림1동 12').dong === '계림1동' && J.guessDong('광주 동구 학동로 12').dong === '' && J.guessDong('예시로 15', hist).dong === '충장동'
+     && J.guessDong('대인동 7', hist).dong === '충장동' && J.guessDong('계림동 123').candidates.join() === '계림1동,계림2동' && J.guessDong('계림동 123').dong === '',
+     '동 추천: 주소의 행정동 이름(낱말 단위), 같은 도로·법정동의 이전 접수, 법정동 줄기 후보(계림동 → 계림1·2동)');
+  ok(J.isKnownDong('충장동') && !J.isKnownDong('충정동') && J.isKnownDong('가상1동', ['가상1동']) && J.isKnownDong(''), '동 이름 오타 확인(동구 행정동·PC 목록의 동)');
+}
+
 console.log(`\n통과 ${passed}개`);

@@ -120,3 +120,62 @@ export function suggestDong(item, known = []) {
   const cands = all.filter((d) => stem(d) === st);
   return { dong: cands.length === 1 ? cands[0] : '', candidates: cands };
 }
+
+// ------------------------------------------------------------ 배출 주소 검증·행정동 추천 (휴대폰 안에서만, 주소를 밖으로 보내지 않음)
+const OTHER_SIDO = /^(서울|부산|대구|인천|대전|울산|세종)(특별시|광역시|특별자치시|시)?$|^(경기|강원|충청북|충청남|충북|충남|전라북|전라남|전북|전남|경상북|경상남|경북|경남|제주)(도|특별자치도)?$/;
+const ROAD_RE = /([가-힣A-Za-z0-9·.]+(?:대로|로|길))\s*(\d+(?:-\d+)?)/;
+const JIBUN_RE = /([가-힣]+[0-9]*(?:동|리|가))\s*(?:산\s*)?(\d+(?:-\d+)?)/;
+/** 도로명(…로·…길) 이름. 없으면 '' */
+export const roadOf = (addr) => { const m = String(addr || '').replace(/\(.*?\)/g, ' ').match(ROAD_RE); return m ? m[1] : ''; };
+/** 지번 주소의 법정동 이름(…동·…가). 없으면 '' */
+export const jibunDongOf = (addr) => { const a = String(addr || '').replace(/\(.*?\)/g, ' '); if (ROAD_RE.test(a)) return ''; const m = a.match(JIBUN_RE); return m ? m[1] : ''; };
+/**
+ * 배출 주소 확인(막지 않고 알려 줌). 돌려주는 값: { kind: 'ROAD'|'JIBUN'|null, warnings: [문구] }
+ * - 건물번호(번지)가 없음, 도로명·지번 형식이 아님, 관할(구) 밖, 다른 시·도, 주소칸에 전화번호
+ */
+export function checkAddress(addr, { jurisdiction = '동구', city = '광주' } = {}) {
+  const raw = String(addr || '').trim();
+  const out = { kind: null, warnings: [] };
+  if (!raw) return out;
+  const a = raw.replace(/\(.*?\)/g, ' ');
+  if (/01[016789][-\s]?\d{3,4}[-\s]?\d{4}/.test(raw)) out.warnings.push('주소칸에 전화번호가 들어 있습니다. 연락처 칸에 적어 주세요.');
+  if (ROAD_RE.test(a)) out.kind = 'ROAD'; else if (JIBUN_RE.test(a)) out.kind = 'JIBUN';
+  if (!/\d/.test(a)) out.warnings.push('건물번호(번지)가 없습니다. 예: 예시로 12, 대인동 34-5');
+  else if (!out.kind) out.warnings.push('도로명(…로·…길 + 건물번호) 또는 지번(…동 + 번지) 형식인지 확인하세요.');
+  const head = a.split(out.kind === 'ROAD' ? ROAD_RE : JIBUN_RE)[0];
+  const toks = head.split(/[\s,]+/).filter(Boolean);
+  const sido = toks.find((t) => OTHER_SIDO.test(t));
+  if (sido) out.warnings.push(`'${sido}' 주소입니다. 관할(${city} ${jurisdiction}) 주소인지 확인하세요.`);
+  const units = toks.filter((t) => /^[가-힣]+(구|군)$/.test(t));
+  if (!sido && units.length && jurisdiction && !units.includes(jurisdiction)) out.warnings.push(`주소의 '${units[0]}'이(가) 관할(${jurisdiction})과 다릅니다. 관할 구역을 확인하세요.`);
+  return out;
+}
+/**
+ * 주소로 행정동 추천(휴대폰에 있는 자료만): ① 주소에 행정동 이름이 그대로 있으면 그것 ② 같은 도로명·같은 법정동의
+ * 이전 접수(history: [{address, dong}])가 한 동으로 모이면 그것 ③ 법정동 이름 줄기가 같은 행정동 후보(예: 계림동 → 계림1동·계림2동).
+ * 돌려주는 값: { dong: '' | 이름, reason, candidates: [] }
+ */
+export function guessDong(addr, history = [], known = []) {
+  const all = [...new Set([...known.map(sq).filter(Boolean), ...DONGGU_DONGS])];
+  // 낱말 단위로만 본다('학동로'처럼 도로 이름 속의 동 이름은 행정동이 아님)
+  const toks = String(addr || '').replace(/\(.*?\)/g, ' ').split(/[\s,]+/).map(sq).filter(Boolean);
+  const exact = all.filter((d) => toks.includes(d));
+  if (exact.length) return { dong: exact[0], reason: '주소에 행정동 이름', candidates: [exact[0]] };
+  const road = roadOf(addr), jd = jibunDongOf(addr);
+  const key = road ? ['road', road] : jd ? ['jibun', jd] : null;
+  if (key) {
+    const same = history.filter((h) => h && h.dong && (key[0] === 'road' ? roadOf(h.address) === key[1] : jibunDongOf(h.address) === key[1]));
+    const dongs = [...new Set(same.map((h) => h.dong))];
+    if (dongs.length === 1) return { dong: dongs[0], reason: `같은 ${key[0] === 'road' ? '도로' : '법정동'}(${key[1]}) 이전 접수 ${same.length}건`, candidates: dongs };
+    if (dongs.length > 1) return { dong: '', reason: `같은 ${key[0] === 'road' ? '도로' : '법정동'}에 여러 동`, candidates: dongs };
+  }
+  if (jd) {
+    const s = stem(jd);
+    const cands = s ? all.filter((d) => stem(d) === s) : [];
+    if (cands.length === 1) return { dong: cands[0], reason: `법정동 ${jd}`, candidates: cands };
+    if (cands.length > 1) return { dong: '', reason: `법정동 ${jd}`, candidates: cands };
+  }
+  return { dong: '', reason: '', candidates: [] };
+}
+/** 고른 동이 아는 행정동 목록에 있는지(오타 확인). 비어 있으면 true */
+export const isKnownDong = (dong, known = []) => !sq(dong) || [...known.map(sq), ...DONGGU_DONGS].includes(sq(dong));

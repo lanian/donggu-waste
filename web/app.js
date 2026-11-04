@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.10';
+export const APP_VERSION = '0.12.11';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -1664,14 +1664,44 @@ function screenIntake(id) {
   }
   const f = ui.form;
   let draftTimer = null;
-  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, reason, id: _i, lat, lon, dongCands, picking, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
+  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, addrAck, reason, id: _i, lat, lon, dongCands, picking, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
   if (f.picking) return pickScreen({ items: f.items, state: f.pick, table, locked, onChange: saveDraft,
     onDone: () => { f.picking = false; render(); setTimeout(() => { const el = document.getElementById('intake-items'); if (el) el.scrollIntoView({ block: 'start' }); }, 0); } });
   const field = (key, label, attrs = {}) => {
     const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search', value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
     if (attrs.multiline) input.value = f[key];
-    input.addEventListener('input', () => { f[key] = input.value; f.dupAck = false; saveDraft(); });
+    input.addEventListener('input', () => { f[key] = input.value; f.dupAck = false; if (key === 'address' || key === 'dong') { f.addrAck = false; addrCheck(); } saveDraft(); });
+    if (key === 'address') input.addEventListener('blur', () => addrCheck(true));
     return h('label', { class: 'fld' }, h('span', {}, label), input);
+  };
+  // 배출 주소 확인·행정동 추천(휴대폰 안 자료로만): 형식·관할·전화번호 섞임, 같은 도로의 이전 접수로 동 추천, 동 이름 오타
+  const addrBox = h('div', { class: 'addr-check', 'aria-live': 'polite' });
+  const dongBox = h('div', { class: 'dong-check', 'aria-live': 'polite' });
+  const history = () => allStops().filter((x) => x.dong && x.address && !x.pii_purged).map((x) => ({ address: x.address, dong: x.dong }));
+  const addrIssues = () => {
+    const c = J.checkAddress(f.address);
+    const out = [...c.warnings];
+    if (f.dong && !J.isKnownDong(f.dong, knownDongs())) out.push(`'${f.dong}'은(는) 동구 행정동 목록에 없는 이름입니다. 오타인지 확인하세요.`);
+    return out;
+  };
+  let dongAuto = false;  // 주소로 자동으로 채운 동인지(주소를 바꾸면 다시 추천)
+  const addrCheck = (final = false) => {
+    if (!f.address.trim()) { addrBox.replaceChildren(); dongBox.replaceChildren(); return; }
+    const c = J.checkAddress(f.address);
+    addrBox.replaceChildren(...((final || c.warnings.length && f.address.length > 6) ? c.warnings.map((w) => h('p', { class: 'small warnp' }, '⚠ ' + w)) : []));
+    const g = J.guessDong(f.address, history(), knownDongs());
+    const dongIn = document.querySelector('#intake-dong');
+    if (g.dong && (!f.dong || dongAuto) && f.dong !== g.dong) {
+      f.dong = g.dong; dongAuto = true; if (dongIn) dongIn.value = g.dong; saveDraft();
+    }
+    const kids = [];
+    if (g.dong && f.dong === g.dong) kids.push(h('p', { class: 'small ok-note' }, `✓ 동: ${g.dong} (${g.reason})`));
+    else if (g.candidates.length > 1 || (g.dong && f.dong !== g.dong)) {
+      kids.push(h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 추천' }, h('span', { class: 'small' }, `동 후보${g.reason ? ` (${g.reason})` : ''}: `),
+        ...(g.candidates.length ? g.candidates : [g.dong]).map((x) => btn(x, () => { f.dong = x; dongAuto = false; f.addrAck = false; if (dongIn) dongIn.value = x; saveDraft(); addrCheck(); }, 'opt chipbtn' + (f.dong === x ? ' on' : '')))));
+    } else if (!f.dong && final) kids.push(h('p', { class: 'small muted' }, onField ? '동을 고르지 않으면 PC가 주소로 정합니다.' : '동을 모르면 비워 두어도 됩니다.'));
+    if (f.dong && !J.isKnownDong(f.dong, knownDongs())) kids.push(h('p', { class: 'small warnp' }, `⚠ '${f.dong}'은(는) 동구 행정동 목록에 없습니다. 오타인지 확인하세요.`));
+    dongBox.replaceChildren(...kids);
   };
   const itemsBox = h('div', {});
   const totalBox = h('p', { class: 'small' });
@@ -1692,13 +1722,22 @@ function screenIntake(id) {
   drawItems();
   const msg = h('p', { class: 'msg' });
   const dupBox = h('div', {});
-  const save = btn(editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록', async () => {
+  const saveLabel = editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록';
+  const save = btn(saveLabel, async () => {
     const phone = digits(f.phone);
     if (!f.name.trim()) return (msg.textContent = '이름을 적어 주세요.');
     if (!/^0\d{8,10}$/.test(phone)) return (msg.textContent = '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
     if (!f.address.trim()) return (msg.textContent = '배출 주소를 적어 주세요.');
     if (!f.planned_date) return (msg.textContent = '수거 예정일을 골라 주세요.');
     if (!f.items.length) return (msg.textContent = '버릴 물건을 하나 이상 추가해 주세요.');
+    // 주소 확인: 걱정되는 점이 있으면 한 번 보여 주고, 맞으면 한 번 더 눌러 저장(막지 않음)
+    const issues = addrIssues();
+    if (issues.length && !f.addrAck) {
+      f.addrAck = true; addrCheck(true);
+      msg.textContent = '주소를 확인해 주세요: ' + issues.join(' / ') + ` — 맞으면 [${saveLabel}]을 한 번 더 누르세요.`;
+      document.querySelector('label.fld input[placeholder^="예: 광주 동구"]')?.scrollIntoView({ block: 'center' });
+      return;
+    }
     if (editing && !f.reason.trim()) return (msg.textContent = '수정 사유를 적어 주세요.');
     if (!editing && !f.dupAck) {
       const dups = allStops().filter((r) => r.status !== 'CANCELLED' && !r.pii_purged && deriveStop(r, st.events).progress !== 'DONE' && (digits(r.phone) === phone || normAddr(r.address) === normAddr(f.address)));
@@ -1750,7 +1789,7 @@ function screenIntake(id) {
       await commit(); ui.form = null; toast(`${req.receipt_no} 등록했습니다`); go('#/home');
     }
   }, 'primary huge');
-  return h('main', {},
+  const view = h('main', {},
     h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
     onField && !registeredNow ? h('section', { class: 'card notice warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
       btn('기기 등록', () => go('#/register'), 'ghost')) : null,
@@ -1774,9 +1813,9 @@ function screenIntake(id) {
           saveDraft(); render();
           toast(ll ? '주소와 위치(건물 출입구)를 채웠습니다' : '주소를 채웠습니다. 위치는 접수 뒤 지도에서 지정하세요');
         } }),
-      field('address', '배출 주소', { autocomplete: 'off' }),
+      field('address', '배출 주소', { autocomplete: 'off', placeholder: '예: 광주 동구 예시로 12 / 대인동 34-5' }), addrBox,
       f.lat != null ? h('p', { class: 'small addr-geo' }, `위치: 주소 검색 좌표(건물 출입구)${f.zip ? ` · 우편번호 ${f.zip}` : ''}. 배출 위치가 다르면 접수 뒤 [위치 고치기]로 맞추세요.`) : null,
-      field('dong', '동 (행정동, 선택)', { autocomplete: 'off', list: 'dong-list', placeholder: '예: 충장동' }),
+      field('dong', '동 (행정동, 선택)', { autocomplete: 'off', list: 'dong-list', placeholder: '예: 충장동', id: 'intake-dong' }), dongBox,
       f.dongCands.length ? h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 제안' }, h('span', { class: 'small' }, '주소 검색 결과의 동 후보: '),
         ...f.dongCands.map((x) => btn(x, () => { f.dong = x; f.dongCands = []; saveDraft(); render(); }, 'opt chipbtn'))) : null,
       h('datalist', { id: 'dong-list' }, ...knownDongs().map((x) => h('option', { value: x }))),
@@ -1787,6 +1826,8 @@ function screenIntake(id) {
       btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'primary big')),
     editing ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
+  if (f.address) setTimeout(() => addrCheck(true), 0);
+  return view;
 }
 const knownDongs = () => [...new Set([...(st.recentDongs || []), ...allStops().map((r) => dongOf(r)).filter(Boolean)])];
 

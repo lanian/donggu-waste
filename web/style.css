@@ -503,3 +503,5 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .pick-row .btn.pick-star.on { color: #8a6100; }
 /* 좌표가 없는 길안내 단추: 눌리지만(이유 안내) 흐리게 */
 .btn.nav-btn.no-loc { opacity: .75; border-style: dashed; }
+/* 배출 주소 확인·동 추천 */
+.addr-check p, .dong-check p { margin: 4px 2px 0; } .warnp { color: var(--warn); font-weight: 600; } .ok-note { color: var(--brand-soft-ink); font-weight: 700; }
