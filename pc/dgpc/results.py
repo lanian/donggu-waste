@@ -79,6 +79,20 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
     with tx(con):
         con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,?)",
                     (imp, channel, dev_id, sha, now(), release))
+        # 휴대폰 기록 세대(v0.13, 백업 복원마다 새 세대): 결과 파일 머리 "gens" = [[세대, 그 세대 첫 번호], …] (없으면 받은 가장 작은 번호)
+        for g_, start_ in P.norm_gens(payload.get("gens")):
+            _note_gen(con, dev_id, g_, start_)
+
+        def seen(ev):
+            # PC가 이 기기·세대의 이 번호를 받았다는 표시(release_info 계산용). 이미 받은 기록(event_id 같음)도 넣는다
+            # — 휴대폰이 복원하며 번호를 옮긴 기록도 PC에 있으면 '받음'이다.
+            sq = ev.get("seq")
+            if isinstance(sq, bool) or not isinstance(sq, int) or sq < 1:
+                return
+            g_ = P.norm_gen(ev.get("gen"))
+            con.execute("INSERT OR IGNORE INTO result_seq (device_id, gen, seq) VALUES (?,?,?)", (dev_id, g_ or "", sq))
+            if g_:
+                _note_gen(con, dev_id, g_, sq)
 
         def insert_event(ev, request_id, assign_ver, base_req_ver, kind, body, status, reason):
             # 휴대폰을 백업에서 되살리면 순번이 다시 쓰일 수 있다: event_id가 새것이면 받고 '순번 재사용' 경고만 남긴다(충돌 아님)
@@ -88,16 +102,17 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 warn = f"순번 {ev['seq']} 재사용(휴대폰 복원 추정) — 앞 기록 {old['event_id'][:8]}"
                 counts["seq_reused"] = counts.get("seq_reused", 0) + 1
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                body_json, apply_status, conflict_reason, device_ts, warning) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                body_json, apply_status, conflict_reason, device_ts, warning, gen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (ev["event_id"], imp, dev_id, ev["seq"], request_id, assign_ver, base_req_ver, kind, json.dumps(body, ensure_ascii=False),
-                         status, reason, ev.get("device_ts"), warn))
+                         status, reason, ev.get("device_ts"), warn, P.norm_gen(ev.get("gen"))))
 
         def one_event(ev):
+            if not isinstance(ev.get("seq"), int):
+                ev["seq"] = int(ev.get("seq") or 0)
+            seen(ev)
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (ev["event_id"],)):
                 counts["skipped_duplicate"] += 1
                 return
-            if not isinstance(ev.get("seq"), int):
-                ev["seq"] = int(ev.get("seq") or 0)
             if ev["kind"] == "UNLOAD":  # 휴대폰에서 기록한 하차 (접수와 무관, 팀 단위)
                 b = ev.get("body") if isinstance(ev.get("body"), dict) else {}
                 ok_ = bool(crew) and (_num(b.get("volume_m3")) or _num(b.get("weight_kg")))
@@ -195,15 +210,16 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 con.execute("ROLLBACK TO ev1"); con.execute("RELEASE ev1")
                 counts["conflict"] += 1
                 try:
+                    seen(ev)
                     con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                        body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,'CONFLICT',?,?)""",
+                        body_json, apply_status, conflict_reason, device_ts, gen) VALUES (?,?,?,?,?,?,?,?,?,'CONFLICT',?,?,?)""",
                                 (str(ev.get("event_id") or uuid.uuid4()), imp, dev_id,
                                  ev["seq"] if isinstance(ev.get("seq"), int) and not isinstance(ev.get("seq"), bool) else -int.from_bytes(os.urandom(4), "big") - 1,
                                  str(ev.get("request_id") or ""),
                                  _int_clamp(ev.get("assign_ver"), 0, 10 ** 9), ev.get("base_req_ver") if isinstance(ev.get("base_req_ver"), int) else None,
                                  str(ev.get("kind") or "?")[:40],
                                  json.dumps(ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
-                                 f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts")))
+                                 f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts"), P.norm_gen(ev.get("gen"))))
                 except Exception:  # noqa: BLE001
                     counts["failed"] = counts.get("failed", 0) + 1
         for rid in touched:
@@ -211,6 +227,14 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
+
+
+def _note_gen(con, dev_id: str, gen: str, start: int):
+    """기기·세대의 첫 번호(작은 쪽을 남김)와 마지막으로 받은 시각."""
+    t = now()
+    con.execute("""INSERT INTO device_gen (device_id, gen, start_seq, first_seen_at, last_seen_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(device_id, gen) DO UPDATE SET start_seq=MIN(device_gen.start_seq, excluded.start_seq), last_seen_at=excluded.last_seen_at""",
+                (dev_id, gen, start, t, t))
 
 
 def _photo_meta(con, rid: str, b: dict, dev_id: str):

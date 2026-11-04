@@ -173,21 +173,78 @@ function wrongField(kind, field) {
 /** 화면 표시: 'D-ABCD EFGH' */
 export const showCode = (kind, code) => `${CODE_KINDS[kind].prefix}-${String(code).slice(0, 4)} ${String(code).slice(4)}`;
 
+// ------------------------------------------------------------ 기록 세대 (gen, v0.13)
+// 휴대폰은 기록마다 세대(gen, 8자리 16진수)를 적는다. 처음 쓸 때와 백업에서 복원할 때마다 새 세대를 만든다.
+// 복원하면 PC가 이미 본 번호가 다시 쓰일 수 있으므로, PC가 알려 주는 '받은 번호'(rel.g)는 세대별로만 믿는다.
+// st.gen = 지금 세대, st.gens = [{ gen, start }] (세대별 첫 번호, 최근 GENS_KEEP개), st.genRestored = 복원한 적 있음(세대 없는 이전 기록은 rel.seq로 반영하지 않음)
+export const GENS_KEEP = 16;
+const GEN_RE = /^[0-9a-f]{8}$/;
+export const isGen = (x) => typeof x === 'string' && GEN_RE.test(x);
+export function randomGen() {
+  const b = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+/** 새 세대를 시작한다: 다음 기록 번호(st.seq + 1)부터 이 세대. restored = 백업 복원으로 만든 세대. */
+export function newGen(st, { restored = false, gen = randomGen() } = {}) {
+  const gens = (st.gens || []).filter((x) => x && isGen(x.gen) && x.gen !== gen);
+  gens.push({ gen, start: (st.seq || 0) + 1 });
+  st.gens = gens.slice(-GENS_KEEP);
+  st.gen = gen;
+  if (restored) st.genRestored = true;
+  return gen;
+}
+/** 세대가 없으면(처음 쓰는 휴대폰·이전 버전 자료) 만든다. 돌려주는 값: 지금 세대. */
+export function ensureGen(st) {
+  if (!isGen(st.gen) || !(st.gens || []).some((x) => x.gen === st.gen)) newGen(st);
+  return st.gen;
+}
+/** 결과 파일 머리 "gens": 보내는 기록의 세대와 그 세대 첫 번호. */
+export function gensOf(st, events) {
+  const used = new Set(events.map((e) => e.gen).filter(isGen));
+  return (st.gens || []).filter((x) => used.has(x.gen)).map((x) => [x.gen, x.start]);
+}
+
 // ------------------------------------------------------------ 결과 반영 정보 (목록 묶음의 "rel", v0.13)
-/** 결과 반영 코드를 넣은 것과 같은 처리: 보낸 범위의 결과 파일을 반영됨으로, releasedSeq를 올린다.
- *  seq를 넘는 기록은 반영됨으로 하지 않는다. 휴대폰 번호(st.seq)가 PC가 아는 번호보다 작으면(오래된 백업 복원 등)
- *  다음 기록이 PC에 이미 있는 번호를 다시 쓰지 않게 st.seq를 올린다. 돌려주는 값: 새로 반영된 기록 수. */
-export function releaseUpTo(st, seq) {
+/** 이 기록을 PC가 받았다고 rel이 말하는가. 세대 있는 기록: rel.g에 그 세대가 있고 번호가 [세대 첫 번호, 받은 번호] 안.
+ *  세대 없는(이전 버전) 기록: 이 휴대폰이 복원한 적 없을 때만 rel.seq 이하. */
+export function relCovers(st, rel, ev) {
+  if (isGen(ev.gen)) {
+    const g = (rel.g || []).find((x) => x[0] === ev.gen);
+    const mine = (st.gens || []).find((x) => x.gen === ev.gen);
+    return !!(g && mine && ev.seq >= mine.start && ev.seq <= g[1]);
+  }
+  return !st.genRestored && ev.seq <= rel.seq;
+}
+/** 받은 번호까지 반영됨으로: 보낸 범위의 결과 파일을 반영됨으로, releasedSeq를 올린다.
+ *  releasedSeq는 '이 번호까지 모두 반영됨'이므로, 번호 순으로 보아 rel이 받았다고 말하지 않는 첫 기록 앞에서 멈춘다
+ *  (그 뒤 기록은 받았다고 해도 다시 보내면 PC가 event_id로 중복을 건너뜀). 돌려주는 값: 새로 반영된 기록 수. */
+function releaseBy(st, rel) {
   const before = st.releasedSeq || 0;
-  st.seq = Math.max(st.seq || 0, seq);
-  st.releasedSeq = Math.max(before, seq);
+  const pending = (st.events || []).filter((e) => e.seq > before).sort((a, b) => a.seq - b.seq);
+  let to = before, blocked = false;
+  for (const e of pending) {
+    if (!relCovers(st, rel, e)) { blocked = true; break; }
+    to = e.seq;
+  }
+  // PC가 아는 번호가 휴대폰 번호보다 크면(오래된 백업 복원 등) 다음 기록이 PC에 이미 있는 번호를 다시 쓰지 않게 번호를 올린다.
+  // 지금 세대 기록이 있으면 번호를 건너뛰는 대신 새 세대를 시작한다(세대 안 번호는 빈틈없이 이어지게).
+  const top = Math.max(rel.seq, ...(rel.g || []).filter((x) => x[0] !== st.gen).map((x) => x[1]));
+  if (top > (st.seq || 0)) {
+    const cur = isGen(st.gen) ? (st.gens || []).find((x) => x.gen === st.gen) : null;
+    if (cur && (st.seq || 0) >= cur.start) { st.seq = top; newGen(st); }
+    else { st.seq = top; if (cur) cur.start = top + 1; }
+  }
+  // 남은 미반영 기록이 없으면 지금 번호까지 반영됨(다음 기록은 그 뒤 번호)
+  if (!blocked) to = Math.max(to, st.seq || 0);
+  st.releasedSeq = Math.max(before, to);
   for (const x of st.exports || []) if (!x.confirmed && x.to <= st.releasedSeq) { x.confirmed = true; x.via = 'list'; }
   return (st.events || []).filter((e) => e.seq > before && e.seq <= st.releasedSeq).length;
 }
 /** 목록에 실려 온 rel을 적용한다. 돌려주는 값: { events: 새로 반영된 기록 수, photos: 새로 회수 확인된 사진 수 } 또는 null(rel 없음). */
 export function applyRelease(st, rel) {
   if (!rel || !Number.isInteger(rel.seq) || rel.seq < 0) return null;
-  const events = releaseUpTo(st, rel.seq);
+  const events = releaseBy(st, rel);
   const known = new Set([...(st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => e.body && e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)]);
   const had = new Set(st.recoveredPhotos || []);
   const add = (rel.ph || []).filter((id) => known.has(id) && !had.has(id));
@@ -207,12 +264,18 @@ const newerList = (a, b) => {
  *  - PC 연결 방식: 지금 휴대폰의 반영 상태(releasedSeq·결과 파일·사진 파일·회수 확인)를 지키고 백업 것과 합친다.
  *    기록은 event_id로 합친다(지금 휴대폰에만 있는 기록도 남김). 번호가 겹치는 다른 기록은 뒤 번호로 옮긴다.
  *    목록은 더 새 것(날짜·갱신본)을 쓴다.
- *  - 단독 방식: 백업으로 바꾸되 seq만 지킨다(새 휴대폰으로 옮기는 용도). */
-export function mergeRestore(cur, bak) {
+ *  - 단독 방식: 백업으로 바꾸되 seq만 지킨다(새 휴대폰으로 옮기는 용도).
+ *  - 기록 세대: 복원하면 늘 새 세대를 시작한다(다음 번호부터). 번호를 옮긴 기록도 새 세대로 적는다(옛 세대 번호 범위 밖이므로).
+ *    PC는 세대별로 받은 번호를 알려 주므로, 복원 전에 PC가 본 번호와 겹쳐도 새 기록을 '받음'으로 착각하지 않는다. */
+export function mergeRestore(cur, bak, gen = randomGen()) {
   const out = { ...bak };
   const seq = Math.max(cur.seq || 0, bak.seq || 0);
   out.seq = seq;
-  if ((bak.mode || cur.mode) !== 'PC') return out;
+  // 세대 기록: 두 쪽의 세대 첫 번호를 합친다(같은 세대면 작은 번호)
+  const gm = new Map();
+  for (const x of [...(bak.gens || []), ...(cur.gens || [])]) if (x && isGen(x.gen)) gm.set(x.gen, Math.min(x.start, gm.has(x.gen) ? gm.get(x.gen) : Infinity));
+  out.gens = [...gm.entries()].map(([g, start]) => ({ gen: g, start })).sort((a, b) => a.start - b.start);
+  if ((bak.mode || cur.mode) !== 'PC') { newGen(out, { restored: true, gen }); return out; }
   out.releasedSeq = Math.max(cur.releasedSeq || 0, bak.releasedSeq || 0);
   const evs = byKey(bak.events, 'event_id');
   for (const e of cur.events || []) if (!evs.has(e.event_id)) evs.set(e.event_id, e);
@@ -221,13 +284,15 @@ export function mergeRestore(cur, bak) {
   const fromBak = new Set((bak.events || []).map((e) => e.event_id));
   const events = [...evs.values()].sort((a, b) => a.seq - b.seq || (fromBak.has(b.event_id) ? 1 : 0) - (fromBak.has(a.event_id) ? 1 : 0));
   const taken = new Set();
+  newGen(out, { restored: true, gen });  // 새 세대: seq + 1부터
   let next = seq;
-  for (const e of events) {
-    if (taken.has(e.seq)) { next += 1; e.seq = next; }
-    taken.add(e.seq);
-  }
+  const moved = events.map((e) => {
+    if (!taken.has(e.seq)) { taken.add(e.seq); return e; }
+    next += 1; taken.add(next);
+    return { ...e, seq: next, gen };
+  });
   out.seq = Math.max(seq, next);
-  out.events = events.sort((a, b) => a.seq - b.seq);
+  out.events = moved.sort((a, b) => a.seq - b.seq);
   const ex = byKey(cur.exports, 'code');
   for (const x of bak.exports || []) { const c = ex.get(x.code); if (!c) ex.set(x.code, x); else if (x.confirmed && !c.confirmed) ex.set(x.code, x); }
   out.exports = [...ex.values()].sort((a, b) => a.from - b.from || a.to - b.to);

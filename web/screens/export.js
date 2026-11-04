@@ -19,7 +19,9 @@ async function screenExport() {
     const from = pending[0].seq, to = pending[pending.length - 1].seq;
     const payload = {
       schema: 'dg.result/1', work_date: st.daylist ? st.daylist.work_date : null, app_version: APP_VERSION,
-      events: pending.map(({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, ts }) => ({ event_id, seq, request_id, assign_ver, base_req_ver, kind, body, device_ts: ts })),
+      // gen: 기록 세대(백업 복원마다 바뀜). gens: 보내는 기록의 세대별 첫 번호 — PC가 세대마다 '빠짐없이 받은 번호'를 센다(rel.g)
+      events: pending.map(({ event_id, seq, gen, request_id, assign_ver, base_req_ver, kind, body, ts }) => ({ event_id, seq, ...(gen ? { gen } : {}), request_id, assign_ver, base_req_ver, kind, body, device_ts: ts })),
+      gens: F.gensOf(st, pending),
       photos: pending.filter((e) => e.kind === 'PHOTO_META').map((e) => ({ photo_id: e.body.photo_id, request_id: e.request_id, phase: e.body.phase, sha256: e.body.sha256, bytes: e.body.bytes })),
     };
     const signRaw = await P.exportRaw(dev.sign.publicKey);
@@ -115,7 +117,7 @@ async function screenExport() {
     if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
     for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
     const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff'].map((k) => [k, st[k]]));
-    setSt({ ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] });
+    setSt({ ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, gen: st.gen, gens: st.gens, genRestored: st.genRestored, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] });
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
 

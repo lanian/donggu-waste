@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import struct
 import zlib
 from dataclasses import dataclass
@@ -318,13 +319,41 @@ def _uid(s: str) -> str:
     return str(_uuid.UUID(bytes=_b64.urlsafe_b64decode(s + "==")))
 
 
-# v0.13: 목록 묶음 맨 위 선택 키 "rel" = 결과 반영 정보 {"seq": 정수, "ph": [photo_id, ...]}
-#   seq: PC가 이 기기에서 빠짐없이 가져온 기록의 마지막 번호(1..seq 전부). 휴대폰은 seq 이하 자기 기록을
+# v0.13: 목록 묶음 맨 위 선택 키 "rel" = 결과 반영 정보 {"seq": 정수, "ph": [photo_id, ...], "g": [[세대, 번호], ...]}
+#   seq: PC가 이 기기에서 빠짐없이 가져온 '세대 없는'(이전 앱) 기록의 마지막 번호(1..seq 전부). 이전 휴대폰은 seq 이하 자기 기록을
 #        "결과 반영 코드"를 넣은 것과 똑같이 반영됨으로 처리하고, seq를 넘는 기록은 그대로 둔다.
 #   ph : PC가 해시를 대조해 회수한 이 기기 사진 ID(문자열 UUID). "사진 회수 코드"를 넣은 것과 같다.
+#   g  : (선택) 세대별 받은 번호. 휴대폰은 백업에서 복원할 때마다 새 세대(8자리 16진수)를 만들고 기록마다 세대를 적는다.
+#        [세대, n] = 그 세대의 첫 번호부터 n까지 PC가 빠짐없이 받음. 휴대폰은 세대가 같은 기록만 이 범위에서 반영됨으로 본다
+#        (복원 뒤 다시 쓰인 번호를 PC가 받은 것으로 착각하지 않게). 최근 세대 몇 개만 싣는다. 형식이 틀리면 g만 없는 것으로 본다.
 #   키가 없으면 이전 동작(코드를 손으로 입력). 형식 번호는 그대로 dg.daylist/2(이전 앱은 모르는 키를 무시).
+_GEN_RE = re.compile(r"^[0-9a-f]{8}$")
+REL_GENS_MAX = 16
+
+
+def norm_gen(x) -> str | None:
+    """기록 세대 ID(8자리 소문자 16진수)면 그대로, 아니면 None."""
+    return x if isinstance(x, str) and _GEN_RE.match(x) else None
+
+
+def norm_gens(v) -> list:
+    """[[세대, 번호(0 이상 정수)], …] 검사. 틀린 형식이면 [] (결과 파일 머리 "gens"·rel.g 공통)."""
+    if not isinstance(v, (list, tuple)) or len(v) > REL_GENS_MAX:
+        return []
+    out = []
+    for x in v:
+        if not isinstance(x, (list, tuple)) or len(x) != 2 or not norm_gen(x[0]):
+            return []
+        n = x[1]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            return []
+        out.append([x[0], n])
+    return out
+
+
 def norm_rel(rel) -> dict | None:
-    """rel 값을 검사해 {"seq": int, "ph": [str]}로 맞춘다. 형식이 틀리면 None(없는 것과 같음)."""
+    """rel 값을 검사해 {"seq": int, "ph": [str], ("g": [[str, int]])}로 맞춘다. 형식이 틀리면 None(없는 것과 같음).
+    g만 틀리면 g를 뺀다(이전 동작)."""
     if not isinstance(rel, dict):
         return None
     seq = rel.get("seq")
@@ -339,7 +368,14 @@ def norm_rel(rel) -> dict | None:
             ids.append(str(_uuid.UUID(str(x))))
         except ValueError:
             return None
-    return {"seq": seq, "ph": list(dict.fromkeys(ids))}
+    out = {"seq": seq, "ph": list(dict.fromkeys(ids))}
+    g = norm_gens(rel.get("g"))
+    if g:
+        seen: dict = {}
+        for k, n in g:
+            seen[k] = max(n, seen.get(k, 0))
+        out["g"] = [[k, n] for k, n in seen.items()]
+    return out
 
 
 def compact_daylist(p: dict, fee_rows: dict) -> dict:

@@ -349,10 +349,7 @@ def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dic
             r["kind"] = "SOLO"
         auto = None
         if r["kind"] == "RESULT":
-            mx = S.one(con, "SELECT MAX(device_seq) AS s FROM result_event WHERE import_id=?", (r["id"],))["s"]
-            if mx is not None:
-                auto = S.one(con, """SELECT receipt_confirmed_at AS t FROM transfer_bundle WHERE device_id=? AND rel_seq >= ? AND receipt_confirmed_at IS NOT NULL
-                    ORDER BY receipt_confirmed_at LIMIT 1""", (r["device_id"], mx))
+            auto = _rel_covered(con, r["id"], r["device_id"], r["imported_at"])
         elif r["kind"] == "PHOTO":
             left = S.one(con, """SELECT COUNT(*) AS n FROM photo WHERE device_id=? AND recovery_status='RECOVERED' AND rel_acked_at IS NULL AND recovered_at <= ?""",
                          (r["device_id"], r["imported_at"]))["n"]
@@ -361,6 +358,27 @@ def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dic
                     "release_code": r["release_code"], "photo_code": r["release_code"] if r["kind"] == "PHOTO" else None,
                     "phone_confirmed": bool(r["phone_confirmed_at"] or auto), "phone_confirmed_by": "MANUAL" if r["phone_confirmed_at"] else ("DAYLIST" if auto else None)})
     return out
+
+
+def _rel_covered(con, import_id: str, device_id: str, imported_at: str):
+    """이 가져오기의 기록을 모두 '받음'으로 알린(rel) 목록을 휴대폰이 받았는지(수신 확인). 세대(gen)별로 본다:
+    세대 없는 기록은 rel.seq, 세대 있는 기록은 rel.g 의 그 세대 번호가 가져온 가장 큰 번호 이상이어야 한다.
+    가져오기 전에 만든 목록은 보지 않는다(복원 뒤 같은 번호가 다시 쓰인 경우 앞 목록을 확인으로 잘못 보지 않게)."""
+    need = {(g or ""): mx for g, mx in con.execute("""SELECT gen, MAX(device_seq) FROM result_event WHERE import_id=? AND device_seq >= 1
+        GROUP BY gen""", (import_id,)).fetchall()}
+    if not need:
+        return None
+    for b in S.rows(con, """SELECT receipt_confirmed_at AS t, rel_seq, rel_json FROM transfer_bundle WHERE device_id=? AND displayed_at >= ?
+            AND receipt_confirmed_at IS NOT NULL ORDER BY receipt_confirmed_at""", (device_id, imported_at)):
+        try:
+            rel = json.loads(b["rel_json"] or "{}")
+        except ValueError:
+            rel = {}
+        have = {g: n for g, n in (rel.get("g") or [])}
+        have[""] = b["rel_seq"] if b["rel_seq"] is not None else -1
+        if all(have.get(g, -1) >= mx for g, mx in need.items()):
+            return {"t": b["t"]}
+    return None
 
 
 def confirm_import(con, import_id: str) -> dict:

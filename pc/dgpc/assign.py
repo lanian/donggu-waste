@@ -259,17 +259,35 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
     return payload, b
 
 
+REL_GENS = 4  # rel.g 에 싣는 최근 세대 수
+
+
+def _contiguous_to(con, device_id: str, gen: str, start: int) -> int:
+    """이 기기·세대에서 start부터 빠짐없이 받은 마지막 번호(start를 못 받았으면 start-1)."""
+    if not con.execute("SELECT 1 FROM result_seq WHERE device_id=? AND gen=? AND seq=?", (device_id, gen, start)).fetchone():
+        return start - 1
+    return con.execute("""SELECT MIN(e.seq) FROM result_seq e WHERE e.device_id=? AND e.gen=? AND e.seq >= ?
+        AND NOT EXISTS (SELECT 1 FROM result_seq x WHERE x.device_id=e.device_id AND x.gen=e.gen AND x.seq=e.seq+1)""",
+                       (device_id, gen, start)).fetchone()[0]
+
+
 def release_info(con, device_id: str) -> dict:
-    """휴대폰에 알려 줄 '안전하게 받은 것': seq = 이 기기 기록 1..seq를 PC가 빠짐없이 저장한(반영·충돌·거부 모두) 마지막 순번,
-    ph = 이 기기에서 회수했지만 아직 휴대폰에 알리지 않은(수신 확인된 목록에 실리지 않은) 사진 ID."""
-    # 빠짐없이 받은 마지막 번호: 1부터 이어진 구간의 끝(중간 번호가 빠졌으면 그 앞에서 멈춤 — 휴대폰은 이 번호까지 지운다)
-    seq = con.execute("""SELECT MIN(e.device_seq) FROM result_event e WHERE e.device_id=? AND e.device_seq >= 1
-        AND NOT EXISTS (SELECT 1 FROM result_event x WHERE x.device_id=e.device_id AND x.device_seq=e.device_seq+1)""", (device_id,)).fetchone()[0]
-    if not con.execute("SELECT 1 FROM result_event WHERE device_id=? AND device_seq=1 LIMIT 1", (device_id,)).fetchone():
-        seq = 0
+    """휴대폰에 알려 줄 '안전하게 받은 것'.
+    seq = 세대 없는(이전 앱) 기록 1..seq를 PC가 빠짐없이 저장한(반영·충돌·거부·중복 모두) 마지막 순번,
+    g   = 최근 세대별 [세대, 그 세대 첫 번호부터 빠짐없이 받은 마지막 번호] (첫 번호를 못 받은 세대는 싣지 않음),
+    ph  = 이 기기에서 회수했지만 아직 휴대폰에 알리지 않은(수신 확인된 목록에 실리지 않은) 사진 ID."""
+    # 빠짐없이 받은 마지막 번호: 첫 번호부터 이어진 구간의 끝(중간 번호가 빠졌으면 그 앞에서 멈춤 — 휴대폰은 이 번호까지 지운다)
+    seq = _contiguous_to(con, device_id, "", 1)
+    g = []
+    # 최근 세대: 휴대폰은 새 세대를 늘 지금 번호 다음부터 시작하므로 첫 번호가 큰 세대가 더 최근이다
+    for r in con.execute("SELECT gen, start_seq FROM device_gen WHERE device_id=? ORDER BY start_seq DESC, last_seen_at DESC LIMIT ?",
+                         (device_id, REL_GENS)).fetchall():
+        to = _contiguous_to(con, device_id, r[0], r[1])
+        if to >= r[1]:
+            g.append([r[0], to])
     ph = [r[0] for r in con.execute("""SELECT photo_id FROM photo WHERE device_id=? AND recovery_status='RECOVERED' AND rel_acked_at IS NULL
         ORDER BY recovered_at LIMIT 500""", (device_id,)).fetchall()]
-    return {"seq": max(0, seq or 0), "ph": ph}
+    return {"seq": max(0, seq or 0), "ph": ph, **({"g": g} if g else {})}
 
 
 def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, device_id: str | None = None,

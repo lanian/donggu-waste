@@ -351,15 +351,79 @@ def _scrub_event_body(raw: str, kind: str | None = None) -> str:
     return json.dumps(b, ensure_ascii=False)
 
 
-def _scrub_names(obj, ids: set):
+_SUMMARY_PII = ("name", "phone", "address")  # 마감 기록 요약(day_close_log.summary_json) 안 접수 항목의 개인정보 칸
+
+
+def _scrub_names(obj, ids: set, receipts: set = frozenset()) -> bool:
+    """요약 안에서 id(또는 접수번호)가 ids(receipts)에 든 항목의 이름·연락처·주소를 지운다. 바꾼 것이 있으면 True."""
+    hit = False
     if isinstance(obj, dict):
-        if obj.get("id") in ids and "name" in obj:
-            obj["name"] = PURGED
+        if obj.get("id") in ids or (obj.get("id") is None and obj.get("receipt_no") in receipts):
+            for k in _SUMMARY_PII:
+                if k in obj and obj[k] not in (PURGED, PURGED_PHONE, "", None):
+                    obj[k] = PURGED_PHONE if k == "phone" else PURGED
+                    hit = True
         for v in obj.values():
-            _scrub_names(v, ids)
+            hit = _scrub_names(v, ids, receipts) or hit
     elif isinstance(obj, list):
         for v in obj:
-            _scrub_names(v, ids)
+            hit = _scrub_names(v, ids, receipts) or hit
+    return hit
+
+
+def _summary_refs(obj, out: list):
+    """요약 안에서 개인정보 칸(이름·연락처·주소)이 아직 남은 항목의 (id, 접수번호)를 모은다."""
+    if isinstance(obj, dict):
+        if any(k in obj and obj[k] not in (PURGED, PURGED_PHONE, "", None) for k in _SUMMARY_PII) and (obj.get("id") or obj.get("receipt_no")):
+            out.append((obj.get("id"), obj.get("receipt_no")))
+        for v in obj.values():
+            _summary_refs(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _summary_refs(v, out)
+
+
+def scrub_close_summaries(con, ids=None) -> int:
+    """마감 기록 요약 안의 파기된 접수 개인정보를 지운다(트랜잭션은 호출하는 쪽). 고친 마감 기록 수를 돌려준다.
+    ids를 주면 그 접수(이번 묶음에서 파기한 것)만, 없으면 '이미 파기됐는데 요약에 이름이 남은 것'을 모두 찾아 고친다
+    (예전 버전에서 파기 도중 멈춰 요약 정리가 빠진 경우 복구)."""
+    if ids is not None:
+        ids = list(ids)
+        if not ids:
+            return 0
+        found = con.execute("""SELECT id, summary_json FROM day_close_log WHERE summary_json IS NOT NULL
+            AND EXISTS (SELECT 1 FROM json_each(?) j WHERE instr(day_close_log.summary_json, j.value) > 0)""", (json.dumps(ids),)).fetchall()
+        rec = {r[0] for r in con.execute("SELECT receipt_no FROM request WHERE id IN (SELECT value FROM json_each(?)) AND receipt_no IS NOT NULL",
+                                         (json.dumps(ids),)).fetchall()}
+        targets = [(cid, sj, set(ids), rec) for cid, sj in found]
+    else:
+        targets = []
+        for cid, sj in con.execute("SELECT id, summary_json FROM day_close_log WHERE summary_json IS NOT NULL").fetchall():
+            try:
+                d = json.loads(sj)
+            except ValueError:
+                continue
+            refs: list = []
+            _summary_refs(d, refs)
+            if not refs:
+                continue
+            rid = [r[0] for r in refs if r[0]]
+            rno = [r[1] for r in refs if r[1] and not r[0]]
+            gone = con.execute("""SELECT id, receipt_no FROM request WHERE pii_purged_at IS NOT NULL
+                AND (id IN (SELECT value FROM json_each(?)) OR receipt_no IN (SELECT value FROM json_each(?)))""",
+                               (json.dumps(rid), json.dumps(rno))).fetchall()
+            if gone:
+                targets.append((cid, sj, {g[0] for g in gone}, {g[1] for g in gone if g[1]}))
+    n = 0
+    for cid, sj, sid, srec in targets:
+        try:
+            d = json.loads(sj)
+        except ValueError:
+            continue
+        if _scrub_names(d, sid, srec):
+            con.execute("UPDATE day_close_log SET summary_json=? WHERE id=?", (json.dumps(d, ensure_ascii=False), cid))
+            n += 1
+    return n
 
 
 def pseudonymize(con, rid: str, ts: str):
@@ -423,6 +487,8 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
             with C.tx(con):
                 for rid in ch:
                     pseudonymize(con, rid, ts)
+                # 마감 기록 요약 안의 이름도 같은 트랜잭션에서(중간에 멈춰도 파기된 접수의 이름이 요약에 남지 않게)
+                scrub_close_summaries(con, ch)
                 pid = str(uuid.uuid4())
                 con.execute("INSERT INTO pii_purge_log (id, at, count, actor, criteria_json, trigger) VALUES (?,?,?,?,?,?)",
                             (pid, ts, len(ch), C.ACTOR.get(), json.dumps(crit, ensure_ascii=False), trigger))
@@ -432,16 +498,12 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
             progress(len(done), len(ids))
     with guard:
         with C.tx(con):
+            # 복구: 이미 파기됐는데 마감 기록 요약에 이름·연락처·주소가 남은 것(예전 버전에서 파기 도중 멈춘 경우 등)을 매번 찾아 지운다
+            repaired = scrub_close_summaries(con)
+            if repaired:
+                C.audit(con, "privacy", "close-summary", "PURGE_PII", {"repaired_close_logs": repaired})
             if done:
-                # 마감 기록 요약 안의 이름, 오래된 QR 묶음(암호문)도 정리
-                sid = set(done)
-                for cid, sj in con.execute("SELECT id, summary_json FROM day_close_log").fetchall():
-                    d = json.loads(sj or "{}")
-                    before = json.dumps(d, ensure_ascii=False)
-                    _scrub_names(d, sid)
-                    after = json.dumps(d, ensure_ascii=False)
-                    if after != before:
-                        con.execute("UPDATE day_close_log SET summary_json=? WHERE id=?", (after, cid))
+                # 오래된 QR 묶음(암호문)도 정리
                 con.execute("UPDATE transfer_bundle SET frames_json=NULL WHERE work_date < ?", (crit["cutoff"],))
                 # 카카오 이동시간 캐시(주민 좌표 쌍): 30일 넘은 것은 쓰지도 않으므로 지운다(카카오를 끈 뒤에도 남지 않게)
                 old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -449,7 +511,7 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
             C.set_setting(con, "last_pii_purge_run", {"at": C.now(), "count": len(done), "trigger": trigger})
         if done:
             C.incremental_vacuum(con)
-    return {"count": len(done), **crit, **({"orphan_requests": orphans} if orphans else {})}
+    return {"count": len(done), **crit, **({"orphan_requests": orphans} if orphans else {}), **({"repaired_close_logs": repaired} if repaired else {})}
 
 
 def purge_log(con, limit: int = 200) -> list[dict]:

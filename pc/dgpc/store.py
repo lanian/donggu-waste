@@ -368,7 +368,24 @@ def _m3_round_unit(con):
     con.execute("UPDATE request SET reduction_round_unit=? WHERE reduction_code IS NOT NULL AND reduction_round_unit IS NULL", (unit,))
 
 
-MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit)]
+def _m4_device_gen(con):
+    """v0.13: 휴대폰 기록 '세대'(gen). 휴대폰은 백업에서 복원할 때마다 새 세대를 만들고 기록마다 세대를 적는다.
+    PC는 기기·세대별로 받은 순번을 따로 세어(결과 반영 정보 rel.g), 복원 뒤 다시 쓰인 번호를 이미 받은 것으로 착각하지 않는다.
+    - result_event.gen: 기록의 세대(이전 휴대폰 기록은 NULL)
+    - device_gen: 기기·세대별 첫 번호(휴대폰이 결과 파일 머리에 알려 줌, 없으면 받은 가장 작은 번호)·마지막으로 받은 시각
+    - result_seq: 기기·세대별로 받은 번호(중복 event_id로 건너뛴 것·충돌함에 넣은 것 포함). 이전 기록은 세대 ''로 채운다."""
+    if "gen" not in _cols(con, "result_event"):
+        con.execute("ALTER TABLE result_event ADD COLUMN gen TEXT")
+    con.execute("""CREATE TABLE IF NOT EXISTS device_gen (device_id TEXT NOT NULL, gen TEXT NOT NULL, start_seq INTEGER NOT NULL,
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY (device_id, gen))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS result_seq (device_id TEXT NOT NULL, gen TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL,
+        PRIMARY KEY (device_id, gen, seq)) WITHOUT ROWID""")
+    con.execute("""INSERT OR IGNORE INTO result_seq (device_id, gen, seq) SELECT device_id, COALESCE(gen, ''), device_seq FROM result_event
+        WHERE device_seq >= 1""")
+
+
+MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
+              (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen)]
 LATEST = MIGRATIONS[-1][0]
 
 

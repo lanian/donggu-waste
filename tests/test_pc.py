@@ -1925,8 +1925,8 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2, 3] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
-       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 3, "다시 열면 멈춘 단계부터 다시 실행(2·3단계)")
+    ok(store.run_migrations(mc) == [2, 3, 4] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 4, "다시 열면 멈춘 단계부터 다시 실행(2·3·4단계)")
     mc.execute("PRAGMA user_version = 99")
     try:
         store.run_migrations(mc)
@@ -2021,7 +2021,7 @@ def v13():
     # 3단계 이전: 기존 감면 접수는 그때의 설정값으로 채움(지금까지와 같은 금액)
     con.execute("UPDATE request SET reduction_round_unit=NULL WHERE id=?", (ru1,))
     con.execute("PRAGMA user_version = 2")
-    ok(store.run_migrations(con) == [3] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
+    ok(store.run_migrations(con) == [3, 4] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
        and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] is None and lev(ru1) == (2480, 2480),
        "이전 단계 3: 기존 감면 접수에 지금 설정값(10) 채움, 감면 없는 접수는 비움")
     S.save_settings(con, {"reduction_round_unit": 1})
@@ -2139,6 +2139,63 @@ def v13():
     OPS.confirm_import(con, pr["import_id"])
     ok({x["id"]: x for x in OPS.recent_imports(con)}[pr["import_id"]]["phone_confirmed_by"] == "MANUAL", "담당자가 '휴대폰에 입력함' 표시")
 
+    # 8-1. 기록 세대(gen): 오래된 백업으로 복원한 휴대폰이 PC가 본 번호를 다시 써도 '받음'으로 알리지 않음 (검토 지적)
+    gA, gB, gC, gD, gE = "aaaa0001", "bbbb0002", "cccc0003", "dddd0004", "eeee0005"
+    n0 = ph.seq
+    legacy0 = S.release_info(con, dev)["seq"]
+
+    def gev(seq, gen, **kw):
+        e = ph.ev(stop_b, "CONTACT", {"result": "REACHED"}); e["seq"] = seq
+        if gen:
+            e["gen"] = gen
+        return {**e, **kw}
+
+    def send(events, gens=None):
+        body = {"schema": "dg.result/1", "events": events, **({"gens": gens} if gens is not None else {})}
+        return S.import_result(con, ph.seal(body, P.TYPE_RESULT))
+    a_evs = [gev(n0 + i, gA) for i in range(1, 21)]  # 세대 A: n0+1 .. n0+20 (PC가 모두 받음)
+    send(a_evs[:10], [[gA, n0 + 1]]); send(a_evs[10:], [[gA, n0 + 1]])
+    r_ = S.release_info(con, dev)
+    ok(r_["seq"] == legacy0 and r_.get("g") == [[gA, n0 + 20]] and S.one(con, "SELECT gen FROM result_event WHERE event_id=?", (a_evs[0]["event_id"],))["gen"] == gA,
+       "세대 A 기록 20건: rel.g = [[A, 끝 번호]], 세대 없는(이전 앱) rel.seq는 그대로, 기록에 세대 저장(result_event.gen)")
+    pre_bun = S.make_bundle(con, b1["batch_id"])  # 복원 전 목록(A까지): 이 목록 수신 확인이 뒤 가져오기의 '휴대폰 확인'이 되면 안 됨
+    # 휴대폰: n0+10까지 든 백업으로 복원 → 새 세대 B(첫 번호 n0+11) → n0+11에 새 기록. 위 rel(A: n0+20)로는 반영되면 안 됨(휴대폰 쪽 시험은 interop.mjs)
+    b_ev = gev(n0 + 11, gB)
+    rb_ = send([b_ev], [[gB, n0 + 11]])
+    r_ = S.release_info(con, dev)
+    ok(rb_.get("seq_reused") == 1 and r_.get("g") == [[gB, n0 + 11], [gA, n0 + 20]],
+       "복원 뒤 세대 B의 n0+11(PC가 A로 본 번호): 받고 순번 재사용 경고, rel.g에 [B, n0+11] 추가(최근 세대 먼저) — A 번호와 섞이지 않음")
+    S.confirm_receipt(con, pre_bun["bundle_id"], ph.receive(pre_bun["frames"])[2])
+    ok(not {x["id"]: x for x in OPS.recent_imports(con)}[rb_["import_id"]]["phone_confirmed"],
+       "가져오기 전에 만든 목록(rel에 A만)의 수신 확인은 세대 B 가져오기의 '휴대폰 확인'이 아님")
+    post_bun = S.make_bundle(con, b1["batch_id"])
+    _, plg, rcg = ph.receive(post_bun["frames"])
+    ok(plg["rel"]["g"] == [[gB, n0 + 11], [gA, n0 + 20]], "휴대폰이 받은 목록(서명된 봉투)에 rel.g가 실려 옴")
+    S.confirm_receipt(con, post_bun["bundle_id"], rcg)
+    ok({x["id"]: x for x in OPS.recent_imports(con)}[rb_["import_id"]]["phone_confirmed_by"] == "DAYLIST", "그 뒤 목록(rel.g에 B)을 받았다고 확인 → 세대 B 가져오기는 '휴대폰 확인'")
+    # 첫 번호가 빠지면 그 세대는 싣지 않음(머리 gens로 첫 번호를 앎) → 첫 번호가 들어오면 이어서
+    c1_, c2_ = gev(n0 + 30, gC), gev(n0 + 31, gC)
+    send([c2_], [[gC, n0 + 30]])
+    ok(gC not in [x[0] for x in S.release_info(con, dev).get("g", [])], "세대 C 첫 번호(n0+30)를 못 받으면 C는 rel.g에 없음(빠진 첫 기록을 받은 것으로 오해하지 않음)")
+    send([c1_], [[gC, n0 + 30]])
+    ok([gC, n0 + 31] in S.release_info(con, dev)["g"], "첫 번호가 들어오면 C: n0+30..n0+31")
+    # 머리(gens)가 없으면 받은 가장 작은 번호부터, 이미 받은 기록(event_id 같음)을 새 세대·번호로 옮겨 보내도 '받음'
+    send([gev(n0 + 40, gD)])
+    moved_ = {**a_evs[19], "seq": n0 + 41, "gen": gE}
+    rm_ = send([moved_, gev(n0 + 42, gE)], [[gE, n0 + 41]])
+    gl = S.release_info(con, dev)["g"]
+    ok(rm_["skipped_duplicate"] == 1 and [gE, n0 + 42] in gl and len(gl) == 4 and gA not in [x[0] for x in gl],
+       "이미 받은 기록을 복원 때 옮긴 번호(세대 E 첫 번호)도 받은 번호로 셈 → E: n0+41..n0+42, rel.g는 최근 세대 4개만")
+    ok(P.norm_rel({"seq": 1, "ph": [], "g": [[gA, 3], [gB, 0], [gA, 5]]}) == {"seq": 1, "ph": [], "g": [[gA, 5], [gB, 0]]}
+       and all("g" not in P.norm_rel({"seq": 1, "g": g_}) for g_ in ([["AAAA0001", 1]], [[gA, -1]], [[gA, True]], [[gA]], "x", [[gA, 1]] * 17, {"a": 1}))
+       and P.norm_rel({"seq": 1, "g": [[gA, "1"]]}) == {"seq": 1, "ph": []} and P.norm_gen("abcd") is None and P.norm_gen(gA) == gA,
+       "dgproto rel.g 검사: 같은 세대는 큰 번호, 틀린 형식(대문자·음수·참거짓·짝 아님·16개 초과)이면 g만 뺌")
+    # 4단계 이전: 이전 기록의 받은 번호를 result_seq(세대 '')로 채움 → rel.seq 그대로
+    legacy_now = S.release_info(con, dev)["seq"]
+    con.execute("DELETE FROM result_seq WHERE gen=''")
+    con.execute("PRAGMA user_version = 3")
+    ok(store.run_migrations(con) == [4] and S.release_info(con, dev)["seq"] == legacy_now == legacy0, "이전 단계 4: 이전 기록 순번을 세대 ''로 채움(rel.seq 같음)")
+
     # 7. 완료일 = 휴대폰 최종 결과 시각
     fut = ph.ev(stop_b, "ATTEMPT", {"outcome": "DONE"})
     fut["device_ts"] = "2099-01-01T00:00:00Z"
@@ -2254,6 +2311,45 @@ def v13():
     logs = S.rows(con, "SELECT count, trigger FROM pii_purge_log ORDER BY at")
     ok(res["count"] == 3 and [x["count"] for x in logs] == [2, 1] and all(x["trigger"] == "SCHEDULE" for x in logs) and not lk.locked(),
        "개인정보 파기: 묶음마다 한 트랜잭션·대장 한 줄, 묶음 사이 잠금 풀림(SCHEDULE)")
+    # 마감 기록 요약 속 이름: 묶음 트랜잭션 안에서 지움(중간에 멈춰도 파기된 접수 이름이 남지 않게) + 매번 남은 것 복구 (검토 지적)
+    olds2 = [mk(f"요약이름{i}", phone=f"010-0000-95{i:02d}") for i in range(4)]
+    for o in olds2:
+        con.execute("UPDATE request SET status='DONE', completed_at='2020-01-02T00:00:00Z' WHERE id=?", (o,))
+    rno2 = {o: S.one(con, "SELECT receipt_no FROM request WHERE id=?", (o,))["receipt_no"] for o in olds2}
+    summ = {"no_result": [{"id": o, "receipt_no": rno2[o], "name": f"요약이름{i}"} for i, o in enumerate(olds2)],
+            "unpaid": [{"receipt_no": rno2[olds2[3]], "name": "요약이름3", "phone": "010-0000-9503"}]}
+    con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json) VALUES (?,?,?,?,?,?)",
+                ("close-pii-1", "2019-12-31", 1, "2020-01-01T00:00:00Z", "admin", json.dumps(summ, ensure_ascii=False)))
+    real_ps = PV.pseudonymize
+    calls = {"n": 0}
+
+    def flaky(con_, rid, ts):
+        calls["n"] += 1
+        if calls["n"] == 3:  # 두 번째 묶음에서 멈춤(첫 묶음은 이미 기록됨)
+            raise RuntimeError("시험용 중단")
+        real_ps(con_, rid, ts)
+    PV.pseudonymize = flaky
+    try:
+        PV.purge_pii(con, trigger="SCHEDULE", batch=2)
+        ok(False, "시험용 중단이 일어나야 함")
+    except RuntimeError:
+        pass
+    finally:
+        PV.pseudonymize = real_ps
+    sj = lambda: S.one(con, "SELECT summary_json FROM day_close_log WHERE id='close-pii-1'")["summary_json"]
+    gone2 = [o for o in olds2 if S.one(con, "SELECT pii_purged_at FROM request WHERE id=?", (o,))["pii_purged_at"]]
+    ok(len(gone2) == 2 and "요약이름0" not in sj() and "요약이름1" not in sj() and "요약이름2" in sj() and "요약이름3" in sj(),
+       "파기 도중 멈춤: 이미 파기된 첫 묶음 2건의 이름은 같은 트랜잭션에서 요약에서도 지워짐, 아직 파기 안 된 건은 그대로")
+    # 예전 버전에서 멈춘 경우 흉내: 파기됐는데(pii_purged_at) 요약에 이름이 남음 → 다음 실행(대상 0건이어도)이 찾아 지움
+    con.execute("UPDATE day_close_log SET summary_json=? WHERE id='close-pii-1'", (json.dumps(summ, ensure_ascii=False),))
+    for o in olds2[2:]:
+        PV.pseudonymize(con, o, S.now())
+    con.commit()
+    rep_ = PV.purge_pii(con, trigger="SCHEDULE")
+    ok(rep_["count"] == 0 and rep_.get("repaired_close_logs") == 1 and not any(f"요약이름{i}" in sj() for i in range(4)) and "010-0000-9503" not in sj()
+       and json.loads(sj())["no_result"][0]["receipt_no"] == rno2[olds2[0]],
+       "다음 파기 실행: 대상이 없어도 파기된 접수의 이름·연락처가 남은 마감 요약을 찾아 지움(id·접수번호로 찾음, 접수번호는 남김)")
+    ok(PV.purge_pii(con, trigger="SCHEDULE").get("repaired_close_logs") is None, "다시 돌리면 고칠 것 없음")
     # 업데이트 사전 사본(state/pre-migration, 개인정보 포함) 보관: 가장 새 1개는 늘 남김, 나머지는 새것부터 3개 안·30일 이내만
     import datetime as _dt
     pmd = store.pre_migration_dir(); pmd.mkdir(parents=True, exist_ok=True)

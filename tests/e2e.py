@@ -847,6 +847,15 @@ def pc_sync(pw, url):
         reused = 0  # 경고 칸이 없는 이전 PC
     ok('"conflict": 0' in imp2 and '"applied": 1' in imp2 and reused == 0 and len({x["device_seq"] for x in seqs}) == len(seqs),
        "백업 복원 → 새 기록 → PC 가져오기: 충돌 0, 순번 재사용 없음(기록 번호 = max(지금, 백업)) " + imp2.splitlines()[0])
+    # 기록 세대(gen): 복원하면 새 세대 — 복원 뒤 기록은 백업 뒤 기록과 다른 세대로 PC에 저장, rel.g에 두 세대
+    try:
+        gq = pc_sql("SELECT gen, device_seq FROM result_event WHERE gen IS NOT NULL ORDER BY device_seq")[-3:]  # 백업 뒤 2건 + 복원 뒤 1건
+        gstart = pc_sql("SELECT gen, start_seq FROM device_gen ORDER BY start_seq")
+    except subprocess.CalledProcessError:
+        gq, gstart = [], []  # 세대를 모르는 이전 PC
+    if gstart:
+        ok(gq[0]["gen"] == gq[1]["gen"] != gq[2]["gen"] and gq[-1]["gen"] == gstart[-1]["gen"] and gstart[-1]["start_seq"] == gq[-1]["device_seq"],
+           f"복원 → 새 기록 세대(gen) {gq[-1]['gen']}(첫 번호 {gstart[-1]['start_seq']}), 백업 뒤 기록 세대 {gq[0]['gen']}와 따로 PC에 저장")
     # 4) 아직 보내지 않은 기록 1건(rel 범위 밖)
     page.goto(url + f"#/stop/{sid}")
     page.get_by_label("현장 메모").fill("보내기 전 메모")

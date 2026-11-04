@@ -29,6 +29,7 @@ const pyExpectFail = (...args) => {
 const pyEval = (code) => execFileSync('python3', ['-c', code], { env, cwd: join(ROOT, 'pc'), encoding: 'utf8' }).trim();
 
 let passed = 0;
+const isGenStr = (x) => typeof x === 'string' && /^[0-9a-f]{8}$/.test(x);
 const ok = (cond, name) => { if (!cond) throw new Error('실패: ' + name); passed++; console.log('  ✓', name); };
 const throwsCode = async (fn, code, name) => {
   try { await fn(); } catch (e) { return ok(e.code === code, `${name} → ${code} (받은 값 ${e.code})`); }
@@ -513,6 +514,86 @@ print((r or {}).get("warning") or "")`);
   const clash = F.mergeRestore({ mode: 'PC', seq: 5, releasedSeq: 4, events: [b] }, { mode: 'PC', seq: 5, releasedSeq: 4, events: [a] });
   ok(clash.events.find((e) => e.event_id === a.event_id).seq === 5 && clash.events.find((e) => e.event_id === 'other').seq === 6 && clash.seq === 6,
      '서로 다른 기록이 같은 번호면 백업 쪽을 그 번호에 두고 나머지는 뒤 번호로');
+  ok(isGenStr(clash.gen) && clash.events.find((e) => e.event_id === 'other').gen === clash.gen && clash.gens.at(-1).start === 6 && clash.genRestored,
+     '복원하면 새 세대(다음 번호부터), 번호를 옮긴 기록은 새 세대로');
+
+  // 22-1) 기록 세대(gen): 오래된 백업으로 복원 뒤 PC가 본 번호를 다시 써도 목록의 rel로 '받음' 처리되지 않음 (검토 지적 시나리오)
+  const send2 = async (events, gens, tag) => {
+    const head = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId, assignVer: opened.payload.assign_ver, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
+    const body = { schema: 'dg.result/1', work_date: opened.payload.work_date, events: events.map(({ ts, ...e }) => ({ ...e, device_ts: ts })), gens, photos: [] };
+    const s2 = await P.seal(body, head, pcKexPub, dev.sign.privateKey);
+    const f = join(WORK, `gen-${tag}.dgr`); writeFileSync(f, s2.bytes); return f;
+  };
+  const devUuid = P.uuidStr(deviceId);
+  // PC → 휴대폰 목록 rel: PC가 만든 값을 dgproto로 압축·휴대폰 normRel로 읽은 것(실제 경로와 같게)
+  const relNow = () => P.normRel(JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import store, service as S
+c = store.connect()
+print(json.dumps(P.norm_rel(S.release_info(c, "${devUuid}"))))`)));
+  const addEv = (st) => { st.seq += 1; const e = { ...mkEv(st.seq), gen: F.ensureGen(st) }; st.events.push(e); return e; };
+  const phA = { mode: 'PC', seq: m.seq + 1, releasedSeq: m.seq + 1, events: [], exports: [] };  // 위 기록(1~5번, 세대 없음) 다음부터 쓰는 새 앱
+  const legacyTop = phA.seq;
+  const gA = F.ensureGen(phA);
+  for (let i = 0; i < 20; i++) addEv(phA);  // 세대 A: legacyTop+1 .. legacyTop+20
+  const bakA = JSON.parse(JSON.stringify({ ...phA, seq: legacyTop + 10, events: phA.events.slice(0, 10), releasedSeq: legacyTop }));  // 10번째까지 든 백업
+  ok(py('import-result', await send2(phA.events, F.gensOf(phA, phA.events), 'a')).includes('"applied": 20') && F.gensOf(phA, phA.events).join() === `${gA},${legacyTop + 1}`,
+     `세대 A 기록 20건(${legacyTop + 1}~${legacyTop + 20}) PC로, 결과 파일 머리 gens = [[A, 첫 번호]]`);
+  // 휴대폰 자료를 잃음 → 새 휴대폰 상태(처음 세대) → 백업 복원: 새 세대 B, 다음 번호는 백업 끝 다음(PC가 A로 이미 본 번호)
+  const fresh = { mode: 'PC', seq: 0, releasedSeq: 0, events: [], exports: [] }; F.ensureGen(fresh);
+  const phB = F.mergeRestore(fresh, bakA);
+  const e11 = addEv(phB);
+  ok(phB.gen !== gA && phB.genRestored && e11.seq === legacyTop + 11 && e11.gen === phB.gen && phB.gens.find((x) => x.gen === phB.gen).start === legacyTop + 11,
+     `복원 → 새 세대 B(첫 번호 ${legacyTop + 11}), 새 기록 ${e11.seq}번은 세대 B`);
+  const rel1 = relNow();
+  ok(rel1.g.some((x) => x[0] === gA && x[1] === legacyTop + 20) && !rel1.g.some((x) => x[0] === phB.gen), `PC rel.g = [[A, ${legacyTop + 20}]] (B는 아직 없음)`);
+  const before11 = F.unsentInfo(phB.events, phB.releasedSeq).count;
+  const r22 = F.applyRelease(phB, rel1);
+  ok(F.unsentInfo(phB.events, phB.releasedSeq).count === 1 && phB.events.filter((e) => e.seq > phB.releasedSeq)[0].event_id === e11.event_id && r22.events === before11 - 1,
+     `목록의 rel(A: ${legacyTop + 20})을 받아도 세대 B의 ${e11.seq}번은 미전송 그대로(PC가 받지 않은 기록을 반영됨·개인정보 지움으로 처리하지 않음), 세대 A 기록만 반영`);
+  ok(phB.seq === legacyTop + 20 && phB.gen !== e11.gen && phB.gens.at(-1).start === legacyTop + 21,
+     'PC가 아는 번호가 더 크면 다음 기록은 그 뒤 번호로, 지금 세대에 기록이 있으므로 새 세대로(세대 안 번호는 빈틈없이)');
+  const pend = phB.events.filter((e) => e.seq > phB.releasedSeq);
+  ok(py('import-result', await send2(pend, F.gensOf(phB, pend), 'b')).includes('"applied": 1'), '미전송 기록(세대 B) 결과 파일로 PC에 감');
+  const rel2 = relNow();
+  ok(rel2.g.some((x) => x[0] === e11.gen && x[1] === legacyTop + 11), `PC rel.g에 [B, ${legacyTop + 11}]`);
+  const r22b = F.applyRelease(phB, rel2);
+  ok(r22b.events === 1 && F.unsentInfo(phB.events, phB.releasedSeq).count === 0 && phB.releasedSeq === phB.seq, `PC가 가져온 뒤 목록을 받으면 ${e11.seq}번 반영됨`);
+  const e21 = addEv(phB);
+  ok(e21.seq === legacyTop + 21 && F.unsentInfo(phB.events, phB.releasedSeq).count === 1, '다음 기록은 새 세대 첫 번호, 미전송');
+}
+
+// 22-2) rel.g 순수 규칙: 이전(세대 없는) 기록은 복원한 적 없을 때만 rel.seq로, 세대 범위 밖은 반영 안 함 -----------------------------
+{
+  const ev = (seq, gen) => ({ event_id: 'g' + seq, seq, ...(gen ? { gen } : {}), kind: 'CONTACT', body: {} });
+  const base = () => ({ seq: 6, releasedSeq: 0, gen: 'bbbbbbbb', gens: [{ gen: 'aaaaaaaa', start: 4 }, { gen: 'bbbbbbbb', start: 6 }],
+    events: [ev(1), ev(2), ev(3), ev(4, 'aaaaaaaa'), ev(5, 'aaaaaaaa'), ev(6, 'bbbbbbbb')], exports: [] });
+  const s1 = base();
+  F.applyRelease(s1, { seq: 3, ph: [], g: [['aaaaaaaa', 5]] });
+  ok(s1.releasedSeq === 5, '이전 기록 1~3번은 rel.seq로, 세대 A 4·5번은 g로 반영, 세대 B 6번은 g에 없어 그대로');
+  const s2 = { ...base(), genRestored: true };
+  ok(F.applyRelease(s2, { seq: 3, ph: [], g: [['aaaaaaaa', 5], ['bbbbbbbb', 6]] }).events === 0 && s2.releasedSeq === 0,
+     '복원한 적 있는 휴대폰: 세대 없는 기록은 rel.seq로 반영하지 않음(그 앞에서 멈춤)');
+  const s3 = base();
+  F.applyRelease(s3, { seq: 3, ph: [], g: [['aaaaaaaa', 9]] });
+  ok(s3.releasedSeq === 5 && s3.seq === 9 && s3.gen !== 'bbbbbbbb', '세대 범위는 휴대폰이 아는 첫 번호부터: A가 9라고 해도 B의 6번은 반영 안 함');
+  const s4 = { seq: 3, releasedSeq: 0, gen: 'cccccccc', gens: [{ gen: 'cccccccc', start: 4 }], events: [ev(1), ev(2), ev(3)], exports: [] };
+  F.applyRelease(s4, { seq: 3, ph: [], g: [['dddddddd', 7]] });
+  ok(s4.releasedSeq === 7 && s4.seq === 7 && s4.gen === 'cccccccc' && s4.gens[0].start === 8, '지금 세대에 기록이 없으면 새 세대 대신 첫 번호만 옮김');
+  const s5 = {}; const g5 = F.ensureGen(s5);
+  ok(isGenStr(g5) && s5.gens[0].start === 1 && !s5.genRestored && F.ensureGen(s5) === g5, '처음: 세대 만들기(첫 번호 1), 다시 불러도 같은 세대');
+  // rel.g 형식: 휴대폰(JS)·PC(Python) 같은 검사, 양방향
+  const bad = [[['AAAAAAAA', 1]], [['aaaaaaaa', -1]], [['aaaaaaaa', 1.5]], [['aaaaaaaa']], 'x', Array(17).fill(['aaaaaaaa', 1]), { a: 1 }];
+  ok(bad.every((g) => !('g' in P.normRel({ seq: 1, g }))) && P.normRel({ seq: 1, g: bad[0] }).seq === 1
+     && JSON.stringify(P.normRel({ seq: 1, g: [['aaaaaaaa', 3], ['bbbbbbbb', 0], ['aaaaaaaa', 5]] }).g) === JSON.stringify([['aaaaaaaa', 5], ['bbbbbbbb', 0]]),
+     '휴대폰 normRel: 틀린 g는 g만 뺌(rel은 유지), 같은 세대는 큰 번호');
+  const pyG = JSON.parse(pyEval(`import json, dgproto as P
+bad = json.loads(${JSON.stringify(JSON.stringify(bad))})
+print(json.dumps({"bad": [("g" in P.norm_rel({"seq": 1, "g": g})) for g in bad], "ok": P.norm_rel({"seq": 1, "ph": [], "g": [["aaaaaaaa", 3], ["bbbbbbbb", 0], ["aaaaaaaa", 5]]}),
+                  "old": P.norm_rel({"seq": 2, "ph": []})}))`));
+  ok(pyG.bad.every((x) => x === false) && JSON.stringify(pyG.ok.g) === JSON.stringify([['aaaaaaaa', 5], ['bbbbbbbb', 0]]) && !('g' in pyG.old),
+     'PC norm_rel: 같은 검사·같은 결과, 이전 형식(g 없음)은 g 없이');
+  const jsPy = P.normRel(JSON.parse(JSON.stringify(pyG.ok)));
+  ok(JSON.stringify(jsPy) === JSON.stringify(pyG.ok) && !('g' in P.normRel(pyG.old)), 'PC가 만든 rel.g를 휴대폰이 같은 값으로 읽음, 이전 형식은 g 없이');
 }
 
 // 23) 같은 날 갱신본: 이 휴대폰 기록이 있는 지점을 PC가 재방문처럼 돌려보내도 기록이 그대로 보임 ------------------------------

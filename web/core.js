@@ -153,6 +153,7 @@ async function loadState() {
   if (!(st.navApp in NAV.NAV_APPS)) st.navApp = NAV.DEFAULT_NAV_APP; // v0.10.0의 '길안내 켬/끔'은 없어짐(항상 켬)
   applyTextSize();
   if (!st.mode && st.daylist) st.mode = 'PC'; // 0.1.0에서 쓰던 자료는 PC 연결 방식
+  F.ensureGen(st); // 기록 세대(v0.13): 처음 쓰는 휴대폰·이전 버전 자료는 여기서 세대를 만든다(복원 때는 mergeRestore가 새로 만듦)
   lockMs = (LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10) * 60000;
   lastActive = Date.now();
 }
@@ -257,7 +258,7 @@ async function addEvent(stop, kind, body) {
   if (!st) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
   st.seq += 1;
   st.events.push({
-    event_id: crypto.randomUUID(), seq: st.seq, request_id: stop.request_id,
+    event_id: crypto.randomUUID(), seq: st.seq, gen: F.ensureGen(st), request_id: stop.request_id,
     assign_ver: stop.assign_ver ?? (st.daylist ? st.daylist.assign_ver : 1), base_req_ver: stop.req_ver, kind, body: withWorker(body), ts: new Date().toISOString(),
   });
   return commit();
@@ -283,7 +284,7 @@ function handoff() { handoffUntil = Date.now() + HANDOFF_MS; }
 // 접수와 무관한 팀 기록(하차 등)
 async function addCrewEvent(kind, body) {
   st.seq += 1;
-  st.events.push({ event_id: crypto.randomUUID(), seq: st.seq, request_id: '', assign_ver: st.daylist ? st.daylist.assign_ver : 0, base_req_ver: null, kind, body: withWorker(body), ts: new Date().toISOString() });
+  st.events.push({ event_id: crypto.randomUUID(), seq: st.seq, gen: F.ensureGen(st), request_id: '', assign_ver: st.daylist ? st.daylist.assign_ver : 0, base_req_ver: null, kind, body: withWorker(body), ts: new Date().toISOString() });
   await commit();
 }
 const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
