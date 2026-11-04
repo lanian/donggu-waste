@@ -2642,6 +2642,7 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
         return {**info, "duplicate_file": True}
     imp = str(uuid.uuid4())
     newids = {r["request_id"] for r in new}
+    line_map: dict[tuple[str, str], str] = {}
     counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0}
     with tx(con):
         con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,NULL)", (imp, "USB", "SOLO", sha, now()))
@@ -2665,9 +2666,15 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                          r.get("received_at") or now(), r.get("updated_at") or now(), dong_s,
                          _store.next_levy_no(con, _store.levy_year(r.get("received_at")), dcode), (r.get("pii_purged") if isinstance(r.get("pii_purged"), str) else now()) if purged else None))
             for it in r.get("items") or []:
+                # 품목 행 ID는 PC 전체에서 하나여야 한다. 휴대폰 단독 자료에서 이미 쓰인 ID(다른 접수에 같은 행 ID가 들어간 경우 등)는
+                # 새 ID로 바꾸고, 그 접수의 현장 기록·사진이 가리키는 행 ID도 함께 바꾼다.
+                lid = it["line_id"]
+                if one(con, "SELECT 1 AS x FROM request_item WHERE line_id=?", (lid,)):
+                    line_map[(r["request_id"], lid)] = lid = str(uuid.uuid4())
+                    counts["lines_renumbered"] = counts.get("lines_renumbered", 0) + 1
                 con.execute("""INSERT INTO request_item (line_id, request_id, fee_rate_id, fee_version_id, name, spec, unit, unit_label, qty,
                     unit_price, amount, price_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (it["line_id"], r["request_id"], it.get("fee_rate_id"), it.get("fee_version_id") or (FEE_TABLE["version_id"] if it.get("fee_rate_id") else None),
+                            (lid, r["request_id"], it.get("fee_rate_id"), it.get("fee_version_id") or (FEE_TABLE["version_id"] if it.get("fee_rate_id") else None),
                              it["name"], it.get("spec") or "", it.get("unit") or "EA", it.get("unit_label") or "개", int(it["qty"]),
                              it.get("unit_price"), it.get("amount"), it.get("price_status") or "PENDING"))
             for v in r.get("versions") or []:
@@ -2697,6 +2704,8 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
             if e.get("request_id") not in newids:  # 이미 PC에 있던 접수의 기록은 덮어쓰지 않음
                 counts["skipped"] += 1
                 continue
+            if isinstance(e.get("body"), dict) and (e["request_id"], e["body"].get("line_id")) in line_map:
+                e = {**e, "body": {**e["body"], "line_id": line_map[(e["request_id"], e["body"]["line_id"])]}}
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (e["event_id"], imp, "SOLO", e.get("seq") or 0, e["request_id"], 0, e.get("base_req_ver"), e["kind"],
