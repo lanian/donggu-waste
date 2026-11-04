@@ -82,7 +82,7 @@ async function countFail(L) {
   return Object.assign(new Error('PIN이 맞지 않습니다'), { code: 'BAD_PIN', fails, until });
 }
 /** PIN을 다시 확인한 뒤(틀리면 실패 횟수에 셈) 데이터 키를 PRF 키로 감싸 저장한다. */
-export async function enrollBio(pin, { credId, prfSalt, prfOut }) {
+export async function enrollBio(pin, { credId, prfSalt, prfOut, transports = null }) {
   const L = await getRaw('lock');
   if (Date.now() < (L.until || 0)) throw Object.assign(new Error('잠시 후 다시 시도하세요'), { code: 'LOCKED_OUT', until: L.until });
   let k;
@@ -92,7 +92,7 @@ export async function enrollBio(pin, { credId, prfSalt, prfOut }) {
   } catch { throw await countFail(L); }
   const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
   const wrapped = new Uint8Array(await subtle.wrapKey('raw', k, await prfKey(prfOut, salt), { name: 'AES-GCM', iv }));
-  await putRaw('bio', { credId, prfSalt, salt, iv, wrapped, at: new Date().toISOString() });
+  await putRaw('bio', { credId, prfSalt, salt, iv, wrapped, at: new Date().toISOString(), ...(transports && transports.length ? { transports } : {}) });
 }
 export const getBio = () => getRaw('bio');
 export const removeBio = () => delRaw('bio');

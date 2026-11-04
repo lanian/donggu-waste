@@ -287,10 +287,8 @@ input[type=file]::file-selector-button { min-height: 48px; font: inherit; font-w
 .btn.result .p.warnp { color: var(--warn); font-size: 0.8rem; }
 .rrow { display: flex; gap: 6px; align-items: stretch; } .rrow .result { flex: 1; }
 /* 여러 품목 담기: 결과마다 담긴 수량 표시, 검색칸 옆 지우기, 담은 요약 */
-.rcount { display: flex; align-items: center; justify-content: center; min-width: 44px; border-radius: 14px; font-weight: 700; color: var(--muted); background: var(--bg); }
-.rcount.on { color: #fff; background: var(--brand); }
 .qrow { display: flex; gap: 6px; align-items: center; } .qrow .search { flex: 1; } .btn.q-clear { flex: none; }
-.pick-status { margin: 8px 0 0; font-weight: 700; color: var(--brand); }
+ .pick-table { margin-top: 12px; }
 .btn.star { width: var(--tap); padding: 0; font-size: 1.267rem; color: var(--muted); } .btn.star.on { color: #8a6100; border-color: var(--sticker); background: var(--warn-bg); }
 
 /* ---- 아래 고정 동작 (상세·하차·접수) ---- */
@@ -468,3 +466,22 @@ html.text-big .chk-opts { grid-template-columns: 1fr; } html.text-big .chk-opts 
 .tp-light i, .tp-auto i:first-child { background: #f2f4f6; } .tp-light i::after, .tp-auto i:first-child::after { background: #191f28; } .tp-light i::before, .tp-auto i:first-child::before { background: #0b7a55; }
 .tp-dark i, .tp-auto i:last-child { background: #0f1419; } .tp-dark i::after, .tp-auto i:last-child::after { background: #eef1f4; } .tp-dark i::before, .tp-auto i:last-child::before { background: #3fcf8e; }
 .bar .btn.theme-toggle { flex: none; width: var(--tap); padding: 0; font-size: 1.333rem; }
+
+/* 접수 '품목 담기' 화면: 검색칸 위 고정, 결과마다 [+ 담기]/[− N +], 아래 요약·완료 고정 */
+.pick-head { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 0 8px; }
+.pick-list { display: flex; flex-direction: column; gap: 8px; }
+.pick-h { margin: 10px 2px 0; font-size: 0.8667rem; font-weight: 700; color: var(--muted); }
+.pick-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--card); border: 1.5px solid var(--line); border-radius: 14px; }
+.pick-row.on { border-color: var(--brand); background: var(--brand-soft); }
+.pick-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pick-info .p { font-size: 0.8667rem; color: var(--muted); } .pick-info .p.warnp { color: var(--warn); }
+.pick-ctl { display: inline-flex; align-items: center; gap: 6px; flex: none; } .pick-ctl .val { min-width: 1.6em; text-align: center; font-size: 1.1rem; }
+.pick-row .btn.pick-add { flex: none; width: auto; min-width: 92px; margin: 0; }
+.pick-row .pick-ctl .btn.step { margin: 0; }
+.pick-free { margin: 0 0 10px; padding: 10px 12px; background: var(--card); border-radius: 14px; } .pick-free summary { font-weight: 700; cursor: pointer; }
+.pick-free .qrow { margin: 8px 0; }
+.footbar.pick-foot { display: flex; align-items: center; gap: 12px; } .pick-sum { flex: 1; min-width: 0; font-weight: 700; color: var(--brand-soft-ink); }
+.footbar.pick-foot .btn.big { width: auto; min-width: 110px; flex: none; }
+.pick-head .bar { position: static; margin: 0 -16px 8px; }
+html:has(.pick-screen) { scroll-padding-bottom: 110px; }
+.pick-screen { padding-bottom: 110px; }

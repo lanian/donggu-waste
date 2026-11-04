@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.3';
+export const APP_VERSION = '0.12.4';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -350,8 +350,8 @@ function screenLock() {
   // 지문·얼굴: 등록되어 있고 PRF로 데이터 키를 풀 수 있을 때만
   const bioBtn = btn('지문·얼굴로 열기', async () => {
     bioBtn.disabled = true; msg.textContent = '생체 인증 중…';
-    try { const B = await S.getBio(); const out = await BIO.bioEvaluate(B.credId, B.prfSalt); await S.unlockBio(out); await afterUnlock(); }
-    catch (e) { bioBtn.disabled = false; msg.textContent = e.code === 'BIO_FAIL' || e.code === 'NO_PRF' ? e.message : '생체 인증을 하지 못했습니다. PIN으로 여세요.'; }
+    try { const B = await S.getBio(); const out = await BIO.bioEvaluate(B.credId, B.prfSalt, B.transports); await S.unlockBio(out); await afterUnlock(); }
+    catch (e) { bioBtn.disabled = false; msg.textContent = e.code === 'BIO_FAIL' || e.code === 'NO_PRF' ? e.message : e.name === 'NotAllowedError' ? '생체 인증을 취소했거나 시간이 지났습니다. 다시 누르거나 PIN으로 여세요.' : `생체 인증을 하지 못했습니다(${e.name || '오류'}). PIN으로 여세요.`; }
   }, 'big', { hidden: true });
   S.getBio().then((b) => { if (b) bioBtn.hidden = false; }).catch(() => {});
   setTimeout(() => pin.focus(), 50);
@@ -1231,11 +1231,8 @@ async function savePhoto(stop, phase, file, lineId = null, meta = {}) {
 
 // ------------------------------------------------------------ 품목 고르기 (현장 추가·접수 등록 공용)
 // 검색어가 바뀌면 선택을 해제해 이전 단가가 잘못 쓰이지 않게 한다. 목록에 없는 품목은 "확인 대기"로만 추가한다.
-// multi: 접수 화면처럼 여러 품목을 담을 때. 결과를 누를 때마다 1개씩 담고(같은 품목은 수량 +1) 화면에 머문다.
-//   count(id) = 지금 담긴 수량(결과에 '✓ N개'로 표시), status() = 담은 품목 요약(검색칸 아래 표시).
-function itemPicker(table, state, { onPick, onFree, addLabel = '추가', multi = false, count = () => 0, status = () => '' }) {
+function itemPicker(table, state, { onPick, onFree, addLabel = '추가' }) {
   const results = h('div', { class: 'results' });
-  const statusLine = h('p', { class: 'pick-status', 'aria-live': 'polite' });
   const qtyBox = h('div', { class: 'row' });
   const addBtn = btn(addLabel, null, 'primary big');
   const drawQty = () => { qtyBox.replaceChildren(h('span', {}, '수량'), stepper(state.qty, (n) => { state.qty = n; drawQty(); }, 1)); };
@@ -1257,24 +1254,12 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가', multi =
     results.replaceChildren(
       ...(quick && rows.length ? [h('p', { class: 'small' }, '즐겨찾기·자주 쓴 품목')] : []),
       ...(state.q && !rows.length ? [h('p', { class: 'small' }, '검색 결과가 없습니다. 아래 [목록에 없음]으로 추가하세요.')] : []),
-      ...rows.map((r) => { const n = multi ? count(r.id) : 0; return h('div', { class: 'rrow' },
+      ...rows.map((r) => h('div', { class: 'rrow' },
         btn(h('span', {}, h('strong', {}, `${r.name} ${r.spec}`),
           h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`), r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 추가: ' + (r.note || '')) : null),
-          multi ? () => pickOne(r) : () => { state.sel = { id: r.id, price: r.price }; drawResults(); },
-          'result' + (multi ? (n ? ' on' : '') : state.sel && state.sel.id === r.id ? ' on' : ''),
-          multi ? { 'aria-label': `${r.name} ${r.spec} ${n ? `(${n}개 담김) ` : ''}1개 더 담기` } : {}),
-        multi ? h('span', { class: 'rcount' + (n ? ' on' : ''), 'aria-hidden': 'true' }, n ? `✓ ${n}` : '+') : null,
-        btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' })); }));
+          () => { state.sel = { id: r.id, price: r.price }; drawResults(); }, 'result' + (state.sel && state.sel.id === r.id ? ' on' : '')),
+        btn(favs.has(r.id) ? '★' : '☆', () => toggleFav(r.id), 'star' + (favs.has(r.id) ? ' on' : ''), { 'aria-label': favs.has(r.id) ? '즐겨찾기 해제' : '즐겨찾기' }))));
     addBtn.disabled = !state.sel;
-    statusLine.textContent = multi ? status() : '';
-  };
-  // 여러 품목 담기: 누를 때마다 1개. 검색어는 그대로 두어 같은 검색에서 다른 규격도 바로 담을 수 있게.
-  const pickOne = async (r) => {
-    st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 };
-    await onPick(r, 1);
-    if (navigator.vibrate) navigator.vibrate(15);
-    toast(`${r.name} ${r.spec} — ${count(r.id)}개 담음`);
-    drawResults();
   };
   const q = h('input', { type: 'search', placeholder: '품목명·규격·초성 (예: 2인용 매트리스, ㅈㄹ)', class: 'search', value: state.q, autocomplete: 'off' });
   q.addEventListener('input', () => { state.q = q.value; state.sel = null; drawResults(); });
@@ -1301,13 +1286,89 @@ function itemPicker(table, state, { onPick, onFree, addLabel = '추가', multi =
       await onFree(freeName.value.trim(), unitSel.value, unitSel.selectedOptions[0].textContent, freeQty);
       freeName.value = ''; freeQty = 1; drawFreeQty();
     }, 'big'));
-  const clearQ = btn('지우기', () => { state.q = ''; q.value = ''; drawResults(); q.focus(); }, 'ghost q-clear', { 'aria-label': '검색어 지우기' });
-  const search = multi
-    ? h('section', { class: 'card picker multi' }, h('h2', {}, '품목 담기'), h('div', { class: 'qrow' }, q, clearQ), statusLine,
-      h('p', { class: 'small' }, '누를 때마다 1개씩 담깁니다(같은 품목은 수량 +1). 수량 고치기·빼기는 위 [버릴 물건]에서.'), results,
-      h('p', { class: 'small' }, `수수료표: ${table.label}`))
-    : h('section', { class: 'card' }, q, results, qtyBox, addBtn, h('p', { class: 'small' }, `수수료표: ${table.label}`));
-  return { search, free, focus: () => q.focus(), pick: (r, qty) => onPick(r, qty), refresh: drawResults };
+  const search = h('section', { class: 'card' }, q, results, qtyBox, addBtn, h('p', { class: 'small' }, `수수료표: ${table.label}`));
+  return { search, free, focus: () => q.focus(), pick: (r, qty) => onPick(r, qty) };
+}
+
+// 접수의 '품목 담기' 화면: 위에 검색칸(고정), 결과마다 [+ 담기] / [− N +], 아래에 담은 요약과 [완료](고정).
+// 여러 품목을 연달아 담기 쉽게: 담기 단추를 눌러도 검색칸 포커스(키보드)를 유지하고 검색어를 선택해 두어, 바로 다음 품목을 치면 바뀐다.
+function intakePickScreen(f, table, locked, saveDraft) {
+  const P = f.pick;
+  const keep = { onmousedown: (e) => e.preventDefault() };  // 단추를 눌러도 검색칸 포커스(키보드) 유지
+  const q = h('input', { type: 'search', class: 'search', value: P.q, placeholder: '품목 찾기 (예: 의자, 매트리스, ㅈㄹ)', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '품목 찾기' });
+  const list = h('div', { class: 'pick-list' });
+  const bar = h('div', { class: 'pick-sum', 'aria-live': 'polite' });
+  const lineOf = (rid) => f.items.find((x) => x.fee_rate_id === rid && !locked.has(x.line_id));
+  const qtyOf = (rid) => f.items.filter((x) => x.fee_rate_id === rid).reduce((a, x) => a + x.qty, 0);
+  const setLine = (l, n) => {
+    if (n <= 0) f.items.splice(f.items.indexOf(l), 1);
+    else { l.qty = n; l.amount = l.price_status === 'CONFIRMED' ? l.unit_price * n : null; }
+  };
+  const bump = (r, d) => {
+    const l = lineOf(r.id);
+    if (!l && d > 0) { f.items.push(lineFromRow(r, 1, table)); st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 }; }
+    else if (l) setLine(l, l.qty + d);
+    if (d > 0 && navigator.vibrate) navigator.vibrate(12);
+    saveDraft(); draw();
+    if (document.activeElement === q) q.select();  // 다음 품목을 치면 검색어가 바로 바뀌게
+  };
+  const ctl = (n, onMinus, onPlus, name) => (n
+    ? h('span', { class: 'pick-ctl' }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), h('b', { class: 'val' }, n), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기` }))
+    : btn('+ 담기', onPlus, 'opt pick-add', { ...keep, 'aria-label': `${name} 담기` }));
+  const row = (r) => {
+    const n = qtyOf(r.id), name = `${r.name} ${r.spec}`.trim();
+    return h('div', { class: 'pick-row' + (n ? ' on' : '') },
+      h('div', { class: 'pick-info' }, h('strong', {}, name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
+        r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 담김') : null),
+      ctl(n, () => bump(r, -1), () => bump(r, 1), name));
+  };
+  const picked = () => f.items.map((l) => h('div', { class: 'pick-row on' },
+    h('div', { class: 'pick-info' }, h('strong', {}, `${l.name} ${l.spec || ''}`.trim()),
+      h('span', { class: 'p' }, l.price_status === 'CONFIRMED' ? `${won(l.unit_price)} / ${l.unit_label}` : '금액 확인 대기')),
+    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); saveDraft(); draw(); }, () => { setLine(l, l.qty + 1); saveDraft(); draw(); }, l.name)));
+  const draw = () => {
+    const out = [];
+    if (!P.q) {
+      if (f.items.length) out.push(h('p', { class: 'pick-h' }, '담은 품목'), ...picked());
+      const favs = st.feeFavs || [], use = st.feeUsage || {};
+      const ids = [...favs, ...Object.keys(use).sort((a, b) => use[b] - use[a]).filter((x) => !favs.includes(x))].filter((x) => !lineOf(x)).slice(0, 12);
+      const quick = ids.map((x) => table.rows.find((r) => r.id === x)).filter(Boolean);
+      if (quick.length) out.push(h('p', { class: 'pick-h' }, '즐겨찾기·자주 쓴 품목'), ...quick.map(row));
+      if (!f.items.length && !quick.length) out.push(h('p', { class: 'small' }, '위 칸에 품목 이름이나 초성을 적으세요.'));
+    } else {
+      const rows = searchFees(table, P.q).slice(0, 40);
+      out.push(...(rows.length ? rows.map(row) : [h('p', { class: 'small' }, '찾는 품목이 없습니다. 아래 [목록에 없는 품목]으로 담으세요.')]));
+    }
+    list.replaceChildren(...out);
+    const n = f.items.reduce((a, x) => a + x.qty, 0);
+    const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
+    const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.unit_price * x.qty, 0);
+    bar.textContent = f.items.length ? `${f.items.length}종 · ${n}개 · ${won(sum)}${pend ? ` + 확인 대기 ${pend}` : ''}` : '담은 품목 없음';
+  };
+  q.addEventListener('input', () => { P.q = q.value; draw(); list.scrollTop = 0; });
+  q.addEventListener('focus', () => q.select());
+  const clear = btn('지우기', () => { P.q = ''; q.value = ''; draw(); q.focus(); }, 'ghost q-clear', { ...keep, 'aria-label': '검색어 지우기' });
+  // 목록에 없는 품목: 금액 확인 대기로 담는다(0원 아님)
+  const freeName = h('input', { type: 'text', class: 'search', placeholder: '품목 이름 (예: 안마기)', 'aria-label': '목록에 없는 품목 이름' });
+  const unitSel = h('select', { 'aria-label': '단위' }, ...[['EA', '개'], ['PIECE', '쪽'], ['SET', '세트'], ['L20', '20ℓ당']].map(([v, t]) => h('option', { value: v }, t)));
+  const free = h('details', { class: 'pick-free' }, h('summary', {}, '목록에 없는 품목'),
+    h('p', { class: 'small' }, '단가를 정하지 않고 "확인 대기"로 담습니다. 0원으로 계산하지 않습니다.'),
+    h('div', { class: 'qrow' }, freeName, unitSel),
+    btn('확인 대기로 담기', () => {
+      const name = freeName.value.trim();
+      if (!name) return toast('품목 이름을 적어 주세요', 'bad');
+      f.items.push({ line_id: crypto.randomUUID(), fee_rate_id: null, name, spec: '', unit: unitSel.value, unit_label: unitSel.selectedOptions[0].textContent, qty: 1, unit_price: null, amount: null, price_status: 'PENDING' });
+      freeName.value = ''; saveDraft(); P.q = ''; q.value = ''; draw(); toast(`${name} — 확인 대기로 담음`);
+    }, 'big'));
+  const done = () => { f.picking = false; P.q = ''; render(); setTimeout(() => { const el = document.getElementById('intake-items'); if (el) el.scrollIntoView({ block: 'start' }); }, 0); };
+  draw();
+  setTimeout(() => q.focus(), 50);
+  return h('main', { class: 'pick-screen' },
+    h('div', { class: 'pick-head' }, h('header', { class: 'bar pick-top' }, btn('← 완료', done, 'ghost'), h('h1', { class: 'bar-title' }, '품목 담기')),
+      h('div', { class: 'qrow' }, q, clear)),
+    free, list,
+    h('nav', { class: 'footbar pick-foot', 'aria-label': '담은 품목' }, bar, btn('완료', done, 'primary big')),
+    h('p', { class: 'small pick-table' }, `수수료표: ${table.label}`));
 }
 
 // ------------------------------------------------------------ 현장 품목 추가
@@ -1588,7 +1649,8 @@ function screenIntake(id) {
   }
   const f = ui.form;
   let draftTimer = null;
-  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, reason, id: _i, lat, lon, dongCands, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
+  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, reason, id: _i, lat, lon, dongCands, picking, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
+  if (f.picking) return intakePickScreen(f, table, locked, saveDraft);
   const field = (key, label, attrs = {}) => {
     const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search', value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
     if (attrs.multiline) input.value = f[key];
@@ -1597,7 +1659,6 @@ function screenIntake(id) {
   };
   const itemsBox = h('div', {});
   const totalBox = h('p', { class: 'small' });
-  let refreshPick = () => {};  // 위 목록에서 수량을 고치면 아래 담기 표시(✓ N개·요약)도 맞춘다
   const drawItems = () => {
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
       h('div', { class: 'lhead' }, h('div', { class: 'lname' }, h('strong', {}, `${it.name} ${it.spec}`)),
@@ -1607,34 +1668,12 @@ function screenIntake(id) {
       h('div', { class: 'row' }, h('span', {}, '수량'), locked.has(it.line_id) ? h('span', { class: 'val' }, it.qty) :
         stepper(it.qty, (n) => { it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1)),
       locked.has(it.line_id) ? null : btn('삭제', () => { f.items.splice(i, 1); drawItems(); saveDraft(); }, 'ghost link'))) :
-      [h('p', { class: 'small' }, '아래에서 품목을 검색해 추가하세요.')]));
+      [h('p', { class: 'small' }, '[+ 품목 담기]로 버릴 물건을 담으세요.')]));
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.amount, 0);
     totalBox.textContent = `접수 금액: ${won(sum)}${pend ? ` + 확인 대기 ${pend}건 (최종 금액 미확정)` : ''}`;
-    refreshPick();
   };
   drawItems();
-  // 같은 품목을 또 누르면 새 줄이 아니라 그 줄 수량 +1 (현장 기록이 있어 잠긴 줄은 건드리지 않음)
-  const qtyOf = (rid) => f.items.filter((x) => x.fee_rate_id === rid).reduce((a, x) => a + x.qty, 0);
-  const picker = itemPicker(table, f.pick, {
-    multi: true,
-    count: qtyOf,
-    status: () => {
-      if (!f.items.length) return '아직 담은 품목이 없습니다.';
-      const n = f.items.reduce((a, x) => a + x.qty, 0);
-      const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
-      const sum = f.items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.unit_price * x.qty, 0);
-      return `담은 품목 ${f.items.length}종 · ${n}개 · ${won(sum)}${pend ? ` + 확인 대기 ${pend}건` : ''}`;
-    },
-    onPick: async (r, qty) => {
-      const same = f.items.find((x) => x.fee_rate_id === r.id && !locked.has(x.line_id));
-      if (same) { same.qty += qty; same.amount = same.price_status === 'CONFIRMED' ? same.unit_price * same.qty : null; }
-      else f.items.push(lineFromRow(r, qty, table));
-      drawItems(); saveDraft();
-    },
-    onFree: async (name, unit, unit_label, qty) => { f.items.push({ line_id: crypto.randomUUID(), fee_rate_id: null, name, spec: '', unit, unit_label, qty, unit_price: null, amount: null, price_status: 'PENDING' }); drawItems(); saveDraft(); },
-  });
-  refreshPick = picker.refresh;
   const msg = h('p', { class: 'msg' });
   const dupBox = h('div', {});
   const save = btn(editing ? '수정 저장' : onField ? '현장 접수 저장' : '접수 등록', async () => {
@@ -1721,8 +1760,8 @@ function screenIntake(id) {
       field('spot_note', '상세 배출 위치', { autocomplete: 'off', placeholder: '예: 101동 분리수거장 옆' }),
       field('memo', '요청 메모', { multiline: true }),
       h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
-    h('section', { class: 'card' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox),
-    picker.search, picker.free,
+    h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox,
+      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'primary big')),
     editing ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
 }
@@ -2029,10 +2068,31 @@ async function screenSettings() {
         const r = await sheet({ title: '지문·얼굴 등록', text: '먼저 지금 PIN을 넣어 주세요. 그 다음 휴대폰의 지문·얼굴 인증 창이 뜹니다. PIN은 계속 쓸 수 있습니다.',
           input: { type: 'password', label: 'PIN', placeholder: 'PIN', required: 'PIN을 넣어 주세요.' }, choices: [{ label: '다음', value: true, cls: 'primary', needInput: true }] });
         if (!r) return;
-        try { const res = await BIO.bioRegister(); await S.enrollBio(r.text, res); toast('지문·얼굴 잠금 해제를 등록했습니다'); }
-        catch (e) { toast(e.code === 'BAD_PIN' ? 'PIN이 맞지 않습니다.' : e.code === 'NO_PRF' ? e.message : e.name === 'NotAllowedError' ? '생체 인증을 취소했습니다.' : '등록하지 못했습니다: ' + (e.message || e.name), 'bad'); }
+        // 실패하면 원인을 화면에 남긴다(담당자에게 알려 줄 수 있게). 개인정보는 들어가지 않음.
+        let step = '인증 정보 만들기';
+        try {
+          const c = await BIO.bioCreate();
+          if (!c.prfOut) {
+            // 등록 응답에 키 보호 값이 없는 휴대폰(예: Galaxy의 Samsung Pass): 새로 누른 단추에서 한 번 더 인증해야 한다
+            step = '한 번 더 인증';
+            const go2 = await sheet({ title: '한 번 더 인증해 주세요', text: '이 휴대폰은 등록 직후 지문·얼굴을 한 번 더 확인해야 키 보호를 켤 수 있습니다.',
+              choices: [{ label: '지문·얼굴 확인', value: true, cls: 'primary' }], cancel: '그만두기' });
+            if (!go2) { toast('등록을 그만두었습니다'); return render(); }
+            c.prfOut = await BIO.bioEvaluate(c.credId, c.prfSalt, c.transports);
+          }
+          step = 'PIN 확인·저장';
+          await S.enrollBio(r.text, c);
+          st.bioLastError = null; await commit();
+          toast('지문·얼굴 잠금 해제를 등록했습니다');
+        } catch (e) {
+          st.bioLastError = { at: new Date().toISOString(), step, name: String(e.name || ''), code: String(e.code || ''), message: String(e.message || '').slice(0, 200), ua: navigator.userAgent.slice(0, 160) };
+          await commit();
+          toast(e.code === 'BAD_PIN' ? 'PIN이 맞지 않습니다.' : e.code === 'NO_PRF' ? e.message : e.name === 'NotAllowedError' ? '생체 인증을 취소했거나 시간이 지났습니다. 다시 해 보세요.' : `등록하지 못했습니다(${step}): ${e.name || ''} ${e.message || ''}`.trim(), 'bad');
+        }
         render();
-      }, 'big') : h('p', { class: 'small' }, '이 휴대폰(또는 브라우저)은 키 보호(PRF)를 지원하는 지문·얼굴 인증이 없어 PIN만 씁니다.'));
+      }, 'big') : h('p', { class: 'small' }, '이 휴대폰(또는 브라우저)은 키 보호(PRF)를 지원하는 지문·얼굴 인증이 없어 PIN만 씁니다.'),
+    !bio && st.bioLastError ? h('details', { class: 'small bio-err' }, h('summary', {}, `마지막 등록 오류 (${st.bioLastError.at.slice(0, 16).replace('T', ' ')}) — 담당자에게 알려 주세요`),
+      h('pre', { class: 'small' }, [`단계: ${st.bioLastError.step}`, `오류: ${st.bioLastError.name} ${st.bioLastError.code}`.trim(), st.bioLastError.message, `앱 ${APP_VERSION} · ${st.bioLastError.ua}`].filter(Boolean).join('\n'))) : null);
 
   // 작업자
   const wIns = [0, 1, 2, 3, 4].map((i) => h('input', { type: 'text', class: 'search', placeholder: `작업자 ${i + 1} (예: 김수거)`, value: (st.workers || [])[i] || '', 'aria-label': `작업자 ${i + 1} 이름`, maxlength: 10 }));

@@ -517,6 +517,24 @@ def midday_update(pw, url):
     ctx.close()
 
 
+def pick_items(page, items, free=None):
+    """접수의 [품목 담기] 화면: 검색 → [+ 담기] → [더하기]로 수량, 목록에 없는 품목은 확인 대기 → [완료]."""
+    page.get_by_role("button", name=re.compile(r"^\+ 품목 (더 )?담기$")).click()
+    expect(page.get_by_label("품목 찾기")).to_be_focused()
+    for q, n in items:
+        page.get_by_label("품목 찾기").fill(q)
+        row = page.locator(".pick-list .pick-row").first
+        row.get_by_role("button", name=re.compile("담기$")).click()
+        for _ in range(n - 1):
+            row.get_by_role("button", name=re.compile("더하기$")).click()
+    if free:
+        page.locator(".pick-free summary").click()
+        page.get_by_label("목록에 없는 품목 이름").fill(free)
+        page.get_by_role("button", name="확인 대기로 담기").click()
+    page.locator(".pick-foot").get_by_role("button", name="완료").click()
+    expect(page.locator("#intake-items")).to_be_visible()
+
+
 def pc_field(pw, url):
     """PC 연결 방식에서도 단독 방식처럼: 방문 순서 바꾸기·현장 접수·정정 요청·취소 요청 → 결과 파일 → PC 원본(사무실 확인)."""
     print("[PC 연결 방식 현장 기능]")
@@ -544,20 +562,29 @@ def pc_field(pw, url):
     page.get_by_label("이름").fill("가상현장")
     page.get_by_label("연락처").fill("010-0000-6161")
     page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
-    page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
-    page.locator(".btn.result").first.click()
-    page.locator(".btn.result").first.click()
-    expect(page.locator(".rcount.on").first).to_have_text("✓ 2")
+    # 품목 담기 화면: 연달아 담기 — 담기 단추를 눌러도 검색칸 포커스 유지·검색어 선택, 바로 다음 품목 입력
+    page.get_by_role("button", name="+ 품목 담기").click()
+    q = page.get_by_label("품목 찾기")
+    expect(q).to_be_focused()
+    q.fill("고정 의자")
+    page.locator(".pick-list .pick-row").first.get_by_role("button", name=re.compile("담기$")).click()
+    page.locator(".pick-list .pick-row").first.get_by_role("button", name=re.compile("더하기$")).click()
+    expect(q).to_be_focused()
+    page.keyboard.type("2인용 매트리스")  # 선택된 검색어가 바로 바뀜
+    expect(q).to_have_value("2인용 매트리스")
+    page.locator(".pick-list .pick-row").first.get_by_role("button", name=re.compile("담기$")).click()
+    expect(page.locator(".pick-sum")).to_have_text(re.compile("^2종 · 3개"))
+    page.screenshot(path=SHOTS / "30a_pick_screen.png")
     page.get_by_role("button", name="검색어 지우기").click()
-    page.get_by_placeholder(re.compile("품목명")).fill("2인용 매트리스")
-    page.locator(".btn.result").first.click()
-    expect(page.locator(".pick-status")).to_contain_text("담은 품목 2종 · 3개")
-    ok(page.locator(".line.orig").count() == 2 and "고정식 의자" in page.locator(".line.orig").first.inner_text(),
-       "여러 품목 담기: 결과를 누를 때마다 1개(같은 품목은 수량 +1, '✓ 2' 표시), 검색어 지우기, 담은 요약 '2종 · 3개'")
-    page.locator(".line.orig").nth(1).get_by_role("button", name="삭제").click()
-    expect(page.locator(".pick-status")).to_contain_text("담은 품목 1종 · 2개")
-    page.get_by_placeholder("품목 이름 (예: 안마기)").fill("표에없는물건")
-    page.get_by_role("button", name="확인 대기로 추가").click()
+    expect(page.locator(".pick-list .pick-row.on")).to_have_count(2)
+    page.locator(".pick-list .pick-row.on").nth(1).get_by_role("button", name=re.compile("빼기$")).click()
+    expect(page.locator(".pick-sum")).to_have_text(re.compile("^1종 · 2개"))
+    ok(True, "품목 담기 화면: 검색 → [+ 담기]/[더하기], 키보드를 내리지 않고 다음 품목 입력, 담은 품목 목록에서 빼기, 아래 요약 '1종 · 2개'")
+    page.locator(".pick-free summary").click()
+    page.get_by_label("목록에 없는 품목 이름").fill("표에없는물건")
+    page.get_by_role("button", name="확인 대기로 담기").click()
+    page.locator(".pick-foot").get_by_role("button", name="완료").click()
+    expect(page.locator("#intake-items .line.orig")).to_have_count(2)
     page.screenshot(path=SHOTS / "30_pc_field_intake.png", full_page=True)
     page.get_by_role("button", name="현장 접수 저장").click()
     expect(page.locator(".who .name")).to_have_text("가상현장", timeout=15000)
@@ -647,8 +674,7 @@ def lock_and_bio(pw, port):
     page.get_by_label("이름").fill("가상삼")
     page.get_by_label("연락처").fill("01000005555")
     page.get_by_label("배출 주소").fill("가상시 동구 잠금로 3")
-    page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
-    page.locator(".btn.result").first.click()
+    pick_items(page, [("고정 의자", 1)])
     page.get_by_role("button", name="접수 등록").click()
     expect(page.get_by_role("button", name=re.compile("내일 1"))).to_be_visible()
     # 지문·얼굴 등록: PIN 확인 → 가상 인증기(PRF)
@@ -659,12 +685,29 @@ def lock_and_bio(pw, port):
     expect(page.get_by_text(re.compile("등록됨 \\("))).to_be_visible(timeout=20000)
     bio = page.evaluate("""async () => { const db = await new Promise(r => { const q = indexedDB.open('dg-proto'); q.onsuccess = () => r(q.result); });
       return await new Promise(r => { const q = db.transaction('kv').objectStore('kv').get('bio'); q.onsuccess = () => r(Object.keys(q.result || {}).sort().join(',')); }); }""")
-    ok(bio == "at,credId,iv,prfSalt,salt,wrapped", f"지문·얼굴 등록: 데이터 키는 PRF 키로 감싼 것만 저장 ({bio})")
+    ok(bio in ("at,credId,iv,prfSalt,salt,wrapped", "at,credId,iv,prfSalt,salt,transports,wrapped"), f"지문·얼굴 등록: 데이터 키는 PRF 키로 감싼 것만 저장 ({bio})")
     page.goto(url + "#/home")
     page.get_by_role("button", name="잠금").click()
     page.get_by_role("button", name="지문·얼굴로 열기").click()
     expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
     ok(True, "지문·얼굴(WebAuthn PRF)로 잠금 해제 — PIN 없이")
+    # Galaxy(Samsung Pass)처럼 등록 응답에 PRF 값이 없는 경우: 한 번 더 인증 창 → 새로 누른 단추에서 인증 → 등록
+    page.locator("nav.tabbar .t-set").click()
+    page.get_by_role("button", name="지문·얼굴 등록 해제").click()
+    page.evaluate("""() => { const orig = navigator.credentials.create.bind(navigator.credentials);
+      navigator.credentials.create = async (o) => { const c = await orig(o); const ext = c.getClientExtensionResults();
+        return new Proxy(c, { get: (t, k) => (k === 'getClientExtensionResults' ? () => (ext.prf ? { prf: { enabled: true } } : {}) : (typeof t[k] === 'function' ? t[k].bind(t) : t[k])) }); }; }""")
+    page.get_by_role("button", name="지문·얼굴 잠금 해제 등록").click()
+    page.get_by_role("dialog").get_by_label("PIN").fill(PIN)
+    page.get_by_role("button", name="다음").click()
+    expect(page.get_by_role("dialog")).to_contain_text("한 번 더 인증해 주세요")
+    page.get_by_role("button", name="지문·얼굴 확인").click()
+    expect(page.get_by_text(re.compile("등록됨 \\("))).to_be_visible(timeout=20000)
+    page.goto(url + "#/home")
+    page.get_by_role("button", name="잠금").click()
+    page.get_by_role("button", name="지문·얼굴로 열기").click()
+    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
+    ok(True, "등록 응답에 PRF가 없는 휴대폰(Samsung Pass 흉내): [한 번 더 인증] → 등록 → 지문·얼굴로 잠금 해제")
     # 자동 잠금 기본 10분: 6분은 열림, 11분이면 잠김
     page.get_by_role("button", name=re.compile("내일 1")).click()
     page.locator(".stop").first.click()
@@ -827,8 +870,8 @@ def juso_flow(pw, url):
        and cq["confmKey"] == ["TEST-COORD-KEY"], "좌표 요청은 건물 식별 번호·좌표 승인키만")
     ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동" and page.locator(".addr-geo").count() == 1,
        "주소 고르기 → 도로명 주소·좌표(건물 출입구)·행정동 '계림2동' 채움")
-    page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
-    page.locator(".btn.result").first.click()
+    pick_items(page, [("고정 의자", 1)])
+    ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동", "품목 담기 화면을 다녀와도 입력한 내용 유지")
     page.get_by_role("button", name="접수 등록").click()
     page.get_by_role("button", name=re.compile("내일 1")).click()
     page.locator(".stop", has_text="가상주소").click()
@@ -898,13 +941,7 @@ def solo(pw, url, video):
         page.get_by_label("상세 배출 위치").fill("1층 현관 앞")
         if dong:
             page.get_by_label("동 (행정동, 선택)").fill(dong)
-        for q, n in items:
-            page.get_by_placeholder(re.compile("품목명")).fill(q)
-            for _ in range(n):  # 누를 때마다 1개씩 담김
-                page.locator(".btn.result").first.click()
-        if free:
-            page.get_by_placeholder("품목 이름 (예: 안마기)").fill(free)
-            page.get_by_role("button", name="확인 대기로 추가").click()
+        pick_items(page, items, free)
 
     intake("가상일", "010-0000-7777", "가상시 동구 예시로 5", [("고정 의자", 3), ("2인용 매트리스", 1)], dong="충장동")
     ok("44,000원" not in page.locator("main").inner_text() and "17,000원" in page.locator("main").inner_text(), "접수 금액 = 고정식 의자 3개 6,000 + 2인용 매트리스 11,000 = 17,000원")
@@ -1031,9 +1068,10 @@ def solo(pw, url, video):
     ok(page.locator("section.screen-card").count() == 1 and page.locator("main > section").first.get_attribute("class").count("screen-card") == 1
        and page.locator(".theme-seg .tp").count() == 3, "설정 맨 위 '화면': 밝기 구분 단추(미리보기 3개)")
     page.goto(url + "#/intake")
-    page.get_by_placeholder(re.compile("품목명")).fill("대리석")
-    expect(page.locator(".btn.result", has_text="6인용 이상").first).to_be_visible()
-    ok("15,000" in page.locator(".btn.result", has_text="6인용 이상").first.inner_text(),
+    page.get_by_role("button", name=re.compile(r"^\+ 품목 (더 )?담기$")).click()
+    page.get_by_label("품목 찾기").fill("대리석")
+    expect(page.locator(".pick-row", has_text="6인용 이상").first).to_be_visible()
+    ok("15,000" in page.locator(".pick-row", has_text="6인용 이상").first.inner_text(),
        "단독: 하차 기록, 확인 필요 단가는 근거와 함께 정한 뒤 새 접수에 적용, 큰 글씨 설정")
     page.goto(url + "#/home")
     # 첫 화면 위 ☀/🌙: 지금 보이는 것의 반대로 바로 바꾸기
