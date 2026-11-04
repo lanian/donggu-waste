@@ -335,4 +335,24 @@ ok(deriveStop(e17.stops[1], []).fee.levied === price * 3 && deriveStop(e17.stops
 const pend = deriveStop({ ...st17, items: [{ ...st17.items[0], price_status: 'PENDING', unit_price: null, amount: null }] }, []);
 ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction === null, '금액 확인 대기가 있으면 감면·부과 금액도 미확정');
 
+// 18) 지문·얼굴 등록: 등록 응답에 PRF가 없어도(Samsung Pass) 다음 인증에서 PRF가 나오면 등록, 끝내 없으면 거부 ---------
+{
+  const BIO = await import('../web/bio.js');
+  const prfVal = new Uint8Array(32).fill(7);
+  const mock = (createExt, getExt) => ({
+    create: async () => ({ rawId: new Uint8Array([1, 2, 3]).buffer, getClientExtensionResults: () => createExt }),
+    get: async () => ({ getClientExtensionResults: () => getExt }),
+  });
+  const setCred = (c) => Object.defineProperty(globalThis, 'navigator', { value: { credentials: c }, configurable: true, writable: true });
+  setCred(mock({}, { prf: { results: { first: prfVal.buffer } } }));  // Samsung Pass: 등록 응답에 PRF 없음, 인증 때 줌
+  const r1 = await BIO.bioRegister();
+  setCred(mock({ prf: { enabled: true, results: { first: prfVal.buffer } } }, {}));  // Google 비밀번호 관리자·iCloud: 등록 때 바로 줌
+  const r2 = await BIO.bioRegister();
+  setCred(mock({ prf: { enabled: false } }, {}));  // 지원 안 함
+  let code = null;
+  try { await BIO.bioRegister(); } catch (e) { code = e.code; }
+  ok(r1.prfOut.length === 32 && r1.prfOut[0] === 7 && r2.prfOut[0] === 7 && code === 'NO_PRF',
+    '지문·얼굴 등록: 등록 응답에 PRF가 없어도(Samsung Pass) 인증에서 나오면 등록, 끝내 없으면 PIN 안내');
+}
+
 console.log(`\n통과 ${passed}개`);

@@ -17,7 +17,7 @@ export async function bioAvailable() {
   } catch { return false; }
 }
 
-const noPrf = () => Object.assign(new Error('이 휴대폰의 생체 인증은 키 보호(PRF)를 지원하지 않아 쓸 수 없습니다. PIN을 쓰세요.'), { code: 'NO_PRF' });
+const noPrf = () => Object.assign(new Error('이 휴대폰의 생체 인증(또는 지금 쓰는 비밀번호 관리자)이 키 보호(PRF)를 지원하지 않아 쓸 수 없습니다. Chrome·Samsung 인터넷을 최신으로 올리거나 아이폰은 iOS 18 이상에서 다시 해 보세요. 그 전까지는 PIN을 쓰세요.'), { code: 'NO_PRF' });
 
 export async function bioEvaluate(credId, prfSalt) {
   const a = await navigator.credentials.get({ publicKey: {
@@ -37,10 +37,10 @@ export async function bioRegister() {
     authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' },
     timeout: 60000, attestation: 'none', extensions: { prf: { eval: { first: prfSalt } } } } });
   const ext = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
-  if (!ext.prf || ext.prf.enabled === false) throw noPrf();
   const credId = new Uint8Array(cred.rawId);
-  // 등록 때 PRF 값을 바로 주지 않는 인증기도 있어 한 번 더 인증한다
-  const first = ext.prf.results && ext.prf.results.first;
+  // 등록 때 PRF 결과를 주지 않는 인증기가 있다(예: Galaxy의 Samsung Pass는 등록 응답에 PRF가 없고 다음 인증부터 줌).
+  // 그래서 등록 응답만 보고 "지원 안 함"으로 막지 않고, 값이 없으면 한 번 더 인증해서 실제로 PRF 값이 나오는지로 판단한다.
+  const first = ext.prf && ext.prf.results && ext.prf.results.first;
   const prfOut = first ? new Uint8Array(first) : await bioEvaluate(credId, prfSalt);
   return { credId, prfSalt, prfOut };
 }

@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.0';
+export const APP_VERSION = '0.12.1';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
