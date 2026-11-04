@@ -1,0 +1,1200 @@
+{
+ "note": "v0.13 리팩터링 전 server.allowed() 결과(역할×경로). tests/test_pc.py 가 지금 경로 표와 비교한다.",
+ "routes": [
+  {
+   "method": "GET",
+   "path": "bootstrap",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": true
+  },
+  {
+   "method": "GET",
+   "path": "calendar",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "dong-detect",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "dongs",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "holidays",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "requests/import-template",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "audit.csv",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "stats",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "pilot",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "pilot.csv",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "stats.csv",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "geocode",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "addr-search",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "juso-search",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "juso-coord",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "privacy",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "access",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "access.csv",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "access/status",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "integrity",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "jobs/{id}",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "imports/recent",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "pending",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "readiness",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "ops-status",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "diag",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "assign/current",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "requests/{id}/notice",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "backup-status",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "revenue",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "revenue.csv",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "recon-template",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "recon-history",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "refunds",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "addr-stats",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "fee-table",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "me",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": true
+  },
+  {
+   "method": "GET",
+   "path": "users",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "backups",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "photo-purge",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "audit",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "requests",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "requests/{id}",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "duplicates",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "batches",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "conflicts",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "field-intakes",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "close",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "registration-qr",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "unloads",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "volumes",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "load-check",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "fee-usage",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "qrtests",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "GET",
+   "path": "photo/{id}",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "import/result",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "import/photos",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "import/solo",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/import",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "recon",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "addr-import",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "external/test",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "route",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backup",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backup/auto",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backup/retention",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "privacy/purge",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "photo-purge",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/sync",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "integrity/full",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/bulk",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/export",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/print",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/reduction",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/receipt-print",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/labels",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "stats/print",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "access/check",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/request",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/{id}/approve",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/{id}/reject",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/{id}/pay",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "refunds/{id}/void",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backup-key",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backups/verify-auto",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/field-check",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/cancel",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/contacts",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/location",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "assign",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "assign/edit",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "imports/{id}/confirm",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "conflicts/bulk",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "bundles",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "bundles/{id}/receipt",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "conflicts/{id}",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "pilot",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "close",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "close/approve",
+   "roles": [
+    "ADMIN",
+    "LEAD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "dongs",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "dongs/{id}/delete",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "holidays",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "holidays/{id}/delete",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "crews",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "devices/register",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "devices/{id}/confirm",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "devices/{id}/status",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/link",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "links/{id}/void",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "requests/{id}/payments",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "payments/{id}/void",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "unloads",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "volumes",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "qrtest",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "qrtest/{id}/result",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "users",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "users/{id}/crew",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "users/{id}/active",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "users/{id}/password",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "geocode/missing",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "fee-revisions",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "fee-revisions/{id}/approve",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "fee-revisions/{id}/reject",
+   "roles": [
+    "ADMIN",
+    "INTAKE"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "backups/verify",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  },
+  {
+   "method": "POST",
+   "path": "prefs",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": true
+  },
+  {
+   "method": "POST",
+   "path": "password",
+   "roles": [
+    "ADMIN",
+    "INTAKE",
+    "FIELD",
+    "LEAD"
+   ],
+   "must_change_ok": true
+  },
+  {
+   "method": "POST",
+   "path": "settings",
+   "roles": [
+    "ADMIN"
+   ],
+   "must_change_ok": false
+  }
+ ]
+}

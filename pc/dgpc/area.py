@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 
-from dgpc import service as S
+from dgpc import addresses as AD, core as C, fees as F, settings as SR
 
 WEEKDAYS = "월화수목금토일"  # date.weekday(): 월=0 … 일=6
 DEFAULT_CLOSED_WEEKDAYS = [5, 6]  # 기본: 토·일 수거 안 함 (설정에서 바꿈)
@@ -25,7 +25,7 @@ def _norm(s: str) -> str:
 
 def _date(s: str) -> dt.date:
     if not re.fullmatch(r"\d{4}-\d\d-\d\d", s or ""):
-        raise S.UserError("날짜 형식이 올바르지 않습니다 (YYYY-MM-DD).")
+        raise C.UserError("날짜 형식이 올바르지 않습니다 (YYYY-MM-DD).")
     return dt.date.fromisoformat(s)
 
 
@@ -35,7 +35,7 @@ def weekdays_label(days: list[int]) -> str:
 
 # ------------------------------------------------------------------ 한도·쉬는 요일 설정
 def capacity_settings(con) -> dict:
-    c = S.get_setting(con, "capacity", {}) or {}
+    c = C.get_setting(con, "capacity") or {}
     return {"daily_count": c.get("daily_count"), "daily_m3": c.get("daily_m3"),
             "closed_weekdays": c.get("closed_weekdays", DEFAULT_CLOSED_WEEKDAYS),
             "prefer_dong_crew": c.get("prefer_dong_crew", True)}
@@ -47,9 +47,9 @@ def _opt_int(v, what, lo=0, hi=100000):
     try:
         n = int(v)
     except (TypeError, ValueError):
-        raise S.UserError(f"{what}은(는) 숫자로 적어 주세요.")
+        raise C.UserError(f"{what}은(는) 숫자로 적어 주세요.")
     if not lo <= n <= hi:
-        raise S.UserError(f"{what}은(는) {lo}~{hi} 사이로 적어 주세요.")
+        raise C.UserError(f"{what}은(는) {lo}~{hi} 사이로 적어 주세요.")
     return n
 
 
@@ -59,9 +59,9 @@ def _opt_float(v, what, lo=0.0, hi=10000.0):
     try:
         n = float(v)
     except (TypeError, ValueError):
-        raise S.UserError(f"{what}은(는) 숫자로 적어 주세요.")
+        raise C.UserError(f"{what}은(는) 숫자로 적어 주세요.")
     if not lo <= n <= hi:
-        raise S.UserError(f"{what}은(는) {lo:g}~{hi:g} 사이로 적어 주세요.")
+        raise C.UserError(f"{what}은(는) {lo:g}~{hi:g} 사이로 적어 주세요.")
     return n
 
 
@@ -70,8 +70,13 @@ def _weekday_list(v) -> list[int]:
         v = [x for x in re.split(r"[,\s]+", v) if x]
     out = sorted({int(x) for x in (v or [])})
     if any(not 0 <= x <= 6 for x in out):
-        raise S.UserError("요일 값이 올바르지 않습니다.")
+        raise C.UserError("요일 값이 올바르지 않습니다.")
     return out
+
+
+@SR.contribute("capacity")
+def _settings_part(con) -> dict:
+    return {"capacity": capacity_settings(con)}
 
 
 def save_capacity(con, data: dict):
@@ -84,10 +89,10 @@ def save_capacity(con, data: dict):
     if "closed_weekdays" in data:
         cur["closed_weekdays"] = _weekday_list(data["closed_weekdays"])
         if len(cur["closed_weekdays"]) == 7:
-            raise S.UserError("모든 요일을 쉬는 날로 정할 수 없습니다.")
+            raise C.UserError("모든 요일을 쉬는 날로 정할 수 없습니다.")
     if "prefer_dong_crew" in data:
         cur["prefer_dong_crew"] = bool(data["prefer_dong_crew"])
-    S.set_setting(con, "capacity", cur)
+    C.set_setting(con, "capacity", cur)
     return cur
 
 
@@ -98,23 +103,23 @@ def list_holidays(con, start: str = "", end: str = "") -> list[dict]:
         sql += " AND day>=?"; args.append(start)
     if end:
         sql += " AND day<=?"; args.append(end)
-    return S.rows(con, sql + " ORDER BY day", args)
+    return C.rows(con, sql + " ORDER BY day", args)
 
 
 def add_holiday(con, day: str, label: str = ""):
     _date(day)
     label = (label or "").strip()[:30]
-    with S.tx(con):
-        con.execute("INSERT INTO holiday (day, label, created_at) VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET label=excluded.label", (day, label, S.now()))
-        S.audit(con, "holiday", day, "SAVE", {"label": label})
+    with C.tx(con):
+        con.execute("INSERT INTO holiday (day, label, created_at) VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET label=excluded.label", (day, label, C.now()))
+        C.audit(con, "holiday", day, "SAVE", {"label": label})
 
 
 def delete_holiday(con, day: str):
-    if not S.one(con, "SELECT 1 AS x FROM holiday WHERE day=?", (day,)):
-        raise S.UserError("등록된 휴무일이 아닙니다.")
-    with S.tx(con):
+    if not C.one(con, "SELECT 1 AS x FROM holiday WHERE day=?", (day,)):
+        raise C.UserError("등록된 휴무일이 아닙니다.")
+    with C.tx(con):
         con.execute("DELETE FROM holiday WHERE day=?", (day,))
-        S.audit(con, "holiday", day, "DELETE", None)
+        C.audit(con, "holiday", day, "DELETE", None)
 
 
 # ------------------------------------------------------------------ 행정동
@@ -127,13 +132,13 @@ def _dong_row(r: dict) -> dict:
 
 
 def list_dongs(con, active_only: bool = False) -> list[dict]:
-    out = S.rows(con, "SELECT d.*, c.name AS crew_name FROM dong d LEFT JOIN crew c ON c.id=d.crew_id"
+    out = C.rows(con, "SELECT d.*, c.name AS crew_name FROM dong d LEFT JOIN crew c ON c.id=d.crew_id"
                  + (" WHERE d.active=1" if active_only else "") + " ORDER BY d.sort, d.name")
     return [_dong_row(r) for r in out]
 
 
 def get_dong(con, name: str) -> dict | None:
-    r = S.one(con, "SELECT d.*, c.name AS crew_name FROM dong d LEFT JOIN crew c ON c.id=d.crew_id WHERE d.name=?", ((name or "").strip(),))
+    r = C.one(con, "SELECT d.*, c.name AS crew_name FROM dong d LEFT JOIN crew c ON c.id=d.crew_id WHERE d.name=?", ((name or "").strip(),))
     return _dong_row(r) if r else None
 
 
@@ -142,10 +147,10 @@ def save_dong(con, data: dict) -> str:
     did = data.get("id") or None
     name = (data.get("name") or "").strip()
     if not name or len(name) > 20:
-        raise S.UserError("동 이름을 20자 이내로 적어 주세요.")
+        raise C.UserError("동 이름을 20자 이내로 적어 주세요.")
     crew = data.get("crew_id") or None
-    if crew and not S.one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew,)):
-        raise S.UserError("없는 수거팀입니다.")
+    if crew and not C.one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew,)):
+        raise C.UserError("없는 수거팀입니다.")
     days = _weekday_list(data.get("weekdays") or [])
     kws = data.get("keywords") or []
     if isinstance(kws, str):
@@ -155,42 +160,42 @@ def save_dong(con, data: dict) -> str:
     limit_m3 = _opt_float(data.get("daily_limit_m3"), "동 일일 한도(m³)", 0.1)
     code = (data.get("code") or "").strip() if "code" in data else None
     if code and not re.fullmatch(r"[0-9A-Za-z]{1,4}", code):
-        raise S.UserError("동 코드(부과번호용)는 숫자·영문 1~4자로 적어 주세요.")
-    dup = S.one(con, "SELECT id FROM dong WHERE name=?", (name,))
+        raise C.UserError("동 코드(부과번호용)는 숫자·영문 1~4자로 적어 주세요.")
+    dup = C.one(con, "SELECT id FROM dong WHERE name=?", (name,))
     if dup and dup["id"] != did:
-        raise S.UserError("같은 이름의 동이 이미 있습니다.")
-    old = S.one(con, "SELECT * FROM dong WHERE id=?", (did,)) if did else None
+        raise C.UserError("같은 이름의 동이 이미 있습니다.")
+    old = C.one(con, "SELECT * FROM dong WHERE id=?", (did,)) if did else None
     if did and not old:
-        raise S.UserError("동을 찾을 수 없습니다.")
+        raise C.UserError("동을 찾을 수 없습니다.")
     did = did or str(uuid.uuid4())
-    with S.tx(con):
+    with C.tx(con):
         con.execute("""INSERT INTO dong (id, name, active, crew_id, weekdays, daily_limit, daily_limit_m3, keywords_json, sort, updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, active=excluded.active, crew_id=excluded.crew_id,
             weekdays=excluded.weekdays, daily_limit=excluded.daily_limit, daily_limit_m3=excluded.daily_limit_m3, keywords_json=excluded.keywords_json,
             sort=excluded.sort, updated_at=excluded.updated_at""",
                     (did, name, 1 if data.get("active", True) else 0, crew, ",".join(map(str, days)), limit, limit_m3,
-                     json.dumps(kws, ensure_ascii=False), int(data.get("sort") or 0), S.now()))
+                     json.dumps(kws, ensure_ascii=False), int(data.get("sort") or 0), C.now()))
         if code is not None:
             con.execute("UPDATE dong SET code=? WHERE id=?", (code or None, did))
         renamed = 0
         if old and old["name"] != name:
             renamed = con.execute("UPDATE request SET dong=? WHERE dong=?", (name, old["name"])).rowcount
-        S.audit(con, "dong", did, "SAVE" if old else "CREATE",
+        C.audit(con, "dong", did, "SAVE" if old else "CREATE",
                 {"name": name, "active": bool(data.get("active", True)), "crew_id": crew, "weekdays": weekdays_label(days) if days else "",
                  "limit": limit, "limit_m3": limit_m3, "keywords": len(kws), **({"renamed_from": old["name"], "n": renamed} if renamed or (old and old["name"] != name) else {})})
     return did
 
 
 def delete_dong(con, did: str):
-    d = S.one(con, "SELECT * FROM dong WHERE id=?", (did,))
+    d = C.one(con, "SELECT * FROM dong WHERE id=?", (did,))
     if not d:
-        raise S.UserError("동을 찾을 수 없습니다.")
-    n = S.one(con, "SELECT COUNT(*) AS n FROM request WHERE dong=?", (d["name"],))["n"]
+        raise C.UserError("동을 찾을 수 없습니다.")
+    n = C.one(con, "SELECT COUNT(*) AS n FROM request WHERE dong=?", (d["name"],))["n"]
     if n:
-        raise S.UserError(f"이 동으로 접수된 건이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
-    with S.tx(con):
+        raise C.UserError(f"이 동으로 접수된 건이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
+    with C.tx(con):
         con.execute("DELETE FROM dong WHERE id=?", (did,))
-        S.audit(con, "dong", did, "DELETE", {"name": d["name"]})
+        C.audit(con, "dong", did, "DELETE", {"name": d["name"]})
 
 
 def detect_dong(con, address: str) -> dict:
@@ -202,7 +207,7 @@ def detect_dong(con, address: str) -> dict:
     a = _norm(address)
     g = None
     try:
-        g = S.geocode(con, address)
+        g = AD.geocode(con, address)
     except Exception:  # 주소 자료가 없거나 해석 못 함
         g = None
     gh = _norm((g or {}).get("dong_h") or "") if g and not g.get("ambiguous") else ""
@@ -232,13 +237,13 @@ def detect_dong(con, address: str) -> dict:
 
 # ------------------------------------------------------------------ 업무일·한도·달력
 def _volume_items(con, items) -> float:
-    from dgpc import routing
-    ov = S.volume_overrides(con)
+    from dgpc import routing  # OR-Tools 를 불러오는 무거운 모듈: 쓸 때만
+    ov = F.volume_overrides(con)
     return sum(routing.volume_of(i, ov) for i in items)
 
 
 def request_volume(con, rid: str) -> float:
-    return _volume_items(con, S.rows(con, "SELECT name, spec, qty, fee_rate_id FROM request_item WHERE request_id=? AND removed=0", (rid,)))
+    return _volume_items(con, C.rows(con, "SELECT name, spec, qty, fee_rate_id FROM request_item WHERE request_id=? AND removed=0", (rid,)))
 
 
 def booked(con, day: str, dong: str | None = None, exclude_id: str | None = None) -> tuple[int, float]:
@@ -248,17 +253,17 @@ def booked(con, day: str, dong: str | None = None, exclude_id: str | None = None
         sql += " AND dong=?"; args.append(dong)
     if exclude_id:
         sql += " AND id!=?"; args.append(exclude_id)
-    ids = [r["id"] for r in S.rows(con, sql, args)]
+    ids = [r["id"] for r in C.rows(con, sql, args)]
     if not ids:
         return 0, 0.0
-    items = S.rows(con, "SELECT name, spec, qty, fee_rate_id FROM request_item WHERE removed=0 AND request_id IN (%s)" % ",".join("?" * len(ids)), ids)
+    items = C.rows(con, "SELECT name, spec, qty, fee_rate_id FROM request_item WHERE removed=0 AND request_id IN (%s)" % ",".join("?" * len(ids)), ids)
     return len(ids), round(_volume_items(con, items), 2)
 
 
 def working_reason(con, day: str, dong: dict | None = None) -> str | None:
     """업무일이 아니면 그 까닭, 업무일이면 None."""
     d = _date(day)
-    h = S.one(con, "SELECT label FROM holiday WHERE day=?", (day,))
+    h = C.one(con, "SELECT label FROM holiday WHERE day=?", (day,))
     if h:
         return f"휴무일({h['label']})" if h["label"] else "휴무일"
     if d.weekday() in capacity_settings(con)["closed_weekdays"]:
@@ -286,7 +291,7 @@ def day_info(con, day: str, dong: str | None = None, exclude_id: str | None = No
     d = _date(day)
     info = {"date": day, "weekday": WEEKDAYS[d.weekday()], "reason": working_reason(con, day, dd), "booked": n, "booked_m3": m3,
             "limit": cap["daily_count"], "limit_m3": cap["daily_m3"], "dong": dd["name"] if dd else None,
-            "closed": bool(S.close_info(con, day))}
+            "closed": bool(C.close_info(con, day))}
     info["working"] = info["reason"] is None
     over = []
     if cap["daily_count"] and n + add > cap["daily_count"]:

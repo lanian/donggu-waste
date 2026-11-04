@@ -23,6 +23,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from dgpc import geo
+
 TIMEOUT_S = 5
 JUSO_DEFAULT = "https://business.juso.go.kr"
 KAKAO_NAVI_DEFAULT = "https://apis-navi.kakaomobility.com"
@@ -175,7 +177,6 @@ def valid_ref(ref: dict) -> dict:
 
 def juso_coord(key: str, ref: dict) -> tuple[float, float]:
     """좌표제공 API → (위도, 경도). UTM-K 출입구 좌표를 geo.utmk_to_wgs84로 바꾼다."""
-    from dgpc import geo
     p = urllib.parse.urlencode({"confmKey": key, **valid_ref(ref), "resultType": "json"})
     res = _juso_results(f"{juso_base()}/addrlink/addrCoordApi.do?{p}")
     j = (res.get("juso") or [None])[0]

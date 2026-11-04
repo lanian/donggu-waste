@@ -1,4 +1,6 @@
 // 품목 검색과 수수료·잔량 계산 (순수 함수, 화면과 분리해 테스트 가능)
+// 계산 규칙은 PC(pc/dgpc/derive.py)와 같다: data/derive_vectors.json 공통 벡터로 양쪽을 함께 시험한다.
+import { LABELS } from './labels-data.js';
 
 const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, '');
 
@@ -81,7 +83,7 @@ export function deriveStop(stop, events) {
   for (const l of lines) l.remaining = Math.max(0, l.qty_confirmed - l.qty_collected);
   // 위치: 현장에서 고친 위치(LOCATION_FIX) 우선, 없으면 접수 자료의 좌표
   if (!loc && stop.lat != null && stop.lon != null) loc = { lat: stop.lat, lon: stop.lon };
-  const fee = calcFee(lines, stop.reduction ? stop.reduction.rate : 0);
+  const fee = calcFee(lines, stop.reduction ? stop.reduction.rate : 0, stop.reduction ? stop.reduction.round_unit : 1);
   const notice = notices.length ? notices[notices.length - 1] : null;
   return { lines, contact, outcome, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
     progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
@@ -97,17 +99,20 @@ export function needsFeeNotice(d) {
   return x > 0 && !d.notices.some((n) => n.extra >= x);
 }
 
-// 감면(v0.11): PC finance.fee_summary 와 같은 규칙 — 감면액 = floor(계산 금액 × 감면율 / 100) (원 단위 버림), 부과 금액 = 계산 금액 − 감면액.
+// 감면(v0.11): PC derive.fee_summary 와 같은 규칙 — 감면액 = floor(계산 금액 × 감면율 / 100)를 끝수 단위(unit) 미만 버림, 부과 금액 = 계산 금액 − 감면액.
+// unit: 접수에 저장된 끝수 단위(1원 = 원 미만 버림, 10원 = 10원 미만 버림). 목록의 선택 키 "ru"로 받으며 없으면 1원.
 // 현장 추가 품목도 계산 금액에 들어가므로 같은 감면율이 적용된다.
-export function applyReduction(amount, rate) {
+export const ROUND_UNITS = [1, 10];
+export function applyReduction(amount, rate, unit = 1) {
   const r = Math.max(0, Math.min(100, Math.trunc(Number(rate) || 0)));
+  const u = ROUND_UNITS.includes(Number(unit)) ? Number(unit) : 1;
   if (amount == null) return { rate: r, reduction: null, levied: null };
-  const reduction = Math.floor((amount * r) / 100);
+  const reduction = Math.floor(Math.floor((amount * r) / 100) / u) * u;
   return { rate: r, reduction, levied: amount - reduction };
 }
 
 // 수수료: 산정 수량 = 현장 확인 수량. 실제 수거 수량은 금액에 쓰지 않는다. 단위가 다른 행은 합산하지 않는다.
-export function calcFee(lines, reductionRate = 0) {
+export function calcFee(lines, reductionRate = 0, roundUnit = 1) {
   const received = lines.filter((l) => l.kind === 'RECEIVED').reduce((s, l) => s + (l.amount_received || 0), 0);
   const pending = lines.filter((l) => l.price == null && l.qty_confirmed > 0);
   const confirmedSubtotal = lines.filter((l) => l.price != null).reduce((s, l) => s + l.price * l.qty_confirmed, 0);
@@ -115,7 +120,7 @@ export function calcFee(lines, reductionRate = 0) {
   const qtyByUnit = {};
   for (const l of lines) qtyByUnit[l.unit_label] = (qtyByUnit[l.unit_label] || 0) + l.qty_confirmed;
   const final = pending.length ? null : confirmedSubtotal;
-  const red = applyReduction(final, reductionRate);
+  const red = applyReduction(final, reductionRate, roundUnit);
   return {
     received, confirmedSubtotal, fieldAdded,
     diff: confirmedSubtotal - received,
@@ -123,7 +128,7 @@ export function calcFee(lines, reductionRate = 0) {
     final,
     qtyByUnit,
     // 감면: reductionRate(%), reduction(감면액), levied(부과 금액 = 주민이 낼 금액). 감면이 없으면 levied = final. 금액 확인 대기가 있으면 null.
-    reductionRate: red.rate, reduction: red.reduction, levied: red.levied,
+    reductionRate: red.rate, reduction: red.reduction, levied: red.levied, reductionRoundUnit: ROUND_UNITS.includes(Number(roundUnit)) ? Number(roundUnit) : 1,
   };
 }
 
@@ -136,13 +141,14 @@ export function progressOf(lines, eventCount) {
   return 'STARTED';
 }
 
+// 연락·결과·미수거 사유·스티커 확인 이름은 PC와 같은 표(data/labels.json → labels-data.js)에서 온다.
+const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
 export const LABEL = {
-  contact: { NOT_CONTACTED: '연락 전', REACHED: '통화 완료', NO_ANSWER: '부재', CALLBACK: '재연락 예정', WRONG_NUMBER: '번호 오류' },
+  contact: { ...LABELS.contact },
   progress: { TODO: '방문 전', STARTED: '처리 중', PARTIAL: '일부 수거', DONE: '수거 완료' },
-  outcome: { DONE: '수거 완료', PARTIAL: '일부 수거', NOT_COLLECTED: '미수거', ON_HOLD: '보류' },
-  reason: { '': '사유 선택', NOT_PUT_OUT: '배출 안 됨', DIFFERENT: '접수와 다름', CANNOT_LOAD: '적재 불가', POSTPONED: '주민 요청 연기',
-    NO_STICKER: '스티커·필증 없음·불일치', FEE_REFUSED: '추가 금액 거부', OTHER: '기타' },
-  sticker: { OK: '확인', MISSING: '없음', MISMATCH: '번호 불일치' },
+  outcome: pick(LABELS.status, ['DONE', 'PARTIAL', 'NOT_COLLECTED', 'ON_HOLD']),
+  reason: { '': '사유 선택', ...LABELS.reason },
+  sticker: { ...LABELS.sticker },
   feeResponse: { NOTIFIED: '주민에게 안내함', AGREED: '동의', REFUSED: '거부(해당 품목 미수거)' },
   noPhoto: { DARK: '어두워 촬영 불가', REFUSED: '주민이 촬영 거부', CAMERA: '카메라 고장', OTHER: '기타' },
 };

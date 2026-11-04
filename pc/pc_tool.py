@@ -34,14 +34,12 @@ import io
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import qrcode
 from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import dgproto as P  # noqa: E402
 from dgpc import service as S, store  # noqa: E402
 from sample_data import make_daylist  # noqa: E402
 
@@ -180,7 +178,7 @@ def cmd_import_result(a):
         return
     print("가져오기 결과:", json.dumps({k: r[k] for k in ("applied", "skipped_duplicate", "conflict", "unloads", "field_intakes", "review") if k in r}, ensure_ascii=False))
     print("사진 해시 목록:", r["photos_expected"], "건 (사진 파일은 보안 매체로 별도 회수)")
-    print("보관 종료 확인 코드:", r["release_code"], "← 휴대폰 [결과 보내기] 화면에 입력하면 반영됨으로 표시됩니다")
+    print("결과 반영 코드: D-" + (r["release_code"] or ""), "← 휴대폰 [결과 보내기] 화면에 입력하면 반영됨으로 표시됩니다")
 
 
 def cmd_import_photos(a):
@@ -189,7 +187,7 @@ def cmd_import_photos(a):
     except S.UserError as e:
         sys.exit(str(e))
     print("사진 회수:", json.dumps({k: r.get(k) for k in ("recovered", "already", "hash_mismatch", "unexpected")}, ensure_ascii=False))
-    print("사진 회수 확인 코드:", r["release_code"] or "발급 안 함(해시 불일치 사진이 있어 휴대폰에서 지우면 안 됨)")
+    print("사진 회수 코드:", ("P-" + r["release_code"]) if r["release_code"] else "발급 안 함(해시 불일치 사진이 있어 휴대폰에서 지우면 안 됨)")
 
 
 def cmd_status(_):
@@ -269,6 +267,19 @@ def cmd_purge_photos(_):
     S.ACTOR.set("cli")
     r = S.purge_photos(c)
     print(f"사진 {r['count']}장 정리 ({r['bytes']:,}B)")
+
+
+def cmd_vacuum(_):
+    """(서버를 끈 상태에서) DB를 빈 공간 돌려주기 가능(auto_vacuum=INCREMENTAL)으로 바꾸고 한 번 정리한다. 큰 DB는 몇 분 걸릴 수 있다.
+    v0.13부터 새로 만든 DB는 처음부터 INCREMENTAL이고, 파기·사진 정리 뒤 서버가 조금씩 공간을 돌려준다."""
+    c = con()
+    before = c.execute("PRAGMA page_count").fetchone()[0] * c.execute("PRAGMA page_size").fetchone()[0]
+    mode = c.execute("PRAGMA auto_vacuum").fetchone()[0]
+    if mode != 2:
+        c.execute("PRAGMA auto_vacuum = INCREMENTAL")
+    c.execute("VACUUM")
+    after = c.execute("PRAGMA page_count").fetchone()[0] * c.execute("PRAGMA page_size").fetchone()[0]
+    print(f"정리했습니다: {before:,}B → {after:,}B (auto_vacuum={c.execute('PRAGMA auto_vacuum').fetchone()[0]}, 2=INCREMENTAL)")
 
 
 def cmd_import_addr(a):
@@ -400,6 +411,7 @@ def main(argv=None):
     rs = s.add_parser("restore"); rs.add_argument("file"); rs.add_argument("--yes", action="store_true"); rs.set_defaults(fn=cmd_restore)
     ra = s.add_parser("reset-admin"); ra.add_argument("--username", default="admin"); ra.set_defaults(fn=cmd_reset_admin)
     s.add_parser("purge-photos").set_defaults(fn=cmd_purge_photos)
+    s.add_parser("vacuum", help="(서버 끈 상태) DB 빈 공간 정리·조금씩 돌려주기 켜기").set_defaults(fn=cmd_vacuum)
     pp = s.add_parser("purge-pii"); pp.add_argument("--preview", action="store_true"); pp.set_defaults(fn=cmd_purge_pii)
     s.add_parser("backup-auto").set_defaults(fn=cmd_backup_auto)
     rsa = s.add_parser("restore-auto"); rsa.add_argument("file"); rsa.add_argument("--key", required=True); rsa.add_argument("--yes", action="store_true")

@@ -11,7 +11,7 @@ const PII = ['name', 'phone', 'address', 'spot_note', 'memo'];
 const itemKey = (s) => (s.items || []).map((i) => [i.line_id, i.qty, i.fee_rate_id || null, i.unit_price ?? null, i.price_status || '', i.prior_collected || 0]);
 // 개인정보를 지운 지점은 이름·연락처·주소가 비어 있으므로, 그 칸은 비교하지 않는다(다시 받은 것은 변경이 아님)
 const infoKey = (s, skipPii) => JSON.stringify([skipPii ? null : [...PII.map((k) => s[k] || ''), s.lat ?? null, s.lon ?? null],
-  s.dong || '', s.appt || null, !!s.revisit, itemKey(s), ...(s.reduction && s.reduction.rate ? [s.reduction.rate] : [])]);
+  s.dong || '', s.appt || null, !!s.revisit, itemKey(s), ...(s.reduction && s.reduction.rate ? [s.reduction.rate] : []), ...(s.reduction && s.reduction.round_unit > 1 ? [s.reduction.round_unit] : [])]);
 
 // 가장 긴 증가 부분 수열에 들지 않는 위치 = 순서가 바뀐 지점 (하나 끼워 넣어도 나머지는 "변경"이 아님)
 function movedIndexes(seq) {
@@ -132,4 +132,234 @@ export function retentionCandidates(requests, events, days, isDone, now = Date.n
     if (now - doneAt > days * 864e5) out.push({ r, doneAt });
   }
   return out;
+}
+
+// ------------------------------------------------------------ PC와 주고받는 확인 코드 (v0.13 이름 통일)
+// 수신 코드(휴대폰 → PC, 목록을 받았다는 확인), 결과 반영 코드(PC → 휴대폰, 이전 이름 '보관 종료 확인 코드'),
+// 사진 회수 코드(PC → 휴대폰). 코드 자체(8자)는 PC가 만들며 바뀌지 않았다. 앞 글자(R·D·P)는 화면 표시·입력 확인용으로만 쓴다.
+export const CODE_KINDS = {
+  RECEIPT: { prefix: 'R', label: '수신 코드', dir: '휴대폰 → PC' },
+  RESULT: { prefix: 'D', label: '결과 반영 코드', dir: 'PC → 휴대폰' },
+  PHOTO: { prefix: 'P', label: '사진 회수 코드', dir: 'PC → 휴대폰' },
+};
+const CODE_ALPHABET = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+/** 입력한 코드를 정리한다: 공백·하이픈 제거, 대문자, 앞 글자(R·D·P + '-')가 있으면 떼어 prefix로 돌려준다. */
+export function parseCode(input) {
+  let s = String(input || '').toUpperCase().replace(/\s+/g, '');
+  let prefix = '';
+  const m = s.match(/^([RDP])-(.*)$/);
+  if (m) { prefix = m[1]; s = m[2]; }
+  s = s.replace(/-/g, '');
+  if (!prefix && s.length === 9 && /^[RDP]/.test(s) && CODE_ALPHABET.test(s.slice(1))) { prefix = s[0]; s = s.slice(1); }
+  return { prefix, code: s };
+}
+/** 코드 입력칸 확인. field: 'RESULT' | 'PHOTO'. known: { RESULT: [코드…], PHOTO: [코드…], RECEIPT: [코드…] } (이 휴대폰이 아는 코드)
+ *  돌려주는 값: { code, kind } (맞는 칸) 또는 { error } (다른 칸 코드·형식 오류·모르는 코드). */
+export function checkCode(input, field, known = {}) {
+  const { prefix, code } = parseCode(input);
+  if (!code) return { error: `${CODE_KINDS[field].label}를 넣어 주세요.` };
+  const kindOfPrefix = Object.keys(CODE_KINDS).find((k) => CODE_KINDS[k].prefix === prefix);
+  if (prefix && kindOfPrefix !== field) return { error: wrongField(kindOfPrefix, field) };
+  if ((known[field] || []).includes(code)) return { code, kind: field };
+  const other = Object.keys(CODE_KINDS).find((k) => k !== field && (known[k] || []).includes(code));
+  if (other) return { error: wrongField(other, field) };
+  if (!CODE_ALPHABET.test(code)) return { error: `${CODE_KINDS[field].label}는 8자리입니다(숫자 0·1, 글자 I·L·O는 쓰지 않음). 다시 확인해 주세요.` };
+  return { error: `맞는 ${CODE_KINDS[field].label}가 없습니다. PC 담당자에게 코드를 다시 확인해 주세요.` };
+}
+function wrongField(kind, field) {
+  if (kind === 'RECEIPT') return '이것은 수신 코드(휴대폰 → PC)입니다. PC 담당자에게 알려 주는 코드이며, 여기에 넣는 코드가 아닙니다.';
+  return `이것은 ${CODE_KINDS[kind].label}입니다. ${kind === 'PHOTO' ? '아래 사진 칸' : '위 결과 칸'}에 넣어 주세요. (여기는 ${CODE_KINDS[field].label} 칸)`;
+}
+/** 화면 표시: 'D-ABCD EFGH' */
+export const showCode = (kind, code) => `${CODE_KINDS[kind].prefix}-${String(code).slice(0, 4)} ${String(code).slice(4)}`;
+
+// ------------------------------------------------------------ 기록 세대 (gen, v0.13)
+// 휴대폰은 기록마다 세대(gen, 8자리 16진수)를 적는다. 처음 쓸 때와 백업에서 복원할 때마다 새 세대를 만든다.
+// 복원하면 PC가 이미 본 번호가 다시 쓰일 수 있으므로, PC가 알려 주는 '받은 번호'(rel.g)는 세대별로만 믿는다.
+// st.gen = 지금 세대, st.gens = [{ gen, start }] (세대별 첫 번호, 최근 GENS_KEEP개), st.genRestored = 복원한 적 있음(세대 없는 이전 기록은 rel.seq로 반영하지 않음)
+export const GENS_KEEP = 16;
+const GEN_RE = /^[0-9a-f]{8}$/;
+export const isGen = (x) => typeof x === 'string' && GEN_RE.test(x);
+export function randomGen() {
+  const b = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+/** 새 세대를 시작한다: 다음 기록 번호(st.seq + 1)부터 이 세대. restored = 백업 복원으로 만든 세대. */
+export function newGen(st, { restored = false, gen = randomGen() } = {}) {
+  const gens = (st.gens || []).filter((x) => x && isGen(x.gen) && x.gen !== gen);
+  gens.push({ gen, start: (st.seq || 0) + 1 });
+  st.gens = gens.slice(-GENS_KEEP);
+  st.gen = gen;
+  if (restored) st.genRestored = true;
+  return gen;
+}
+/** 세대가 없으면(처음 쓰는 휴대폰·이전 버전 자료) 만든다. 돌려주는 값: 지금 세대. */
+export function ensureGen(st) {
+  if (!isGen(st.gen) || !(st.gens || []).some((x) => x.gen === st.gen)) newGen(st);
+  return st.gen;
+}
+/** 결과 파일 머리 "gens": 보내는 기록의 세대와 그 세대 첫 번호. */
+export function gensOf(st, events) {
+  const used = new Set(events.map((e) => e.gen).filter(isGen));
+  return (st.gens || []).filter((x) => used.has(x.gen)).map((x) => [x.gen, x.start]);
+}
+
+// ------------------------------------------------------------ 결과 반영 정보 (목록 묶음의 "rel", v0.13)
+/** 이 기록을 PC가 받았다고 rel이 말하는가. 세대 있는 기록: rel.g에 그 세대가 있고 번호가 [세대 첫 번호, 받은 번호] 안.
+ *  세대 없는(이전 버전) 기록: 이 휴대폰이 복원한 적 없을 때만 rel.seq 이하. */
+export function relCovers(st, rel, ev) {
+  if (isGen(ev.gen)) {
+    const g = (rel.g || []).find((x) => x[0] === ev.gen);
+    const mine = (st.gens || []).find((x) => x.gen === ev.gen);
+    return !!(g && mine && ev.seq >= mine.start && ev.seq <= g[1]);
+  }
+  return !st.genRestored && ev.seq <= rel.seq;
+}
+/** 받은 번호까지 반영됨으로: 보낸 범위의 결과 파일을 반영됨으로, releasedSeq를 올린다.
+ *  releasedSeq는 '이 번호까지 모두 반영됨'이므로, 번호 순으로 보아 rel이 받았다고 말하지 않는 첫 기록 앞에서 멈춘다
+ *  (그 뒤 기록은 받았다고 해도 다시 보내면 PC가 event_id로 중복을 건너뜀). 돌려주는 값: 새로 반영된 기록 수. */
+function releaseBy(st, rel) {
+  const before = st.releasedSeq || 0;
+  const pending = (st.events || []).filter((e) => e.seq > before).sort((a, b) => a.seq - b.seq);
+  let to = before, blocked = false;
+  for (const e of pending) {
+    if (!relCovers(st, rel, e)) { blocked = true; break; }
+    to = e.seq;
+  }
+  // PC가 아는 번호가 휴대폰 번호보다 크면(오래된 백업 복원 등) 다음 기록이 PC에 이미 있는 번호를 다시 쓰지 않게 번호를 올린다.
+  // 지금 세대 기록이 있으면 번호를 건너뛰는 대신 새 세대를 시작한다(세대 안 번호는 빈틈없이 이어지게).
+  const top = Math.max(rel.seq, ...(rel.g || []).filter((x) => x[0] !== st.gen).map((x) => x[1]));
+  if (top > (st.seq || 0)) {
+    const cur = isGen(st.gen) ? (st.gens || []).find((x) => x.gen === st.gen) : null;
+    if (cur && (st.seq || 0) >= cur.start) { st.seq = top; newGen(st); }
+    else { st.seq = top; if (cur) cur.start = top + 1; }
+  }
+  // 남은 미반영 기록이 없으면 지금 번호까지 반영됨(다음 기록은 그 뒤 번호)
+  if (!blocked) to = Math.max(to, st.seq || 0);
+  st.releasedSeq = Math.max(before, to);
+  for (const x of st.exports || []) if (!x.confirmed && x.to <= st.releasedSeq) { x.confirmed = true; x.via = 'list'; }
+  return (st.events || []).filter((e) => e.seq > before && e.seq <= st.releasedSeq).length;
+}
+/** 목록에 실려 온 rel을 적용한다. 돌려주는 값: { events: 새로 반영된 기록 수, photos: 새로 회수 확인된 사진 수 } 또는 null(rel 없음). */
+export function applyRelease(st, rel) {
+  if (!rel || !Number.isInteger(rel.seq) || rel.seq < 0) return null;
+  const events = releaseBy(st, rel);
+  const known = new Set([...(st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => e.body && e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)]);
+  const had = new Set(st.recoveredPhotos || []);
+  const add = (rel.ph || []).filter((id) => known.has(id) && !had.has(id));
+  if (add.length) st.recoveredPhotos = [...had, ...add];
+  return { events, photos: add.length };
+}
+
+// ------------------------------------------------------------ 백업 복원 (v0.13)
+const byKey = (arr, key) => { const m = new Map(); for (const x of arr || []) if (x && x[key] != null && !m.has(x[key])) m.set(x[key], x); return m; };
+const newerList = (a, b) => {
+  if (!a) return b; if (!b) return a;
+  if (a.work_date !== b.work_date) return a.work_date > b.work_date ? a : b;
+  return (a.assign_ver || 0) >= (b.assign_ver || 0) ? a : b;
+};
+/** 백업(bak)을 지금 상태(cur)에 복원한다. 새 상태를 돌려준다(cur·bak은 바꾸지 않음).
+ *  - 기록 번호 seq = max(지금, 백업): 이미 PC로 보낸 번호를 다시 쓰지 않는다(PC는 기기·번호가 같으면 거부).
+ *  - PC 연결 방식: 지금 휴대폰의 반영 상태(releasedSeq·결과 파일·사진 파일·회수 확인)를 지키고 백업 것과 합친다.
+ *    기록은 event_id로 합친다(지금 휴대폰에만 있는 기록도 남김). 번호가 겹치는 다른 기록은 뒤 번호로 옮긴다.
+ *    목록은 더 새 것(날짜·갱신본)을 쓴다.
+ *  - 단독 방식: 백업으로 바꾸되 seq만 지킨다(새 휴대폰으로 옮기는 용도).
+ *  - 기록 세대: 복원하면 늘 새 세대를 시작한다(다음 번호부터). 번호를 옮긴 기록도 새 세대로 적는다(옛 세대 번호 범위 밖이므로).
+ *    PC는 세대별로 받은 번호를 알려 주므로, 복원 전에 PC가 본 번호와 겹쳐도 새 기록을 '받음'으로 착각하지 않는다. */
+export function mergeRestore(cur, bak, gen = randomGen()) {
+  const out = { ...bak };
+  const seq = Math.max(cur.seq || 0, bak.seq || 0);
+  out.seq = seq;
+  // 세대 기록: 두 쪽의 세대 첫 번호를 합친다(같은 세대면 작은 번호)
+  const gm = new Map();
+  for (const x of [...(bak.gens || []), ...(cur.gens || [])]) if (x && isGen(x.gen)) gm.set(x.gen, Math.min(x.start, gm.has(x.gen) ? gm.get(x.gen) : Infinity));
+  out.gens = [...gm.entries()].map(([g, start]) => ({ gen: g, start })).sort((a, b) => a.start - b.start);
+  if ((bak.mode || cur.mode) !== 'PC') { newGen(out, { restored: true, gen }); return out; }
+  out.releasedSeq = Math.max(cur.releasedSeq || 0, bak.releasedSeq || 0);
+  const evs = byKey(bak.events, 'event_id');
+  for (const e of cur.events || []) if (!evs.has(e.event_id)) evs.set(e.event_id, e);
+  // 서로 다른 기록이 같은 번호(이전에 잘못 복원한 휴대폰): 백업 쪽 기록을 그 번호에 두고 나머지는 맨 뒤 번호로 옮긴다.
+  // 옮긴 기록을 PC가 이미 받았다면 PC는 event_id로 중복을 알아 건너뛴다(번호 충돌 없음).
+  const fromBak = new Set((bak.events || []).map((e) => e.event_id));
+  const events = [...evs.values()].sort((a, b) => a.seq - b.seq || (fromBak.has(b.event_id) ? 1 : 0) - (fromBak.has(a.event_id) ? 1 : 0));
+  const taken = new Set();
+  newGen(out, { restored: true, gen });  // 새 세대: seq + 1부터
+  let next = seq;
+  const moved = events.map((e) => {
+    if (!taken.has(e.seq)) { taken.add(e.seq); return e; }
+    next += 1; taken.add(next);
+    return { ...e, seq: next, gen };
+  });
+  out.seq = Math.max(seq, next);
+  out.events = moved.sort((a, b) => a.seq - b.seq);
+  const ex = byKey(cur.exports, 'code');
+  for (const x of bak.exports || []) { const c = ex.get(x.code); if (!c) ex.set(x.code, x); else if (x.confirmed && !c.confirmed) ex.set(x.code, x); }
+  out.exports = [...ex.values()].sort((a, b) => a.from - b.from || a.to - b.to);
+  for (const x of out.exports) if (!x.confirmed && x.to <= out.releasedSeq) x.confirmed = true;
+  out.photoExports = [...byKey([...(cur.photoExports || []), ...(bak.photoExports || [])], 'code').values()];
+  out.recoveredPhotos = [...new Set([...(cur.recoveredPhotos || []), ...(bak.recoveredPhotos || [])])];
+  out.keptPhotos = [...byKey([...(cur.keptPhotos || []), ...(bak.keptPhotos || [])], 'photo_id').values()];
+  const dl = newerList(cur.daylist, bak.daylist);
+  if (dl && dl === cur.daylist) { out.daylist = cur.daylist; out.lastBundleHash = cur.lastBundleHash; out.listChanges = cur.listChanges || {}; out.localOrder = cur.localOrder || null; }
+  out.fieldStops = [...byKey([...(bak.fieldStops || []), ...(cur.fieldStops || [])], 'request_id').values()];
+  return out;
+}
+
+// ------------------------------------------------------------ 하루 중 같은 날 목록 갱신 (v0.13)
+/** 같은 날짜의 새 목록(pl)에서, 이 휴대폰이 그날 이미 기록한 지점을 PC가 '재방문'처럼 돌려보낸 것(중간 결과 반영 뒤 PC가
+ *  수거한 품목을 빼고 prior_collected로 보냄)을 이 휴대폰 기록 기준으로 되돌린다. 그렇게 하지 않으면 같은 날 기록이
+ *  재방문으로 표시되고, 다 실은 품목 줄이 사라져 그 기록이 화면 계산에서 빠진다(기록이 '오래된 것'처럼 보임).
+ *  - 이전 목록에도 있던 지점(같은 팀 목록)만 본다. 그 지점의 since_seq(어느 기록부터 볼지)는 이전 값을 그대로.
+ *  - 이전 목록에 없던 재방문이 아니면 revisit 표시를 이전 값으로, 새 목록에 빠진 품목 줄 중 이 휴대폰 기록이 있는 줄은 이전 줄을 다시 넣는다.
+ *  pl.stops를 바꾸고, 되돌린 지점 수를 돌려준다. */
+export function carryOver(oldList, pl, events) {
+  if (!oldList || !pl || oldList.work_date !== pl.work_date) return 0;
+  const prev = new Map(oldList.stops.map((s) => [s.request_id, s]));
+  let n = 0;
+  for (const s of pl.stops) {
+    const o = prev.get(s.request_id);
+    if (!o) continue;
+    if (o.since_seq != null) s.since_seq = o.since_seq;
+    const mine = events.filter((e) => e.request_id === s.request_id && !(e.seq <= (o.since_seq || 0)));
+    if (!mine.length) continue;
+    let touched = false;
+    if (s.revisit && !o.revisit) { s.revisit = false; touched = true; }
+    // 이 휴대폰이 남긴 재방문 약속(REVISIT_APPT)을 PC가 방문 약속·도착 예정으로 돌려보낸 것: 이전 값으로(기록이 약속을 정함)
+    const appt = [...mine].reverse().find((e) => e.kind === 'REVISIT_APPT');
+    const b = appt && appt.body;
+    if (b && b.start && Array.isArray(s.appt) && s.appt[0] === b.start && (s.appt[1] || null) === (b.end || null) && JSON.stringify(s.appt) !== JSON.stringify(o.appt || null)) {
+      s.appt = o.appt || null;
+      if (appt.body.start && s.eta === appt.body.start) s.eta = o.eta || '';
+      touched = true;
+    }
+    const have = new Set((s.items || []).map((i) => i.line_id));
+    const used = new Set(mine.map((e) => e.body && e.body.line_id).filter(Boolean));
+    for (const it of o.items || []) {
+      if (!have.has(it.line_id) && used.has(it.line_id)) { s.items.push({ ...it }); touched = true; }
+    }
+    // 줄 순서는 이전 목록 순서대로(되살린 줄이 끝으로 가서 '정보 변경'으로 보이지 않게), 새 줄은 뒤에
+    const pos = new Map((o.items || []).map((x, i) => [x.line_id, i]));
+    s.items = s.items.map((x, i) => [x, pos.has(x.line_id) ? pos.get(x.line_id) : 1e6 + i]).sort((a, b) => a[1] - b[1]).map((x) => x[0]);
+    // 이 휴대폰이 현장에서 더한 줄(FIELD_ITEM_ADD)을 PC가 목록에 넣어 돌려보낸 것은 빼 둔다 — 기록에서 다시 만들어진다(같은 줄 ID)
+    const addedHere = new Set(mine.filter((e) => e.kind === 'FIELD_ITEM_ADD').map((e) => e.body && e.body.line_id));
+    const before = s.items.length;
+    s.items = s.items.filter((it) => !(addedHere.has(it.line_id) && !(o.items || []).some((x) => x.line_id === it.line_id)));
+    if (s.items.length !== before) touched = true;
+    // 이 휴대폰 기록이 있는 줄은 PC가 그 기록으로 바꾼 수량(확인 수량·prior_collected)을 쓰지 않는다 — 기록이 그 값을 정함.
+    // 단가·금액 상태(사무실이 확정한 단가 등)는 새 목록 것을 쓴다.
+    for (const it of s.items) {
+      const o2 = (o.items || []).find((x) => x.line_id === it.line_id);
+      if (!o2 || !used.has(it.line_id)) continue;
+      const q = { qty: o2.qty, qty_received: o2.qty_received, prior_collected: o2.prior_collected || 0 };
+      if (it.qty !== q.qty || it.qty_received !== q.qty_received || (it.prior_collected || 0) !== q.prior_collected) {
+        Object.assign(it, q);
+        const recv = (it.line_kind || 'RECEIVED') === 'RECEIVED';
+        it.amount = !recv ? 0 : it.price_status === 'CONFIRMED' && it.unit_price != null ? it.unit_price * (it.qty_received ?? it.qty) : null;
+        touched = true;
+      }
+    }
+    if (touched) n++;
+  }
+  return n;
 }

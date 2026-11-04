@@ -62,7 +62,7 @@ jobs:
           cmp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs web/vendor/maplibre/maplibre-gl-worker.mjs
           cmp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs
       - name: 앱 내장 수수료표가 원본 JSON과 같은지
-        run: python tools/build_fee_js.py && git diff --exit-code web/fees-data.js
+        run: python tools/check_generated.py
       - run: npm test
       - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)
 

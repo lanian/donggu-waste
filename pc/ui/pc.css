@@ -681,3 +681,56 @@ nav.tabs a.on { background: none; color: var(--navy-ink); border-bottom-color: v
 .cond-v .quick { flex-wrap: wrap; }
 .searchbox .cond { grid-template-columns: 92px minmax(0, 1fr) 92px minmax(0, 2fr) 92px minmax(0, 1fr); }
 .cond-v input[type=date] { flex: 0 0 auto; width: 128px; min-width: 0; font-size: 0.9rem; }
+
+/* ---- v0.13 화면 ---- */
+/* 작업 중인 단추(두 번 누름 막기) */
+button[aria-busy="true"] { cursor: progress; opacity: .7; }
+/* 백그라운드 작업 진행 띠 (오른쪽 아래) */
+.jobs { position: fixed; right: 20px; bottom: 20px; z-index: 60; display: flex; flex-direction: column; gap: 6px; align-items: stretch; width: min(360px, calc(100vw - 32px)); }
+.jobs:empty { display: none; }
+.jobrow { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--info); border-radius: var(--r-m); padding: 8px 12px; box-shadow: 0 4px 14px rgba(0, 0, 0, .18); font-size: 0.9286rem; }
+.jobrow .jt { justify-self: end; color: var(--muted); font-variant-numeric: tabular-nums; }
+.jobrow progress { grid-column: 1 / -1; width: 100%; height: 8px; accent-color: var(--navy-2); }
+.jobrow.done { border-left-color: var(--green); } .jobrow.bad { border-left-color: var(--red); } .jobrow.bad .jt { color: var(--bad); font-weight: 700; }
+/* 메뉴 숫자 */
+nav.side a .nav-badge { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); min-width: 20px; padding: 0 6px; border-radius: 10px; background: var(--red); color: #fff; font-size: 0.7857rem; font-weight: 700; line-height: 18px; text-align: center; }
+.shell.rail nav.side a .nav-badge { right: 2px; top: 4px; transform: none; min-width: 16px; padding: 0 4px; line-height: 16px; }
+/* 머리줄 도움말 */
+.topbar a.tb-help { font-size: 0.9286rem; font-weight: 600; padding: 4px 10px; border-radius: var(--r-s); white-space: nowrap; color: #fff; text-decoration: none; }
+.topbar a.tb-help:hover, .topbar a.tb-help.on { background: rgba(255, 255, 255, .14); }
+/* 운영 준비 점검·밀린 일·경고 띠 */
+.readiness .ready-list { list-style: none; margin: 6px 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 4px 16px; }
+.readiness .ready-list li { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-bottom: 1px dashed var(--line-2); }
+.readiness .mark { font-weight: 800; width: 1.2em; text-align: center; }
+.readiness li.ok .mark { color: var(--ok-fg); } .readiness li.no .mark { color: var(--bad); }
+.readiness li.ok .lbl { color: var(--muted); } .readiness li.no .lbl { font-weight: 700; }
+.readiness .fix { margin-left: auto; white-space: nowrap; }
+.ops-warn { margin-top: 0; }
+.notice.ok-note { background: var(--green-tint); border-color: var(--ok-line); border-left-color: var(--green); }
+.mine-box ul { margin: 6px 0; padding-left: 20px; }
+.stale-note:empty { display: none; }
+/* 결과 가져오기: 끌어 놓기 칸, 코드 */
+.dropzone { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 22px 16px; border: 2px dashed var(--border); border-radius: var(--r-m); background: var(--surface-2); text-align: center; }
+.dropzone.over { border-color: var(--navy-2); background: var(--navy-tint); }
+.btnlike { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; border: 1px solid var(--border); border-radius: var(--r-s); background: var(--btn-bg); font-weight: 600; cursor: pointer; }
+.btnlike input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.btnlike:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+.code-wrap { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.code-wrap .code-kind { font-weight: 800; color: var(--muted); font-size: 1.1rem; }
+.code-wrap .big { font-size: 1.4rem; letter-spacing: 2px; font-family: ui-monospace, Consolas, monospace; }
+tr.imp-row.bad td { background: var(--red-tint); }
+.block { display: block; }
+/* 충돌함 접수별 묶음 */
+table.conflicts tr.grp td { background: var(--th-bg); border-top: 2px solid var(--line); font-weight: 600; }
+table.conflicts tr.grp .row { gap: 6px; align-items: center; }
+.imp-bulk { margin: 6px 0; }
+/* 배정 부분 수정 */
+.edit-cols .insert-row { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.edit-cols .insert-row select { max-width: 100%; flex: 1; min-width: 180px; }
+.plan-stale { font-size: 1rem; }
+.pickmap { height: 420px; }
+.coordtools { gap: 4px; }
+/* 도움말 */
+.help-steps li { margin: 4px 0; }
+.help-exc td:first-child { white-space: nowrap; }
+@media print { .jobs { display: none !important; } }

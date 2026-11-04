@@ -17,8 +17,10 @@ import sys
 import tempfile
 import threading
 from functools import partial
+from datetime import datetime, timedelta
 from urllib.parse import unquote
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 from playwright.sync_api import expect, sync_playwright
@@ -29,6 +31,12 @@ SHOTS = WORK / "shots"
 SHOTS.mkdir(parents=True, exist_ok=True)
 ENV = {**os.environ, "DG_STATE": str(WORK / "state"), "DG_OUT": str(WORK / "out"), "DG_DB_KEY": os.environ.get("DG_DB_KEY", "test-db-key-not-for-production")}
 PIN = "246813"
+# 목록 날짜는 오늘(한국 시간): 지난 날짜 목록은 휴대폰이 '지난 목록' 띠를 띄우고 '지금 갈 곳'·진행 띠를 숨긴다(v0.13)
+_NOW = datetime.now(ZoneInfo("Asia/Seoul"))
+DAY = _NOW.date().isoformat()
+TOMORROW = (_NOW + timedelta(days=1)).date().isoformat()
+RELEASE_RE = r"(?:보관 종료 확인 코드|결과 반영 코드)[^:\n]*: (?:D-)?([0-9A-Z]{8})"
+PHOTO_RE = r"사진 회수 (?:확인 )?코드[^:\n]*: (?:P-)?([0-9A-Z]{8})"
 CHROME = os.environ.get("CHROME", "/usr/bin/google-chrome")
 passed = 0
 REQUESTS: list[tuple[str, str]] = []  # 브라우저가 보낸 모든 요청 (개인정보 반출 검사용)
@@ -159,7 +167,7 @@ def main():
             ctx.close()
 
             # 2) 목록 QR 수신 ----------------------------------------------------------
-            mk = py("make-bundle", "--device", dev_short, "--count", "20", "--date", "2026-11-03", "--reduce", "2")
+            mk = py("make-bundle", "--device", dev_short, "--count", "20", "--date", DAY, "--reduce", "2")
             short = re.search(r"묶음 ([0-9a-f]{8})", mk).group(1)
             frames = json.loads((WORK / "out" / f"bundle_{short}.frames.json").read_text())
             print("  ·", mk.splitlines()[0])
@@ -177,6 +185,19 @@ def main():
             page.get_by_role("button", name="오늘 순서 보기").click()
             expect(page.locator(".stop")).to_have_count(20)
             ok(page.locator(".stop").count() == 20, "오늘 순서 20건 표시")
+            # v0.13: 수신 코드는 PC가 받아 적을 때까지 첫 화면에 남음(다시 보기), 처음 설정 카드(작업자·길안내 앱·지도 받기·현장 점검)
+            rc_card = page.locator(".receipt-card")
+            ok(rc_card.is_visible() and receipt[:4] in rc_card.inner_text() and "R-" in rc_card.inner_text() and page.locator(".day-banner").count() == 0,
+               "첫 화면에 수신 코드(R-) 카드가 남음, 오늘 목록이라 지난 목록 띠 없음")
+            rc_card.get_by_role("button", name="수신 코드 다시 보기").click()
+            expect(page.locator(".code-show .fp")).to_have_text(re.compile(receipt[:4] + " ?" + receipt[4:]))
+            page.get_by_role("button", name="오늘 순서 보기").click()
+            page.locator(".receipt-card").get_by_role("button", name="PC에 알렸음").click()
+            expect(page.locator(".receipt-card")).to_have_count(0)
+            ok(True, "[수신 코드 다시 보기] → 같은 코드, [PC에 알렸음]을 누르면 카드 내림")
+            setup = page.locator(".setup-card")
+            ok(setup.is_visible() and setup.locator("li").count() == 4 and setup.locator("li.done").count() == 0
+               and all(t in setup.inner_text() for t in ("작업자", "길안내 앱", "지도 받기", "현장 점검")), "기기 등록 뒤 첫 화면: 처음 설정 4가지(작업자·길안내 앱·지도 받기·현장 점검), 아직 ✓ 없음")
             ok(page.locator(".stop").filter(has=page.locator(".chip.load")).count() == 16 and page.locator(".trip-head").count() == 1
                and "싣기 안내" in page.locator(".trip-head").inner_text() and "앞쪽 바닥" in page.locator(".trip-head").inner_text(),
                "품목별 취급 표시(16곳) · 싣기 안내 머리글(큰 짐 자리 남겨 두기)")
@@ -224,6 +245,8 @@ def main():
             page.goto(url + "#/home")
             page.get_by_role("group", name="작업자 바꾸기").get_by_role("button", name="이수거").click()
             expect(page.get_by_role("group", name="작업자 바꾸기").get_by_role("button", name="이수거")).to_have_attribute("aria-pressed", "true")
+            ok(page.locator(".setup-card li.setup-worker.done").count() == 1 and "✓" in page.locator(".setup-card li.setup-worker").inner_text()
+               and page.locator(".setup-card h2").inner_text().startswith("처음 설정 1/4"), "처음 설정: 작업자를 정하면 ✓ (1/4)")
             ok(page.get_by_placeholder("PIN").count() == 0, "작업자 바꾸기: PIN 없이 교대")
             page.goto(url + "#/backup")
             expect(page.get_by_text("PC 연결 방식의 안전용 백업")).to_be_visible()
@@ -272,11 +295,11 @@ def main():
             expect(page.locator(".thumbs img")).to_have_count(1, timeout=15000)
             ok(True, "현장 사진 촬영(파일 입력) → 앱 안에 암호화 저장, 찍은 시각 표시")
             page.get_by_text("재방문 약속 기록").click()
-            page.locator("details.revisit input[type=date]").fill("2026-11-05")
+            page.locator("details.revisit input[type=date]").fill(TOMORROW)
             page.locator("details.revisit input[type=time]").nth(0).fill("14:00")
             page.locator("details.revisit input[type=time]").nth(1).fill("16:00")
             page.get_by_role("button", name="약속 저장").click()
-            expect(page.get_by_text("재방문 약속: 2026-11-05 14:00~16:00")).to_be_visible()
+            expect(page.get_by_text(f"재방문 약속: {TOMORROW} 14:00~16:00")).to_be_visible()
             ok(True, "통화 후 재방문 약속(날짜·시간) 기록")
             received_total = page.locator(".fee dd").nth(0).inner_text()
 
@@ -348,6 +371,15 @@ def main():
             ok(page.locator(".line.field").last.locator(".row.left .val").inner_text().startswith("1"),
                "현장 추가 품목의 남은 대상 1 유지 (다른 품목 수거로 상쇄 안 됨)")
             page.get_by_label("현장 메모").fill("지하주차장 입구에 배출")
+            # 적는 중인 메모·재방문 날짜는 화면을 다시 그려도(기록 저장 등) 남는다 (v0.13)
+            page.get_by_text("재방문 약속 바꾸기").click()
+            page.locator("details.revisit input[type=time]").nth(0).fill("09:30")
+            page.evaluate("() => { window.__memoEl = document.querySelector('textarea[aria-label=\"현장 메모\"]'); }")
+            page.get_by_role("button", name="통화 완료").click()  # 기록 저장 → 화면 다시 그림
+            page.wait_for_function("() => window.__memoEl && !window.__memoEl.isConnected && document.querySelector('textarea[aria-label=\"현장 메모\"]')")
+            ok(page.get_by_label("현장 메모").input_value() == "지하주차장 입구에 배출" and page.locator("details.revisit input[type=time]").nth(0).input_value() == "09:30",
+               "다시 그려도 적던 현장 메모·재방문 시간 유지")
+            page.locator("details.revisit input[type=time]").nth(0).fill("14:00")
             page.get_by_role("button", name="메모 남기기").click()
             expect(page.locator(".memo-box li", has_text="지하주차장 입구")).to_be_visible()
             ok(True, "현장 메모 남기기")
@@ -419,15 +451,15 @@ def main():
             f = WORK / dl.value.suggested_filename
             dl.value.save_as(f)
             imp = py("import-result", str(f))
-            release = re.search(r"보관 종료 확인 코드: (\w+)", imp).group(1)
+            release = re.search(RELEASE_RE, imp).group(1)
             ok('"applied"' in imp, "결과 파일 PC 가져오기 성공 " + imp.splitlines()[0])
             ok('"unloads": 1' in imp, "휴대폰 하차 기록이 PC 하차 기록으로 반영")
             blob = f.read_bytes()
             ok(name.encode() not in blob and phone.replace("-", "").encode() not in blob, "결과 파일에 이름·전화번호 평문 없음")
-            page.get_by_placeholder("확인 코드 8자리", exact=True).fill(release)
-            page.get_by_role("button", name="확인 코드 입력").click()
+            page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(release)
+            page.get_by_role("button", name="결과 반영 코드 입력").click()
             expect(page.get_by_text("반영 확인됨")).to_be_visible()
-            ok(True, f"보관 종료 확인 코드 입력 → 반영 확인 ({release})")
+            ok(True, f"결과 반영 코드(D-) 입력 → 반영 확인 ({release})")
             evs = pc_sql("SELECT kind, body_json FROM result_event")
             kinds = {e["kind"] for e in evs}
             arr = [json.loads(e["body_json"]) for e in evs if e["kind"] == "ARRIVE"]
@@ -444,18 +476,18 @@ def main():
             pf = WORK / dlp.value.suggested_filename
             dlp.value.save_as(pf)
             pimp = py("import-photos", str(pf))
-            pcode = re.search(r"사진 회수 확인 코드: (\w+)", pimp).group(1)
+            pcode = re.search(PHOTO_RE, pimp).group(1)
             ok('"recovered": 1' in pimp, "사진 파일(.dgp) → PC 가져오기: 해시 대조 후 회수 1장")
-            page.get_by_placeholder("사진 회수 확인 코드 8자리").fill(pcode)
-            page.get_by_role("button", name="사진 회수 확인").click()
+            page.get_by_placeholder("사진 회수 코드 8자리").fill(pcode)
+            page.get_by_role("button", name="사진 회수 코드 입력").click()
             expect(page.get_by_text("미회수 0장")).to_be_visible()
-            ok(True, f"사진 회수 확인 코드 입력 → 미회수 0장 ({pcode})")
+            ok(True, f"사진 회수 코드(P-) 입력 → 미회수 0장 ({pcode})")
             page.screenshot(path=SHOTS / "07_export.png", full_page=True)
 
             # 보관 종료 확인 뒤: 끝난 곳(일부 수거)의 이름·연락처·주소를 휴대폰에서 지움
             page.goto(url + "#/home")
             expect(page.locator(".stop").first.locator("strong")).to_have_text("개인정보 정리됨")
-            ok(name not in page.locator("main").inner_text(), "보관 종료 확인 코드 입력 → 처리 끝난 곳의 이름·연락처·주소 휴대폰에서 삭제 (수거 기록은 유지)")
+            ok(name not in page.locator("main").inner_text(), "결과 반영 코드 입력 → 처리 끝난 곳의 이름·연락처·주소 휴대폰에서 삭제 (수거 기록은 유지)")
             page.screenshot(path=SHOTS / "07b_home_after_release.png")
 
             # 6) 오프라인에서도 동작 (서비스 워커) -----------------------------------
@@ -506,6 +538,7 @@ def main():
 
             midday_update(pw, url)
             pc_field(pw, url)
+            pc_sync(pw, url)
             solo(pw, url, WORK / "reg.y4m")
             juso_flow(pw, url)
             lock_and_bio(pw, port)
@@ -524,11 +557,11 @@ def midday_update(pw, url):
     """하루 중 새 목록: 1곳 추가, 1곳 빠짐, 순서 바꿈 → 요약 알림과 바뀐 곳 표시."""
     code = (
         "import json,sys; sys.path.insert(0,'.'); from dgpc import store, service as S; c=store.connect(); "
-        "b=[x for x in S.list_batches(c,'2026-11-03') if x['status']=='ACTIVE'][0]; "
+        f"b=[x for x in S.list_batches(c,'{DAY}') if x['status']=='ACTIVE'][0]; "
         "stops=[{'request_id':x['request_id'],'eta':x['eta']} for x in b['stops']]; stops.pop(5); stops[2],stops[3]=stops[3],stops[2]; "
         "fid=[k for k,r in S.FEE_ROWS.items() if r['status']=='CONFIRMED' and r['unit']=='EA'][0]; "
-        "r=S.create_request(c,{'name':'가상새집','phone':'01000009999','address':'가상시 동구 새길 1','spot_note':'','memo':'','planned_date':'2026-11-03','lat':35.15,'lon':126.92,'items':[{'fee_rate_id':fid,'qty':1}]}); "
-        "bid=S.confirm_plan(c,'2026-11-03',{b['crew_id']:stops+[{'request_id':r['id'],'eta':'15:00'}]})[0]['batch_id']; "
+        f"r=S.create_request(c,{{'name':'가상새집','phone':'01000009999','address':'가상시 동구 새길 1','spot_note':'','memo':'','planned_date':'{DAY}','lat':35.15,'lon':126.92,'items':[{{'fee_rate_id':fid,'qty':1}}]}}); "
+        f"bid=S.confirm_plan(c,'{DAY}',{{b['crew_id']:stops+[{{'request_id':r['id'],'eta':'15:00'}}]}})[0]['batch_id']; "
         "m=S.make_bundle(c,bid); print(json.dumps(m['frames']))")
     frames = json.loads(subprocess.run([sys.executable, "-c", code], cwd=ROOT / "pc", env=ENV, capture_output=True, text=True, check=True).stdout)
     write_y4m(WORK / "list2.y4m", [qr_png(f) for f in frames], hold=4, loops=4)
@@ -719,15 +752,169 @@ def pc_field(pw, url):
     cf = pc_sql("SELECT kind, conflict_reason FROM result_event WHERE apply_status='CONFLICT' AND kind IN ('CORRECTION','CANCEL_REQUEST')")
     ok({c["kind"] for c in cf} == {"CORRECTION", "CANCEL_REQUEST"} and pc_sql("SELECT phone FROM request WHERE name='가상새집'")[0]["phone"] == "01000009999",
        "정정·취소 요청은 PC 충돌함(확인 대상)으로, 원본은 확인 전까지 그대로")
-    release = re.search(r"보관 종료 확인 코드: (\w+)", imp).group(1)
-    page.get_by_placeholder("확인 코드 8자리", exact=True).fill(release)
-    page.get_by_role("button", name="확인 코드 입력").click()
+    release = re.search(RELEASE_RE, imp).group(1)
+    page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(release)
+    page.get_by_role("button", name="결과 반영 코드 입력").click()
     expect(page.get_by_text("반영 확인됨").first).to_be_visible()
     page.goto(url + "#/home")
     page.locator(".stop", has_text="가상새집").click()
     expect(page.get_by_text("PC로 보냄 · 사무실 확인 뒤 새 목록에 반영")).to_be_visible(timeout=15000)
     ok(True, "보낸 요청은 'PC로 보냄 · 사무실 확인 뒤 반영'으로 표시")
     ok(not errors, "페이지 스크립트 오류 없음(PC 연결 방식 현장 기능)" + (": " + "; ".join(errors) if errors else ""))
+    ctx.close()
+
+
+CAPTURE_JS = """() => { window.__dgDl = null; const oc = URL.createObjectURL.bind(URL); const orig = HTMLAnchorElement.prototype.click;
+  URL.createObjectURL = (b) => { if (b instanceof File) b.arrayBuffer().then((buf) => { let s = ''; new Uint8Array(buf).forEach((x) => { s += String.fromCharCode(x); });
+    window.__dgDl = { name: b.name, b64: btoa(s) }; }); return oc(b); };
+  HTMLAnchorElement.prototype.click = function () { if (!this.download) return orig.call(this); }; }"""
+
+
+def grab_file(page, click) -> Path:
+    """앱이 만든 파일(결과·사진·백업)을 내려받기 대신 그대로 받는다(같은 프로필 두 번째 다운로드 문제 회피)."""
+    page.evaluate("() => { window.__dgDl = null; }")
+    click()
+    page.wait_for_function("() => window.__dgDl", timeout=60000)
+    got = page.evaluate("window.__dgDl")
+    f = WORK / got["name"]
+    f.write_bytes(base64.b64decode(got["b64"]))
+    return f
+
+
+def pc_sync(pw, url):
+    """v0.13: 백업 복원 뒤 기록 번호 이어 쓰기 → PC 충돌 없음, 목록에 실린 결과 반영 정보(rel)로 코드 없이 반영 확인,
+    같은 날 갱신본에서 이 휴대폰 기록이 '재방문'으로 바뀌지 않음, 지난 목록 띠·목록 받기 전 미전송 알림, 도움말."""
+    print("[PC 연결 방식 동기화 (v0.13)]")
+    ctx, page = browser(pw, WORK / "list2.y4m")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(url)
+    unlock(page)
+    expect(page.locator(".stop").first).to_be_visible(timeout=20000)
+    page.evaluate(CAPTURE_JS)
+    # 도움말
+    page.goto(url + "#/settings")
+    page.get_by_role("button", name="현장 처리 순서").click()
+    expect(page.locator("h1", has_text="현장 처리 순서")).to_be_visible()
+    txt = page.locator("main").inner_text()
+    ok("수신 코드 R-" in txt and "결과 반영 코드 D-" in txt and "사진 회수 코드 P-" in txt and page.locator(".help-list li").count() >= 10,
+       "설정 → [현장 처리 순서] 한 장 도움말 (코드 세 가지 이름 포함)")
+    # 1) 안전용 백업: 지금(모든 기록 반영됨) 상태
+    page.goto(url + "#/export")
+    ok("미전송" not in page.locator("h2", has_text="결과 보내기").inner_text(), "시작: 보내지 않은 기록 없음")
+    page.goto(url + "#/backup")
+    page.get_by_placeholder("백업 비밀번호 (12자 이상)").fill("backup-pass-pc1")
+    page.get_by_placeholder("한 번 더").fill("backup-pass-pc1")
+    bfile = grab_file(page, lambda: page.get_by_role("button", name="암호화 백업 파일 만들기").click())
+    ok(bfile.read_bytes()[:4] == b"DGB1", f"PC 연결 방식 안전용 백업 ({bfile.name})")
+    # 2) 백업 뒤 기록 2건(메모·사진) → 결과 파일 → PC 가져옴, 사진 파일 → PC 회수 (휴대폰에는 코드를 넣지 않음)
+    page.goto(url + "#/home")
+    page.locator(".stop").nth(4).click()
+    sid = page.url.split("/stop/")[1]
+    page.get_by_label("현장 메모").fill("백업 뒤 메모")
+    page.get_by_role("button", name="메모 남기기").click()
+    expect(page.locator(".memo-box li", has_text="백업 뒤 메모")).to_be_visible()
+    page.locator("#cam-BEFORE").set_input_files(str(ROOT / "web/icons/icon-192.png"))
+    expect(page.locator(".thumbs img")).to_have_count(1, timeout=15000)
+    page.goto(url + "#/export")
+    f1 = grab_file(page, lambda: page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click())
+    imp1 = py("import-result", str(f1))
+    ok('"applied": 2' in imp1 or '"applied": 1' in imp1, "백업 뒤 기록 2건 → PC 가져옴 " + imp1.splitlines()[0])
+    pf = grab_file(page, lambda: page.get_by_role("button", name=re.compile("사진 파일 만들기")).click())
+    pimp = py("import-photos", str(pf))
+    ok('"recovered": 1' in pimp, "사진 1장 → PC 회수 (휴대폰에는 사진 회수 코드를 넣지 않음)")
+    # 3) 백업에서 복원 → 새 기록 → PC 가져오기: 충돌·순번 재사용 없음
+    page.goto(url + "#/backup")
+    page.locator("input[type=file][accept^='.dgb']").set_input_files(str(bfile))
+    page.get_by_placeholder("백업 비밀번호", exact=True).fill("backup-pass-pc1")
+    page.get_by_role("button", name="백업에서 복원").click()
+    expect(page.get_by_role("dialog")).to_contain_text("합칩니다")
+    page.get_by_role("button", name="복원하기").click()
+    expect(page.locator(".stop").first).to_be_visible(timeout=20000)
+    page.goto(url + f"#/stop/{sid}")
+    expect(page.locator(".memo-box li", has_text="백업 뒤 메모")).to_be_visible()
+    ok(page.locator(".thumbs img").count() == 1, "복원해도 백업 뒤 기록(메모·사진)이 지워지지 않음(합침)")
+    page.get_by_label("현장 메모").fill("복원 뒤 메모")
+    page.get_by_role("button", name="메모 남기기").click()
+    expect(page.locator(".memo-box li", has_text="복원 뒤 메모")).to_be_visible()
+    page.goto(url + "#/export")
+    f2 = grab_file(page, lambda: page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click())
+    imp2 = py("import-result", str(f2))
+    seqs = pc_sql("SELECT device_seq FROM result_event e JOIN device d ON d.id = e.device_id ORDER BY device_seq")
+    try:
+        reused = pc_sql("SELECT COUNT(*) AS n FROM result_event WHERE warning LIKE '%재사용%'")[0]["n"]
+    except subprocess.CalledProcessError:
+        reused = 0  # 경고 칸이 없는 이전 PC
+    ok('"conflict": 0' in imp2 and '"applied": 1' in imp2 and reused == 0 and len({x["device_seq"] for x in seqs}) == len(seqs),
+       "백업 복원 → 새 기록 → PC 가져오기: 충돌 0, 순번 재사용 없음(기록 번호 = max(지금, 백업)) " + imp2.splitlines()[0])
+    # 기록 세대(gen): 복원하면 새 세대 — 복원 뒤 기록은 백업 뒤 기록과 다른 세대로 PC에 저장, rel.g에 두 세대
+    try:
+        gq = pc_sql("SELECT gen, device_seq FROM result_event WHERE gen IS NOT NULL ORDER BY device_seq")[-3:]  # 백업 뒤 2건 + 복원 뒤 1건
+        gstart = pc_sql("SELECT gen, start_seq FROM device_gen ORDER BY start_seq")
+    except subprocess.CalledProcessError:
+        gq, gstart = [], []  # 세대를 모르는 이전 PC
+    if gstart:
+        ok(gq[0]["gen"] == gq[1]["gen"] != gq[2]["gen"] and gq[-1]["gen"] == gstart[-1]["gen"] and gstart[-1]["start_seq"] == gq[-1]["device_seq"],
+           f"복원 → 새 기록 세대(gen) {gq[-1]['gen']}(첫 번호 {gstart[-1]['start_seq']}), 백업 뒤 기록 세대 {gq[0]['gen']}와 따로 PC에 저장")
+    # 4) 아직 보내지 않은 기록 1건(rel 범위 밖)
+    page.goto(url + f"#/stop/{sid}")
+    page.get_by_label("현장 메모").fill("보내기 전 메모")
+    page.get_by_role("button", name="메모 남기기").click()
+    expect(page.locator(".memo-box li", has_text="보내기 전 메모")).to_be_visible()
+    ctx.close()
+    # 5) PC가 결과 반영 정보(rel)를 실은 같은 날 목록 → 휴대폰은 코드 없이 반영 확인, rel 범위 밖 기록은 미전송 그대로
+    code = ("import json,sys; sys.path.insert(0,'.'); from dgpc import store, service as S; c=store.connect(); "
+            f"b=[x for x in S.list_batches(c,'{DAY}') if x['status']=='ACTIVE'][0]; d=b['device_id']; pl,_=S.build_daylist(c,b['id']); "
+            "rel=S.release_info(c,d) if hasattr(S,'release_info') else {'seq':c.execute('SELECT MAX(device_seq) FROM result_event WHERE device_id=?',(d,)).fetchone()[0],"
+            "'ph':[r[0] for r in c.execute(\"SELECT photo_id FROM photo WHERE device_id=? AND recovery_status='RECOVERED'\",(d,))]}; "
+            "pl['rel']=rel; m=S.make_bundle(c,payload=pl,device_id=d); print(json.dumps({'frames':m['frames'],'rel':rel}))")
+    out = json.loads(subprocess.run([sys.executable, "-c", code], cwd=ROOT / "pc", env=ENV, capture_output=True, text=True, check=True).stdout)
+    write_y4m(WORK / "list3.y4m", [qr_png(f) for f in out["frames"]], hold=4, loops=4)
+    ctx, page = browser(pw, WORK / "list3.y4m")
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(url)
+    unlock(page)
+    page.get_by_role("button", name="오늘 목록 받기").first.click()
+    expect(page.get_by_text("목록을 받았습니다")).to_be_visible(timeout=60000)
+    note = page.locator(".rel-note").inner_text()
+    ok("결과 3건 반영 확인" in note and "사진 1장 회수 확인" in note and "코드 입력 필요 없음" in note,
+       f"목록의 결과 반영 정보(rel seq {out['rel']['seq']}, 사진 {len(out['rel']['ph'])}장) → '{note}'")
+    page.get_by_role("button", name="오늘 순서 보기").click()
+    expect(page.locator(".stop").first).to_be_visible()
+    flagged = [page.locator(".stop").nth(i).inner_text().replace("\n", " ")[:120] for i in range(page.locator(".stop").count())
+               if page.locator(".stop").nth(i).locator(".chip.warn", has_text="재방문").count() or page.locator(".stop").nth(i).locator(".chip.new", has_text="정보 변경").count()]
+    if flagged:
+        print("  · 표시된 곳:", flagged, page.evaluate("JSON.stringify(window.__dgDebug || null)"))
+    ok(not flagged,
+       "같은 날 갱신본: PC가 반영한 이 휴대폰 기록이 있는 곳도 '재방문'·'정보 변경'으로 바뀌지 않음")
+    page.goto(url + "#/export")
+    ok("미전송 1건" in page.locator("h2", has_text="결과 보내기").inner_text() and page.get_by_text("미회수 0장").is_visible()
+       and page.get_by_text("반영 확인됨(새 목록)").count() >= 1,
+       "코드 입력 없이: 결과 파일 반영 확인(새 목록)·사진 미회수 0장, rel 뒤의 기록 1건은 미전송 그대로")
+    # 코드 칸 확인: 사진 회수 코드를 결과 칸에 넣으면 알려 줌
+    pcode = re.search(PHOTO_RE, pimp).group(1)
+    page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(pcode)
+    page.get_by_role("button", name="결과 반영 코드 입력").click()
+    expect(page.locator(".code-card .msg.err")).to_contain_text("사진 회수 코드")
+    ok(True, "결과 반영 코드 칸에 사진 회수 코드(P-)를 넣으면 '사진 칸에 넣어 주세요'")
+    ok(not errors, "페이지 스크립트 오류 없음(동기화)" + (": " + "; ".join(errors) if errors else ""))
+    ctx.close()
+    # 6) 다음 날 아침(휴대폰 시계 +1일): 지난 날짜 목록 띠, '지금 갈 곳'·진행 띠 숨김, 목록 받기 전에 미전송 알림
+    ctx, page = browser(pw, WORK / "list3.y4m")
+    nxt = (_NOW + timedelta(days=1)).replace(hour=9, minute=5, second=0, microsecond=0)
+    page.clock.install(time=nxt)
+    page.goto(url)
+    unlock(page)
+    expect(page.locator(".day-banner")).to_be_visible(timeout=20000)
+    md = f"{_NOW.month}월 {_NOW.day}일 목록입니다 — 결과를 보내고 오늘 목록을 받으세요"
+    ok(md in page.locator(".day-banner").inner_text() and page.locator(".now-tag").count() == 0 and page.locator(".summary").count() == 0,
+       f"지난 날짜 목록: 큰 띠 '{md}', 지금 갈 곳·진행 띠 숨김")
+    page.screenshot(path=SHOTS / "40_yesterday_banner.png")
+    page.locator("section.actions").get_by_role("button", name="오늘 목록 받기").click()
+    expect(page.locator(".owed-card")).to_be_visible()
+    ok("보내지 않은 기록 1건" in page.locator(".owed-card").inner_text() and page.locator("video.cam").count() == 0,
+       "목록 받기 전에(QR을 다 읽기 전에) 지난 날짜 미전송 1건을 먼저 알림")
+    page.screenshot(path=SHOTS / "41_owed_before_scan.png")
     ctx.close()
 
 
@@ -814,6 +1001,21 @@ def lock_and_bio(pw, port):
     unlock(page)
     expect(page.locator(".thumbs img")).to_have_count(1, timeout=15000)
     ok(True, "잠긴 사이 찍은 사진 → 잠금 해제 뒤 암호화 저장 (사진 잃지 않음)")
+    # v0.13: 사진을 찍은 직후·수량을 고른 직후 바로 잠겨도(다른 창에서 열림 등) 잃지 않음 — 잠금은 저장이 끝난 뒤
+    lock_now = "() => new BroadcastChannel('dg-session').postMessage({ type: 'active', id: 'e2e-other-window' })"
+    page.locator("#cam-AFTER").set_input_files(str(ROOT / "web/icons/icon-512.png"))
+    page.evaluate(lock_now)
+    expect(page.get_by_placeholder("PIN")).to_be_visible(timeout=15000)
+    unlock(page)
+    expect(page.locator(".thumbs img")).to_have_count(2, timeout=15000)
+    ok(True, "사진을 찍자마자 잠겨도 → 잠금 해제 뒤 사진 2장 (저장 중 잠금은 저장을 기다림, 대기열에서 버리지 않음)")
+    got = page.locator(".line .row.got")
+    got.locator(".btn.step").last.click()  # 실은 수량 +1 (모아서 저장하는 수량)
+    page.evaluate(lock_now)
+    expect(page.get_by_placeholder("PIN")).to_be_visible(timeout=15000)
+    unlock(page)
+    expect(page.locator(".line .row.got .val")).to_have_text("1", timeout=15000)
+    ok(True, "수량을 고르자마자 잠겨도 → 잠금 해제 뒤 그 수량이 저장되어 있음")
     # 부재로 미수거: 사진이 있으므로 통과. 사진 없는 경우는 아래 확인
     ok(not errors, "잠금·생체 인증 스크립트 오류 없음" + (": " + "; ".join(errors) if errors else ""))
     ctx.close()
@@ -853,7 +1055,7 @@ def personal_from_bundle() -> list[str]:
     sys.path.insert(0, str(ROOT / "pc"))
     from sample_data import make_daylist
     out = []
-    for st in make_daylist(20, "2026-11-03", 1, seed=7)["stops"]:
+    for st in make_daylist(20, DAY, 1, seed=7)["stops"]:
         out += [st["name"], st["phone"], st["address"], st["receipt_no"], f"{st['lat']}", f"{st['lon']}"]
     return out
 

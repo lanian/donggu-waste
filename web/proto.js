@@ -216,6 +216,28 @@ const fromSid = (s) => {
   const b = Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '=='), (c) => c.charCodeAt(0));
   return uuidStr(b);
 };
+// v0.13: 목록 맨 위 선택 키 "rel" = 결과 반영 정보 {"seq": 정수, "ph": [사진 ID…], "g": [[세대, 번호]…]} (pc/dgproto.py norm_rel 과 같은 검사).
+// 서명된 봉투 안에 있으므로 PC가 보낸 값이다. 형식이 틀리면 없는 것으로 본다(손으로 코드 입력하던 이전 동작).
+// g(선택): 기록 세대(8자리 16진수)별로 그 세대 첫 번호부터 PC가 빠짐없이 받은 번호. 형식이 틀리면 g만 뺀다.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GEN_RE = /^[0-9a-f]{8}$/;
+export const REL_GENS_MAX = 16;
+export function normGens(v) {
+  if (!Array.isArray(v) || v.length > REL_GENS_MAX) return [];
+  const ok = v.every((x) => Array.isArray(x) && x.length === 2 && typeof x[0] === 'string' && GEN_RE.test(x[0]) && Number.isInteger(x[1]) && x[1] >= 0);
+  return ok ? v.map((x) => [x[0], x[1]]) : [];
+}
+export function normRel(rel) {
+  if (!rel || typeof rel !== 'object' || Array.isArray(rel)) return null;
+  if (!Number.isInteger(rel.seq) || rel.seq < 0) return null;
+  const ph = rel.ph == null ? [] : rel.ph;
+  if (!Array.isArray(ph) || !ph.every((x) => typeof x === 'string' && UUID_RE.test(x))) return null;
+  const out = { seq: rel.seq, ph: [...new Set(ph.map((x) => x.toLowerCase()))] };
+  const gm = new Map();
+  for (const [k, n] of normGens(rel.g)) gm.set(k, Math.max(n, gm.get(k) || 0));
+  if (gm.size) out.g = [...gm.entries()];
+  return out;
+}
 export function expandDaylist(p, feeTable) {
   if (!p || p.schema !== 'dg.daylist/2') return p;
   const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
@@ -224,7 +246,8 @@ export function expandDaylist(p, feeTable) {
     spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
     appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
     // v0.11: 선택 키 "rd" 감면율(%), "lv" 부과번호. 없으면 감면 없음·부과번호 없음(이전 목록 그대로).
-    levy_no: c.lv || '', reduction: c.rd ? { rate: Number(c.rd) } : null,
+    // v0.13: 선택 키 "ru" 감면액 끝수 단위(원, 10만 — 1원이면 싣지 않음). 감면이 있을 때만 뜻이 있음. 없으면 1원(이전 목록 그대로).
+    levy_no: c.lv || '', reduction: c.rd ? { rate: Number(c.rd), ...(Number(c.ru) === 10 ? { round_unit: 10 } : {}) } : null,
     // v0.10.1: "u"의 선택 5·6번째 값 = 반입지 위도·경도(길안내용). 없으면 null(이전 목록 그대로).
     unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3], lat: c.u[4] ?? null, lon: c.u[5] ?? null } : null,
     items: c.it.map(([sid, rid, qty, x = {}]) => {
@@ -243,5 +266,6 @@ export function expandDaylist(p, feeTable) {
   }));
   const fee_table = { version_id: p.fee };
   if (p.fb) Object.assign(fee_table, { base_version: p.fb, overrides: p.fo || {}, effective_from: p.fe || null });
-  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops };
+  const rel = normRel(p.rel);
+  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops, ...(rel ? { rel } : {}) };
 }

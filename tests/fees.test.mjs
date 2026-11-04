@@ -1,5 +1,7 @@
 // 공식 수수료표([별표 1]) 검색·계산 규칙 테스트
-import { searchFees, deriveStop, chosungOf, matchText } from '../web/fees.js';
+import { readFileSync } from 'node:fs';
+import { searchFees, deriveStop, chosungOf, matchText, applyReduction, LABEL } from '../web/fees.js';
+import { LABELS } from '../web/labels-data.js';
 import { BUILTIN_FEES as T } from '../web/fees-data.js';
 
 let n = 0;
@@ -45,4 +47,25 @@ const dup = deriveStop(rs, [{ seq: 1, request_id: 'r3', kind: 'FIELD_ITEM_ADD', 
 ok(dup.lines.length === 1, '다시 받은 목록의 현장 추가 줄 + 현장 추가 기록 → 한 줄(금액 두 배 안 됨)');
 // 현장 접수·정정·취소 요청 기록만으로는 '처리 중'이 아님
 ok(deriveStop({ request_id: 'r4', req_ver: 1, items: [] }, [{ seq: 1, request_id: 'r4', kind: 'FIELD_INTAKE', body: {} }]).progress !== 'STARTED', '현장 접수 기록만 있으면 처리 중으로 세지 않음');
+// PC·휴대폰 공통 계산 규칙: data/derive_vectors.json (tests/test_pc.py 도 같은 파일로 PC derive_pure·fee_summary 를 확인)
+const VEC = JSON.parse(readFileSync(new URL('../data/derive_vectors.json', import.meta.url), 'utf8')).vectors;
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+for (const v of VEC) {
+  const ru = v.reduction_round_unit || 1;
+  const stop = { request_id: 'v', req_ver: 1, items: v.items, ...(v.reduction_rate ? { reduction: { rate: v.reduction_rate, ...(ru !== 1 ? { round_unit: ru } : {}) } } : {}) };
+  const d = deriveStop(stop, v.events.map((e, i) => ({ request_id: 'v', seq: i + 1, kind: e.kind, body: e.body, ts: `2026-11-12T00:00:0${i}Z` })));
+  const x = v.expect, f = d.fee;
+  const lines = d.lines.map((l) => ({ line_id: l.line_id, kind: l.kind, price: l.price, qty_confirmed: l.qty_confirmed, qty_collected: l.qty_collected, remaining: l.remaining }));
+  const fee = { received: f.received, confirmed_subtotal: f.confirmedSubtotal, field_added: f.fieldAdded, diff: f.diff, pending_count: f.pendingCount, final: f.final, qty_by_unit: f.qtyByUnit };
+  const red = { rate: f.reductionRate, reduction: f.reduction, levied: f.levied };
+  const ar = applyReduction(f.final, v.reduction_rate, ru);
+  ok(same(lines, x.lines) && same(fee, x.fee) && same(red, x.reduction) && same(ar, x.reduction) && d.contact === x.contact && d.outcome === x.outcome,
+    `공통 벡터: ${v.name}`);
+}
+ok(VEC.filter((v) => v.reduction_round_unit === 10).length >= 3, '공통 벡터에 끝수 10원 사례가 있음(휴대폰도 10원 미만 버림)');
+ok(applyReduction(3015, 50, 7).reduction === 1507 && applyReduction(3015, 50).reduction === 1507, '모르는 끝수 단위·단위 없음 → 1원(이전과 같음)');
+// 표시 이름: data/labels.json → web/labels-data.js (tools/build_labels.py). 휴대폰 LABEL 은 공통 표에서 온다
+ok(same(LABEL.contact, LABELS.contact) && same(LABEL.sticker, LABELS.sticker) && LABEL.reason[''] === '사유 선택'
+  && same(Object.keys(LABEL.reason).slice(1), Object.keys(LABELS.reason)) && Object.keys(LABEL.outcome).every((k) => LABEL.outcome[k] === LABELS.status[k]),
+  '휴대폰 표시 이름(연락·사유·스티커·결과) = data/labels.json');
 console.log(`\n통과 ${n}개`);

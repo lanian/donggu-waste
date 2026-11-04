@@ -35,8 +35,17 @@ sys.path.insert(0, str(ROOT / "pc"))
 import dgproto as P  # noqa: E402
 from dgpc import service as S, store  # noqa: E402
 
-PORT = 8899
+def free_port() -> int:
+    """빈 포트(0번으로 묶어 운영체제가 고른 번호). 고정 포트를 쓰면 다른 실행·서버와 부딪친다."""
+    import socket
+    with socket.socket() as sk:
+        sk.bind(("127.0.0.1", 0))
+        return sk.getsockname()[1]
+
+
+PORT = free_port()
 URL = f"http://127.0.0.1:{PORT}/"
+SRV: list = []  # 서버 프로세스 (중간에 죽으면 바로 실패)
 PW = "test-password-123"
 PROXY = os.environ.get("HTTPS_PROXY", "")
 REQUESTS: list[tuple[str, str]] = []
@@ -45,6 +54,8 @@ passed = 0
 
 def ok(c, m):
     global passed
+    if SRV and SRV[0].poll() is not None:
+        raise AssertionError(f"PC 서버가 종료됨(코드 {SRV[0].returncode}) — {m}")
     if not c:
         raise AssertionError("실패: " + m)
     passed += 1
@@ -175,13 +186,18 @@ def main():
     FAKE["base"] = fake
     srv = subprocess.Popen([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "serve", "--port", str(PORT)], env=ENV,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    SRV.append(srv)
     try:
-        for _ in range(50):
+        for _ in range(100):
+            if srv.poll() is not None:  # 바로 죽었으면(포트·DB 문제) 기다리지 않고 실패
+                raise AssertionError("PC 서버가 시작하지 못했습니다:\n" + (srv.stdout.read() if srv.stdout else ""))
             try:
                 urllib.request.urlopen(URL, timeout=1)
                 break
             except Exception:
                 time.sleep(0.2)
+        else:
+            raise AssertionError("PC 서버가 20초 안에 응답하지 않았습니다")
         run()
     finally:
         srv.terminate()
@@ -197,7 +213,7 @@ def run():
     # 서버 보안
     no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     urllib.request.install_opener(no_proxy)
-    ok(raw_get("/api/state", {"Host": "evil.example:8899", "X-DG-CSRF": "1"}) == 403, "다른 Host 이름으로 접근 거부 (DNS 리바인딩 방지)")
+    ok(raw_get("/api/state", {"Host": f"evil.example:{PORT}", "X-DG-CSRF": "1"}) == 403, "다른 Host 이름으로 접근 거부 (DNS 리바인딩 방지)")
     ok(raw_get("/api/state") == 403, "CSRF 헤더 없는 API 요청 거부")
     ok(raw_get("/api/requests", {"X-DG-CSRF": "1"}) == 401, "로그인 없이 업무 자료 요청 거부")
 
@@ -207,7 +223,7 @@ def run():
     with playwright_with_fail_shot() as pw:
         b = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True,
                                args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", *([f"--proxy-server={PROXY}", "--proxy-bypass-list=127.0.0.1"] if PROXY else [])])
-        ctx = b.new_context(viewport={"width": 1400, "height": 950}, ignore_https_errors=True)
+        ctx = b.new_context(viewport={"width": 1400, "height": 950}, ignore_https_errors=True, permissions=["clipboard-read", "clipboard-write"])
         def rec(r):
             try:
                 body = (r.post_data_buffer or b"").decode("utf8", "ignore")
@@ -229,6 +245,13 @@ def run():
         page.get_by_role("button", name="관리자 계정 만들기").click()
         expect(page.get_by_role("heading", name="오늘 현황")).to_be_visible()
         ok(True, "최초 운영 관리자 계정(admin) 만들기 후 로그인 → 오늘 현황")
+        rdy = page.locator(".readiness")
+        expect(rdy).to_be_visible()
+        expect(rdy.locator("li.no", has_text="자동 백업 키")).to_be_visible()
+        ok(rdy.locator("li.no", has_text="자동 백업 키").locator("a.fix").get_attribute("href") == "#/settings/backup"
+           and rdy.locator("li.no", has_text="수거팀").count() == 1 and "✗" in rdy.inner_text(),
+           "오늘 현황(관리자): 운영 준비 점검(✗ 항목 + 고칠 설정 탭 링크)")
+        ok(page.locator(".ops-warn").is_visible() and "예약 작업" in page.locator(".ops-warn").inner_text(), "예약 작업 기록이 없으면 오늘 현황에 경고 띠")
 
         # 휴대폰 등록·팀
         page.goto(URL + "#/settings/devices")
@@ -241,21 +264,23 @@ def run():
         fp_pc = re.sub(r"\D", "", page.locator(".big").inner_text())
         fp_phone = P.fingerprint(P.pub_raw(phone.pc_sign), P.pub_raw(phone.pc_kex), phone.id, P.pub_raw(phone.kex), P.pub_raw(phone.sign))
         ok(fp_pc == fp_phone, f"화면에서 휴대폰 등록, 지문 9자리 일치 ({fp_pc})")
-        page.wait_for_timeout(2800)
+        # 등록하면 바로 목록이 새로 그려진다(기다리지 않음): 지문 확인 대기 행과 지문은 그대로 보임
+        expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("지문 확인 대기")
+        expect(page.locator(".big")).to_contain_text("지문")
         page.get_by_role("button", name="지문 같음 · 사용 시작").click()
-        expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("사용")
+        chooser = page.get_by_role("dialog", name="어느 팀에 연결할까요?")
+        expect(chooser).to_be_visible()
         ok(S.list_devices(store.connect())[0]["confirmed_at"], "지문 확인을 눌러야 사용 시작(그 전에는 목록을 보낼 수 없음)")
-        page.wait_for_timeout(2800)
+        chooser.get_by_label("새 팀 이름").fill("가상 1팀")
+        chooser.get_by_role("button", name="연결").click()
+        expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("사용")
         page.goto(URL + "#/settings/crews")
-        new_row = page.locator("tr", has=page.get_by_placeholder("새 팀 이름"))
-        new_row.get_by_placeholder("새 팀 이름").fill("가상 1팀")
-        new_row.locator("select").select_option(index=1)
-        new_row.get_by_role("button", name="추가").click()
         expect(page.locator("td input").first).to_have_value("가상 1팀")
-        ok(True, "수거팀 추가·휴대폰 연결")
+        ok(page.get_by_label("연결 휴대폰").first.input_value() == S.list_devices(store.connect())[0]["id"],
+           "지문 같음 → '어느 팀에 연결할까요?'에서 새 팀(가상 1팀) 만들고 휴대폰 연결")
 
         # 접수 3건
-        def intake(name, phone_no, addr, query, qty=1, click_map=None, appt=None):
+        def intake(name, phone_no, addr, query, qty=1, click_map=None, appt=None, dbl=False):
             page.goto(URL + "#/request/new")
             expect(page.get_by_role("heading", name="전화 접수 등록")).to_be_visible()
             # 화면이 다 그려진 뒤(예약 달력까지) 입력한다: 늦게 끝난 다시 그리기가 입력한 양식을 덮지 않게
@@ -278,28 +303,47 @@ def run():
             if click_map:
                 canvas = page.locator(".mapbox canvas")
                 expect(canvas).to_be_visible(timeout=30000)
-                page.wait_for_timeout(1500)
-                canvas.click(position=click_map)
+                for _ in range(20):  # 지도 클릭 처리기가 붙을 때까지 다시 누른다(바탕 지도가 늦게 와도)
+                    canvas.click(position=click_map)
+                    if page.locator("input[readonly]").first.input_value():
+                        break
+                    page.wait_for_timeout(300)
                 expect(page.locator("input[readonly]").first).not_to_have_value("")
-            for label, val in (("이름", name), ("연락처", phone_no), ("배출 주소", addr)):  # 혹시 다시 그려져 비었으면 채운다
-                if not page.get_by_label(label).input_value():
-                    page.get_by_label(label).fill(val)
-            expect(page.get_by_label("이름")).to_have_value(name)
-            page.get_by_role("button", name="접수 등록").click()
+            # 늦게 끝난 다시 그리기가 입력한 양식을 지우지 않는지(회귀 시험): 1초 뒤에도 적은 값이 그대로
+            page.wait_for_timeout(1000)
+            for label, val in (("이름", name), ("배출 주소", addr), ("상세 배출 위치", "현관 앞")):
+                expect(page.get_by_label(label)).to_have_value(val)
+            expect(page.get_by_label("연락처")).to_have_value(re.compile("^" + "-?".join(re.sub(r"\D", "", phone_no)) + "$"))  # 칸을 떠나면 010-0000-0000 꼴로
+            expect(page.locator(".items .it")).to_have_count(1)
+            if dbl:
+                page.get_by_role("button", name="접수 등록").dblclick()
+            else:
+                page.get_by_role("button", name="접수 등록").click()
 
         intake("가상하나", "010-0000-5001", "가상시 동구 시험로 1", "3인용 소파", 1, click_map={"x": 300, "y": 180}, appt=("09:00", "11:00"))
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
         r1_url = page.url
         r1_head = page.get_by_role("heading", name=re.compile("접수 DG-")).inner_text()
         page.screenshot(path=SHOTS / "pc_01_request.png", full_page=True)
+        # 저장 뒤: [+ 다음 접수]·[주민 안내 문구 복사] (이름·연락처·주소 없는 안내 글이 클립보드로)
+        done = page.locator(".ok-note")
+        expect(done).to_contain_text("등록을 마쳤습니다")
+        done.get_by_role("button", name="주민 안내 문구 복사").click()
+        expect(page.get_by_text("주민 안내 문구를 복사했습니다")).to_be_visible()
+        clip = page.evaluate("() => navigator.clipboard.readText()")
+        ok(r1_head.replace("접수 ", "") in clip and "배출일" in clip and "문의" in clip and "가상하나" not in clip and "5001" not in clip and "시험로" not in clip,
+           "접수 저장 뒤 [주민 안내 문구 복사]: 접수번호·배출일·금액·문의처(이름·연락처·주소 없음)가 클립보드로")
+        done.get_by_role("button", name="+ 다음 접수").click()
+        expect(page.get_by_role("heading", name="전화 접수 등록")).to_be_visible()
         intake("가상둘", "01000005001", "가상시 동구 시험로 2", "장농", 2, click_map={"x": 420, "y": 260})
         expect(page.get_by_text(re.compile("비슷한 미완료 접수 1건"))).to_be_visible()
         ok(True, "같은 연락처 접수 → 중복 후보 경고 (자동 병합 없음)")
         page.get_by_role("button", name="접수 등록").click()
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
-        intake("가상셋", "01000005003", "가상시 동구 시험로 3", "대리석")
+        intake("가상셋", "01000005003", "가상시 동구 시험로 3", "대리석", dbl=True)
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
         ok(page.get_by_text("금액 확인 대기").first.is_visible(), "대리석 식탁(원문 규격 겹침) → 금액 확인 대기")
+        ok(S.one(store.connect(), "SELECT COUNT(*) AS n FROM request WHERE name='가상셋'")["n"] == 1, "[접수 등록] 두 번 누름(더블클릭) → 접수 1건만 (단추 잠금 + client_req_id)")
 
         # 수정 이력
         page.goto(r1_url)
@@ -314,6 +358,33 @@ def run():
         page.get_by_role("button", name="수정 저장").click()
         expect(page.get_by_text(re.compile("주민 요청: 위치 보완"))).to_be_visible()
         ok(True, "수정 사유 필수, 버전 이력 표시")
+        # 409: 내가 고치는 사이 다른 담당자가 먼저 저장 → 저장하지 않고 안내, 적은 값 유지 → [다시 열기] → [내 값 다시 넣기] → 저장
+        r1id_ = r1_url.rsplit("/", 1)[1]
+        settled(page)
+        page.get_by_label("상세 배출 위치").fill("102동 쓰레기장 옆")
+        st_other = page.evaluate("""async (id) => {
+            const r = await (await fetch('/api/requests/' + id, {headers: {'X-DG-CSRF': '1'}})).json();
+            const body = {name: r.name, phone: r.phone, address: r.address, spot_note: r.spot_note, memo: '다른 담당자 메모', planned_date: r.planned_date, appt_start: r.appt_start,
+              appt_end: r.appt_end, must_today: r.must_today, urgent: r.urgent, priority: r.priority, lat: r.lat, lon: r.lon, geo_source: r.geo_source, dong: r.dong || '', channel: r.channel,
+              items: r.items.map((i) => ({line_id: i.line_id, fee_rate_id: i.fee_rate_id, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty})),
+              reason: '다른 담당자 수정(가상)', req_ver: r.req_ver};
+            return (await fetch('/api/requests/' + id, {method: 'POST', headers: {'X-DG-CSRF': '1', 'Content-Type': 'application/json'}, body: JSON.stringify(body)})).status; }""", r1id_)
+        page.get_by_placeholder("수정 사유 (필수)").fill("주민 요청: 위치 다시 바꿈")
+        page.get_by_role("button", name="수정 저장").click()
+        expect(page.locator(".stale-note")).to_contain_text("다른 곳에서 바뀌었습니다")
+        ok(st_other == 200 and page.get_by_label("상세 배출 위치").input_value() == "102동 쓰레기장 옆"
+           and S.get_request(store.connect(), r1id_)["spot_note"] == "101동 현관 앞", "접수 수정 409(다른 곳에서 먼저 저장): 저장하지 않고 안내, 적은 값은 화면에 그대로")
+        page.locator(".stale-note").get_by_role("button", name="다시 열기").click()
+        mine = page.locator(".mine-box")
+        expect(mine).to_contain_text("102동 쓰레기장 옆")
+        expect(page.get_by_label("요청 메모")).to_have_value("다른 담당자 메모")
+        mine.get_by_role("button", name="내 값 다시 넣기").click()
+        expect(page.get_by_label("상세 배출 위치")).to_have_value("102동 쓰레기장 옆")
+        expect(page.get_by_placeholder("수정 사유 (필수)")).to_have_value("주민 요청: 위치 다시 바꿈")
+        page.get_by_role("button", name="수정 저장").click()
+        expect(page.get_by_text("주민 요청: 위치 다시 바꿈")).to_be_visible()
+        g1 = S.get_request(store.connect(), r1id_)
+        ok(g1["spot_note"] == "102동 쓰레기장 옆" and g1["memo"] == "다른 담당자 메모", "[다시 열기] → 내가 고친 칸만 다시 넣고 저장 (다른 담당자가 바꾼 메모는 유지)")
 
         page.goto(URL + "#/requests")
         expect(page.locator("tbody tr")).to_have_count(3)
@@ -330,8 +401,17 @@ def run():
         expect(page.locator(".day-load")).to_contain_text(re.compile(r"3건 · 적재 추정 [\d.]+m³ / 고른 팀 [\d.]+m³"))
         ok(page.locator(".stopline .stop-items").count() == 2 and page.locator(".day-load").get_by_text(re.compile("무게 추정")).is_visible(),
            "하루 물량 점검(건수·적재·무게·작업 시간 ↔ 팀 용량)과 지점별 품목 표시")
-        page.wait_for_timeout(2500)
+        expect(page.locator(".dispatch .mapbox canvas")).to_be_visible(timeout=30000)
+        quiet(page, 3000)
         page.screenshot(path=SHOTS / "pc_03_dispatch.png")
+        # 날짜를 바꾸면 이전 계산 결과로는 확정하지 못함(다시 계산하라는 띠), 되돌리면 다시 확정 가능
+        tomorrow = (dt.date.fromisoformat(today) + dt.timedelta(days=1)).isoformat()
+        page.get_by_label("수거일").fill(tomorrow)
+        expect(page.locator(".plan-stale")).to_contain_text("계산 결과입니다")
+        ok(page.get_by_role("button", name="배정 확정").is_disabled(), "노선 계산 뒤 수거일을 바꾸면 'M/D 계산 결과입니다' 띠, [배정 확정] 꺼짐")
+        page.get_by_label("수거일").fill(today)
+        expect(page.locator(".plan-stale")).to_have_count(0)
+        expect(page.get_by_role("button", name="배정 확정")).to_be_enabled()
         page.get_by_role("button", name="1번 아래로").first.click()
         expect(page.locator(".route .stopline").nth(1)).to_contain_text("누적 적재(추정) 4.2m³")
         first_load = page.locator(".route .stopline").nth(0).inner_text()
@@ -344,6 +424,43 @@ def run():
         page.get_by_role("button", name="배정 확정").click()
         expect(page.get_by_role("heading", name="목록 전송 (QR)")).to_be_visible()
 
+        # 확정된 배정 부분 수정(다시 계산 없이): 넣기 → 순서 → 빼기, 409(다른 곳에서 먼저 고침) → 다시 불러오기
+        page.goto(URL + "#/dispatch")
+        page.get_by_label("수거일").fill(today)
+        page.get_by_role("button", name="현재 배정 불러오기").click()
+        ec = page.locator(".edit-cols .route").first
+        expect(ec).to_contain_text("2곳")
+        ver0 = int(re.search(r"갱신본 (\d+)", ec.inner_text()).group(1))
+        ec.get_by_label("가상 1팀에 넣을 접수").select_option(ec.get_by_label("가상 1팀에 넣을 접수").locator("option", has_text="가상셋").get_attribute("value"))
+        ec.get_by_role("button", name="가상 1팀에 넣기").click()
+        expect(ec).to_contain_text("3곳")
+        expect(ec.locator(".stopline").nth(2)).to_contain_text("가상셋")
+        ec.get_by_role("button", name="가상 1팀 3번 위로").click()
+        expect(ec.locator(".stopline").nth(1)).to_contain_text("가상셋")
+        page.screenshot(path=SHOTS / "pc_03b_assign_edit.png", full_page=True)
+        v13shot(page, "dispatch-edit")
+        ok(f"갱신본 {ver0 + 2}" in ec.inner_text() and page.get_by_text(re.compile("목록을 휴대폰에 다시 보내야")).first.is_visible(),
+           f"현재 배정 불러오기 → 넣기(끝)·순서 바꾸기: 고칠 때마다 새 갱신본({ver0}→{ver0 + 2}), 다시 보내기 안내")
+        # 다른 화면(다른 담당자)이 먼저 고침 → 이 화면의 다음 수정은 409
+        cur_now = page.evaluate("async (d) => (await (await fetch('/api/assign/current?date=' + d, {headers: {'X-DG-CSRF': '1'}})).json())", today)
+        b0 = cur_now[0]
+        st_edit = page.evaluate("""async ([d, b]) => (await fetch('/api/assign/edit', {method: 'POST', headers: {'X-DG-CSRF': '1', 'Content-Type': 'application/json'},
+            body: JSON.stringify({date: d, op: 'reorder', crew_id: b.crew_id, order: b.stops.map((x) => x.request_id), assign_ver: {[b.crew_id]: b.assign_ver}})})).status""", [today, b0])
+        ec.get_by_role("button", name="가상 1팀 1번 아래로").click()
+        expect(page.get_by_text("배정이 다른 곳에서 바뀌었습니다")).to_be_visible()
+        ok(st_edit == 200, "부분 수정 409: 다른 곳에서 먼저 고친 배정은 고치지 않고 '배정이 다른 곳에서 바뀌었습니다' + [다시 불러오기]")
+        page.get_by_role("button", name="다시 불러오기").click()
+        ec = page.locator(".edit-cols .route").first
+        expect(ec).to_contain_text(f"갱신본 {ver0 + 3}")
+        ec.get_by_role("button", name="가상 1팀 2번 빼기").click()
+        page.locator(".dlg").get_by_role("button", name="빼기").click()
+        expect(ec).to_contain_text("2곳")
+        cur_end = page.evaluate("async (d) => (await (await fetch('/api/assign/current?date=' + d, {headers: {'X-DG-CSRF': '1'}})).json())", today)
+        ok(len(cur_end[0]["stops"]) == 2 and cur_end[0]["assign_ver"] == ver0 + 4 and S.get_request(store.connect(), S.one(store.connect(), "SELECT id FROM request WHERE name='가상셋'")["id"])["status"] == "RECEIVED",
+           "부분 수정 [빼기] → 그 접수는 미배정(접수 상태)으로, 팀 갱신본 +1")
+        page.goto(URL + "#/send")
+        expect(page.get_by_role("heading", name="목록 전송 (QR)")).to_be_visible()
+
         # QR 표시 → 휴대폰 수신 → 수신 확인
         with page.expect_popup() as pop:
             page.get_by_role("button", name="QR 표시").click()
@@ -354,10 +471,21 @@ def run():
         head, payload, receipt = phone.receive(frames)
         ok(len(payload["stops"]) == 2 and payload["stops"][0]["phone"].startswith("010"), f"휴대폰이 목록 2건 수신 (QR {len(frames)}장)")
         qr.close()
-        page.get_by_placeholder(re.compile("수신 확인 코드")).fill(receipt)
+        page.get_by_placeholder(re.compile("수신 코드")).fill("R-" + receipt[:4] + " " + receipt[4:])
         page.get_by_role("button", name="수신 확인").click()
         expect(page.get_by_text("휴대폰 수신 확인됨")).to_be_visible()
-        ok(True, f"수신 확인 코드 입력 → 수신 확인 ({receipt})")
+        ok(True, f"수신 코드(R-) 입력 → 수신 확인 ({receipt})")
+        # 휴대폰이 이미 받은 날을 다시 확정하려 하면: "수거팀이 QR을 다시 받아야 합니다"
+        page.goto(URL + "#/dispatch")
+        page.get_by_label("수거일").fill(today)
+        page.get_by_role("button", name="노선 계산").click()
+        expect(page.get_by_role("button", name="배정 확정")).to_be_enabled(timeout=20000)
+        page.get_by_role("button", name="배정 확정").click()
+        rd = page.get_by_role("dialog", name="수거팀이 QR을 다시 받아야 합니다")
+        expect(rd).to_contain_text("가상 1팀")
+        rd.get_by_role("button", name="취소").click()
+        expect(rd).to_have_count(0)
+        ok(S.one(store.connect(), "SELECT COUNT(*) AS n FROM transfer_bundle WHERE receipt_confirmed_at IS NOT NULL")["n"] == 1, "휴대폰이 받은 배정을 다시 확정 → 확인창(취소하면 그대로)")
 
         # 결과·사진 파일
         s1 = payload["stops"][0]
@@ -375,15 +503,30 @@ def run():
         pfile.write_bytes(phone.seal({"schema": "dg.photos/1", "photos": [{"photo_id": pid, "request_id": s1["request_id"], "phase": "AFTER",
                                      "sha256": hashlib.sha256(photo_raw).hexdigest(), "data": base64.b64encode(photo_raw).decode()}]}, S.TYPE_PHOTOS))
         page.goto(URL + "#/results")
-        page.locator("input[type=file]").nth(0).set_input_files(str(rfile))
-        page.get_by_role("button", name="가져오기").nth(0).click()
-        expect(page.get_by_text("보관 종료 확인 코드")).to_be_visible()
-        ok(page.locator("dd").first.inner_text() == "6", "결과 파일 가져오기: 6건 반영(도착·스티커 확인 포함), 보관 종료 확인 코드 표시")
-        page.locator("input[type=file]").nth(1).set_input_files(str(pfile))
-        page.get_by_role("button", name="가져오기").nth(1).click()
-        expect(page.get_by_text("사진 회수 확인 코드")).to_be_visible()
-        ok(True, "사진 파일 가져오기: 해시 대조 후 사진 회수 확인 코드 표시")
+        # 여러 파일 한꺼번에(사진을 먼저 골라도 결과를 먼저 가져옴) → 파일마다 결과 줄(팀·기기·코드)
+        page.get_by_label("결과·사진 파일 (여러 개)").set_input_files([str(pfile), str(rfile)])
+        run_rows = page.locator("#import-run .imp-row")
+        expect(run_rows).to_have_count(2)
+        rrow = run_rows.filter(has_text="DG_R_test_1-4.dgr")
+        prow = run_rows.filter(has_text="DG_P_test.dgp")
+        expect(rrow).to_contain_text("결과 반영 코드")
+        expect(prow).to_contain_text("사진 회수 코드")
+        expect(rrow).to_contain_text("가상 1팀")
+        ok("반영 6" in rrow.inner_text() and "D-" in rrow.inner_text() and "P-" in prow.inner_text() and "사진 회수 1" in prow.inner_text(),
+           "결과·사진 파일 여러 개 한꺼번에: 결과 6건 반영 + 결과 반영 코드(D-), 사진 해시 대조 후 사진 회수 코드(P-), 팀·기기 표시")
+        rc_tbl = page.locator("#recent-imports tbody tr")
+        expect(rc_tbl).to_have_count(2)
+        d_code = re.sub(r"\s", "", rrow.locator(".big").inner_text())
+        ok(len(d_code) == 8 and d_code in re.sub(r"\s", "", page.locator("#recent-imports").inner_text()), f"최근 가져오기 표: 결과 반영 코드 D-{d_code}·사진 회수 코드 다시 보기")
         page.screenshot(path=SHOTS / "pc_05_results.png", full_page=True)
+        v13shot(page, "results")
+        page.reload()
+        expect(page.locator("#recent-imports tbody tr")).to_have_count(2)
+        first_rec = page.locator("#recent-imports tbody tr", has_text="결과").first
+        expect(first_rec).to_contain_text("휴대폰 입력 전")
+        first_rec.get_by_role("button", name="휴대폰에 입력함").click()
+        expect(page.locator("#recent-imports tbody tr", has_text="결과").first).to_contain_text("휴대폰 입력함")
+        ok(True, "화면을 다시 열어도 최근 가져오기의 코드가 남고, [휴대폰에 입력함]으로 휴대폰 확인 표시")
 
         # v0.12 휴대폰(PC 연결 방식) 현장 접수·정정 요청 → 충돌함(지금 값 → 요청 값) 반영, 현장 접수 확인 완료
         s2 = payload["stops"][1]
@@ -395,9 +538,8 @@ def run():
         f2 = WORK / "DG_R_test_field.dgr"
         f2.write_bytes(phone.seal({"schema": "dg.result/1", "work_date": today, "events": [fev, cev]}, P.TYPE_RESULT))
         page.goto(URL + "#/results")
-        page.locator("input[type=file]").nth(0).set_input_files(str(f2))
-        page.get_by_role("button", name="가져오기").nth(0).click()
-        expect(page.get_by_text("현장 접수 만듦")).to_be_visible()
+        page.get_by_label("결과·사진 파일 (여러 개)").set_input_files(str(f2))
+        expect(page.locator("#import-run .imp-row")).to_contain_text("현장 접수 만듦")
         page.locator(".conf-tabs .qchip", has_text="충돌").click()
         expect(page.locator("#conflicts tr", has_text="정정 요청")).to_have_count(0)
         page.locator(".conf-tabs .qchip", has_text="현장 요청").click()
@@ -418,6 +560,46 @@ def run():
         page.get_by_role("button", name="확인 완료").click()
         expect(page.get_by_text(re.compile("사무실 확인 \\("))).to_be_visible()
         ok(S.get_request(store.connect(), fid)["field_checked_at"] and S.get_request(store.connect(), fid)["channel"] == "현장", "현장 접수 상세: 안내 → [확인 완료] (경로 '현장')")
+
+        # 충돌함 묶음 처리: 배정에서 뺀 접수(가상셋)의 옛 목록 결과 2개 파일 → 가져오기별 [모두 거부] → 접수별 [모두 거부]
+        c_ = store.connect()
+        g3r = S.one(c_, "SELECT id FROM request WHERE name='가상셋'")["id"]
+        st3 = {"request_id": g3r, "assign_ver": ver0 + 1, "req_ver": S.get_request(c_, g3r)["req_ver"]}
+        l3 = S.get_request(c_, g3r)["items"][0]["line_id"]
+        cfiles = []
+        for n in (1, 2):
+            evs3 = [phone.ev(st3, "ITEM_RESULT", {"line_id": l3, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}), phone.ev(st3, "ATTEMPT", {"outcome": "DONE"})]
+            fx = WORK / f"DG_R_old_{n}.dgr"
+            fx.write_bytes(phone.seal({"schema": "dg.result/1", "work_date": today, "events": evs3}, P.TYPE_RESULT))
+            cfiles.append((fx, evs3[0]["event_id"]))
+        page.goto(URL + "#/results")
+        page.get_by_label("결과·사진 파일 (여러 개)").set_input_files([str(f) for f, _ in cfiles])
+        expect(page.locator("#import-run .imp-row")).to_have_count(2)
+        expect(page.locator("#conflicts tr.ev")).to_have_count(4)
+        grp = page.locator("#conflicts tr.grp", has_text="가상셋")
+        expect(grp).to_contain_text("기록 4건")
+        expect(page.locator("nav.side a[data-k=results] .nav-badge")).to_have_text("4")
+        ok(page.locator("#conflicts tr.ev").first.inner_text().find("배정") >= 0 or "빠진" in page.locator("#conflicts").inner_text(),
+           "충돌함: 접수별로 묶어 보이고(기록 4건), 메뉴 [결과 가져오기]에 숫자 4")
+        page.screenshot(path=SHOTS / "pc_05d_conflicts.png", full_page=True)
+        page.locator("#conflicts").scroll_into_view_if_needed()
+        v13shot(page, "conflicts")
+        imp2 = S.one(c_, "SELECT import_id FROM result_event WHERE event_id=?", (cfiles[1][1],))["import_id"]
+        page.get_by_label("가져오기 고르기").select_option(imp2)
+        page.get_by_role("button", name="이 가져오기 모두 거부").click()
+        bd = page.get_by_role("dialog")
+        bd.get_by_label("판단 사유").fill("옛 목록 결과 — 배정에서 뺀 건(가상)")
+        bd.get_by_role("button", name="모두 거부").click()
+        expect(page.get_by_text("2건 거부했습니다")).to_be_visible()
+        expect(page.locator("#conflicts tr.ev")).to_have_count(2)
+        grp.get_by_role("button", name="이 접수 기록 모두 거부").click()
+        bd = page.get_by_role("dialog")
+        bd.get_by_label("판단 사유").fill("옛 목록 결과 — 배정에서 뺀 건(가상)")
+        bd.get_by_role("button", name="모두 거부").click()
+        expect(page.locator("#conflicts")).to_contain_text("확인할 충돌이 없습니다")
+        rej = S.rows(store.connect(), "SELECT apply_status, resolved_reason FROM result_event WHERE request_id=? AND kind IN ('ITEM_RESULT','ATTEMPT')", (g3r,))
+        ok(len(rej) == 4 and all(x["apply_status"] == "REJECTED" and "배정에서 뺀" in x["resolved_reason"] for x in rej) and S.get_request(store.connect(), g3r)["status"] == "RECEIVED",
+           "충돌함 [이 가져오기 모두 거부]·[이 접수 기록 모두 거부]: 한 사유로 4건 거부 (접수 상태 그대로)")
         page.goto(URL + "#/home")
         expect(page.locator("h1", has_text="오늘 현황")).to_be_visible()
         # 시범 운영 비교: 기간·기존 방식 수치 저장 → 비교표(100건당, 좋아짐/나빠짐)
@@ -443,9 +625,13 @@ def run():
         ok("위치 정확도 ±14m" in fc.inner_text() and "김수거" in fc.inner_text() and "번호 불일치" in fc.inner_text() and "촬영" in fc.inner_text(),
            "현장 결과: 도착 시각·위치 정확도, 작업자, 스티커 번호 불일치, 사진 촬영 시각 (휴대폰 v0.10 기록)")
         expect(page.locator("h2", has_text="수납 기록")).to_contain_text("미납")
+        settled(page)
+        # 저장하지 않은 수정 중에 아래 카드(수납)를 기록해도 수정 양식은 지워지지 않는다
+        page.get_by_label("상세 배출 위치").fill("수정 중(저장 안 함)")
         page.get_by_role("button", name="수납 기록").click()
         expect(page.locator("h2", has_text="수납 기록")).to_contain_text("납부 확인")
-        ok(True, "수납: 미납 → 계산 금액 납부 기록 → 납부 확인")
+        ok(page.get_by_label("상세 배출 위치").input_value() == "수정 중(저장 안 함)", "수정 중인 양식은 수납 기록 뒤에도 그대로(아래 카드만 새로 그림)")
+        ok(S.payment_status(store.connect(), s1["request_id"])["status"] == "PAID", "수납: 미납 → 계산 금액 납부 기록 → 납부 확인")
 
         # 마감
         page.goto(URL + "#/close")
@@ -541,7 +727,9 @@ def run():
         page.get_by_placeholder(re.compile("^백업 비밀번호 \\(12자")).fill("backup-pass-e2e-0001")
         page.get_by_placeholder("한 번 더").fill("backup-pass-e2e-0001")
         page.get_by_role("button", name="지금 백업").click()
+        expect(page.locator(".jobrow", has_text="수동 백업")).to_be_visible()
         expect(page.get_by_text(re.compile("백업했습니다: donggu-backup-"))).to_be_visible()
+        ok(page.locator(".jobrow", has_text="수동 백업").count() == 1, "수동 백업: 작업 번호 → 진행 띠(GET /api/jobs/{id}) → 끝나면 파일 이름")
         brow = page.locator("tr", has_text="donggu-backup-").first
         brow.get_by_placeholder("백업 비밀번호").fill("backup-pass-e2e-0001")
         brow.get_by_role("button", name="열어 확인").click()
@@ -591,7 +779,23 @@ def run():
         page.locator(".results button").first.click()
         page.get_by_role("button", name="품목 추가", exact=True).click()
         page.get_by_role("button", name="접수 등록").click()
+        # 예정일을 비워 두면 가장 빠른 가능일을 권한다 → [예정일 없이 등록]
+        nd = page.get_by_role("dialog", name="수거 예정일이 비어 있습니다")
+        expect(nd).to_contain_text("가장 빠른 가능일")
+        nd.get_by_role("button", name="예정일 없이 등록").click()
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
+        ok(S.one(store.connect(), "SELECT planned_date FROM request WHERE name='가상다섯'")["planned_date"] is None, "예정일 빈 채 저장 → 가장 빠른 가능일 권유 대화 상자 → 예정일 없이 등록")
+        # 오늘 현황 '밀린 일': 예정일 없음 1건 → 누르면 접수 목록 [예정일 없음] 빠른 조회
+        page.goto(URL + "#/home")
+        nd_link = page.locator(".backlog a[data-key=nodate]")
+        expect(nd_link).to_contain_text("예정일 없음 1건")
+        page.screenshot(path=SHOTS / "pc_09_home_backlog.png", full_page=True)
+        v13shot(page, "home")
+        nd_link.click()
+        expect(page.locator(".qchip.on")).to_contain_text("예정일 없음")
+        expect(page.locator("tbody tr.click")).to_have_count(1)
+        ok("가상다섯" in page.locator("tbody").inner_text(), "오늘 현황 밀린 일(예정일 없음) → 접수 목록 빠른 조회(NODATE)로 바로")
+        page.locator(".qchip", has_text="전체").first.click()
         page.goto(URL + "#/requests")
         page.locator("#rq-status").select_option("")
         page.locator("#rq-dong").select_option("가상1동")
@@ -730,8 +934,12 @@ def run():
         ps1 = S.payment_status(c_, r1id)
         ok(ps1["reduction_rate"] == 50 and ps1["levied"] == ps1["calculated"] - ps1["reduction"] and "과납" in pay_card.inner_text(),
            f"감면(차상위 50%) 적용 → 계산 {ps1['calculated']:,} → 감면 {ps1['reduction']:,} → 부과 {ps1['levied']:,}원, 이미 낸 금액은 과납 확인 필요")
+        page.get_by_role("button", name="접수증 인쇄").click()
+        pd_ = page.get_by_role("dialog", name="문의처가 아직 기본 문구입니다")
+        expect(pd_).to_be_visible()
+        ok(True, "접수증 인쇄: 문의처가 기본 문구면 먼저 알림(설정 링크)")
         with ctx.expect_page() as rp_:
-            page.get_by_role("button", name="접수증 인쇄").click()
+            pd_.get_by_role("button", name="그대로 인쇄").click()
         rcp = rp_.value; rcp.wait_for_load_state()
         rtxt = rcp.locator("body").inner_text()
         ok(s1["receipt_no"] in rtxt and S.get_request(c_, r1id)["levy_no"] in rtxt and "부과 금액" in rtxt and "문의처" in rtxt and "배출 장소 안내" in rtxt and "가상하나" not in rtxt,
@@ -849,8 +1057,12 @@ def run():
         expect(tb).to_contain_text("접수증")
         ok("가상하나" not in tb.inner_text(), "접속기록: 상세·목록·출력(접수증·배출 표지) 기록, 작업별 거르기 (내용·검색어 없음)")
         page.get_by_label("작업", exact=True).select_option("")
-        page.get_by_role("button", name="무결성 검사").click()
-        expect(page.get_by_text("무결성 검사 정상")).to_be_visible()
+        page.get_by_role("button", name="빠른 무결성 검사").click()
+        expect(page.get_by_text("빠른 무결성 검사 정상")).to_be_visible()
+        page.get_by_role("button", name="전체 무결성 검사").click()
+        expect(page.locator(".jobrow", has_text="전체 무결성 검사")).to_be_visible()
+        expect(page.get_by_text("전체 무결성 검사 정상")).to_be_visible()
+        ok(True, "무결성 검사: 빠른 검사(검사점 뒤) · 전체 검사(백그라운드 작업 진행 띠)")
         page.get_by_label("점검 메모").fill("이상 없음(가상)")
         page.get_by_role("button", name="점검 완료").click()
         expect(page.locator(".chip", has_text="점검 완료")).to_be_visible()
@@ -877,6 +1089,7 @@ def run():
            "통계 화면: 날짜별 막대·툴팁, 접수별 CSV(이름·연락처 없음, 상태 한글+코드, 부과 금액) 내려받기")
         page.screenshot(path=SHOTS / "pc_13_stats.png", full_page=True)
         page.goto(URL + "#/send")
+        page.get_by_label("수거일").fill(today)  # 자정을 넘겨 실행되어도 그날 배정을 본다
         with ctx.expect_page() as pp:
             page.get_by_role("button", name="배차표 인쇄").first.click()
         pr = pp.value
@@ -952,8 +1165,8 @@ def run():
         ok("15,000원" in p2.locator(".card", has=p2.get_by_role("heading", name="현장 결과")).inner_text(), "유사 품목 적용: 확인 대기 품목에 근거·확인자와 함께 확정 단가 연결")
         p2.goto(URL + "#/results")
         p2.get_by_role("button", name="웹캠으로 읽기").click()
-        expect(p2.get_by_text("보관 종료 확인 코드")).to_be_visible(timeout=60000)
-        code2 = p2.locator(".big").inner_text()
+        expect(p2.locator("#import-run .imp-row", has_text="웹캠")).to_contain_text("결과 반영 코드", timeout=60000)
+        code2 = re.sub(r"\s", "", p2.locator("#import-run .imp-row .big").first.inner_text())
         ok(len(code2) == 8 and S.get_request(store.connect(), s2["request_id"])["status"] == "NOT_COLLECTED",
            f"역방향 QR {len(frames2)}장 웹캠 수신 → 결과 반영(미수거), 확인 코드 {code2}")
         ok(S.rows(store.connect(), "SELECT channel FROM result_import ORDER BY imported_at DESC LIMIT 1")[0]["channel"] == "QR", "회수 경로가 'QR'로 기록됨")
@@ -972,8 +1185,9 @@ def run():
         p3.locator("#rq-status").select_option("")
         expect(p3.locator("tr.click").first).to_be_visible()
         names = p3.locator("tbody").inner_text()
-        other = p3.evaluate("""async (id) => (await fetch('/api/requests/' + id, {headers:{'X-DG-CSRF':'1'}})).status""", S.rows(store.connect(), "SELECT id FROM request WHERE name='가상셋'")[0]["id"])
-        ok("가상셋" not in names and "가상하나" in names and other == 400, "수거팀 계정: 내 팀에 배정된 접수만 보임, 다른 접수 열기 거부")
+        other = p3.evaluate("""async (id) => (await fetch('/api/requests/' + id, {headers:{'X-DG-CSRF':'1'}})).status""", S.rows(store.connect(), "SELECT id FROM request WHERE name='가상넷'")[0]["id"])
+        # (가상셋은 위 부분 수정에서 이 팀 목록에 잠시 들어갔으므로 이 팀이 볼 수 있다 — 한 번도 배정된 적 없는 가상넷으로 확인)
+        ok("가상넷" not in names and "가상하나" in names and other == 400, "수거팀 계정: 내 팀에 배정된 접수만 보임, 다른 접수 열기 거부")
         c3.close()
         # 팀장(검토자): 마감 확인(2단계), 설정·사용자 관리 메뉴 없음
         c4 = b2.new_context(viewport={"width": 1400, "height": 950})
@@ -1063,6 +1277,17 @@ def playwright_with_fail_shot():
                 except Exception as e:  # noqa: BLE001
                     print("실패 화면 캡처 못 함:", e, flush=True)
             raise
+
+
+def v13shot(pg, name):
+    """DG_SHOT_DIR이 있으면 1440×900(배율 1) 화면 캡처를 그 폴더에 v13-<name>.png로 (검토용)."""
+    d = os.environ.get("DG_SHOT_DIR")
+    if not d:
+        return
+    pg.set_viewport_size({"width": 1440, "height": 900})
+    pg.wait_for_timeout(300)
+    pg.screenshot(path=str(Path(d) / f"v13-{name}.png"))
+    pg.set_viewport_size({"width": 1400, "height": 950})
 
 
 def quiet(pg, ms=8000):
