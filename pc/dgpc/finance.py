@@ -88,7 +88,9 @@ def apply_reduction_fields(con, data: dict) -> dict | None:
         return None
     item = _check_reduction(con, code, data.get("reduction_proof") or "", data.get("reduction_checker") or "")
     return {"reduction_code": code, "reduction_rate": item["rate"], "reduction_label": item["label"], "reduction_proof": data.get("reduction_proof"),
-            "reduction_checker": (data.get("reduction_checker") or "").strip()[:30], "reduction_at": C.now()}
+            "reduction_checker": (data.get("reduction_checker") or "").strip()[:30], "reduction_at": C.now(),
+            # 끝수 단위는 감면을 적용·바꿀 때의 설정값을 접수에 남긴다(나중에 설정을 바꿔도 이 접수의 부과 금액은 그대로)
+            "reduction_round_unit": D.reduction_round_unit(con)}
 
 
 def set_reduction(con, rid: str, data: dict) -> dict:
@@ -106,14 +108,16 @@ def set_reduction(con, rid: str, data: dict) -> dict:
         if data.get("req_ver") not in (None, ""):  # 화면이 연 버전과 같을 때만(다르면 409)
             C.check_req_ver(con, rid, data.get("req_ver"))
         if vals:
-            con.execute("""UPDATE request SET reduction_code=?, reduction_rate=?, reduction_label=?, reduction_proof=?, reduction_checker=?, reduction_at=? WHERE id=?""",
+            con.execute("""UPDATE request SET reduction_code=?, reduction_rate=?, reduction_label=?, reduction_proof=?, reduction_checker=?, reduction_at=?,
+                reduction_round_unit=? WHERE id=?""",
                         (*vals.values(), rid))
         else:
-            con.execute("UPDATE request SET reduction_code=NULL, reduction_rate=NULL, reduction_label=NULL, reduction_proof=NULL, reduction_checker=NULL, reduction_at=? WHERE id=?",
+            con.execute("UPDATE request SET reduction_code=NULL, reduction_rate=NULL, reduction_label=NULL, reduction_proof=NULL, reduction_checker=NULL, reduction_at=?, reduction_round_unit=NULL WHERE id=?",
                         (C.now(), rid))
         con.execute("UPDATE request SET updated_at=? WHERE id=?", (C.now(), rid))  # 목록 전송 뒤 바뀌면 '재전송 필요'
         C.audit(con, "request", rid, "REDUCTION" if vals else "REDUCTION_CLEAR",
-                {**({"code": vals["reduction_code"], "rate": vals["reduction_rate"], "proof": vals["reduction_proof"], "checker": vals["reduction_checker"]} if vals else {}),
+                {**({"code": vals["reduction_code"], "rate": vals["reduction_rate"], "proof": vals["reduction_proof"], "checker": vals["reduction_checker"],
+                     "round_unit": vals["reduction_round_unit"]} if vals else {}),
                  **({"reason": why[:200]} if why else {}), **flag})
     return D.payment_status(con, rid)
 
@@ -313,7 +317,6 @@ def sync_refunds(con, rids=None, progress=None) -> dict:
     if not rids:
         return {"created": 0, "closed": 0}
     with C.tx(con):
-        unit = D.reduction_round_unit(con)
         for ch in C._chunks(rids):
             q = ",".join("?" * len(ch))
             open_by: dict[str, list] = {}
@@ -326,7 +329,7 @@ def sync_refunds(con, rids=None, progress=None) -> dict:
             reqs = {r["id"]: r for r in C.rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(todo))})", todo)}
             pre = D.prefetch(con, list(reqs), ("items", "events", "links", "payments", "partial"))
             for rid, r in reqs.items():
-                ps = D.payment_core(r, D.derive(con, r, pre)["fee"]["final"], pre["payments"][rid], pre["partial"][rid], unit)
+                ps = D.payment_core(r, D.derive(con, r, pre)["fee"]["final"], pre["payments"][rid], pre["partial"][rid])
                 need, cause = 0, None
                 if ps["status"] == "REFUND_NEEDED":
                     need, cause = ps["paid"], "CANCELLED"

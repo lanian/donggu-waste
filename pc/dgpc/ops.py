@@ -165,6 +165,7 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
                          ("idem", lambda: _locked(guard, lambda: S.purge_idem(con))),
                          ("access_retention", lambda: _locked(guard, lambda: PV.purge_old_access(con))),
                          ("backup_retention", lambda: len(_locked(guard, lambda: BK.run_retention(con)))),
+                         ("pre_migration_retention", lambda: _pre_migration_retention(con, guard)),
                          ("verify_quick", lambda: _verify_quick(con, lock, read_con_factory))):
             try:
                 out[name] = fn()
@@ -184,6 +185,18 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
     finally:
         S.ACTOR.reset(tok)
     return out
+
+
+def _pre_migration_retention(con, guard, state_dir: Path | None = None, now: float | None = None) -> int:
+    """업데이트 때 생긴 DB 사전 사본(state/pre-migration/, 개인정보 포함) 보관 규칙 적용: 가장 새 1개는 늘 남기고,
+    나머지는 새것부터 3개 안·30일 이내만 남긴다. 지웠으면 변경 이력에 한 줄. 지운 개수."""
+    gone = store.pre_migration_retention(state_dir, now=now)
+    if gone:
+        with guard:
+            with S.tx(con):
+                S.audit(con, "backup", "pre-migration", "PURGE", {"count": len(gone), "files": ",".join(gone)[:500],
+                                                                  "keep": store.PRE_MIGRATION_KEEP, "days": store.PRE_MIGRATION_DAYS})
+    return len(gone)
 
 
 def _locked(guard, fn):
@@ -307,6 +320,7 @@ def diag(con, state_dir: Path | None = None) -> dict:
     return {"db_bytes": size(db), "wal_bytes": size(Path(str(db) + "-wal")), "photos": {"count": ph["n"], "bytes": ph["b"]},
             "free_bytes": free * psz, "page_bytes": pages * psz, "auto_vacuum": con.execute("PRAGMA auto_vacuum").fetchone()[0],
             "schema_version": con.execute("PRAGMA user_version").fetchone()[0], "tables": counts,
+            "pre_migration": store.pre_migration_info(d),
             "last": {"backup": S.get_setting(con, "last_backup_at"), "verify_quick": g("last_quick_verify").get("at"), "verify_full": g("last_full_verify").get("at"),
                      "pii_purge": g("last_pii_purge_run").get("at"), "photo_purge": g("last_photo_purge_run").get("at"), "daily_tasks": g("last_daily_tasks").get("at"),
                      "refund_sync": g("last_refund_sync").get("at")}}

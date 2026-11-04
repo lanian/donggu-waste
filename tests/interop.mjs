@@ -338,6 +338,42 @@ ok(d17b.fee.final === tot && d17b.fee.reduction === Math.floor((tot * 50) / 100)
 ok(deriveStop(e17.stops[1], []).fee.levied === price * 3 && deriveStop(e17.stops[1], []).fee.reductionRate === 0, '감면 없는 건: 부과 금액 = 계산 금액');
 const pend = deriveStop({ ...st17, items: [{ ...st17.items[0], price_status: 'PENDING', unit_price: null, amount: null }] }, []);
 ok(pend.fee.final === null && pend.fee.levied === null && pend.fee.reduction === null, '금액 확인 대기가 있으면 감면·부과 금액도 미확정');
+// 17b) 감면액 끝수 단위 "ru" (v0.13 선택 키) — PC → 휴대폰, 휴대폰 → PC, 이전 형식 -----------------------
+const pc17b = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+row = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["unit"] == "EA")
+it = {"line_id": "00000000-0000-0000-0000-0000000000b1", "fee_rate_id": None, "name": "가상", "spec": "", "unit": "EA", "unit_label": "개",
+      "qty": 1, "unit_price": 3015, "amount": 3015, "price_status": "CONFIRMED"}
+base = {"req_ver": 1, "name": "가", "phone": "01000000000", "address": "가상로 1", "items": [it]}
+p = {"schema": "dg.daylist/1", "work_date": "2026-11-05", "crew": "가상", "assign_ver": 1, "fee_table": {"version_id": S.FEE_TABLE["version_id"]},
+     "stops": [{**base, "seq": 1, "request_id": "00000000-0000-0000-0000-000000000021", "receipt_no": "DG-1", "reduction": {"rate": 50, "label": "가상", "round_unit": 10}},
+               {**base, "seq": 2, "request_id": "00000000-0000-0000-0000-000000000022", "receipt_no": "DG-2", "reduction": {"rate": 50, "label": "가상"}},
+               {**base, "seq": 3, "request_id": "00000000-0000-0000-0000-000000000023", "receipt_no": "DG-3"}]}
+print(json.dumps({"c": P.compact_daylist(p, S.FEE_ROWS)}, ensure_ascii=False))`));
+const c17b = pc17b.c, e17b = P.expandDaylist(c17b, BUILTIN_FEES);
+ok(c17b.s[0].ru === 10 && !('ru' in c17b.s[1]) && !('ru' in c17b.s[2]), 'PC 압축: 끝수 10원 감면 건만 "ru": 10 (1원·감면 없음은 싣지 않음 — 이전 형식 그대로)');
+const f17b = e17b.stops.map((x) => deriveStop(x, []).fee);
+ok(e17b.stops[0].reduction.round_unit === 10 && !('round_unit' in e17b.stops[1].reduction) && f17b[0].reduction === 1500 && f17b[0].levied === 1515
+  && f17b[1].reduction === 1507 && f17b[1].levied === 1508 && f17b[2].levied === 3015,
+  '휴대폰이 "ru"를 읽어 10원 미만 버림(3,015원 50% → 감면 1,500·부과 1,515), 없으면 1원(감면 1,507)');
+const old17b = { ...c17b, s: c17b.s.map(({ ru, ...x }) => x) };
+ok(P.expandDaylist(old17b, BUILTIN_FEES).stops.every((x) => !x.reduction || !('round_unit' in x.reduction)) && deriveStop(P.expandDaylist(old17b, BUILTIN_FEES).stops[0], []).fee.reduction === 1507,
+  '이전 형식("ru" 없음)은 1원 단위 그대로');
+const js17b = { ...c17b, s: c17b.s.map((x, i) => (i === 1 ? { ...x, ru: 10 } : i === 2 ? { ...x, ru: 10 } : x)) };
+const py17b = JSON.parse(pyEval(`import json, dgproto as P
+from dgpc import service as S
+c = json.loads(${JSON.stringify(JSON.stringify(js17b))})
+o = json.loads(${JSON.stringify(JSON.stringify(old17b))})
+e, eo = P.expand_daylist(c, S.FEE_ROWS), P.expand_daylist(o, S.FEE_ROWS)
+print(json.dumps({"red": [s.get("reduction") for s in e["stops"]], "old": [s.get("reduction") for s in eo["stops"]],
+                  "rt": [x.get("ru") for x in P.compact_daylist(e | {"fee_table": {"version_id": e["fee_table"]["version_id"]}}, S.FEE_ROWS)["s"]]}))`));
+ok(JSON.stringify(py17b.red) === JSON.stringify([{ rate: 50, round_unit: 10 }, { rate: 50, round_unit: 10 }, null]) && JSON.stringify(py17b.old) === JSON.stringify([{ rate: 50 }, { rate: 50 }, null])
+  && JSON.stringify(py17b.rt) === JSON.stringify([10, 10, null]),
+  'PC(Python) expand_daylist 도 "ru"를 같은 뜻으로 읽음(감면 없는 지점의 "ru"는 무시), 이전 형식 포함, 다시 압축해도 유지(왕복)');
+const pyRu = JSON.parse(pyEval(`import json
+from dgpc import finance as FN
+print(json.dumps([FN.fee_summary({"reduction_code": "X", "reduction_rate": r, "reduction_round_unit": 10}, a)["levied"] for a, r in ${JSON.stringify(pairs)}]))`));
+ok(pairs.every(([a, r], i) => applyReduction(a, r, 10).levied === pyRu[i]), '끝수 10원 감면 계산이 PC와 같음');
 
 // 18) 지문·얼굴 등록: 등록 응답에 PRF가 없어도(Samsung Pass) 다음 인증에서 PRF가 나오면 등록, 끝내 없으면 거부 ---------
 {

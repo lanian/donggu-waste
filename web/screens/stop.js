@@ -53,7 +53,7 @@ async function feeNotice(stop, d) {
   const x = feeExtra(d), f = d.fee;
   const v = await sheet({ title: `추가 금액 ${won(x)}`,
     text: `접수 당시 ${won(f.received)} → 현장 확인 ${won(f.confirmedSubtotal)}${f.pendingCount ? ` (금액 확인 대기 ${f.pendingCount}건 제외)` : ''}.`
-      + (f.reductionRate ? ` 감면 ${f.reductionRate}% 적용 시 늘어나는 부과 금액은 ${won(applyReduction(x, f.reductionRate).levied)}입니다.` : '') + ' 주민에게 안내하고 결과를 고르세요.',
+      + (f.reductionRate ? ` 감면 ${f.reductionRate}% 적용 시 늘어나는 부과 금액은 ${won(applyReduction(x, f.reductionRate, f.reductionRoundUnit).levied)}입니다.` : '') + ' 주민에게 안내하고 결과를 고르세요.',
     choices: [{ label: LABEL.feeResponse.AGREED, value: 'AGREED', cls: 'primary' }, { label: LABEL.feeResponse.NOTIFIED, value: 'NOTIFIED' },
       { label: LABEL.feeResponse.REFUSED, value: 'REFUSED', cls: 'danger' }] });
   if (v == null) return false;

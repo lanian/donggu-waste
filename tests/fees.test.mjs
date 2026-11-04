@@ -51,16 +51,19 @@ ok(deriveStop({ request_id: 'r4', req_ver: 1, items: [] }, [{ seq: 1, request_id
 const VEC = JSON.parse(readFileSync(new URL('../data/derive_vectors.json', import.meta.url), 'utf8')).vectors;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 for (const v of VEC) {
-  const stop = { request_id: 'v', req_ver: 1, items: v.items, ...(v.reduction_rate ? { reduction: { rate: v.reduction_rate } } : {}) };
+  const ru = v.reduction_round_unit || 1;
+  const stop = { request_id: 'v', req_ver: 1, items: v.items, ...(v.reduction_rate ? { reduction: { rate: v.reduction_rate, ...(ru !== 1 ? { round_unit: ru } : {}) } } : {}) };
   const d = deriveStop(stop, v.events.map((e, i) => ({ request_id: 'v', seq: i + 1, kind: e.kind, body: e.body, ts: `2026-11-12T00:00:0${i}Z` })));
   const x = v.expect, f = d.fee;
   const lines = d.lines.map((l) => ({ line_id: l.line_id, kind: l.kind, price: l.price, qty_confirmed: l.qty_confirmed, qty_collected: l.qty_collected, remaining: l.remaining }));
   const fee = { received: f.received, confirmed_subtotal: f.confirmedSubtotal, field_added: f.fieldAdded, diff: f.diff, pending_count: f.pendingCount, final: f.final, qty_by_unit: f.qtyByUnit };
   const red = { rate: f.reductionRate, reduction: f.reduction, levied: f.levied };
-  const ar = applyReduction(f.final, v.reduction_rate);
+  const ar = applyReduction(f.final, v.reduction_rate, ru);
   ok(same(lines, x.lines) && same(fee, x.fee) && same(red, x.reduction) && same(ar, x.reduction) && d.contact === x.contact && d.outcome === x.outcome,
     `공통 벡터: ${v.name}`);
 }
+ok(VEC.filter((v) => v.reduction_round_unit === 10).length >= 3, '공통 벡터에 끝수 10원 사례가 있음(휴대폰도 10원 미만 버림)');
+ok(applyReduction(3015, 50, 7).reduction === 1507 && applyReduction(3015, 50).reduction === 1507, '모르는 끝수 단위·단위 없음 → 1원(이전과 같음)');
 // 표시 이름: data/labels.json → web/labels-data.js (tools/build_labels.py). 휴대폰 LABEL 은 공통 표에서 온다
 ok(same(LABEL.contact, LABELS.contact) && same(LABEL.sticker, LABELS.sticker) && LABEL.reason[''] === '사유 선택'
   && same(Object.keys(LABEL.reason).slice(1), Object.keys(LABELS.reason)) && Object.keys(LABEL.outcome).every((k) => LABEL.outcome[k] === LABELS.status[k]),

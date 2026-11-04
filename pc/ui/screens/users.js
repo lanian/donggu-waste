@@ -90,6 +90,7 @@ function diagCard() {
     body.replaceChildren(
       h('dl', { class: 'kv compact' }, h('dt', {}, 'DB'), h('dd', {}, `${mb(d.db_bytes)} (WAL ${mb(d.wal_bytes)}, 빈 공간 ${mb(d.free_bytes)}) · 구조 ${d.schema_version} · auto_vacuum ${['NONE', 'FULL', 'INCREMENTAL'][d.auto_vacuum] || d.auto_vacuum}`),
         h('dt', {}, '사진'), h('dd', {}, `${(d.photos.count || 0).toLocaleString()}장 · ${mb(d.photos.bytes)}`),
+        d.pre_migration ? [h('dt', {}, '업데이트 사본'), h('dd', {}, d.pre_migration.count ? `${d.pre_migration.count}개 · ${mb(d.pre_migration.bytes)} (state/pre-migration, 개인정보 포함 — 가장 새 1개 외에는 ${d.pre_migration.keep}개·${d.pre_migration.days}일 넘으면 자동 삭제)` : '없음')] : null,
         h('dt', {}, '서버'), h('dd', {}, `로그인 세션 ${d.sessions} · 대기 작업 ${d.jobs_queued} · 예약 확인 ${d.scheduler_tick ? kst(d.scheduler_tick) : '—'}`)),
       grid(['예약 작업', '마지막 실행', '상태'], o.items.map((x) => [x.label, x.last_at ? `${kst(x.last_at)} (${x.age_days}일 전)` : '기록 없음', chip(x.stale ? '확인 필요' : '정상', x.stale ? 'bad' : 'ok')]), { cls: 'ops-tbl' }),
       h('details', { class: 'tableview' }, h('summary', {}, '표별 건수'), grid(['표', '건수'], Object.entries(d.tables).map(([t, n]) => [t, n == null ? '—' : n.toLocaleString()]), { num: [1] })),

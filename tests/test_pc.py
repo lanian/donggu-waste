@@ -1925,8 +1925,8 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2] and "fee_final" in store._cols(mc, "request") and mc.execute("PRAGMA user_version").fetchone()[0] == 2,
-       "다시 열면 멈춘 단계부터 다시 실행")
+    ok(store.run_migrations(mc) == [2, 3] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 3, "다시 열면 멈춘 단계부터 다시 실행(2·3단계)")
     mc.execute("PRAGMA user_version = 99")
     try:
         store.run_migrations(mc)
@@ -1991,6 +1991,39 @@ def v13():
     raises(lambda: S.save_settings(con, {"reduction_round_unit": 7}), "1원 또는 10원", "끝수 단위는 1·10원만")
     S.save_settings(con, {"reduction_round_unit": 10})
     ok(S.settings(con)["reduction_round_unit"] == 10 and S.settings(con)["reduction_round_units"] == [1, 10], "끝수 단위 설정·선택지(bootstrap settings)")
+    S.save_settings(con, {"reduction_round_unit": 1})
+    # 끝수 단위는 감면을 적용할 때 접수에 저장: 나중에 설정을 바꿔도 이미 감면한 접수의 부과 금액·수납 상태는 그대로
+    S.save_settings(con, {"reductions": FN.reductions(con) + [{"code": "T25", "label": "시험25", "rate": 25, "note": "", "active": True}]})
+    wall = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["price"] % 1000 == 300)  # 3,300원 × 25% = 825
+    red25 = {"reduction_code": "T25", "reduction_proof": "서류 확인", "reduction_checker": "가상"}
+    S.save_settings(con, {"reduction_round_unit": 10})
+    ru1 = S.create_request(con, {**base, "name": "끝수가", "phone": "010-0000-9311", "items": [{"fee_rate_id": wall["id"], "qty": 1}], **red25})["id"]
+    lev = lambda rid: (S.payment_status(con, rid)["levied"], S.one(con, "SELECT levied FROM request WHERE id=?", (rid,))["levied"])
+    ok(S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10 and lev(ru1) == (2480, 2480),
+       "끝수 10원일 때 감면 접수: 접수에 단위 10 저장, 3,300원 25% → 감면 820 → 부과 2,480(요약 열 같음)")
+    S.add_payment(con, ru1, {"amount": 2480, "method": "현장 카드"})
+    S.save_settings(con, {"reduction_round_unit": 1})
+    S.refresh_request_summary(con, [ru1])
+    ok(lev(ru1) == (2480, 2480) and S.payment_status(con, ru1)["status"] == "PAID" and S.payment_status(con, ru1)["reduction_round_unit"] == 10,
+       "설정을 1원으로 바꿔도 이미 감면한 접수는 그대로(부과 2,480, 납부 확인 유지)")
+    ru2 = S.create_request(con, {**base, "name": "끝수나", "phone": "010-0000-9312", "items": [{"fee_rate_id": wall["id"], "qty": 1}], **red25})["id"]
+    ok(S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] == 1 and lev(ru2) == (2475, 2475), "새 감면 접수는 새 단위(1원: 감면 825 → 부과 2,475)")
+    from dgpc import assign as AS
+    ok(AS.request_round_unit(S.one(con, "SELECT * FROM request WHERE id=?", (ru1,))) == 10, "휴대폰 목록에 실을 단위도 접수에 저장된 값")
+    from dgpc import reports as RP_
+    csv_ = [line for _r, line in RP_._export_rows(con, [S.one(con, "SELECT * FROM request WHERE id=?", (x,)) for x in (ru1, ru2)])]
+    ok(any(str(c_) in ("2480", "2,480") for c_ in csv_[0]) and any(str(c_) in ("2475", "2,475") for c_ in csv_[1]), "CSV(내보내기)도 접수에 저장된 단위로 부과 금액")
+    S.save_settings(con, {"reduction_round_unit": 10})
+    FN.set_reduction(con, ru2, {**red25, "req_ver": RV(con, ru2)})
+    ok(lev(ru2) == (2480, 2480), "감면을 다시 적용·바꾸면 그때의 설정값으로 저장")
+    FN.set_reduction(con, ru2, {"reduction_code": "", "req_ver": RV(con, ru2)})
+    ok(S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] is None and lev(ru2) == (3300, 3300), "감면 해제 → 단위도 지움")
+    # 3단계 이전: 기존 감면 접수는 그때의 설정값으로 채움(지금까지와 같은 금액)
+    con.execute("UPDATE request SET reduction_round_unit=NULL WHERE id=?", (ru1,))
+    con.execute("PRAGMA user_version = 2")
+    ok(store.run_migrations(con) == [3] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
+       and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] is None and lev(ru1) == (2480, 2480),
+       "이전 단계 3: 기존 감면 접수에 지금 설정값(10) 채움, 감면 없는 접수는 비움")
     S.save_settings(con, {"reduction_round_unit": 1})
     raises(lambda: FN.request_refund(con, {"request_id": ra, "cause": "MANUAL", "amount": "x", "note": "가상"}), "환불 금액", "환불 금액 숫자 아님 → 업무 오류")
 
@@ -2221,7 +2254,34 @@ def v13():
     logs = S.rows(con, "SELECT count, trigger FROM pii_purge_log ORDER BY at")
     ok(res["count"] == 3 and [x["count"] for x in logs] == [2, 1] and all(x["trigger"] == "SCHEDULE" for x in logs) and not lk.locked(),
        "개인정보 파기: 묶음마다 한 트랜잭션·대장 한 줄, 묶음 사이 잠금 풀림(SCHEDULE)")
+    # 업데이트 사전 사본(state/pre-migration, 개인정보 포함) 보관: 가장 새 1개는 늘 남김, 나머지는 새것부터 3개 안·30일 이내만
+    import datetime as _dt
+    pmd = store.pre_migration_dir(); pmd.mkdir(parents=True, exist_ok=True)
+    mkc = lambda days, tag="": (pmd / f"pc-v1-to-v3-{(_dt.datetime.now() - _dt.timedelta(days=days)).strftime('%Y%m%d-%H%M%S')}{tag}.db").write_bytes(b"x" * 100)
+    for days_ in (1, 2, 3, 5, 40):
+        mkc(days_)
+    (pmd / "메모.txt").write_text("사본 아님")
     dr = OPS.daily_tasks(con, None, None)
+    left = sorted(f.name for f in pmd.iterdir())
+    ok(dr["pre_migration_retention"] == 2 and len(left) == 4 and "메모.txt" in left
+       and S.one(con, "SELECT 1 AS x FROM audit_log WHERE entity_id='pre-migration' AND action='PURGE'"),
+       "매일 예약 작업: 사전 사본 4번째(5일)·30일 넘은 것 삭제, 새것 3개 남김(다른 파일은 그대로), 변경 이력")
+    info = store.pre_migration_info()
+    ok(info["count"] == 3 and info["bytes"] == 300, "사전 사본 개수·크기(진단용)")
+    for f in pmd.glob("pc-v*.db"):
+        f.unlink()
+    mkc(50); mkc(60)
+    oldest_ = sorted(f.name for f in pmd.glob("pc-v*.db"))[0]
+    ok(store.pre_migration_retention() == [oldest_] and len(list(pmd.glob("pc-v*.db"))) == 1,
+       "30일 넘은 사본만 있어도 가장 새 1개는 남김")
+    for f in pmd.glob("pc-v*.db"):
+        f.unlink()
+    mkc(1); mkc(0, "-1")
+    old_ = (_dt.datetime.now() - _dt.timedelta(days=50)).timestamp()
+    for f in pmd.glob("pc-v*.db"):
+        os.utime(f, (old_, old_))  # copy2 는 원본 DB 수정 시각을 옮기므로 파일 시각은 쓰지 않음
+    ok(store.pre_migration_retention() == [] and store.pre_migration_info()["newest"].endswith("-1.db") and store.pre_migration_info()["count"] == 2,
+       "나이는 파일 이름의 만든 시각으로(파일 수정 시각 아님, 같은 초 '-1' 이름 포함)")
     st1 = {x["key"]: x for x in OPS.ops_status(con)["items"]}
     ok(not st1["pii_purge"]["stale"] and not st1["photo_purge"]["stale"] and not st1["daily"]["stale"] and "verify_quick" in dr and dr["verify_full"] is True,
        "하루 예약 작업(파기·사진 정리·환불 점검·재전송 기록 정리·무결성 검사) 뒤 경고 사라짐")
@@ -2309,8 +2369,9 @@ def v13():
     ok(j["status"] == "DONE" and "count" in j["result"] and http("GET", f"/api/jobs/{jid}", cookie=kim)[0] == 404, "사진 정리 → 작업 번호, GET /api/jobs/{id}로 결과(다른 사용자는 못 봄)")
     st_, _, body = http("GET", "/api/diag", cookie=adm)
     dg = json.loads(body)
-    ok(st_ == 200 and dg["tables"]["request"] >= 10 and dg["db_bytes"] > 0 and dg["schema_version"] == store.LATEST and http("GET", "/api/diag", cookie=kim)[0] == 403,
-       "진단(관리자만): DB·WAL·사진 크기, 표별 건수, 마지막 백업·검사·파기")
+    ok(st_ == 200 and dg["tables"]["request"] >= 10 and dg["db_bytes"] > 0 and dg["schema_version"] == store.LATEST and http("GET", "/api/diag", cookie=kim)[0] == 403
+       and dg["pre_migration"]["count"] == 2 and dg["pre_migration"]["bytes"] == 200 and dg["pre_migration"]["keep"] == 3 and dg["pre_migration"]["days"] == 30,
+       "진단(관리자만): DB·WAL·사진 크기, 표별 건수, 마지막 백업·검사·파기, 업데이트 사전 사본 개수·크기")
     st_, hd, body = http("GET", f"/api/requests/{rb}/notice", cookie=kim)
     ok(st_ == 200 and hd.get("Content-Type", "").startswith("text/plain") and "접수번호" in body.decode(), "GET /api/requests/{id}/notice → 안내 글(text/plain)")
     tkn = json.loads(http("POST", f"/api/requests/{rb}/receipt-print", {}, cookie=kim)[2])["token"]
@@ -2339,12 +2400,31 @@ def v13():
         SV.flush_login_fails(con, force=True)
     lf = S.rows(con, "SELECT detail, actor FROM audit_log WHERE action='LOGIN_FAIL'")
     ok(len(lf) == 1 and json.loads(lf[0]["detail"])["count"] == 3 and lf[0]["actor"] == "kim13", "로그인 실패 이력은 분마다 모아 한 줄(횟수)")
-    SV.LAN = {"hostname": "x", "nets": []}
-    for _ in range(SV.IP_FAIL_MAX):
-        SV.ip_failed("10.0.0.9")
-    ok(SV.ip_blocked("10.0.0.9") > 0 and SV.ip_blocked("10.0.0.8") == 0, "LAN 모드: 한 PC에서 10분에 20번 틀리면 그 PC 잠금")
-    SV.LAN = None
+    # 접속 위치(IP)별 제한은 LAN 모드에서만. 기본 방식(이 PC에서만, 모두 127.0.0.1)은 아이디별 제한만
+    SV.FAILS.clear(); SV.IP_FAILS.clear()
+    codes = [http("POST", "/api/login", {"username": f"nobody{i}", "password": "wrong-password"})[0] for i in range(SV.IP_FAIL_MAX + 3)]
+    ok(all(c_ == 400 for c_ in codes) and not SV.IP_FAILS and login("kim13", "intake-pass-13"),
+       f"기본 방식: 여러 아이디로 {SV.IP_FAIL_MAX + 3}번 틀려도 이 PC의 다른 사용자 로그인은 막히지 않음(위치별 제한 없음)")
+    for _ in range(5):
+        http("POST", "/api/login", {"username": "kim13", "password": "wrong-password"})
+    st_, _, body = http("POST", "/api/login", {"username": "kim13", "password": "intake-pass-13"})
+    ok(st_ == 400 and "초 뒤" in json.loads(body)["error"] and login("admin13", "admin-pass-013"), "기본 방식: 아이디별 제한은 그대로(5번 틀린 아이디만 잠김)")
+    SV.FAILS.clear(); SV.IP_FAILS.clear()
+    import ipaddress
+    SV.LAN = {"hostname": "127.0.0.1", "nets": [ipaddress.ip_network("10.0.0.0/24")]}
+    for i in range(SV.IP_FAIL_MAX):
+        http("POST", "/api/login", {"username": f"nobody{i}", "password": "wrong-password"})
+    st_, _, body = http("POST", "/api/login", {"username": "kim13", "password": "intake-pass-13"})
+    ok(st_ == 400 and "초 뒤" in json.loads(body)["error"] and SV.ip_blocked("127.0.0.1") > 0 and SV.ip_blocked("10.0.0.8") == 0,
+       "LAN 모드: 한 PC(IP)에서 10분에 20번 틀리면 그 PC 잠금(맞는 비밀번호도), 다른 PC는 영향 없음")
     SV.IP_FAILS.clear()
+    for _ in range(5):
+        http("POST", "/api/login", {"username": "kim13", "password": "wrong-password"})
+    st_, _, body = http("POST", "/api/login", {"username": "kim13", "password": "intake-pass-13"})
+    ok(st_ == 400 and "초 뒤" in json.loads(body)["error"] and not SV.ip_blocked("127.0.0.1"), "LAN 모드: 아이디별 제한도 그대로")
+    SV.LAN = None
+    ok(SV.login_ip("10.0.0.9") is None and SV.ip_blocked(None) == 0, "기본 방식에서는 위치별 제한에 쓸 IP 없음")
+    SV.FAILS.clear(); SV.IP_FAILS.clear()
     srv.shutdown(); srv.server_close()
 
     ok(not summary_matches(), "여러 쓰기 경로(취소·수납·배정 수정·충돌 반영·단독 옮기기·파기) 뒤에도 요약 열 = derive()")
@@ -2396,7 +2476,8 @@ def v13_refactor():
     for v in vec:
         d = D.derive_pure(v["items"], [{"kind": e["kind"], "body_json": json.dumps(e["body"]), "device_ts": f"2026-11-12T00:00:{i:02d}Z"}
                                        for i, e in enumerate(v["events"])], [])
-        fs = D.fee_summary({"reduction_code": "X" if v["reduction_rate"] else None, "reduction_rate": v["reduction_rate"]}, d["fee"]["final"])
+        fs = D.fee_summary({"reduction_code": "X" if v["reduction_rate"] else None, "reduction_rate": v["reduction_rate"],
+                            "reduction_round_unit": v.get("reduction_round_unit")}, d["fee"]["final"])
         x = v["expect"]
         ok([{k: l[k] for k in ("line_id", "kind", "price", "qty_confirmed", "qty_collected", "remaining")} for l in d["lines"]] == x["lines"]
            and {k: d["fee"][k] for k in x["fee"]} == x["fee"] and d["contact"] == x["contact"] and d["outcome"] == x["outcome"]

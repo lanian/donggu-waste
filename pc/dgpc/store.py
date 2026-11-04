@@ -11,7 +11,9 @@ PC 개인키(서명·키 합의)는 파일이 아니라 이 암호화 DB 안에 
 from __future__ import annotations
 
 import getpass
+import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -352,7 +354,21 @@ def _m2_v13(con):
         _D.refresh_request_summary(con, ids[i:i + 500])
 
 
-MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13)]
+def _m3_round_unit(con):
+    """v0.13: 감면액 끝수 단위를 접수마다 저장(감면을 적용·바꿀 때의 설정값). 설정을 나중에 바꿔도 이미 감면한 접수의 부과 금액은 그대로.
+    기존 감면 접수는 지금 설정값으로 채운다(지금까지 그 값으로 계산·표시해 왔으므로 금액이 바뀌지 않음)."""
+    if "reduction_round_unit" not in _cols(con, "request"):
+        con.execute("ALTER TABLE request ADD COLUMN reduction_round_unit INTEGER")
+    row = con.execute("SELECT value FROM meta WHERE key='reduction_round_unit'").fetchone()
+    try:
+        unit = json.loads(row[0]) if row else 1
+    except (TypeError, ValueError):
+        unit = 1
+    unit = unit if unit in (1, 10) else 1
+    con.execute("UPDATE request SET reduction_round_unit=? WHERE reduction_code IS NOT NULL AND reduction_round_unit IS NULL", (unit,))
+
+
+MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit)]
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -376,6 +392,60 @@ def pre_migration_backup(con, path: Path, from_ver: int) -> Path | None:
     except OSError:
         pass
     return dest
+
+
+# 사전 사본 보관: 개인정보가 든 DB 사본이므로 오래 두지 않는다. 가장 새 사본 1개는 늘 남기고(업데이트 직후 되돌리기용),
+# 나머지는 '새것부터 3개 안' 그리고 '30일 이내'인 것만 남긴다(둘 중 하나라도 벗어나면 지움). 매일 예약 작업에서 돈다.
+PRE_MIGRATION_KEEP = 3
+PRE_MIGRATION_DAYS = 30
+_PRE_RE = re.compile(r"^pc-v\d+-to-v\d+-(\d{8}-\d{6})(?:-\d+)?\.db$")
+
+
+def pre_migration_dir(d: Path | None = None) -> Path:
+    return (d or state_dir()) / "pre-migration"
+
+
+def _pre_copies(d: Path | None = None) -> list[tuple[float, Path]]:
+    """사전 사본 목록 (만든 시각(초), 경로), 새것부터. 시각은 파일 이름(만든 때, 이 PC 시각) — copy2 가 원본 DB의 수정 시각을 옮기므로 파일 시각은 쓰지 않음."""
+    import datetime as _dt
+    pd = pre_migration_dir(d)
+    out = []
+    if not pd.is_dir():
+        return out
+    for f in pd.iterdir():
+        m = _PRE_RE.match(f.name)
+        if not m or not f.is_file():
+            continue
+        try:
+            t = _dt.datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").timestamp()
+        except ValueError:
+            t = f.stat().st_mtime
+        out.append((t, f))
+    return sorted(out, key=lambda x: (x[0], x[1].name), reverse=True)
+
+
+def pre_migration_info(d: Path | None = None) -> dict:
+    """진단용: 사전 사본 개수·크기·가장 오래된/새 사본 이름."""
+    cs = _pre_copies(d)
+    return {"count": len(cs), "bytes": sum(f.stat().st_size for _t, f in cs), "newest": cs[0][1].name if cs else None,
+            "oldest": cs[-1][1].name if cs else None, "keep": PRE_MIGRATION_KEEP, "days": PRE_MIGRATION_DAYS}
+
+
+def pre_migration_retention(d: Path | None = None, now: float | None = None) -> list[str]:
+    """보관 규칙을 벗어난 사전 사본을 지운다(가장 새 것은 늘 남김). 지운 파일 이름 목록."""
+    import time as _time
+    now = _time.time() if now is None else now
+    gone = []
+    for i, (t, f) in enumerate(_pre_copies(d)):
+        if i == 0:
+            continue
+        if i >= PRE_MIGRATION_KEEP or now - t > PRE_MIGRATION_DAYS * 86400:
+            try:
+                f.unlink()
+                gone.append(f.name)
+            except OSError:
+                pass
+    return gone
 
 
 def run_migrations(con, path: Path | None = None) -> list[int]:
@@ -409,7 +479,7 @@ def run_migrations(con, path: Path | None = None) -> list[int]:
 _DIRTY_SQL = [
     "CREATE TEMP TABLE IF NOT EXISTS dirty_req (id TEXT)",
     "CREATE TEMP TRIGGER IF NOT EXISTS dg_req_ins AFTER INSERT ON main.request BEGIN INSERT INTO dirty_req VALUES (NEW.id); END",
-    "CREATE TEMP TRIGGER IF NOT EXISTS dg_req_upd AFTER UPDATE OF name, address, status, reduction_code, reduction_rate ON main.request "
+    "CREATE TEMP TRIGGER IF NOT EXISTS dg_req_upd AFTER UPDATE OF name, address, status, reduction_code, reduction_rate, reduction_round_unit ON main.request "
     "BEGIN INSERT INTO dirty_req VALUES (NEW.id); END",
 ]
 for _t, _ops, _col in (("request_item", ("INSERT", "UPDATE", "DELETE"), "request_id"), ("item_link", ("INSERT", "UPDATE"), "request_id"),

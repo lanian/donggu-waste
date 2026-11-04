@@ -1,5 +1,5 @@
 {
- "about": "PC(pc/dgpc/derive.py derive_pure·fee_summary)와 휴대폰(web/fees.js deriveStop·applyReduction)이 함께 따르는 계산 규칙의 공통 시험 벡터. 입력(접수 품목 + 현장 기록 + 감면율) → 기대값(줄별 수량·금액·감면·부과 금액). tests/test_pc.py 와 tests/fees.test.mjs 가 같은 파일로 확인한다. 감면액 끝수는 1원 단위(휴대폰은 10원 단위 설정을 받지 않는다).",
+ "about": "PC(pc/dgpc/derive.py derive_pure·fee_summary)와 휴대폰(web/fees.js deriveStop·applyReduction)이 함께 따르는 계산 규칙의 공통 시험 벡터. 입력(접수 품목 + 현장 기록 + 감면율) → 기대값(줄별 수량·금액·감면·부과 금액). tests/test_pc.py 와 tests/fees.test.mjs 가 같은 파일로 확인한다. 감면액 끝수 단위는 벡터의 reduction_round_unit(없으면 1원). 10원은 접수에 저장된 단위가 휴대폰 목록의 선택 키 \"ru\"로 전달되는 경우.",
  "vectors": [
   {
    "name": "기본: 확정 단가 2줄, 기록 없음",
@@ -987,6 +987,298 @@
      "rate": 0,
      "reduction": 0,
      "levied": 4000
+    }
+   }
+  },
+  {
+   "name": "감면 끝수 10원: 3,015원 × 50% → 감면 1,507 → 1,500원",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "가상 품목",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 3015,
+     "amount": 3015,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 50,
+   "reduction_round_unit": 10,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 3015,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 3015,
+     "confirmed_subtotal": 3015,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 3015,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": 1500,
+     "levied": 1515
+    }
+   }
+  },
+  {
+   "name": "감면 끝수 1원(같은 입력): 3,015원 × 50% → 감면 1,507원",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "가상 품목",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 3015,
+     "amount": 3015,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 50,
+   "reduction_round_unit": 1,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 3015,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 3015,
+     "confirmed_subtotal": 3015,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 3015,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": 1507,
+     "levied": 1508
+    }
+   }
+  },
+  {
+   "name": "감면 끝수 10원 + 현장 추가 품목: 3,333원 × 30% → 999 → 990원",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [
+    {
+     "kind": "FIELD_ITEM_ADD",
+     "body": {
+      "line_id": "f1",
+      "name": "가상 추가",
+      "spec": "",
+      "unit": "EA",
+      "unit_label": "개",
+      "unit_price": 1333,
+      "price_status": "CONFIRMED",
+      "qty": 1
+     }
+    }
+   ],
+   "reduction_rate": 30,
+   "reduction_round_unit": 10,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "f1",
+      "kind": "FIELD",
+      "price": 1333,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 3333,
+     "field_added": 1333,
+     "diff": 1333,
+     "pending_count": 0,
+     "final": 3333,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 30,
+     "reduction": 990,
+     "levied": 2343
+    }
+   }
+  },
+  {
+   "name": "감면 끝수 10원, 100% 감면: 12,345원 → 감면 12,340원, 부과 5원",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "가상 품목",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 12345,
+     "amount": 12345,
+     "price_status": "CONFIRMED"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 100,
+   "reduction_round_unit": 10,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 12345,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 12345,
+     "confirmed_subtotal": 12345,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 0,
+     "final": 12345,
+     "qty_by_unit": {
+      "개": 1
+     }
+    },
+    "reduction": {
+     "rate": 100,
+     "reduction": 12340,
+     "levied": 5
+    }
+   }
+  },
+  {
+   "name": "감면 끝수 10원, 금액 확인 대기 → 감면·부과 미확정",
+   "items": [
+    {
+     "line_id": "a",
+     "fee_rate_id": null,
+     "name": "의자",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": 2000,
+     "amount": 2000,
+     "price_status": "CONFIRMED"
+    },
+    {
+     "line_id": "b",
+     "fee_rate_id": null,
+     "name": "식탁",
+     "spec": "",
+     "unit": "EA",
+     "unit_label": "개",
+     "qty": 1,
+     "unit_price": null,
+     "amount": 0,
+     "price_status": "PENDING"
+    }
+   ],
+   "events": [],
+   "reduction_rate": 50,
+   "reduction_round_unit": 10,
+   "expect": {
+    "lines": [
+     {
+      "line_id": "a",
+      "kind": "RECEIVED",
+      "price": 2000,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     },
+     {
+      "line_id": "b",
+      "kind": "RECEIVED",
+      "price": null,
+      "qty_confirmed": 1,
+      "qty_collected": 0,
+      "remaining": 1
+     }
+    ],
+    "contact": "NOT_CONTACTED",
+    "outcome": null,
+    "fee": {
+     "received": 2000,
+     "confirmed_subtotal": 2000,
+     "field_added": 0,
+     "diff": 0,
+     "pending_count": 1,
+     "final": null,
+     "qty_by_unit": {
+      "개": 2
+     }
+    },
+    "reduction": {
+     "rate": 50,
+     "reduction": null,
+     "levied": null
     }
    }
   }

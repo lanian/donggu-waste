@@ -418,7 +418,7 @@ function reductionCard(r, ctx = {}) {
   const who = h('input', { 'aria-label': '확인자', placeholder: '확인자', value: r.reduction_checker || boot.me.display_name, class: 'w-s' });
   const why = r.closed ? h('input', { placeholder: '마감 후 수정 사유 (필수)', 'aria-label': '감면 변경 사유', class: 'w-m' }) : null;
   return h('div', { class: 'card' }, h('h2', {}, '수수료 감면 ', r.reduction_code ? chip(`${r.reduction_label} ${r.reduction_rate}%`, 'info') : chip('없음', 'neutral')),
-    r.reduction_code ? h('p', { class: 'small muted' }, `증빙 ${r.reduction_proof || '-'} · 확인 ${r.reduction_checker || '-'} · ${kst(r.reduction_at)}`) : null,
+    r.reduction_code ? h('p', { class: 'small muted' }, `증빙 ${r.reduction_proof || '-'} · 확인 ${r.reduction_checker || '-'} · ${kst(r.reduction_at)}${+r.reduction_round_unit === 10 ? ' · 끝수 10원 미만 버림' : ''}`) : null,
     canWork() && r.status !== 'CANCELLED' ? h('div', { class: 'row' }, sel, proof, who, why, btn('감면 저장', wrap(async () => {
       if (!sel.value && !r.reduction_code) throw new Error('감면 사유를 고르세요.');
       try { await post(`requests/${r.id}/reduction`, { reduction_code: sel.value, reduction_proof: proof.value, reduction_checker: who.value, reason: why ? why.value : '', req_ver: ctx.ver ? ctx.ver() : r.req_ver }); }

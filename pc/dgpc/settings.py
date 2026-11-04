@@ -150,7 +150,7 @@ register("capacity", {}, "수거 한도(하루 건수·부피, 동별 우선 팀
          group="수거 한도", owner="area")
 
 # ---- 수수료·감면
-register("reduction_round_unit", 1, "감면액 끝수 처리 단위(원): 1 = 원 미만 버림, 10 = 10원 미만 버림.", lambda v: v in (1, 10), group="수수료",
+register("reduction_round_unit", 1, "감면액 끝수 처리 단위(원): 1 = 원 미만 버림, 10 = 10원 미만 버림. 감면을 적용·바꿀 때 접수에 저장(이미 감면한 접수는 바꿔도 그대로).", lambda v: v in (1, 10), group="수수료",
          owner="config")
 register("reductions", None, "감면 사유 목록 [{code, label, rate, note, active}]. 비어 있으면 기본 목록(조례 확인 필요 표시).", _opt(_is_list),
          group="수수료", owner="finance")

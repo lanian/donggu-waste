@@ -11,7 +11,7 @@ from dgpc import privacy as _pv, finance
 from dgpc.core import (
     LABELS, KST, UserError, _chunks, _date_ok, _kst_date, _kst_range, audit, get_setting, one, rows, safe_csv_writer, set_setting, today_kst, tx,
 )
-from dgpc.derive import FINAL, derive, payment_core, prefetch, reduction_round_unit
+from dgpc.derive import FINAL, derive, payment_core, prefetch
 from dgpc.fees import FEE_ROWS
 from dgpc.intake import CHANNELS, _ids
 
@@ -24,7 +24,6 @@ PAY_LABEL = {"NONE": "해당 없음", "AMOUNT_PENDING": "금액 확인 대기", 
 
 def _export_rows(con, reqs: list[dict]):
     """CSV 행(묶어서 미리 읽음 — 접수마다 질의하지 않음). 만들면서 하나씩 돌려준다."""
-    unit = reduction_round_unit(con)
     for ch in _chunks([r for r in reqs], 500):
         ids = [r["id"] for r in ch]
         pre = prefetch(con, ids, ("items", "events", "links", "payments", "partial"))
@@ -34,7 +33,7 @@ def _export_rows(con, reqs: list[dict]):
             ver.setdefault(x["request_id"], x["fee_version_id"])
         for r in ch:
             st = derive(con, r, pre)
-            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]])
             yield r, _export_line(r, st, ps, ver.get(r["id"]), crew_of.get(r["id"]))
 
 
@@ -148,7 +147,6 @@ def stats(con, start: str, end: str, basis: str = "planned") -> dict:
     live_ids = [r["id"] for r in reqs if r["status"] != "CANCELLED"]
     pre = prefetch(con, live_ids, ("items", "events", "links", "payments", "partial"))
     crew_of = _last_crew_names(con, live_ids)
-    unit = reduction_round_unit(con)
     by_day: dict[str, dict] = {}
     def day(d):
         return by_day.setdefault(d, {"date": d, "received": 0, "planned": 0, "done": 0, "partial": 0, "not_collected": 0, "cancelled": 0,
@@ -185,7 +183,7 @@ def stats(con, start: str, end: str, basis: str = "planned") -> dict:
             continue
         st = derive(con, r, pre)
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
-            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            ps = payment_core(r, st["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]])
             if ps["calculated"] is None:
                 totals["amount_pending"] += 1
             else:

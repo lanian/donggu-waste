@@ -124,12 +124,13 @@ def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | Non
     red = finance.apply_reduction_fields(con, data) or {}
     con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
         planned_date, appt_start, appt_end, must_today, urgent, priority, status, received_at, updated_at, dong, channel, levy_no,
-        reduction_code, reduction_rate, reduction_label, reduction_proof, reduction_checker, reduction_at)
-        VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RECEIVED',?,?,?,?,?,?,?,?,?,?,?)""",
+        reduction_code, reduction_rate, reduction_label, reduction_proof, reduction_checker, reduction_at, reduction_round_unit)
+        VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RECEIVED',?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rid, receipt, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
                  (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None else None, d["planned_date"] or None, d["appt_start"] or None,
                  d["appt_end"] or None, d["must_today"], d["urgent"], d["priority"], ts, ts, dong, d["channel"], levy,
-                 red.get("reduction_code"), red.get("reduction_rate"), red.get("reduction_label"), red.get("reduction_proof"), red.get("reduction_checker"), red.get("reduction_at")))
+                 red.get("reduction_code"), red.get("reduction_rate"), red.get("reduction_label"), red.get("reduction_proof"), red.get("reduction_checker"), red.get("reduction_at"),
+                 red.get("reduction_round_unit")))
     for it in items:
         _insert_item(con, rid, it)
     return rid, receipt

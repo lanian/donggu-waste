@@ -34,7 +34,7 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 - 결과 가져오기(`POST /api/import/result`) 응답: `seq_reused`(휴대폰 복원으로 순번이 겹친 기록 수, 반영됨·경고만), `import_id`. 사진 가져오기 응답에 `import_id`.
 - 충돌함의 "같은 팀 옛 갱신본" 결과는 이제 **반영**된다(`conflict_reason`에 "이전 갱신본(…) — 같은 팀 배정 유지로 반영" 메모). 충돌은 다른 팀으로 옮겼거나 뺀 경우만.
 - 결과 기록에 `warning` 열(순번 재사용 등). 상세의 `events`에는 아직 넣지 않음.
-- `GET /api/bootstrap` → `settings`에 `payment_guide`(납부 안내 문구, 접수증·안내 문구용), `reduction_round_unit`(1 또는 10), `reduction_round_units`([1, 10]). `POST /api/settings`로 저장(`payment_guide` 300자, `reduction_round_unit` 1·10만).
+- `GET /api/bootstrap` → `settings`에 `payment_guide`(납부 안내 문구, 접수증·안내 문구용), `reduction_round_unit`(1 또는 10), `reduction_round_units`([1, 10]). `POST /api/settings`로 저장(`payment_guide` 300자, `reduction_round_unit` 1·10만). 끝수 단위는 감면을 적용·바꿀 때 접수 열 `reduction_round_unit`에 저장되고(감면 해제 시 비움), 금액 계산(상세·수납 상태·요약 열·접수증·통계·CSV·휴대폰 목록)은 모두 접수에 저장된 값을 쓴다 — 설정을 바꿔도 이미 감면한 접수는 그대로. 수납 상태 응답에 `reduction_round_unit`(그 접수에 쓴 단위). 휴대폰 목록 묶음에는 10원일 때만 선택 키 `"ru": 10`(phone-events 8.5).
 - 단독 휴대폰 옮기기(`POST /api/import/solo?preview=1`): `invalid`(틀린 접수 수), `errors: [{request_id(앞 8자), receipt_no, error}]` → 미리보기 표에 행별로. 실제 옮기기 응답에도 `invalid`, `renamed`(접수번호 S 표시로 바꾼 수).
 - 접수번호가 겹치는 단독 접수: `…-S0001`, 그것도 있으면 `…-S0001-2`, `-3`….
 - 수신 코드 입력(`POST /api/bundles/{id}/receipt`): 휴대폰 화면의 앞 글자 `R-`·띄어쓰기·하이픈을 붙여 넣어도 받는다. 오류 문구는 "수신 코드가 맞지 않습니다".
@@ -52,7 +52,7 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 | `GET /api/pending` | 접수·팀장·관리자 | 대시보드 처리할 일 `{today, total, items: [{key, label, count, oldest, link}]}`. key: `close_approve`(마감 확인 대기), `refund_approve`(환불 결재 대기), `unclosed_days`(마감 안 한 지난 날짜 90일), `overdue`, `nodate`, `no_result_crews`(+`crews`), `conflicts`. `link`는 화면 키 제안(`requests?quick=OVERDUE` 등) |
 | `GET /api/readiness` | 접수·팀장·관리자 | 운영 준비 점검 `{ok, done, total, items: [{key, label, ok, fix, note}]}`. key: crews, devices, depot, unload_site, dongs, address, backup_key, fee, contact, admin_password. `fix`는 고칠 화면 키(`settings/crews`, `settings/devices`, `settings/route`, `settings/dongs`, `settings/address`, `settings/backup`, `fee`, `settings/notice`, `users`) |
 | `GET /api/ops-status` | 접수·팀장·관리자 | 예약 작업 상태 `{items: [{key, label, last_at, age_days, stale}], warnings: [...]}` — 개인정보 자동 파기·사진 정리·하루 예약 작업·빠른/전체 무결성 검사·백업. 2일(전체 검사 8일) 넘으면 `stale` → 대시보드 경고 띠 |
-| `GET /api/diag` | 관리자만 | 진단: `db_bytes, wal_bytes, photos{count,bytes}, free_bytes, auto_vacuum, schema_version, tables{표: 건수}, last{backup, verify_quick, verify_full, pii_purge, photo_purge, daily_tasks, refund_sync}, scheduler_tick, sessions, jobs_queued` |
+| `GET /api/diag` | 관리자만 | 진단: `db_bytes, wal_bytes, photos{count,bytes}, free_bytes, auto_vacuum, schema_version, tables{표: 건수}, last{backup, verify_quick, verify_full, pii_purge, photo_purge, daily_tasks, refund_sync}, pre_migration{count, bytes, newest, oldest, keep, days}, scheduler_tick, sessions, jobs_queued` |
 | `GET /api/assign/current?date=` | 접수·팀장·관리자 | 그날 확정(ACTIVE) 배정 `[{batch_id, crew_id, crew_name, assign_ver, created_at, sent_at, stops: [{seq, eta, request_id, receipt_no, status, dong, lat, lon, unload_after?}]}]` |
 | `POST /api/assign/edit` | 접수·관리자 | 다시 계산하지 않는 부분 수정. 본문 `{date, op, assign_ver: {팀ID: 화면이 본 갱신본}, reason?}` + op별: `insert {crew_id, request_id, position?(1부터, 없으면 끝), eta?}`, `remove {request_id}`, `reorder {crew_id, order: [request_id…] (같은 접수 모두)}`, `move {request_id, to_crew_id, position?}`. 고친 팀마다 새 갱신본(assign_ver+1) → 응답 `{batches: [{batch_id, crew_id, assign_ver, count}], resend_needed: [팀ID]}` → 그 팀 목록을 다시 보내야 함. `assign_ver`가 지금과 다르면 409 `{crew_id, assign_ver}` |
 | `POST /api/conflicts/bulk` | 접수·관리자 | 충돌 한꺼번에: `{action: APPLY|REJECT, reason, request_id | import_id}` → `{resolved, failed: [{event_id, kind, error}]}` |
@@ -64,7 +64,7 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 
 - **조회(GET)는 DB 쓰기 잠금 없이** 조회 전용 연결로 처리한다(접속기록·변경 이력은 잠금 안에서 따로 씀). 노선 계산·외부 호출(행안부·카카오)·결과/사진/단독 파일 검증·주소 자료 읽기·로그인 비밀번호 확인도 잠금 밖 → 긴 작업 중에도 다른 화면이 멈추지 않는다.
 - 세션: 30분 무조작 만료 + **로그인 뒤 10시간 절대 만료**(조작해도). 401 `{"login": true}`이면 로그인 화면으로(지금과 같음).
-- LAN 모드: 한 PC(IP)에서 10분에 20번 넘게 로그인 실패 → 그 PC 10분 잠금(400, "여러 번 틀렸습니다. N초 뒤…"). 로그인 실패 변경 이력은 분마다 모아 한 줄(`LOGIN_FAIL {count, minute}`).
+- LAN 모드: 한 PC(IP)에서 10분에 20번 넘게 로그인 실패 → 그 PC 10분 잠금(400, "여러 번 틀렸습니다. N초 뒤…"). 이 PC에서만 여는 기본 방식(모두 127.0.0.1)에는 위치별 제한이 없고 계정별 잠금만. 로그인 실패 변경 이력은 분마다 모아 한 줄(`LOGIN_FAIL {count, minute}`).
 - 백업 검사(`backups/verify`, `backups/verify-auto`)는 정한 이름 형식(`donggu-backup|auto-YYYYMMDD-HHMMSS[-n].dgbak|dgabk`)만, 백업 폴더 밖 경로 거부.
 - 두 번째 백업 위치 변경은 변경 이력에 경로가 남는다(`backup / DEST2`).
 - 1초 넘는 요청은 서버 로그에 WARNING(경로 틀·ms).
@@ -93,7 +93,7 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 ## 8. 남은 것·제한 (서버)
 
 - 사진을 별도 암호화 DB 파일(photos.db)로 옮기는 일(16)은 위험이 커서 하지 않았다. 대신: 새 DB는 `auto_vacuum=INCREMENTAL`, 파기·사진 정리 뒤 `PRAGMA incremental_vacuum`, 백업 해시는 조각으로 읽어 계산. 기존 DB를 INCREMENTAL로 바꾸려면 서버를 끄고 `python pc/pc_tool.py vacuum`(큰 DB는 몇 분).
-- 이전 단계(PRAGMA user_version): 1 = v0.12 이하 구조, 2 = v0.13. 기존 DB를 처음 열 때 `state/pre-migration/pc-v{이전}-to-v{새}-….db`로 파일을 복사해 둔다(같은 DB 키로 암호화된 그대로). DB가 프로그램보다 새 버전이면 열지 않는다.
+- 이전 단계(PRAGMA user_version): 1 = v0.12 이하 구조, 2 = v0.13 요약 열·색인, 3 = 접수 열 `reduction_round_unit`(감면액 끝수 단위, 기존 감면 접수는 그때 설정값으로 채움). 기존 DB를 처음 열 때 `state/pre-migration/pc-v{이전}-to-v{새}-….db`로 파일을 복사해 둔다(같은 DB 키로 암호화된 그대로). 사본은 매일 예약 작업이 정리한다(가장 새 1개는 늘 남김, 나머지는 새것부터 3개 안·30일 이내만; 지우면 변경 이력 `backup / pre-migration PURGE`). DB가 프로그램보다 새 버전이면 열지 않는다.
 - 접수 일괄 등록(CSV)·대사 파일의 **실제 반영**은 아직 잠금 안에서 읽고 넣는다(미리보기는 잠금 밖). 2,000·5,000행 제한이라 짧다.
 - 마감 확인(`close/approve`) 뒤 자동 파기·자동 백업은 이전처럼 그 요청 안에서 돈다(예약 작업과 별개).
 

@@ -11,7 +11,7 @@ import uuid
 import dgproto as P
 from dgpc import privacy as _pv
 from dgpc.core import KST, StaleError, UserError, _chunks, _date_ok, _int_clamp, _num, audit, get_setting, now, one, rows, today_kst, tx
-from dgpc.derive import derive
+from dgpc.derive import derive, request_round_unit
 from dgpc.devices import list_crews, pc_key
 from dgpc.fees import FEE_ROWS, fee_table_for_phone, volume_overrides
 
@@ -244,8 +244,9 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
             extra_u = {}
         # "dong": 행정동 이름(문자열). 휴대폰 목록 형식(dgproto)이 아직 모르면 압축할 때 빠진다.
         # "reduction": 감면율(%)·사유. 휴대폰 목록 압축 형식에는 감면율만 "rd"로 싣는다(사유 이름은 복지 정보라 휴대폰에 보내지 않음).
-        # "levy_no": 부과번호 → "lv"
-        red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or ""}} if r.get("reduction_code") else {}
+        # "levy_no": 부과번호 → "lv". 감면액 끝수 단위(접수에 저장된 값, 10원일 때만) → "ru"
+        red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or "",
+                              **({"round_unit": 10} if request_round_unit(r) == 10 else {})}} if r.get("reduction_code") else {}
         stops.append({**extra_u, **red_, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],
                       "lat": r["lat"], "lon": r["lon"], "eta": s["eta"] or (r["appt_start"] or ""),

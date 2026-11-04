@@ -163,14 +163,13 @@ def refresh_request_summary(con, rids) -> int:
     rids = [r for r in dict.fromkeys(rids) if r]
     if not rids:
         return 0
-    unit = reduction_round_unit(con)
     n = 0
     for ch in _chunks(rids):
         reqs = rows(con, f"SELECT * FROM request WHERE id IN ({','.join('?' * len(ch))})", ch)
         pre = prefetch(con, [r["id"] for r in reqs])
         for r in reqs:
             final = derive(con, r, pre)["fee"]["final"]
-            ps = payment_core(r, final, pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            ps = payment_core(r, final, pre["payments"][r["id"]], pre["partial"][r["id"]])
             con.execute("UPDATE request SET fee_final=?, levied=?, paid_total=?, pay_status=?, active_crew_id=?, chosung=? WHERE id=?",
                         (final, ps["levied"], ps["paid"], ps["status"], pre["active"][r["id"]], chosung_key(r["name"], r["address"]), r["id"]))
             n += 1
@@ -181,21 +180,32 @@ ROUND_UNITS = (1, 10)  # 감면액 끝수 처리 단위(원): 1 = 원 미만 버
 
 
 def reduction_round_unit(con) -> int:
+    """지금 설정값. 감면을 적용·바꿀 때 접수에 저장하는 값이며, 금액 계산에는 접수에 저장된 값(request_round_unit)을 쓴다."""
     u = get_setting(con, "reduction_round_unit")
     return u if u in ROUND_UNITS else 1
 
 
-def fee_summary(r: dict, final: int | None, unit: int = 1) -> dict:
-    """계산 금액 → 감면액 → 부과 금액. 감면액은 unit(1원·10원) 미만 버림(설정 reduction_round_unit, 기본 1원)."""
+def request_round_unit(r: dict) -> int:
+    """접수에 저장된 감면액 끝수 단위(감면을 적용·바꿀 때의 설정값). 없으면 1원(감면 없음·옛 자료)."""
+    u = r.get("reduction_round_unit")
+    return u if u in ROUND_UNITS else 1
+
+
+def fee_summary(r: dict, final: int | None, unit: int | None = None) -> dict:
+    """계산 금액 → 감면액 → 부과 금액. 감면액은 unit(1원·10원) 미만 버림. unit 을 주지 않으면 접수에 저장된 단위
+    (r["reduction_round_unit"], 감면을 적용할 때의 설정값 — 나중에 설정을 바꿔도 이미 감면한 접수는 그대로)."""
     rate = int(r.get("reduction_rate") or 0) if r.get("reduction_code") else 0
+    unit = request_round_unit(r) if unit is None else unit
+    unit = unit if unit in ROUND_UNITS else 1
     if final is None:
-        return {"calculated": None, "reduction_rate": rate, "reduction": None, "levied": None, "reduction_label": r.get("reduction_label")}
-    unit = unit if unit in (1, 10) else 1
+        return {"calculated": None, "reduction_rate": rate, "reduction": None, "levied": None, "reduction_label": r.get("reduction_label"),
+                "reduction_round_unit": unit}
     red = (final * rate // 100) // unit * unit
-    return {"calculated": final, "reduction_rate": rate, "reduction": red, "levied": final - red, "reduction_label": r.get("reduction_label") if rate else None}
+    return {"calculated": final, "reduction_rate": rate, "reduction": red, "levied": final - red, "reduction_label": r.get("reduction_label") if rate else None,
+            "reduction_round_unit": unit}
 
 
-def payment_core(r: dict, final, recs: list[dict], partial_adj: int = 0, unit: int = 1) -> dict:
+def payment_core(r: dict, final, recs: list[dict], partial_adj: int = 0, unit: int | None = None) -> dict:
     """DB 없이 수납 상태 계산(계산 금액 → 감면 → 부과 금액, 납부 기록, 일부 수거 환불 지급액)."""
     fs = fee_summary(r, final, unit)
     owed = fs["levied"]
@@ -230,7 +240,7 @@ def payment_status(con, rid: str, pre: dict | None = None, r: dict | None = None
     if pre is None:
         pre = prefetch(con, [rid], ("items", "events", "links", "payments", "partial"))
     final = derive(con, r, pre)["fee"]["final"]
-    return payment_core(r, final, pre["payments"].get(rid, []), pre["partial"].get(rid, 0), reduction_round_unit(con))
+    return payment_core(r, final, pre["payments"].get(rid, []), pre["partial"].get(rid, 0))
 
 
 on_dirty("summary", refresh_request_summary)

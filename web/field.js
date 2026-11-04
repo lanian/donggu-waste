@@ -11,7 +11,7 @@ const PII = ['name', 'phone', 'address', 'spot_note', 'memo'];
 const itemKey = (s) => (s.items || []).map((i) => [i.line_id, i.qty, i.fee_rate_id || null, i.unit_price ?? null, i.price_status || '', i.prior_collected || 0]);
 // 개인정보를 지운 지점은 이름·연락처·주소가 비어 있으므로, 그 칸은 비교하지 않는다(다시 받은 것은 변경이 아님)
 const infoKey = (s, skipPii) => JSON.stringify([skipPii ? null : [...PII.map((k) => s[k] || ''), s.lat ?? null, s.lon ?? null],
-  s.dong || '', s.appt || null, !!s.revisit, itemKey(s), ...(s.reduction && s.reduction.rate ? [s.reduction.rate] : [])]);
+  s.dong || '', s.appt || null, !!s.revisit, itemKey(s), ...(s.reduction && s.reduction.rate ? [s.reduction.rate] : []), ...(s.reduction && s.reduction.round_unit > 1 ? [s.reduction.round_unit] : [])]);
 
 // 가장 긴 증가 부분 수열에 들지 않는 위치 = 순서가 바뀐 지점 (하나 끼워 넣어도 나머지는 "변경"이 아님)
 function movedIndexes(seq) {

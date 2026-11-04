@@ -10,7 +10,7 @@ import uuid
 from dgpc import backup as _bk, privacy as _pv, area
 from dgpc.assign import list_unloads
 from dgpc.core import ACTOR, KST, LABELS, UserError, _secs, audit, close_info, now, one, rows, today_kst, tx
-from dgpc.derive import derive, payment_core, payment_status, prefetch, reduction_round_unit
+from dgpc.derive import derive, payment_core, payment_status, prefetch
 from dgpc.devices import crew_request_ids
 from dgpc.intake import _snapshot
 from dgpc.results import field_intakes, list_conflicts
@@ -74,7 +74,6 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     assigned_ids = {r["request_id"] for r in rows(con, """SELECT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
         WHERE b.work_date=? AND b.status='ACTIVE'""", (work_date,))}
     pre = prefetch(con, [r["id"] for r in reqs], ("items", "events", "links", "payments", "partial"))
-    unit = reduction_round_unit(con)
     derived = {}
     for r in reqs:
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
@@ -111,7 +110,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     unpaid = []
     for r in reqs:
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD", "CANCELLED"):
-            ps = payment_core(r, derived[r["id"]]["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]], unit)
+            ps = payment_core(r, derived[r["id"]]["fee"]["final"], pre["payments"][r["id"]], pre["partial"][r["id"]])
             if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING", "REFUND_NEEDED", "OVERREFUNDED_REVIEW"):
                 unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
                                "levied": ps["levied"], "paid": ps["paid"]})

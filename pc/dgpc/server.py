@@ -78,17 +78,24 @@ STATE = {"scheduler_tick": None, "started_at": None}
 IP_FAIL_MAX, IP_FAIL_WINDOW, IP_BLOCK_S = 20, 600, 600
 
 
-def ip_blocked(ip: str) -> int:
-    """LAN 모드에서 이 PC(IP)가 잠겨 있으면 남은 초."""
-    if not LAN:
+def login_ip(client_ip: str) -> str | None:
+    """접속 위치별 로그인 제한에 쓸 IP. LAN 모드에서만(다른 PC가 각자 IP로 들어옴). 이 PC에서만 여는 기본 방식은
+    모든 사용자가 127.0.0.1 한 곳이라, 위치별 제한을 걸면 누군가 20번 틀릴 때 이 PC의 모든 로그인이 막힌다 — 그래서 None(제한 없음).
+    아이디별 제한(login_blocked)은 두 방식 모두 그대로."""
+    return client_ip if LAN else None
+
+
+def ip_blocked(ip: str | None) -> int:
+    """LAN 모드에서 이 PC(IP)가 잠겨 있으면 남은 초. ip 가 None(기본 방식)이거나 LAN 모드가 아니면 0."""
+    if not LAN or not ip:
         return 0
     f = IP_FAILS.get(ip)
     return max(0, int(f["until"] - time.time()) + 1) if f and f["until"] > time.time() else 0
 
 
-def ip_failed(ip: str):
-    """LAN 모드: 한 PC에서 10분에 20번 넘게 틀리면(아이디를 바꿔 가며 시도) 그 PC를 10분 잠근다."""
-    if not LAN:
+def ip_failed(ip: str | None):
+    """LAN 모드: 한 PC에서 10분에 20번 넘게 틀리면(아이디를 바꿔 가며 시도) 그 PC를 10분 잠근다. 기본 방식(ip None)은 세지 않는다."""
+    if not LAN or not ip:
         return
     now_ = time.time()
     if len(IP_FAILS) > 1000:
@@ -558,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
     def login(self):
         """로그인: scrypt 확인은 DB 잠금 밖(조회 전용 연결)에서, 마지막 로그인 시각·이력만 잠금 안에서."""
         d = self.json_body()
-        ip = self.client_address[0] if LAN else "local"
+        ip = login_ip(self.client_address[0])
         wait = login_blocked(d.get("username") or "") or ip_blocked(ip)
         if wait:
             raise S.UserError(f"여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")

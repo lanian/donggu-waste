@@ -282,7 +282,7 @@ function settingsBasic() {
       unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value,
       unload_hours: { start: uhs.value, end: uhe.value }, lunch: { start: lus.value, end: lue.value, minutes: lum.value }, base_first: bfirst.checked }); toast('저장했습니다'); setBoot(null); render(); }, routeMsg), 'primary')), routeMsg),
     h('div', { class: 'card' }, h('h2', {}, '접수증·안내 문구·월보'), isPlaceholderContact() ? h('div', { class: 'notice warn small' }, '문의처가 아직 기본 문구입니다. 접수증·주민 안내 문구에 그대로 나가니 전화번호를 넣으세요.') : null,
-      h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('납부 안내', payGuide, h('span', { class: 'muted small' }, '납부 방법·기한 (300자, 접수증·안내 문구)')), ft('감면액 끝수', roundUnit), ft('월보 제목', title)),
+      h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('납부 안내', payGuide, h('span', { class: 'muted small' }, '납부 방법·기한 (300자, 접수증·안내 문구)')), ft('감면액 끝수', roundUnit, h('span', { class: 'muted small' }, '새로 감면하는 접수부터 적용 (이미 감면한 접수는 그때 단위 그대로)')), ft('월보 제목', title)),
       h('p', { class: 'small muted' }, '문의처·배출 장소 안내·납부 안내는 접수증(신청인 보관용)과 [안내 문구 복사]에, 월보 제목은 통계 → [월보 출력]에 쓰입니다.'),
       h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { contact_info: contact.value, disposal_guide: guide.value, payment_guide: payGuide.value, ...(+roundUnit.value !== +(st.reduction_round_unit || 1) ? { reduction_round_unit: +roundUnit.value } : {}), monthly_report_title: title.value }); toast('저장했습니다'); setBoot(null); render(); }, infoMsg), 'primary')), infoMsg),
     noticeCard()];
