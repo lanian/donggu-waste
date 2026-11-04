@@ -296,7 +296,9 @@ def run():
 
         # 수정 이력
         page.goto(r1_url)
+        settled(page)
         page.get_by_label("상세 배출 위치").fill("101동 현관 앞")
+        expect(page.get_by_label("상세 배출 위치")).to_have_value("101동 현관 앞")
         page.get_by_role("button", name="수정 저장").click()
         expect(page.get_by_text("수정 사유를 적어 주세요.")).to_be_visible()
         page.get_by_placeholder("수정 사유 (필수)").fill("주민 요청: 위치 보완")
@@ -724,6 +726,7 @@ def run():
 
         # 자동 백업: 백업 키(개인키는 한 번만 내려받음) → 지금 자동 백업
         page.goto(URL + "#/settings/backup")
+        settled(page)
         # 화면이 다 그려진 뒤(백업 키 상태가 보인 뒤) 누른다 — 늦은 다시 그리기가 대화 상자와 겹치지 않게
         expect(page.get_by_text("없음 — 자동 백업 안 함")).to_be_visible()
         dismiss(page)
@@ -951,6 +954,15 @@ def run():
        "브라우저는 주소 API·길찾기 API(가짜 서버)에 직접 연결하지 않음 (PC 서버만 연결)")
     secrets = ["가상하나", "가상둘", "가상셋", "01000005001", "01000005003", "시험로"]
     ok(not [s for s in secrets if any(s in urllib.parse.unquote(u) for u in external)], "외부 요청에 이름·연락처·주소 없음")
+
+
+def settled(pg):
+    """화면이 다 그려질 때까지(늦게 오는 예약 현황 등) 기다린다 — 그 전에 입력하면 늦은 다시 그리기가 지울 수 있다."""
+    pg.wait_for_load_state("networkidle")
+    expect(pg.locator("main h1")).to_be_visible()
+    if pg.get_by_role("group", name="예약 현황").count():
+        expect(pg.get_by_role("group", name="예약 현황").get_by_role("button").first).to_be_visible()
+    pg.wait_for_load_state("networkidle")
 
 
 def dismiss(pg):
