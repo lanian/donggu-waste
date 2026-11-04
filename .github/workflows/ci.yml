@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: { python-version: '${{ env.PYTHON_VERSION }}' }
       # 태그 실행이면 GITHUB_REF_TYPE=tag · GITHUB_REF_NAME=v… 를 읽어 태그까지 비교
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
       - uses: actions/setup-python@v5
@@ -74,7 +74,7 @@ jobs:
       matrix:
         suite: [e2e, e2e_pc]      # tests/e2e.py (휴대폰 화면), tests/e2e_pc.py (PC 화면)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
         run: echo "DG_TEST_DIR=$RUNNER_TEMP/${{ matrix.suite }}" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
@@ -117,7 +117,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: pc/requirements.txt }
       - name: 의존성 설치 (바이너리 휠만, 소스 빌드 금지)
@@ -167,7 +167,7 @@ jobs:
       group: pages
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v5
         with: { path: web }
