@@ -460,6 +460,7 @@ def main():
             ctx.close()
 
             midday_update(pw, url)
+            pc_field(pw, url)
             solo(pw, url, WORK / "reg.y4m")
             juso_flow(pw, url)
             lock_and_bio(pw, port)
@@ -503,6 +504,106 @@ def midday_update(pw, url):
     page.get_by_role("button", name="← 목록").first.click()
     expect(page.locator(".stop", has_text="가상새집").locator(".chip.new")).to_have_count(0)
     ok(True, "바뀐 곳은 열어 보면 표시가 사라짐")
+    ctx.close()
+
+
+def pc_field(pw, url):
+    """PC 연결 방식에서도 단독 방식처럼: 방문 순서 바꾸기·현장 접수·정정 요청·취소 요청 → 결과 파일 → PC 원본(사무실 확인)."""
+    print("[PC 연결 방식 현장 기능]")
+    ctx, page = browser(pw, WORK / "list2.y4m")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(url)
+    unlock(page)
+    expect(page.locator(".stop").first).to_be_visible(timeout=20000)
+    n0 = page.locator(".stop").count()
+    # 방문 순서 바꾸기 (이 휴대폰만)
+    second = page.locator(".stop strong").nth(1).inner_text()
+    page.get_by_role("button", name="방문 순서 바꾸기").click()
+    page.locator(".srow").nth(1).get_by_role("button", name="위로").click()
+    expect(page.locator(".stop strong").first).to_have_text(second)
+    page.get_by_role("button", name="순서 정하기 끝").click()
+    page.reload()
+    unlock(page)
+    expect(page.locator(".stop strong").first).to_have_text(second, timeout=20000)
+    ok("순서 바꿈(이 휴대폰만)" in page.locator(".meta").inner_text() and page.get_by_role("button", name="PC 순서로 되돌리기").is_visible(),
+       "PC 연결 방식에서도 방문 순서 바꾸기(이 휴대폰만, 다시 열어도 유지, PC 순서로 되돌리기)")
+    # 현장 접수
+    page.get_by_role("button", name="+ 현장 접수").click()
+    expect(page.locator("h1", has_text="현장 접수")).to_be_visible()
+    page.get_by_label("이름").fill("가상현장")
+    page.get_by_label("연락처").fill("010-0000-6161")
+    page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
+    page.get_by_placeholder(re.compile("품목명")).fill("고정 의자")
+    page.locator(".btn.result").first.click()
+    page.locator(".card", has=page.get_by_placeholder(re.compile("품목명"))).locator(".stepper .btn.step").last.click()
+    page.get_by_role("button", name="품목 추가", exact=True).click()
+    page.get_by_placeholder("품목 이름 (예: 안마기)").fill("표에없는물건")
+    page.get_by_role("button", name="확인 대기로 추가").click()
+    page.screenshot(path=SHOTS / "30_pc_field_intake.png", full_page=True)
+    page.get_by_role("button", name="현장 접수 저장").click()
+    expect(page.locator(".who .name")).to_have_text("가상현장", timeout=15000)
+    ok(page.get_by_text(re.compile("이 휴대폰에서 받은 현장 접수입니다\\(임시번호 현장-")).is_visible(), "현장 접수 저장 → 바로 그 지점 화면(임시번호, PC 반영 전 안내)")
+    page.get_by_role("button", name="전부 실음 · 수거 완료").click()
+    expect(page.get_by_text("저장됨: 수거 완료")).to_be_visible()
+    page.goto(url + "#/home")
+    expect(page.locator(".stop")).to_have_count(n0 + 1)
+    ok(page.locator(".stop", has_text="가상현장").locator(".chip", has_text="현장 접수").count() == 1, "목록에 현장 접수 1곳 추가(현장 접수 표시)")
+    # 정정 요청: 가상새집 연락처
+    page.locator(".stop", has_text="가상새집").click()
+    page.get_by_role("button", name="정정 요청").click()
+    page.get_by_role("button", name="정정 요청 남기기").click()
+    ok("바뀐 내용이 없습니다" in page.locator(".msg").last.inner_text(), "바뀐 칸이 없으면 정정 요청을 남기지 않음")
+    page.get_by_label("연락처").fill("010-0000-9898")
+    page.get_by_role("button", name="정정 요청 남기기").click()
+    ok("요청 사유" in page.locator(".msg").last.inner_text(), "요청 사유 없이는 남기지 않음")
+    page.get_by_label("요청 사유 (필수)").fill("주민이 새 번호를 알려 줌")
+    page.get_by_role("button", name="정정 요청 남기기").click()
+    expect(page.get_by_text(re.compile("정정 요청 · 연락처 → 010-0000-9898"))).to_be_visible()
+    ok(page.locator(".who .phone").inner_text() != "010-0000-9898" and page.get_by_text("보내기 전 (결과 보내기 때 함께)").is_visible(),
+       "정정 요청은 이 휴대폰 목록을 바꾸지 않고 '보내기 전' 요청으로 표시")
+    # 취소 요청: 다른 지점
+    page.goto(url + "#/home")
+    page.locator(".stop").nth(3).click()
+    cname = page.locator(".who .name").inner_text()
+    page.get_by_role("button", name="취소 요청").click()
+    page.get_by_role("dialog").get_by_role("button", name="주민 취소").click()
+    expect(page.locator(".who .notice", has_text="취소를 요청했습니다")).to_be_visible()
+    ok(page.get_by_role("button", name="취소 요청").is_disabled(), f"취소 요청({cname}) → 표시, 같은 요청 두 번 막음, 원래 접수는 그대로")
+    page.screenshot(path=SHOTS / "31_pc_change_request.png", full_page=True)
+    # 결과 보내기: 현장 접수·정정 요청이 들어간다는 안내 → PC 가져오기
+    page.goto(url + "#/export")
+    expect(page.get_by_text(re.compile("현장 접수·정정 요청 2건의 이름·연락처·주소가 들어갑니다"))).to_be_visible(timeout=15000)
+    ok(True, "결과 보내기 화면: 현장 접수·정정 요청의 개인정보가 들어간다고 알림")
+    # 파일 저장 대신 앱이 만든 파일 내용을 그대로 받는다(같은 프로필로 두 번째 다운로드하면 헤드리스 브라우저가 닫히는 문제를 피함; CSP로 blob fetch 불가)
+    page.evaluate("""() => { window.__dgDl = null; const oc = URL.createObjectURL.bind(URL); const orig = HTMLAnchorElement.prototype.click;
+      URL.createObjectURL = (b) => { if (b instanceof File) b.arrayBuffer().then((buf) => { let s = ''; new Uint8Array(buf).forEach((x) => { s += String.fromCharCode(x); });
+        window.__dgDl = { name: b.name, b64: btoa(s) }; }); return oc(b); };
+      HTMLAnchorElement.prototype.click = function () { if (!this.download) return orig.call(this); }; }""")
+    page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click()
+    page.wait_for_function("() => window.__dgDl", timeout=30000)
+    got = page.evaluate("window.__dgDl")
+    f = WORK / got["name"]
+    f.write_bytes(__import__("base64").b64decode(got["b64"]))
+    imp = py("import-result", str(f))
+    ok('"field_intakes": 1' in imp and '"review": 2' in imp, "PC 가져오기: 현장 접수 1건 → PC 원본 접수, 정정·취소 요청 2건 → 확인 대상 " + imp.splitlines()[0])
+    rq = pc_sql("SELECT receipt_no, channel, origin_device, status, field_checked_at FROM request WHERE name='가상현장'")
+    items = pc_sql("SELECT i.name, i.amount, i.price_status FROM request_item i JOIN request r ON r.id=i.request_id WHERE r.name='가상현장' ORDER BY i.name")
+    ok(len(rq) == 1 and rq[0]["channel"] == "현장" and rq[0]["origin_device"] and rq[0]["status"] == "DONE" and rq[0]["field_checked_at"] is None
+       and any(i["price_status"] == "PENDING" and i["amount"] is None for i in items) and any(i["price_status"] == "CONFIRMED" and i["amount"] for i in items),
+       f"PC 원본 {rq[0]['receipt_no'] if rq else '-'}: 경로 '현장', 수거 완료, 사무실 확인 전, 표에 없는 품목은 확인 대기")
+    cf = pc_sql("SELECT kind, conflict_reason FROM result_event WHERE apply_status='CONFLICT' AND kind IN ('CORRECTION','CANCEL_REQUEST')")
+    ok({c["kind"] for c in cf} == {"CORRECTION", "CANCEL_REQUEST"} and pc_sql("SELECT phone FROM request WHERE name='가상새집'")[0]["phone"] == "01000009999",
+       "정정·취소 요청은 PC 충돌함(확인 대상)으로, 원본은 확인 전까지 그대로")
+    release = re.search(r"보관 종료 확인 코드: (\w+)", imp).group(1)
+    page.get_by_placeholder("확인 코드 8자리", exact=True).fill(release)
+    page.get_by_role("button", name="확인 코드 입력").click()
+    expect(page.get_by_text("반영 확인됨").first).to_be_visible()
+    page.goto(url + "#/home")
+    page.locator(".stop", has_text="가상새집").click()
+    expect(page.get_by_text("PC로 보냄 · 사무실 확인 뒤 새 목록에 반영")).to_be_visible(timeout=15000)
+    ok(True, "보낸 요청은 'PC로 보냄 · 사무실 확인 뒤 반영'으로 표시")
+    ok(not errors, "페이지 스크립트 오류 없음(PC 연결 방식 현장 기능)" + (": " + "; ".join(errors) if errors else ""))
     ctx.close()
 
 

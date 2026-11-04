@@ -177,7 +177,7 @@ def cmd_import_result(a):
     if r.get("duplicate_file"):
         print("이미 가져온 파일입니다. 변경 없음.")
         return
-    print("가져오기 결과:", json.dumps({k: r[k] for k in ("applied", "skipped_duplicate", "conflict", "unloads") if k in r}, ensure_ascii=False))
+    print("가져오기 결과:", json.dumps({k: r[k] for k in ("applied", "skipped_duplicate", "conflict", "unloads", "field_intakes", "review") if k in r}, ensure_ascii=False))
     print("사진 해시 목록:", r["photos_expected"], "건 (사진 파일은 보안 매체로 별도 회수)")
     print("보관 종료 확인 코드:", r["release_code"], "← 휴대폰 [결과 보내기] 화면에 입력하면 반영됨으로 표시됩니다")
 

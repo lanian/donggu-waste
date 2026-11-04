@@ -414,7 +414,8 @@ async function screenHome() {
   const todo = [
     [sum.unconfirmed_bundles, `수신 미확인 전송 ${sum.unconfirmed_bundles}건`, '#/send', 'warn', 'ADMIN INTAKE'],
     [sum.no_result.length, `결과 미회수 ${sum.no_result.length}건`, '#/results', 'warn', 'ADMIN INTAKE FIELD'],
-    [sum.conflicts, `충돌 검토 ${sum.conflicts}건`, '#/results', 'bad', 'ADMIN INTAKE'],
+    [sum.conflicts, `충돌·현장 요청 검토 ${sum.conflicts}건`, '#/results', 'bad', 'ADMIN INTAKE'],
+    [sum.field_intakes, `현장 접수 확인 ${sum.field_intakes}건`, '#/requests', 'warn', 'ADMIN INTAKE', () => { screenRequests.f = { ...(screenRequests.f || {}), status: '', date_from: '', date_to: '', quick: 'FIELD', page: 1 }; }],
     [sum.pending_fee.length, `금액 확인 대기 ${sum.pending_fee.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
     [sum.payments.length, `수납 확인 필요 ${sum.payments.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
     [sum.photos_missing, `사진 미회수 ${sum.photos_missing}장`, '#/results', '', 'ADMIN INTAKE FIELD'],
@@ -471,7 +472,7 @@ async function screenHome() {
       h('div', { class: 'dash-side' },
       overseeCard,
       h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '처리할 일'), todo.length ? h('span', { class: 'muted small' }, `${todo.length}종`) : null),
-        todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
+        todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls, , pre]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls, onclick: pre || null }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
           : h('p', { class: 'empty' }, sum.total ? '지금 처리할 일이 없습니다. 결과를 가져오면 미회수·충돌·수납 확인이 여기에 모입니다.' : '이 날짜의 접수가 없습니다. 다른 날짜를 고르거나 접수를 등록하세요.')),
       (sum.dongs || []).length ? h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '동별 현황'), sum.capacity && sum.capacity.limit ? h('span', { class: 'muted small' }, `전체 ${sum.capacity.booked}/${sum.capacity.limit}건`) : null),
         h('div', { class: 'tablewrap' }, h('table', { class: 'dongtbl' }, h('thead', {}, h('tr', {}, ...['동', '담당 팀', '예정', '완료', '미처리', '한도 대비'].map((t) => h('th', { scope: 'col' }, t)))),
@@ -513,7 +514,7 @@ async function screenRequests() {
   const quickBar = h('div', { class: 'quick' });
   const pager = h('div', { class: 'pager' });
   const selBar = h('div', { class: 'selbar' });
-  const QUICK = [['ALL', '전체'], ['TODAY', '오늘 예정'], ['NOLOC', '위치 없음'], ['FEE', '금액 확인 대기'], ['UNASSIGNED', '미배정'], ['REFUND', '환불 필요']];
+  const QUICK = [['ALL', '전체'], ['TODAY', '오늘 예정'], ['NOLOC', '위치 없음'], ['FEE', '금액 확인 대기'], ['UNASSIGNED', '미배정'], ['REFUND', '환불 필요'], ['FIELD', '현장 접수 확인']];
   const COLS = [['', null], ['번호', null], ['접수번호', 'receipt_no'], ['예정일', 'planned_date'], ['동', 'dong'], ['이름', 'name'], ['연락처', null], ['배출 주소', 'address'],
     ['품목', null], ['상태', 'status'], ['금액', null], ['위치', null], ['배정', null]];
   let res = { rows: [], total: 0, page: 1, pages: 1, counts: {} };
@@ -916,6 +917,9 @@ async function screenRequest(id) {
         !isNew && canWork() && r.status !== 'CANCELLED' ? btn('배출 표지 인쇄', wrap(async () => { const t = await post('requests/labels', { ids: [id] }); window.open('/print/doc/' + t.token, 'dg-print'); toast('배출 표지를 열었습니다'); }), 'small') : null,
         btn('← 목록', () => go('#/requests')))),
     fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; render(true); }, 'small')) : null,
+    !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn') }, h('strong', {}, '휴대폰 현장 접수 '),
+      r.field_checked_at ? `— ${kst(r.field_checked_at)} 사무실 확인 (${r.field_checked_by || '-'})` : '— 수거팀이 현장에서 받은 접수입니다. 주소·동·품목·금액을 확인하고 필요하면 고친 뒤 [확인 완료]를 누르세요. ',
+      !r.field_checked_at && canWork() ? btn('확인 완료', wrap(async () => { await post(`requests/${id}/field-check`); toast('현장 접수를 확인했습니다'); render(true); }), 'small primary') : null) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
     r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
     h('div', { class: 'grid2' },
@@ -1222,7 +1226,7 @@ async function screenResults() {
       if (!f.files[0]) throw new Error('파일을 골라 주세요.');
       const r = await api(path, { method: 'POST', raw: new Uint8Array(await f.files[0].arrayBuffer()) });
       rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),
-        h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
+        h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함(확인)', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
         r.release_code ? h('div', { class: 'notice' }, path.includes('photos') ? '사진 회수 확인 코드' : '보관 종료 확인 코드', ' — 휴대폰에 입력하게 알려 주세요: ', h('span', { class: 'big' }, r.release_code))
           : path.includes('photos') ? h('p', { class: 'err' }, '해시가 맞지 않는 사진이 있어 확인 코드를 발급하지 않았습니다. 휴대폰에서 사진을 지우지 마세요.') : null));
       f.value = ''; loadConf();
@@ -1235,14 +1239,14 @@ async function screenResults() {
       list.length ? grid(['접수', '기록 종류', '기록 내용', '휴대폰 시각', '충돌 사유', '처리'], list.map((c) => {
         const why = h('input', { placeholder: '판단 사유', class: 'w-m', 'aria-label': '판단 사유' });
         return [h('span', {}, c.request_id ? h('a', { href: `#/request/${c.request_id}` }, c.receipt_no || c.request_id.slice(0, 8)) : '-', ' ', c.name || '', h('br'), c.request_status ? statusChip(c.request_status) : null),
-          EVENT_KIND[c.kind] || c.kind, eventBody(c.kind, c.body_json), kst(c.device_ts), c.conflict_reason,
+          EVENT_KIND[c.kind] || c.kind, c.kind === 'CORRECTION' ? correctionBody(c) : eventBody(c.kind, c.body_json), kst(c.device_ts), c.conflict_reason,
           h('span', { class: 'row' }, why, btn('반영', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'APPLY', reason: why.value }); toast('반영했습니다'); loadConf(); }), 'small'),
             btn('거부', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'REJECT', reason: why.value }); toast('거부로 기록했습니다'); loadConf(); }), 'small danger'))];
       }), { cls: 'conflicts' }) : h('p', { class: 'empty' }, '확인할 충돌이 없습니다.'));
   });
   loadConf();
   const showReport = (r, isPhoto) => rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),
-    h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
+    h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함(확인)', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
     r.release_code ? h('div', { class: 'notice' }, isPhoto ? '사진 회수 확인 코드' : '보관 종료 확인 코드', ' — 휴대폰에 입력하게 알려 주세요: ', h('span', { class: 'big' }, r.release_code)) : null));
   return h('div', {}, pagehead('결과 가져오기', h('a', { href: '#conflicts', class: 'small', onclick: (e) => { e.preventDefault(); conf.scrollIntoView(); } }, '충돌함으로 ↓')),
     h('div', { class: 'grid2' }, fileIn('결과 파일 (.dgr) — 업무 메일 첨부', 'import/result', '.dgr'), fileIn('사진 파일 (.dgp) — 승인된 보안 매체', 'import/photos', '.dgp')),
@@ -1253,10 +1257,12 @@ async function screenResults() {
 
 // 휴대폰 기록 종류·내용을 사람이 읽는 표로 (충돌함)
 const EVENT_KIND = { CONTACT: '연락 결과', FIELD_ITEM_ADD: '현장 품목 추가', ITEM_RESULT: '품목 결과', ATTEMPT: '수거 결과', LOCATION_FIX: '위치 보정', FIELD_MEMO: '현장 메모',
-  PHOTO_META: '사진', REVISIT_APPT: '재방문 약속', DIAL_INTENT: '전화 걸기', UNLOAD: '하차', ARRIVE: '도착', STICKER_CHECK: '스티커 확인', FEE_NOTICE: '추가 금액 고지', SMS_INTENT: '문자 앱 열기', NAV_INTENT: '길안내 앱 열기' };
+  PHOTO_META: '사진', REVISIT_APPT: '재방문 약속', DIAL_INTENT: '전화 걸기', UNLOAD: '하차', ARRIVE: '도착', STICKER_CHECK: '스티커 확인', FEE_NOTICE: '추가 금액 고지', SMS_INTENT: '문자 앱 열기', NAV_INTENT: '길안내 앱 열기',
+  FIELD_INTAKE: '현장 접수', CORRECTION: '정정 요청', CANCEL_REQUEST: '취소 요청' };
 const BODY_KEY = { result: '결과', outcome: '결과', line_id: '품목 행', qty_confirmed: '현장 수량', qty_collected: '실은 수량', reason: '사유', name: '품목', spec: '규격', qty: '수량', unit_label: '단위',
   date: '날짜', start: '시작', end: '끝', phase: '단계', text: '메모', worker: '작업자', response: '응답', extra: '추가 금액', total: '현장 금액', received: '접수 금액', template: '문구', app: '앱',
-  number: '번호', decision: '판단', acc: '정확도(m)', lat: '위도', lon: '경도', volume_m3: '부피(m³)', weight_kg: '중량(kg)', place: '장소', no_photo_reason: '사진 없는 사유', taken_at: '촬영 시각', source: '출처', line_kind: '구분' };
+  number: '번호', decision: '판단', acc: '정확도(m)', lat: '위도', lon: '경도', volume_m3: '부피(m³)', weight_kg: '중량(kg)', place: '장소', no_photo_reason: '사진 없는 사유', taken_at: '촬영 시각', source: '출처', line_kind: '구분',
+  temp_no: '휴대폰 임시번호', fields: '고칠 칸', code: '사유 코드', items: '품목 수', planned_date: '예정일', phone: '연락처', address: '주소', spot_note: '상세 위치' };
 const BODY_VAL = { ...STATUS, ...CONTACT, ...REASON, ...STICKER, ...NOTICE, ...SMS_T, ...NO_PHOTO, BEFORE: '수거 전', AFTER: '수거 후', RECEIVED: '처음 접수', FIELD: '현장 추가', LEAVE: '미수거', COLLECT: '그래도 수거' };
 function eventBody(kind, raw) {
   let b; try { b = JSON.parse(raw || '{}'); } catch { return h('span', { class: 'muted' }, '(읽을 수 없는 내용)'); }
@@ -1265,6 +1271,18 @@ function eventBody(kind, raw) {
   if (!ent.length) return h('span', { class: 'muted' }, '-');
   return h('dl', { class: 'kv mini' }, ...ent.slice(0, 8).flatMap(([k, v]) => [h('dt', {}, BODY_KEY[k] || k),
     h('dd', {}, k === 'line_id' ? String(v).slice(0, 8) : typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : (BODY_VAL[v] || String(v)).slice(0, 80))]));
+}
+
+// 정정 요청: 고칠 칸마다 지금 PC 원본 값 → 요청 값
+const FIX_LABEL = { name: '이름', phone: '연락처', address: '주소', spot_note: '상세 위치', planned_date: '예정일' };
+function correctionBody(c) {
+  let b; try { b = JSON.parse(c.body_json || '{}'); } catch { b = {}; }
+  const f = b.fields && typeof b.fields === 'object' ? b.fields : {};
+  const cur = c.current || {};
+  const show = (k, v) => (k === 'phone' ? fmtPhone(v || '') : v || '(없음)');
+  return h('dl', { class: 'kv mini' }, ...Object.keys(FIX_LABEL).filter((k) => k in f).flatMap((k) => [h('dt', {}, FIX_LABEL[k]),
+    h('dd', {}, h('span', { class: 'muted' }, show(k, cur[k])), ' → ', h('strong', {}, show(k, f[k])))]),
+  b.reason ? h('dt', {}, '사유') : null, b.reason ? h('dd', {}, String(b.reason).slice(0, 100)) : null);
 }
 
 // 휴대폰 단독 방식 백업(.dgb) → PC 원본으로 옮기기

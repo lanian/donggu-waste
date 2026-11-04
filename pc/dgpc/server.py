@@ -92,7 +92,7 @@ def login_succeeded(username: str):
 PERM = {
     "INTAKE": {"GET": {"bootstrap", "requests", "duplicates", "batches", "conflicts", "close", "unloads", "volumes", "fee-usage", "qrtests", "photo", "me",
                        "fee-table", "geocode", "stats", "stats.csv", "calendar", "dong-detect", "holidays", "dongs", "addr-search", "juso-search", "juso-coord", "revenue", "revenue.csv",
-                       "refunds", "recon-template", "recon-history"},
+                       "refunds", "recon-template", "recon-history", "field-intakes"},
                "POST": {"requests", "route", "assign", "bundles", "import", "conflicts", "close", "payments", "unloads", "qrtest", "password",
                         "fee-revisions", "geocode", "links", "refunds", "recon", "stats"}},
     "FIELD": {"GET": {"bootstrap", "requests", "batches", "close", "unloads", "fee-usage", "qrtests", "photo", "me", "fee-table"},
@@ -532,6 +532,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(out)
             if p == "conflicts":
                 return self.send_json(S.list_conflicts(c))
+            if p == "field-intakes":
+                out = S.field_intakes(c)
+                if out:
+                    PV.record_access(c, "SEARCH", "", len(out), "현장 접수 확인 목록")
+                return self.send_json(out)
             if p == "close":
                 return self.send_json(S.day_summary(c, qs["date"], self.crew_scope()))
             if p == "registration-qr":
@@ -615,6 +620,8 @@ class Handler(BaseHTTPRequestHandler):
             if parts[0] == "requests" and len(parts) == 2:
                 d = self.json_body()
                 return self.send_json(S.update_request(c, parts[1], d, d.get("reason", "")))
+            if parts[0] == "requests" and len(parts) == 3 and parts[2] == "field-check":
+                return self.send_json(S.check_field_intake(c, parts[1]))
             if parts[0] == "requests" and len(parts) == 3 and parts[2] == "cancel":
                 d = self.json_body()
                 return self.send_json(S.cancel_request(c, parts[1], d.get("reason", ""), d.get("code") or None))

@@ -275,6 +275,7 @@ def migrate(con):
             con.execute("ROLLBACK")
             raise
     migrate_v11(con)
+    migrate_v12(con)
     if not con.execute("SELECT 1 FROM day_close_log LIMIT 1").fetchone():  # 이전 마감 기록(날짜별 1행) → 1회차
         for wd, at, sj, note in con.execute("SELECT work_date, closed_at, summary_json, note FROM day_close").fetchall():
             con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note) VALUES (?,?,1,?,NULL,?,?)",
@@ -313,6 +314,13 @@ def migrate_v11(con):
         WHERE r.levy_no IS NULL ORDER BY r.received_at, r.receipt_no""").fetchall()
     for rid, at, code in todo:
         con.execute("UPDATE request SET levy_no=? WHERE id=?", (next_levy_no(con, levy_year(at), code), rid))
+
+
+def migrate_v12(con):
+    """v0.12: 휴대폰(PC 연결 방식)에서 현장 접수한 건의 출처 기기와 사무실 확인 표시. 여러 번 실행해도 같다."""
+    for col, decl in (("origin_device", "TEXT"), ("field_checked_at", "TEXT"), ("field_checked_by", "TEXT")):
+        if col not in _cols(con, "request"):
+            con.execute(f"ALTER TABLE request ADD COLUMN {col} {decl}")
 
 
 def levy_year(received_at: str | None) -> str:

@@ -104,6 +104,9 @@ export function purgeEventPII(e) {
   const b = e.body || {};
   let hit = false;
   for (const k of ['text', 'lat', 'lon', 'acc', 'geo']) if (k in b) { delete b[k]; hit = true; }
+  // 현장 접수·정정 요청(PC 연결 방식)에는 이름·연락처·주소가 들어 있다: 칸 이름만 남기고 값은 지운다
+  if (e.kind === 'FIELD_INTAKE') for (const k of [...PII, 'dong']) if (k in b) { delete b[k]; hit = true; }
+  if (e.kind === 'CORRECTION' && b.fields && typeof b.fields === 'object' && !Array.isArray(b.fields)) { b.fields = Object.keys(b.fields); hit = true; }
   if (hit) b.pii_purged = true;
   return hit;
 }

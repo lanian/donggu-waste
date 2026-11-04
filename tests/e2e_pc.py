@@ -361,6 +361,36 @@ def run():
         ok(True, "사진 파일 가져오기: 해시 대조 후 사진 회수 확인 코드 표시")
         page.screenshot(path=SHOTS / "pc_05_results.png", full_page=True)
 
+        # v0.12 휴대폰(PC 연결 방식) 현장 접수·정정 요청 → 충돌함(지금 값 → 요청 값) 반영, 현장 접수 확인 완료
+        s2 = payload["stops"][1]
+        fid, fline = str(uuid.uuid4()), str(uuid.uuid4())
+        fev = phone.ev({"request_id": fid, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"temp_no": "현장-1103-1", "name": "가상현장", "phone": "010-0000-5061",
+              "address": "가상시 동구 현장길 9", "planned_date": "2026-12-28", "items": [{"line_id": fline, "fee_rate_id": s1["items"][0]["fee_rate_id"], "qty": 1}]})
+        fev["assign_ver"] = 0
+        cev = phone.ev(s2, "CORRECTION", {"fields": {"spot_note": "뒷문 옆 화단"}, "reason": "주민이 배출 위치를 바꿨다고 함"})
+        f2 = WORK / "DG_R_test_field.dgr"
+        f2.write_bytes(phone.seal({"schema": "dg.result/1", "work_date": today, "events": [fev, cev]}, P.TYPE_RESULT))
+        page.goto(URL + "#/results")
+        page.locator("input[type=file]").nth(0).set_input_files(str(f2))
+        page.get_by_role("button", name="가져오기").nth(0).click()
+        expect(page.get_by_text("현장 접수 만듦")).to_be_visible()
+        row = page.locator("#conflicts tr", has_text="정정 요청")
+        expect(row).to_contain_text("뒷문 옆 화단")
+        old_spot = s2.get("spot_note") or "(없음)"
+        ok(old_spot in row.inner_text() and "현장 정정 요청" in row.inner_text(), f"충돌함: 정정 요청을 '지금 값({old_spot}) → 요청 값'으로 보여 줌")
+        page.screenshot(path=SHOTS / "pc_05b_field_requests.png", full_page=True)
+        row.get_by_label("판단 사유").fill("주민 통화로 확인")
+        row.get_by_role("button", name="반영").click()
+        expect(page.locator("#conflicts tr", has_text="정정 요청")).to_have_count(0)
+        ok(S.get_request(store.connect(), s2["request_id"])["spot_note"] == "뒷문 옆 화단", "정정 요청 [반영] → PC 원본 상세 위치 변경(이전 내용은 버전으로)")
+        page.goto(URL + f"#/request/{fid}")
+        expect(page.get_by_text("휴대폰 현장 접수")).to_be_visible()
+        page.get_by_role("button", name="확인 완료").click()
+        expect(page.get_by_text(re.compile("사무실 확인 \\("))).to_be_visible()
+        ok(S.get_request(store.connect(), fid)["field_checked_at"] and S.get_request(store.connect(), fid)["channel"] == "현장", "현장 접수 상세: 안내 → [확인 완료] (경로 '현장')")
+        page.goto(URL + "#/home")
+        expect(page.locator("h1", has_text="오늘 현황")).to_be_visible()
+
         # 현장 결과 확인
         page.goto(URL + f"#/request/{s1['request_id']}")
         expect(page.get_by_role("heading", name="현장 결과")).to_be_visible()

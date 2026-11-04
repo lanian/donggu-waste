@@ -1477,8 +1477,121 @@ def v11_external():
     print(f"\n통과 {passed}개 (v0.11 외부 서비스 포함)")
 
 
+def v12_field():
+    """v0.12 PC 연결 방식 휴대폰의 현장 접수·정정 요청·취소 요청: PC가 원본, 사무실 확인을 거친다."""
+    print("\n— v0.12 현장 접수·정정·취소 요청 —")
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-v12-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    ph = Phone(S.registration_text(con))
+    dev = S.register_device(con, ph.code(), "현장폰")["device_id"]
+    cid = S.save_crew(con, {"name": "현장 시험팀", "device_id": dev})
+    other = Phone(S.registration_text(con))
+    S.register_device(con, other.code(), "다른폰")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    day = "2026-11-10"
+    # 원래 접수 + 배정
+    r0 = S.create_request(con, {"name": "원래가상", "phone": "010-0000-7001", "address": "가상시 동구 예시로 70", "planned_date": day,
+                                "lat": 35.15, "lon": 126.92, "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    bt = S.confirm_plan(con, day, {cid: [{"request_id": r0["id"], "eta": "09:00"}]})[0]
+    payload, _ = S.build_daylist(con, bt["batch_id"])
+    s0 = payload["stops"][0]
+
+    # 1) 현장 접수: 휴대폰 단가(0원)는 믿지 않고 PC 표로 다시 계산, 표에 없는 품목은 확인 대기
+    rid, l1, l2 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    fstop = {"request_id": rid, "assign_ver": 0, "req_ver": 1}
+    intake = ph.ev(fstop, "FIELD_INTAKE", {"temp_no": "현장-1", "name": "현장가상", "phone": "010-0000-7002", "address": "가상시 동구 예시로 72",
+                                            "spot_note": "대문 옆", "memo": "", "planned_date": day, "eta": "10:30", "dong": "",
+                                            "items": [{"line_id": l1, "fee_rate_id": chair["id"], "qty": 2, "unit_price": 0, "price_status": "CONFIRMED"},
+                                                      {"line_id": l2, "fee_rate_id": None, "name": "표에없는물건", "unit": "EA", "unit_label": "개", "qty": 1}]}, assign_ver=0)
+    intake["assign_ver"] = 0
+    res_ev = [ph.ev(fstop, "ITEM_RESULT", {"line_id": l1, "qty_confirmed": 2, "qty_collected": 2}, assign_ver=0),
+              ph.ev(fstop, "ITEM_RESULT", {"line_id": l2, "qty_confirmed": 1, "qty_collected": 1}, assign_ver=0),
+              ph.ev(fstop, "ATTEMPT", {"outcome": "DONE"}, assign_ver=0)]
+    for e in res_ev:
+        e["assign_ver"] = 0
+    out = S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [intake] + res_ev}, P.TYPE_RESULT))
+    req = S.one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    items = {i["line_id"]: i for i in S.rows(con, "SELECT * FROM request_item WHERE request_id=?", (rid,))}
+    ok(out.get("field_intakes") == 1 and out["conflict"] == 0 and req and req["channel"] == "현장" and req["origin_device"] == dev and req["receipt_no"].startswith("DG-"),
+       f"현장 접수 → PC 원본 접수 {req and req['receipt_no']} (경로 '현장', 출처 기기 기록), 결과도 충돌 없이 반영")
+    ok(items[l1]["unit_price"] == chair["price"] and items[l1]["amount"] == chair["price"] * 2 and items[l2]["price_status"] == "PENDING" and items[l2]["amount"] is None,
+       "현장 접수 금액: 휴대폰 단가를 믿지 않고 PC 표로 다시 계산, 표에 없는 품목은 확인 대기(0원 아님)")
+    ok(req["status"] == "DONE" and req["appt_start"] == "10:30", "현장 접수 건의 수거 결과 반영(수거 완료) · 방문 시각")
+    stored = json.loads(S.one(con, "SELECT body_json FROM result_event WHERE event_id=?", (intake["event_id"],))["body_json"])
+    ok("현장가상" not in json.dumps(stored, ensure_ascii=False) and "0000-7002" not in json.dumps(stored) and stored.get("pii_purged"),
+       "결과 기록에는 현장 접수의 이름·연락처·주소를 남기지 않음(원본은 접수에)")
+    ok([x["id"] for x in S.field_intakes(con)] == [rid] and S.search_requests(con, {"quick": "FIELD", "status": ""})["total"] == 1, "현장 접수 확인 목록·빠른 조회 '현장 접수 확인'")
+    ok(S.day_summary(con, day)["field_intakes"] == 1, "오늘 현황의 처리할 일: 현장 접수 확인 1건")
+    S.check_field_intake(con, rid)
+    ok(not S.field_intakes(con) and S.one(con, "SELECT field_checked_at FROM request WHERE id=?", (rid,))["field_checked_at"], "사무실 확인 완료 표시")
+    raises(lambda: S.check_field_intake(con, rid), "이미", "두 번 확인 거부")
+    raises(lambda: S.check_field_intake(con, r0["id"]), "현장 접수가 아닙니다", "일반 접수는 현장 확인 대상 아님")
+    # 같은 파일 다시: 중복 / 같은 ID 다시 보내도 접수를 두 번 만들지 않음
+    ph.seq += 1
+    again = dict(intake, event_id=str(uuid.uuid4()), seq=ph.seq)
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [again]}, P.TYPE_RESULT))
+    ok(S.one(con, "SELECT COUNT(*) AS n FROM request WHERE id=?", (rid,))["n"] == 1, "같은 현장 접수가 다시 와도 접수는 하나")
+    # 다른 휴대폰이 이 현장 접수 건의 결과를 보내면: 배정된 적 없는 접수 → 충돌
+    rid2 = str(uuid.uuid4())
+    i2 = ph.ev({"request_id": rid2, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"name": "현장둘", "phone": "010-0000-7003", "address": "가상시 동구 예시로 74",
+                                                                                 "planned_date": day, "items": [{"line_id": str(uuid.uuid4()), "fee_rate_id": chair["id"], "qty": 1}]})
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [i2]}, P.TYPE_RESULT))
+    oth = other.ev({"request_id": rid2, "assign_ver": 0, "req_ver": 1}, "ATTEMPT", {"outcome": "NOT_COLLECTED"}, assign_ver=0)
+    oth["assign_ver"] = 0
+    S.import_result(con, other.seal({"schema": "dg.result/1", "work_date": day, "events": [oth]}, P.TYPE_RESULT))
+    ok(S.one(con, "SELECT apply_status FROM result_event WHERE event_id=?", (oth["event_id"],))["apply_status"] == "CONFLICT", "다른 휴대폰의 결과는 충돌함으로(출처 기기만 예외)")
+
+    # 2) 잘못된 현장 접수(연락처 틀림): 충돌함에서 확인, 반영하려면 고쳐서 다시 접수해야 함
+    bad_id = str(uuid.uuid4())
+    bad = ph.ev({"request_id": bad_id, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"name": "틀린가상", "phone": "12", "address": "가상시 동구 예시로 73",
+                                                                                    "planned_date": day, "items": [{"line_id": str(uuid.uuid4()), "fee_rate_id": chair["id"], "qty": 1}]})
+    o2 = S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [bad]}, P.TYPE_RESULT))
+    cf = [c for c in S.list_conflicts(con) if c["event_id"] == bad["event_id"]]
+    ok(o2.get("review") == 1 and cf and "현장 접수 확인 필요" in cf[0]["conflict_reason"] and not S.one(con, "SELECT 1 AS x FROM request WHERE id=?", (bad_id,)),
+       "형식이 틀린 현장 접수는 만들지 않고 충돌함으로")
+    raises(lambda: S.resolve_conflict(con, bad["event_id"], "APPLY", "확인"), "연락처", "그대로 반영하면 오류(아무것도 바뀌지 않음)")
+    S.resolve_conflict(con, bad["event_id"], "REJECT", "주민에게 전화해 PC에서 다시 접수")
+    ok("틀린가상" not in S.one(con, "SELECT body_json FROM result_event WHERE event_id=?", (bad["event_id"],))["body_json"], "거부한 현장 접수 기록에서도 개인정보를 지움")
+
+    # 3) 정정 요청: 바로 바뀌지 않고 확인 대상 → 반영하면 버전 보존 + 동·위치 다시
+    s0c = {**s0, "assign_ver": s0["assign_ver"]}
+    corr = ph.ev(s0c, "CORRECTION", {"fields": {"phone": "010-0000-7009", "address": "가상시 동구 예시로 79", "planned_date": "2026-11-12"}, "reason": "주민이 번호 바뀜 알려 줌"})
+    o3 = S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [corr]}, P.TYPE_RESULT))
+    cur = S.one(con, "SELECT phone, req_ver FROM request WHERE id=?", (r0["id"],))
+    lc = [c for c in S.list_conflicts(con) if c["event_id"] == corr["event_id"]]
+    ok(o3.get("review") == 1 and o3["conflict"] == 0 and cur["phone"] == "01000007001" and lc and lc[0]["current"]["phone"] == "01000007001" and "정정 요청" in lc[0]["conflict_reason"],
+       "정정 요청은 원본을 바로 바꾸지 않고 확인 대상(지금 값과 나란히)")
+    S.resolve_conflict(con, corr["event_id"], "APPLY", "주민 통화로 확인")
+    now_ = S.one(con, "SELECT * FROM request WHERE id=?", (r0["id"],))
+    ver = S.rows(con, "SELECT * FROM request_version WHERE request_id=?", (r0["id"],))
+    ok(now_["phone"] == "01000007009" and now_["address"] == "가상시 동구 예시로 79" and now_["planned_date"] == "2026-11-12" and now_["req_ver"] == cur["req_ver"] + 1
+       and now_["lat"] is None and any("현장 정정 요청 반영" in v["reason"] for v in ver), "정정 반영: 연락처·주소·예정일 변경, 이전 내용은 버전으로, 주소가 바뀌어 위치는 다시 지정")
+    ok(not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (r0["id"],)) and now_["status"] == "RECEIVED", "예정일이 바뀌면 그날 배정을 풀어 다시 배정")
+    ok("0000-7009" not in S.one(con, "SELECT body_json FROM result_event WHERE event_id=?", (corr["event_id"],))["body_json"], "반영한 정정 기록에는 바꾼 칸 이름만 남김")
+    same = ph.ev(s0c, "CORRECTION", {"fields": {"phone": "010-0000-7009"}, "reason": "중복"})
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [same]}, P.TYPE_RESULT))
+    raises(lambda: S.resolve_conflict(con, same["event_id"], "APPLY", "확인"), "같은 내용", "원본과 같은 정정은 반영하지 않음(거부로 정리)")
+    S.resolve_conflict(con, same["event_id"], "REJECT", "이미 반영됨")
+
+    # 4) 취소 요청: 확인 후 취소(사유 코드 + 현장 요청 표시)
+    canc = ph.ev(s0c, "CANCEL_REQUEST", {"code": "RESIDENT", "text": "주민이 직접 처리함"})
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [canc]}, P.TYPE_RESULT))
+    ok(S.one(con, "SELECT status FROM request WHERE id=?", (r0["id"],))["status"] != "CANCELLED", "취소 요청도 바로 취소하지 않음")
+    S.resolve_conflict(con, canc["event_id"], "APPLY", "주민 통화 확인")
+    cr = S.one(con, "SELECT status, cancel_code FROM request WHERE id=?", (r0["id"],))
+    au = S.rows(con, "SELECT detail FROM audit_log WHERE entity='request' AND entity_id=? AND action='CANCEL'", (r0["id"],))
+    ok(cr["status"] == "CANCELLED" and cr["cancel_code"] == "RESIDENT" and au and "현장 요청" in au[-1]["detail"], "취소 요청 반영: 사유 코드(주민 취소) + '현장 요청' 기록")
+    d = S.derive(con, S.one(con, "SELECT * FROM request WHERE id=?", (rid,)))
+    ok(not d["field"]["other_kinds"], "PC 화면의 '알 수 없는 기록'에 새 종류가 섞이지 않음")
+    con.close()
+    print(f"\n통과 {passed}개 (v0.12 포함)")
+
+
 if __name__ == "__main__":
     main()
     v10()
     v11()
     v11_external()
+    v12_field()

@@ -252,3 +252,19 @@ PC 업무 화면(브라우저)은 여전히 바탕 지도 조각 서버에만 �
 
 - 행안부·카카오모빌리티 **실제 서버로는 시험하지 못했습니다**(시험 환경에서 외부 연결 불가, 실제 키 없음). 단위 시험은 `external.urlopen`을 바꿔 끼운 가짜 HTTP로, PC 종단 시험(`tests/e2e_pc.py`)은 `DG_JUSO_BASE`·`DG_KAKAO_NAVI_BASE`로 띄운 가짜 서버로 확인했습니다. 실제 응답 필드(특히 다중 목적지 API의 `routes[].key`·`result_code`, 반경 밖 처리)는 운영 전에 실제 키로 확인해야 합니다.
 - 카카오모빌리티 이용 약관·일일 호출 한도·요금, 위치 좌표의 외부 제공에 대한 기관 개인정보 검토는 운영 전에 확인해야 합니다(좌표만 보내지만 주민 집 위치에 가까운 값입니다).
+
+## 9. PC 연결 방식의 요청 기록 (v0.12, PC v0.12 + 휴대폰 0.12.0)
+
+단독 방식에만 있던 접수·수정·취소를 PC 연결 방식에서도 하되, PC가 원본이므로 휴대폰은 **요청 기록**을 결과 파일에 넣고 PC가 확인합니다. PC v0.11 이하는 이 종류를 모르므로(알 수 없는 접수 → 충돌함) PC를 먼저 올려야 합니다.
+
+| `kind` | 본문 | PC 처리 |
+| --- | --- | --- |
+| `FIELD_INTAKE` | `temp_no`, `name`, `phone`, `address`, `dong`, `spot_note`, `memo`, `planned_date`, `eta`, `items[]`(`line_id`, `fee_rate_id`, `name`, `spec`, `unit`, `unit_label`, `qty`), 선택 `lat`·`lon` | `request_id`(휴대폰이 만든 UUID)로 접수를 만듦. 경로 '현장', `origin_device`=보낸 기기, 사무실 확인 전(`field_checked_at` 없음). 금액은 PC 표로 다시 계산(휴대폰 단가 무시), PC 표에 없는 품목은 확인 대기. 품목 행 ID를 그대로 써서 뒤따르는 `ITEM_RESULT` 등이 이어짐. 형식 오류면 만들지 않고 충돌함. 기록에는 개인정보 없이 `temp_no`·품목 수·예정일만 남김 |
+| `CORRECTION` | `fields`{`name`/`phone`/`address`/`spot_note`/`planned_date` 중 바뀐 것}, `reason` | 늘 충돌함(사유 "현장 정정 요청 — 사무실 확인 필요"). [반영] = 원본 수정 + 이전 내용 버전 보존, 주소가 바뀌면 동 다시 판별·좌표 지움, 예정일이 바뀌면 활성 배정 해제. 처리 뒤 본문은 바꾼 칸 이름만 |
+| `CANCEL_REQUEST` | `code`(`RESIDENT`·`DUPLICATE`·`ITEM_REFUSED`·`OUT_OF_AREA`·`OTHER`), `text` | 늘 충돌함(사유 "현장 취소 요청 — 사무실 확인 필요"). [반영] = 그 사유 코드로 취소(이력에 "현장 요청 · 사무실 확인: 사유"), 납부가 있으면 환불 필요 |
+
+- 현장 접수 지점의 기록은 `assign_ver`=0. PC는 **그 접수를 만든 기기**가 보낸 갱신본 0 기록을 배정 기록 없이 받습니다(다른 기기·다른 팀은 지금처럼 충돌함).
+- 가져오기 결과 요약에 `field_intakes`(만든 현장 접수 수), `review`(확인 대상 요청 수)가 붙습니다. `review`는 `conflict`에 더하지 않습니다.
+- 휴대폰: 새 목록에 같은 `request_id`가 오면 PC 것을 쓰고 현장 접수 사본을 내립니다. 반영 확인(보관 종료 확인 코드) 뒤 `FIELD_INTAKE`의 이름·연락처·주소와 `CORRECTION`의 값은 지우고 칸 이름만 남깁니다.
+- 방문 순서 바꾸기는 휴대폰 안에서만(`localOrder`) — PC로 보내는 기록이 없습니다.
+

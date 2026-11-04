@@ -184,6 +184,12 @@ F.purgeStopPII(pst, '2026-11-03T00:00:00Z');
 ok(!pst.name && !pst.phone && !pst.address && pst.lat === null && pst.receipt_no === 'R' && pst.versions[0].snapshot === null && pst.pii_purged, '지점 개인정보 지우기 (접수번호·기록 유지, 이전 버전 사본도)');
 const ev9 = { body: { text: '메모', lat: 1, lon: 2, acc: 5, qty: 3 } }; F.purgeEventPII(ev9);
 ok(ev9.body.qty === 3 && !('text' in ev9.body) && !('lat' in ev9.body), '기록에서 메모 글·좌표만 지움');
+const fi = { kind: 'FIELD_INTAKE', body: { temp_no: '현장-1104-1', name: '가상', phone: '01000000000', address: '가상로 1', spot_note: '옆', memo: 'm', dong: '충장동', planned_date: '2026-11-04', items: [{ qty: 1 }] } };
+F.purgeEventPII(fi);
+const fc = { kind: 'CORRECTION', body: { fields: { phone: '01011112222', planned_date: '2026-11-05' }, reason: '번호 바뀜' } };
+F.purgeEventPII(fc);
+ok(!fi.body.name && !fi.body.phone && !fi.body.address && !fi.body.dong && fi.body.items.length === 1 && fi.body.temp_no && JSON.stringify(fc.body.fields) === '["phone","planned_date"]' && !JSON.stringify(fc).includes('01011112222'),
+  '현장 접수·정정 요청 기록: 이름·연락처·주소 값은 지우고 품목·칸 이름만 남김');
 const now = Date.parse('2026-11-03T12:00:00Z');
 const u9 = F.unsentInfo([{ seq: 1, ts: '2026-11-03T08:00:00Z' }, { seq: 2, ts: '2026-11-03T11:00:00Z' }, { seq: 3, ts: '2026-11-03T11:30:00Z' }], 1, now);
 ok(u9.count === 2 && Math.abs(u9.ageH - 1) < 1e-9, '미전송 기록 수·가장 오래된 나이(시간)');

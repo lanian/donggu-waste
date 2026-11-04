@@ -30,7 +30,7 @@ FEE_TABLE = json.loads((ROOT / "data" / "fee_table.json").read_text(encoding="ut
 FEE_ROWS = {r["id"]: r for r in FEE_TABLE["rows"]}
 TYPE_PHOTOS = 4
 FINAL = {"DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"}
-CHANNELS = ("전화", "방문", "온라인", "단체(공동주택)", "기타")  # 접수 경로
+CHANNELS = ("전화", "방문", "온라인", "단체(공동주택)", "현장", "기타")  # 접수 경로 (현장 = 수거 중 휴대폰으로 받은 접수)
 # 사유 코드 (코드 + 직접 입력 글). 기타(OTHER)는 글이 꼭 있어야 한다.
 CANCEL_CODES = {"OUT_OF_AREA": "관할 밖", "RESIDENT": "주민 취소", "DUPLICATE": "중복 접수", "ITEM_REFUSED": "품목 불가", "OTHER": "기타"}
 POSTPONE_CODES = {"RESIDENT": "주민 요청", "OVER_CAPACITY": "수거 한도 초과", "NO_ROUTE": "배정 불가(노선·시간)", "REVISIT": "재방문(미수거·보류)",
@@ -506,9 +506,9 @@ def find_duplicates(con, phone: str, address: str, exclude_id: str | None = None
     return out
 
 
-def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | None) -> tuple[str, str]:
-    """접수 한 건 넣기(트랜잭션은 호출하는 쪽). 접수번호는 오늘 날짜의 다음 번호."""
-    rid, ts = str(uuid.uuid4()), now()
+def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | None, rid: str | None = None) -> tuple[str, str]:
+    """접수 한 건 넣기(트랜잭션은 호출하는 쪽). 접수번호는 오늘 날짜의 다음 번호. rid: 휴대폰 현장 접수처럼 ID가 정해진 경우."""
+    rid, ts = rid or str(uuid.uuid4()), now()
     day = today_kst().replace("-", "")
     n = con.execute("SELECT COUNT(*) FROM request WHERE receipt_no LIKE ?", (f"DG-{day}-%",)).fetchone()[0] + 1
     receipt = f"DG-{day}-{n:04d}"
@@ -685,7 +685,7 @@ def is_chosung(s: str) -> bool:
 
 SORTABLE = {"receipt_no": "receipt_no", "planned_date": "COALESCE(planned_date,'9999')", "received_at": "received_at", "name": "name",
             "dong": "COALESCE(dong,'')", "status": "status", "channel": "channel", "address": "address"}
-QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND")
+QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND", "FIELD")
 
 
 def _enrich(con, r: dict) -> dict:
@@ -749,6 +749,8 @@ def _quick_ok(con, r: dict, key: str, today: str) -> bool:
         return derive(con, r)["fee"]["final"] is None
     if key == "REFUND":
         return r["status"] == "CANCELLED" and payment_status(con, r["id"])["status"] == "REFUND_NEEDED"
+    if key == "FIELD":  # 휴대폰 현장 접수 중 사무실 확인 전
+        return bool(r.get("origin_device")) and not r.get("field_checked_at")
     return True
 
 
@@ -828,7 +830,7 @@ def derive(con, req: dict) -> dict:
     # 휴대폰 v0.10 기록: 도착·스티커 확인·추가 금액 고지·문자/길안내(횟수만)·작업자·부재 증거
     fx = {"arrive": None, "stickers": {}, "fee_notices": [], "sms": {}, "nav": 0, "nav_apps": {}, "workers": [], "no_photo_reason": None, "other_kinds": {}}
     known = {"CONTACT", "FIELD_ITEM_ADD", "ITEM_RESULT", "ATTEMPT", "LOCATION_FIX", "FIELD_MEMO", "PHOTO_META", "REVISIT_APPT", "DIAL_INTENT", "UNLOAD",
-             "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT"}
+             "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT", "FIELD_INTAKE", "CORRECTION", "CANCEL_REQUEST"}
     for e in _events_for(con, req["id"]):
         try:
             b = json.loads(e["body_json"]) or {}
@@ -1103,7 +1105,10 @@ def _open_from_device(con, data: bytes, expect_type: int):
 
 
 KNOWN_KINDS = {"CONTACT", "FIELD_ITEM_ADD", "ITEM_RESULT", "ATTEMPT", "LOCATION_FIX", "FIELD_MEMO", "PHOTO_META", "REVISIT_APPT", "DIAL_INTENT", "UNLOAD",
-               "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT"}
+               "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT", "FIELD_INTAKE", "CORRECTION", "CANCEL_REQUEST"}
+# v0.12 휴대폰(PC 연결 방식)의 요청 기록: 원본(PC)을 바로 바꾸지 않고 사무실 확인을 거친다
+REVIEW_KINDS = {"CORRECTION": "현장 정정 요청 — 사무실 확인 필요", "CANCEL_REQUEST": "현장 취소 요청 — 사무실 확인 필요"}
+CORRECTABLE = ("name", "phone", "address", "spot_note", "planned_date")
 # 취소된 접수라도 충돌함으로 보내지 않는 기록(연락·사진·도착·문자/길안내 앱 열기 — 결과를 바꾸지 않음)
 CANCELLED_OK_KINDS = ("CONTACT", "DIAL_INTENT", "PHOTO_META", "ARRIVE", "SMS_INTENT", "NAV_INTENT")
 
@@ -1151,6 +1156,24 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
             ev.setdefault("request_id", "")
             if not isinstance(ev.get("body"), dict):
                 ev["body"] = {}
+            if ev["kind"] == "FIELD_INTAKE" and ev["request_id"]:  # 휴대폰 현장 접수 → PC 원본에 접수를 만든다(사무실 확인 표시)
+                reason, note = None, None
+                if one(con, "SELECT 1 AS x FROM request WHERE id=?", (ev["request_id"],)):
+                    note = "이미 PC에 있는 접수(다시 만들지 않음)"
+                else:
+                    try:
+                        _field_request(con, ev["request_id"], ev["body"], dev_id)
+                        counts["field_intakes"] = counts.get("field_intakes", 0) + 1
+                        touched.add(ev["request_id"])
+                    except UserError as e:
+                        reason = f"현장 접수 확인 필요: {e}"
+                        counts["review"] = counts.get("review", 0) + 1
+                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (ev["event_id"], imp, dev_id, ev["seq"], ev["request_id"], 0, None, "FIELD_INTAKE",
+                             json.dumps(ev["body"] if reason else _strip_request_pii("FIELD_INTAKE", ev["body"]), ensure_ascii=False),
+                             "CONFLICT" if reason else "APPLIED", reason or note, ev.get("device_ts")))
+                continue
             if not ev["request_id"] and ev.get("kind") not in KNOWN_KINDS:
                 # 앞으로 생길 팀 단위 기록(알 수 없는 종류): 접수와 무관하게 보관만 하고 병합을 막지 않는다
                 con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
@@ -1159,26 +1182,33 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                              json.dumps(ev["body"], ensure_ascii=False), ev.get("device_ts")))
                 counts["stored_other"] = counts.get("stored_other", 0) + 1
                 continue
-            req = one(con, "SELECT status, req_ver FROM request WHERE id=?", (ev["request_id"],))
+            req = one(con, "SELECT status, req_ver, origin_device FROM request WHERE id=?", (ev["request_id"],))
             reason = None
+            # 이 휴대폰이 현장에서 접수한 건: PC 목록에 들어오기 전(갱신본 0)에 남긴 결과는 배정 기록 없이도 받는다
+            own = bool(req) and req.get("origin_device") == dev_id
             if not req:
                 reason = "PC에 없는 접수"
             elif req["status"] == "CANCELLED" and ev["kind"] not in CANCELLED_OK_KINDS:
                 reason = "취소된 접수의 결과"
+            elif ev["kind"] in REVIEW_KINDS:
+                reason = REVIEW_KINDS[ev["kind"]]
             elif ev["kind"] in ("ITEM_RESULT", "FIELD_ITEM_ADD", "ATTEMPT"):
                 act = one(con, """SELECT b.assign_ver, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
                     WHERE a.request_id=?""", (ev["request_id"],))
                 done_before = req and req["status"] in FINAL
                 if act and crew and act["crew_id"] != crew["id"]:
                     reason = "다른 팀에 다시 배정된 접수"
-                elif act and ev.get("assign_ver") is not None and ev["assign_ver"] < act["assign_ver"]:
+                elif act and ev.get("assign_ver") is not None and ev["assign_ver"] < act["assign_ver"] and not (own and not ev["assign_ver"]):
                     reason = f"오래된 목록(갱신본 {ev['assign_ver']} < 현재 {act['assign_ver']})의 결과"
-                elif not act and not done_before and not one(con, """SELECT 1 AS x FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
+                elif not act and not done_before and not own and not one(con, """SELECT 1 AS x FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
                         WHERE s.request_id=? AND b.crew_id=?""", (ev["request_id"], crew["id"] if crew else "")):
                     reason = "이 팀에 배정된 적 없는 접수"
             status = "CONFLICT" if reason else "APPLIED"
             note = reason or (f"접수 수정(버전 {ev.get('base_req_ver')}→{req['req_ver']}) 뒤에 기록된 결과" if req and ev.get("base_req_ver") and ev["base_req_ver"] != req["req_ver"] else None)
-            counts["conflict" if reason else "applied"] += 1
+            if reason and ev["kind"] in REVIEW_KINDS:
+                counts["review"] = counts.get("review", 0) + 1  # 정정·취소 요청: 충돌이 아니라 사무실 확인 대상
+            else:
+                counts["conflict" if reason else "applied"] += 1
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (ev["event_id"], imp, dev_id, ev["seq"], ev["request_id"], ev.get("assign_ver") or 0, ev.get("base_req_ver"),
@@ -1228,7 +1258,12 @@ def list_conflicts(con, include_resolved=False):
         WHERE e.conflict_reason IS NOT NULL AND e.kind NOT IN ('DIAL_INTENT')"""
     if not include_resolved:
         sql += " AND e.apply_status='CONFLICT'"
-    return rows(con, sql + " ORDER BY e.device_ts")
+    out = rows(con, sql + " ORDER BY e.device_ts")
+    for c in out:  # 정정 요청: 지금 PC 원본 값을 나란히 보여 준다
+        if c["kind"] == "CORRECTION" and c["request_id"]:
+            r = one(con, "SELECT name, phone, address, spot_note, planned_date FROM request WHERE id=?", (c["request_id"],))
+            c["current"] = r or {}
+    return out
 
 
 def resolve_conflict(con, event_id: str, action: str, reason: str):
@@ -1239,10 +1274,20 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         raise UserError("반영 또는 거부를 골라 주세요.")
     if not (reason or "").strip():
         raise UserError("판단 사유를 적어 주세요.")
+    body = json.loads(e["body_json"] or "{}")
+    cancelled = False
     with tx(con):
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
+            if e["kind"] == "FIELD_INTAKE" and not one(con, "SELECT 1 AS x FROM request WHERE id=?", (e["request_id"],)):
+                _field_request(con, e["request_id"], body, e["device_id"])
+            if e["kind"] == "CORRECTION":
+                _apply_correction(con, e["request_id"], body, reason.strip())
+            if e["kind"] == "CANCEL_REQUEST":
+                code, text, full = _reason(CANCEL_CODES, body.get("code") or "OTHER", body.get("text") or "현장 요청", "취소")
+                _cancel(con, e["request_id"], code, text, f"{full} (현장 요청 · 사무실 확인: {reason.strip()})"[:300])
+                cancelled = True
             if e["kind"] == "REVISIT_APPT":
                 _apply_revisit(con, e["request_id"], json.loads(e["body_json"]))
             if e["kind"] == "PHOTO_META":
@@ -1250,7 +1295,116 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
                 con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id) VALUES (?,?,?,?,?,?)",
                             (b.get("photo_id"), e["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), e["device_id"]))
             _refresh_status(con, e["request_id"])
-        audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip()})
+        if e["kind"] in ("FIELD_INTAKE", "CORRECTION"):  # 처리한 요청 기록에서는 개인정보를 지운다(원본은 접수·버전 이력에)
+            con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps(_strip_request_pii(e["kind"], body), ensure_ascii=False), event_id))
+        audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip(), "kind": e["kind"]})
+    if cancelled:
+        _fin().sync_refunds(con)
+
+
+# ------------------------------------------------------------------ 휴대폰(PC 연결 방식)의 현장 접수·정정 요청·취소 요청
+def _strip_request_pii(kind: str, b: dict) -> dict:
+    """반영·거부한 요청 기록에 남길 내용(개인정보 없이). 실제 값은 접수 원본과 버전 이력에 있다."""
+    keep = {k: b[k] for k in ("worker", "temp_no") if b.get(k)}
+    if kind == "FIELD_INTAKE":
+        return {**keep, "planned_date": b.get("planned_date"), "items": len(b.get("items") or []), "pii_purged": True}
+    if kind == "CORRECTION":
+        f = b.get("fields") or {}
+        return {**keep, "fields": ",".join(k for k in CORRECTABLE if k in f), **({"date": f["planned_date"]} if f.get("planned_date") else {}),
+                "reason": (b.get("reason") or "")[:100], "pii_purged": True}
+    return b
+
+
+def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
+    """휴대폰 현장 접수로 PC 원본 접수를 만든다(트랜잭션은 호출하는 쪽). 금액은 PC 수수료표로 다시 계산하고,
+    PC 표에 없는 품목은 '확인 대기'로 둔다(0원·최저가로 두지 않음). 품목 행 ID는 휴대폰 것을 그대로 써서 현장 결과가 이어진다."""
+    if not re.fullmatch(r"[0-9a-f-]{36}", rid or ""):
+        raise UserError("접수 ID 형식이 올바르지 않습니다.")
+    fr = fee_rows(con)
+    items = []
+    for it in (b.get("items") or [])[:50]:
+        if not isinstance(it, dict):
+            continue
+        x = {"line_id": str(it.get("line_id") or "")[:40] or None, "qty": it.get("qty"), "name": str(it.get("name") or "")[:60],
+             "spec": str(it.get("spec") or "")[:60], "unit": str(it.get("unit") or "EA")[:10], "unit_label": str(it.get("unit_label") or "개")[:10]}
+        if it.get("fee_rate_id") in fr:
+            x["fee_rate_id"] = it["fee_rate_id"]
+        elif not x["name"]:
+            continue
+        items.append(x)
+    data = {k: str(b.get(k) or "")[:300] for k in ("name", "phone", "address", "spot_note", "memo", "planned_date")}
+    data.update(channel="현장", items=items, appt_start=b.get("eta") if re.fullmatch(r"\d\d:\d\d", str(b.get("eta") or "")) else None)
+    if _num(b.get("lat")) is not None and _num(b.get("lon")) is not None:
+        data.update(lat=_num(b["lat"]), lon=_num(b["lon"]), geo_source="ADDR")
+    dong_s = str(b.get("dong") or "").strip()[:20]
+    if dong_s and _area().get_dong(con, dong_s):
+        data["dong"] = dong_s
+    d = validate(data)
+    built = build_items(items, con)
+    for it in built:
+        if one(con, "SELECT 1 AS x FROM request_item WHERE line_id=?", (it["line_id"],)):
+            raise UserError("품목 행 ID가 이미 PC에 있습니다(같은 기록을 다시 보냈는지 확인).")
+    dong, _ = _resolve_dong(con, data, d["address"])
+    _, receipt = _insert_request(con, d, built, data, dong, rid=rid)
+    con.execute("UPDATE request SET origin_device=? WHERE id=?", (dev_id, rid))
+    audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": "현장", "origin": "FIELD", "device": (dev_id or "")[:8],
+                                          **({"temp_no": str(b["temp_no"])[:30]} if b.get("temp_no") else {}), **({"dong": dong} if dong else {})})
+    return receipt
+
+
+def _apply_correction(con, rid: str, b: dict, office_reason: str):
+    """현장 정정 요청(이름·연락처·주소·상세 위치·예정일)을 원본에 반영한다. 이전 내용은 버전으로 보존(트랜잭션은 호출하는 쪽)."""
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    if not r:
+        raise UserError("접수를 찾을 수 없습니다.")
+    if r["status"] == "CANCELLED":
+        raise UserError("취소된 접수는 고칠 수 없습니다. [거부]로 정리하세요.")
+    f = {k: str(v).strip() for k, v in (b.get("fields") or {}).items() if k in CORRECTABLE and v is not None}
+    new = {k: (f[k] if k in f else (r[k] or "")) for k in CORRECTABLE}
+    new["phone"] = norm_phone(new["phone"])
+    if not new["name"]:
+        raise UserError("이름이 비어 있습니다.")
+    if not re.fullmatch(r"0\d{8,10}", new["phone"]):
+        raise UserError("요청한 연락처 형식이 올바르지 않습니다.")
+    if not new["address"]:
+        raise UserError("주소가 비어 있습니다.")
+    if new["planned_date"] and not re.fullmatch(r"\d{4}-\d\d-\d\d", new["planned_date"]):
+        raise UserError("요청한 예정일 형식이 올바르지 않습니다.")
+    changed = [k for k in CORRECTABLE if (new[k] or None) != (r[k] or None)]
+    if not changed:
+        raise UserError("PC 원본과 같은 내용입니다. [거부]로 정리하세요.")
+    flag = _after_close(con, rid)
+    con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
+                (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), f"현장 정정 요청 반영: {office_reason}"[:200], now()))
+    dong, lat, lon, geo, status = r["dong"], r["lat"], r["lon"], r["geo_source"], r["status"]
+    if "address" in changed:  # 주소가 바뀌면 동을 다시 정하고, 이전 주소의 위치는 쓰지 않는다(현장 위치 보정이 있으면 다시 반영됨)
+        dong = _area().detect_dong(con, new["address"])["dong"] or r["dong"]
+        lat = lon = geo = None
+    if "planned_date" in changed and con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,)).rowcount and status == "ASSIGNED":
+        status = "RECEIVED"
+    con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note=?, planned_date=?, dong=?, lat=?, lon=?, geo_source=?,
+        status=?, updated_at=? WHERE id=?""", (new["name"], new["phone"], new["address"], new["spot_note"], new["planned_date"] or None, dong, lat, lon, geo,
+                                               status, now(), rid))
+    audit(con, "request", rid, "UPDATE", {"reason": f"현장 정정 요청: {office_reason}"[:200], "from_ver": r["req_ver"], "fields": changed, "origin": "FIELD", **flag})
+
+
+def field_intakes(con) -> list[dict]:
+    """휴대폰에서 현장 접수했는데 아직 사무실이 확인하지 않은 접수."""
+    return rows(con, """SELECT id, receipt_no, name, address, planned_date, status, received_at, dong FROM request
+        WHERE origin_device IS NOT NULL AND field_checked_at IS NULL ORDER BY received_at""")
+
+
+def check_field_intake(con, rid: str) -> dict:
+    """현장 접수를 사무실이 확인했다고 표시(주소·품목·금액을 본 뒤). 내용 수정은 일반 접수 수정으로."""
+    r = one(con, "SELECT origin_device, field_checked_at FROM request WHERE id=?", (rid,))
+    if not r or not r["origin_device"]:
+        raise UserError("휴대폰 현장 접수가 아닙니다.")
+    if r["field_checked_at"]:
+        raise UserError("이미 확인한 접수입니다.")
+    with tx(con):
+        con.execute("UPDATE request SET field_checked_at=?, field_checked_by=? WHERE id=?", (now(), ACTOR.get(), rid))
+        audit(con, "request", rid, "FIELD_CHECK", {})
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ 사진 회수 (보안 매체로 옮긴 사진 묶음 파일)
@@ -1415,6 +1569,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     cap = area.capacity_settings(con)
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
+            "field_intakes": len(field_intakes(con)),
             "payments": unpaid, "unloads": unloads, "sticker_issues": sticker_issues, "fee_refused": fee_refused, "no_evidence": no_evidence,
             "unload_total": {"volume_m3": round(sum(u["volume_m3"] or 0 for u in unloads), 2), "weight_kg": round(sum(u["weight_kg"] or 0 for u in unloads), 1)},
             "carry": [] if crew_id else carry_candidates(con, work_date), "dongs": dongs,
