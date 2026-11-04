@@ -199,10 +199,17 @@ def _keyring_set(value: str) -> bool:
         return False
 
 
+# 콘솔에서 입력받은 DB 비밀번호(키 저장소·DG_DB_KEY가 없을 때). DB가 실제로 열린 뒤에만 이 프로세스 메모리에 기억해
+# 조회용 연결·백그라운드 작업·예약 작업이 비밀번호를 다시 묻지 않게 한다(디스크에는 남기지 않음).
+_PROMPTED_KEY: str | None = None
+
+
 def db_key(create: bool = False) -> str:
     k = os.environ.get("DG_DB_KEY") or _keyring_get()
     if k:
         return k
+    if _PROMPTED_KEY:
+        return _PROMPTED_KEY
     if create:
         k = secrets.token_urlsafe(32)
         if _keyring_set(k):
@@ -229,12 +236,15 @@ def connect(create: bool = False, readonly: bool = False):
     is_new = not path.exists()
     con = dbapi.connect(str(path), check_same_thread=False, isolation_level=None)
     if ENCRYPTED:
+        global _PROMPTED_KEY
         key = db_key(create=is_new)
         con.execute("PRAGMA key = " + _quote(key))
         try:
             con.execute("SELECT count(*) FROM sqlite_master").fetchone()
         except Exception:
             sys.exit("DB를 열 수 없습니다. DB 키(비밀번호)가 맞는지 확인하세요.")
+        if not (os.environ.get("DG_DB_KEY") or _keyring_get()):
+            _PROMPTED_KEY = key  # 맞는 것으로 확인된 입력값만 기억
     con.execute("PRAGMA busy_timeout = 10000")
     if readonly:
         con.execute("PRAGMA query_only = ON")

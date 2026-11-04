@@ -92,8 +92,11 @@ def current_assignment(con, work_date: str) -> list[dict]:
         JOIN crew c ON c.id=b.crew_id WHERE b.work_date=? AND b.status='ACTIVE' ORDER BY c.name""", (work_date,))
     for b in out:
         route = {x["request_id"]: x for x in json.loads(b.pop("route_json") or "[]") if isinstance(x, dict)}
+        # 지금도 이 배정에 묶인 접수만: 다른 날·다른 팀으로 옮겨 간 접수(지난 배정 기록만 남은 것)는 부분 수정에서 다시 쓰지 않는다
         b["stops"] = rows(con, """SELECT s.seq, s.eta, r.id AS request_id, r.receipt_no, r.status, r.dong, r.lat, r.lon FROM assignment_stop s
-            JOIN request r ON r.id=s.request_id WHERE s.batch_id=? ORDER BY s.seq""", (b["batch_id"],))
+            JOIN request r ON r.id=s.request_id
+            JOIN active_assignment a ON a.request_id=s.request_id AND a.batch_id=s.batch_id
+            WHERE s.batch_id=? ORDER BY s.seq""", (b["batch_id"],))
         for st in b["stops"]:
             if route.get(st["request_id"], {}).get("unload_after"):
                 st["unload_after"] = route[st["request_id"]]["unload_after"]

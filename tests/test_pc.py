@@ -2523,6 +2523,39 @@ def v13():
     SV.FAILS.clear(); SV.IP_FAILS.clear()
     srv.shutdown(); srv.server_close()
 
+    # 리뷰 반영: 다른 날·다른 팀으로 옮겨 간 접수는 오늘 배정 부분 수정에서 다시 쓰지 않는다
+    tmr = (dt.date.fromisoformat(today) + dt.timedelta(days=1)).isoformat()
+    rm_, rn_ = mk("십삼마", phone="010-0000-9305"), mk("십삼바", phone="010-0000-9306")
+    S.edit_assignment(con, today, "insert", {"crew_id": c1, "request_id": rm_})
+    S.reschedule_requests(con, [rm_], tmr, "OTHER", "주민 요청 내일로")
+    S.edit_assignment(con, tmr, "insert", {"crew_id": c2, "request_id": rm_})
+    ok(rm_ not in [x["request_id"] for b in S.current_assignment(con, today) for x in b["stops"]], "옮겨 간 접수는 오늘 확정 배정 목록에 없음")
+    S.edit_assignment(con, today, "insert", {"crew_id": c1, "request_id": rn_})
+    mv = S.one(con, "SELECT r.planned_date, b.crew_id, b.work_date FROM request r JOIN active_assignment a ON a.request_id=r.id JOIN assignment_batch b ON b.id=a.batch_id WHERE r.id=?", (rm_,))
+    ok(mv and mv["planned_date"] == tmr and mv["crew_id"] == c2 and mv["work_date"] == tmr,
+       "오늘 배정에 다른 접수를 넣어도 내일·2팀으로 옮긴 접수의 일정·팀은 그대로(되돌리지 않음)")
+
+    # 리뷰 반영: 콘솔에서 입력한 DB 비밀번호는 맞는 것으로 확인된 뒤 기억 → 조회 연결이 다시 묻지 않음
+    saved_env, saved_kr, saved_gp, saved_pk = os.environ.pop("DG_DB_KEY"), store._keyring_get, store.getpass.getpass, store._PROMPTED_KEY
+    asked = []
+    try:
+        store._keyring_get = lambda: None
+        store._PROMPTED_KEY = None
+        store.getpass.getpass = lambda prompt="": asked.append(prompt) or saved_env
+        c_a = store.connect(readonly=True); c_b = store.connect(readonly=True)
+        c_a.close(); c_b.close()
+        ok(len(asked) == 1, "DB 비밀번호는 한 번만 물음(조회용 연결·예약 작업은 기억한 값 사용)")
+        store._PROMPTED_KEY = None; asked.clear()
+        store.getpass.getpass = lambda prompt="": asked.append(prompt) or "wrong-key-xxxxxxxx"
+        try:
+            store.connect(readonly=True)
+        except SystemExit:
+            pass
+        ok(store._PROMPTED_KEY is None, "틀린 비밀번호는 기억하지 않음")
+    finally:
+        os.environ["DG_DB_KEY"] = saved_env
+        store._keyring_get, store.getpass.getpass, store._PROMPTED_KEY = saved_kr, saved_gp, saved_pk
+
     ok(not summary_matches(), "여러 쓰기 경로(취소·수납·배정 수정·충돌 반영·단독 옮기기·파기) 뒤에도 요약 열 = derive()")
     con.close()
     print(f"\n통과 {passed}개 (v0.13 포함)")
