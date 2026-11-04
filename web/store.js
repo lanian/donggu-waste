@@ -10,10 +10,18 @@ let dataKey = null; // 잠금 해제 동안만 존재
 
 function idb() {
   if (!dbp) dbp = new Promise((res, rej) => {
+    // 저장소가 열리지 않고 멈추는 경우(다른 창이 붙잡고 있는 상태에서 자료 삭제 등)를 기다리기만 하지 않도록 시간 제한
+    const timer = setTimeout(() => { dbp = null; rej(Object.assign(new Error('저장소를 열지 못했습니다'), { code: 'DB_TIMEOUT' })); }, 8000);
     const r = indexedDB.open(DB_NAME, 1);
     r.onupgradeneeded = () => r.result.createObjectStore('kv');
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
+    r.onsuccess = () => {
+      clearTimeout(timer);
+      const db = r.result;
+      // 다른 창에서 자료를 지우거나 새 버전이 열리면 이 창의 연결을 바로 놓아 준다(안 그러면 그쪽이 멈춤)
+      db.onversionchange = () => { try { db.close(); } catch {} dbp = null; };
+      res(db);
+    };
+    r.onerror = () => { clearTimeout(timer); dbp = null; rej(r.error); };
   });
   return dbp;
 }
@@ -126,6 +134,14 @@ export const delSecureBytes = (k) => delRaw('b:' + k);
 
 export async function wipeAll() {
   dataKey = null;
-  const db = await idb(); db.close(); dbp = null;
-  await new Promise((res, rej) => { const r = indexedDB.deleteDatabase(DB_NAME); r.onsuccess = res; r.onerror = rej; r.onblocked = res; });
+  try { const db = await idb(); db.close(); } catch {}
+  dbp = null;
+  // 다른 창이 연결을 놓을 때까지 잠시 기다린다(그 창도 onversionchange로 놓음). 끝내 막히면 알려 준다.
+  await new Promise((res, rej) => {
+    const r = indexedDB.deleteDatabase(DB_NAME);
+    let blockedTimer = null;
+    r.onsuccess = () => { clearTimeout(blockedTimer); res(); };
+    r.onerror = () => { clearTimeout(blockedTimer); rej(r.error); };
+    r.onblocked = () => { blockedTimer = setTimeout(() => rej(Object.assign(new Error('다른 창에서 이 앱이 열려 있어 지우지 못했습니다'), { code: 'DB_BLOCKED' })), 5000); };
+  });
 }

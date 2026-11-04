@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.7';
+export const APP_VERSION = '0.12.8';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -68,7 +68,7 @@ const toast = (msg, kind = '') => {
 // 아래에서 올라오는 확인 창 (window.prompt·confirm 대신). 큰 단추, 큰 글씨 설정을 따른다.
 // choices: [{label, value, cls, needInput}] → 고른 value (입력칸이 있으면 {value, text}), 취소·뒤로 가기는 null
 const openSheets = new Set();
-function sheet({ title, text = '', body = null, choices = [], input = null, cancel = '취소' }) {
+function sheet({ title, text = '', body = null, choices = [], input = null, cancel = '취소', cancelCls = 'ghost big' }) {
   return new Promise((resolve) => {
     const dlg = h('dialog', { class: 'sheet', 'aria-label': title });
     const inp = input ? h(input.multiline ? 'textarea' : 'input', { type: input.type || 'text', class: 'search', placeholder: input.placeholder || '', 'aria-label': input.label || input.placeholder || title, autocomplete: 'off', rows: input.multiline ? 3 : null }) : null;
@@ -76,17 +76,33 @@ function sheet({ title, text = '', body = null, choices = [], input = null, canc
     const msg = h('p', { class: 'msg err', role: 'alert' });
     const done = (v) => { openSheets.delete(done); try { dlg.close(); } catch {} dlg.remove(); resolve(v); };
     openSheets.add(done);
-    const kids = [h('div', { class: 'grip', 'aria-hidden': 'true' }), h('h2', {}, title), text ? h('p', { class: 'sheet-text' }, text) : null, body,
+    // 닫기 쉽게(취소할 수 있는 창만): 위 ✕, 바깥(어두운 곳) 누르기, 손잡이·제목을 아래로 끌기, 뒤로 가기
+    const grip = h('div', { class: 'grip', 'aria-hidden': 'true' });
+    const head = h('div', { class: 'sheet-head' }, h('h2', {}, title), cancel ? btn('✕', () => done(null), 'ghost sheet-x', { 'aria-label': '닫기' }) : null);
+    const kids = [grip, head, text ? h('p', { class: 'sheet-text' }, text) : null, body,
       inp ? h('label', { class: 'fld' }, h('span', {}, input.label || ''), inp) : null, msg,
       h('div', { class: 'sheet-actions' }, ...choices.map((c) => btn(c.label, () => {
         if (inp && c.needInput && !inp.value.trim()) { msg.textContent = input.required || '내용을 적어 주세요.'; inp.focus(); return; }
         done(inp ? { value: c.value, text: inp.value.trim() } : c.value);
-      }, 'huge ' + (c.cls || ''))), cancel ? btn(cancel, () => done(null), 'ghost big') : null)];
+      }, 'huge ' + (c.cls || ''))), cancel ? btn(cancel, () => done(null), cancelCls) : null)];
     dlg.append(...kids.filter(Boolean));
-    dlg.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); if (cancel) done(null); });
+    if (cancel) {
+      dlg.addEventListener('click', (e) => {
+        if (e.target !== dlg) return;
+        const r = dlg.getBoundingClientRect();
+        if (e.clientY < r.top || e.clientY > r.bottom || e.clientX < r.left || e.clientX > r.right) done(null);
+      });
+      let y0 = null, dy = 0;
+      const startDrag = (e) => { y0 = e.clientY; dy = 0; dlg.style.transition = 'none'; };
+      const moveDrag = (e) => { if (y0 == null) return; dy = Math.max(0, e.clientY - y0); dlg.style.transform = `translateY(${dy}px)`; };
+      const endDrag = () => { if (y0 == null) return; y0 = null; dlg.style.transition = ''; if (dy > 70) done(null); else dlg.style.transform = ''; };
+      for (const el of [grip, head]) { el.addEventListener('pointerdown', startDrag); }
+      dlg.addEventListener('pointermove', moveDrag); dlg.addEventListener('pointerup', endDrag); dlg.addEventListener('pointercancel', endDrag);
+    }
     document.body.append(dlg);
     try { dlg.showModal(); } catch { dlg.setAttribute('open', ''); }
-    setTimeout(() => (inp || dlg.querySelector('.btn')).focus(), 30);
+    setTimeout(() => (inp || dlg.querySelector('.sheet-actions .btn') || dlg.querySelector('.btn')).focus(), 30);
   });
 }
 const ask = async (text, ok = '계속', { title = '확인해 주세요', danger = false } = {}) =>
@@ -1262,7 +1278,7 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
     const box = h('div', { class: 'pick-list sheet-list' });
     redrawSheet = () => box.replaceChildren(...rows.map((r) => row(r, true)));
     redrawSheet();
-    await sheet({ title: name, text: '규격을 골라 담으세요. 여러 규격을 함께 담아도 됩니다.', body: box, choices: [], cancel: '닫기' });
+    await sheet({ title: name, text: '규격을 골라 담으세요. 다 담았으면 [완료] 또는 바깥을 누르세요.', body: box, choices: [], cancel: '완료', cancelCls: 'primary big' });
     redrawSheet = () => {};
     draw();
   };
@@ -2199,7 +2215,9 @@ async function screenSettings() {
       btn('이 휴대폰의 모든 자료 지우기', async () => {
         const u = unsent().length;
         if (!(await ask((u ? `보내지 않은 기록 ${u}건이 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
-        stopCamera(); await S.wipeAll(); st = null; location.hash = ''; location.reload();
+        stopCamera();
+        try { await S.wipeAll(); } catch (e) { return toast(e.code === 'DB_BLOCKED' ? '이 앱이 열린 다른 창(브라우저 탭·설치한 앱)을 모두 닫고 다시 누르세요.' : '지우지 못했습니다: ' + errMsg(e), 'bad'); }
+        st = null; location.hash = ''; location.reload();
       }, 'danger')),
     tabBar('set'));
 }
@@ -2281,6 +2299,7 @@ async function render() {
   photoUrls.forEach((u) => URL.revokeObjectURL(u)); photoUrls = [];
   if (liveMap) { try { liveMap.remove(); } catch {} liveMap = null; }
   let view;
+  try {
   if (!(await S.hasPin())) view = screenSetup();
   else if (!S.isUnlocked()) view = screenLock();
   else {
@@ -2295,6 +2314,7 @@ async function render() {
       mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
+  } catch (e) { view = errorScreen(e); }
   if (my !== renderSeq) return; // 그 사이 다른 화면으로 이동
   wantWake(S.isUnlocked() && wakeRoute());
   const sameRoute = ui.lastRoute === location.hash, y = scrollY; // 같은 화면을 다시 그릴 때는 스크롤 유지
@@ -2323,5 +2343,15 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
 }
 
+// 불러오다 멈추거나 오류가 나면 '불러오는 중…'에 머물지 않고 이유와 [다시 시도]를 보여 준다
+function errorScreen(e) {
+  const stuck = e && (e.code === 'DB_TIMEOUT' || e.code === 'DB_BLOCKED');
+  return h('main', { class: 'center' }, appLogo('app-icon'), h('h1', {}, '불러오지 못했습니다'),
+    h('p', {}, stuck ? '휴대폰 저장소가 열리지 않습니다. 이 앱이 열린 다른 창(브라우저 탭·설치한 앱)을 모두 닫고 [다시 시도]를 누르세요. 자료를 지운 직후라면 앱을 완전히 닫았다가 다시 여세요.'
+      : '오류가 났습니다. [다시 시도]를 누르고, 계속되면 이 화면을 담당자에게 보여 주세요.'),
+    h('p', { class: 'small' }, `${(e && (e.code || e.name)) || '오류'}: ${(e && e.message) || ''} · 앱 ${APP_VERSION}`),
+    btn('다시 시도', () => location.reload(), 'primary big'));
+}
+const bootWatch = setTimeout(() => { if (/불러오는 중/.test($app.textContent)) $app.replaceChildren(errorScreen({ code: 'DB_TIMEOUT', message: '10초 넘게 걸림' })); }, 10000);
 // 화면 설정(테마·고대비)은 잠금 화면 전에 적용
-S.getRaw('prefs').then((p) => { if (p) prefs = { ...prefs, ...p }; }).catch(() => {}).finally(() => { applyPrefs(); render(); });
+S.getRaw('prefs').then((p) => { if (p) prefs = { ...prefs, ...p }; }).catch(() => {}).finally(() => { applyPrefs(); render().finally(() => clearTimeout(bootWatch)); });

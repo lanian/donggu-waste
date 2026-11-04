@@ -577,8 +577,16 @@ def pc_field(pw, url):
     dlg = page.get_by_role("dialog")
     dlg.locator(".pick-row", has_text="300ℓ 미만").get_by_role("button", name=re.compile("담기$")).click()
     dlg.locator(".pick-row", has_text="300ℓ 미만").get_by_role("button", name=re.compile("더하기$")).click()
-    dlg.get_by_role("button", name="닫기").click()
+    page.mouse.click(195, 40)  # 바깥(어두운 곳)을 누르면 닫힘
+    expect(dlg).to_have_count(0)
     expect(page.get_by_role("button", name=re.compile("^냉장고.*2개 담김"))).to_be_visible()
+    page.get_by_role("button", name=re.compile("^냉장고.*규격 고르기")).click()
+    page.get_by_role("dialog").get_by_role("button", name="닫기").click()  # 위 ✕
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    page.get_by_role("button", name=re.compile("^냉장고.*규격 고르기")).click()
+    page.get_by_role("dialog").get_by_role("button", name="완료").click()
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    ok(True, "규격 고르기 창 닫기: 바깥 누르기·위 ✕·아래 [완료]")
     page.get_by_role("group", name="품목 분류").get_by_role("button", name="가구").click()
     page.get_by_role("button", name=re.compile("^싱크대.*1개 담기")).click()
     expect(page.locator(".pick-sum")).to_have_text(re.compile("^2종 · 3개"))
@@ -1134,10 +1142,19 @@ def solo(pw, url, video):
     again = subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "import-solo", str(bfile)], env={**ENV, "DG_SOLO_PASS": "backup-pass-1"},
                            capture_output=True, text=True, check=True).stdout
     ok("duplicate_file" in again, "같은 백업을 다시 옮기면 중복 반영 안 함")
+    # 같은 앱이 다른 창(탭)에도 열려 있는 채로 모두 지우기 → 멈추지 않고 첫 화면(PIN 설정)으로
+    other = page.context.new_page()
+    other.goto(url)
+    expect(other.get_by_placeholder("PIN")).to_be_visible(timeout=20000)
     page.goto(url + "#/settings")
     page.get_by_role("button", name="이 휴대폰의 모든 자료 지우기").click()
     page.get_by_role("button", name="모두 지우기").click()
     page.wait_for_load_state()
+    expect(page.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
+    other.reload()
+    expect(other.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
+    ok(True, "다른 창에 앱이 열린 채로 모든 자료 지우기 → '불러오는 중'에 멈추지 않고 두 창 모두 첫 화면")
+    other.close()
     page.get_by_placeholder("숫자 6자리 이상").fill(PIN)
     page.get_by_placeholder("한 번 더").fill(PIN)
     page.get_by_role("button", name="PIN 설정").click()

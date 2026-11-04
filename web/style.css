@@ -367,7 +367,10 @@ html.text-big section[id^="st-"] { scroll-margin-top: 170px; }
 dialog.sheet { position: fixed; inset: auto 0 0 0; margin: 0 auto; width: 100%; max-width: 640px; max-height: 88vh; overflow-y: auto; border: 0;
   padding: 10px 16px calc(16px + env(safe-area-inset-bottom)); border-radius: 22px 22px 0 0; background: var(--card); color: var(--ink); box-shadow: 0 -12px 40px rgba(0, 0, 0, .25); }
 dialog.sheet::backdrop { background: rgba(10, 14, 20, .55); }
-dialog.sheet .grip { width: 44px; height: 5px; border-radius: 3px; background: var(--line-strong); margin: 0 auto 12px; }
+dialog.sheet .grip { width: 44px; height: 5px; border-radius: 3px; background: var(--line-strong); margin: 0 auto 6px; touch-action: none; }
+dialog.sheet { transition: transform .15s ease; }
+.sheet-head { display: flex; align-items: center; gap: 8px; touch-action: none; padding-top: 6px; } .sheet-head h2 { flex: 1; margin: 0; }
+.sheet-head .btn.sheet-x { flex: none; width: var(--tap); min-height: var(--tap); padding: 0; margin: 0; font-size: 1.3rem; }
 dialog.sheet h2 { font-size: 1.2rem; } dialog.sheet .sheet-text { font-size: 1rem; color: var(--ink); }
 .sheet-actions { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; } .sheet-actions .btn { margin: 4px 0; }
 .btn.danger.huge { background: var(--bad); color: var(--on-bad); border-color: var(--bad); }
