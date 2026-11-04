@@ -660,11 +660,14 @@ async function importDlg() {
 // ------------------------------------------------------------ 접수 등록·수정
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
+let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
+const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
   const blank = { name: '', phone: '', address: '', spot_note: '', memo: '', planned_date: '', appt_start: '', appt_end: '', must_today: 0, urgent: 0, priority: 0, lat: null, lon: null,
     items: [], versions: [], locked_lines: [], status: 'RECEIVED', dong: null, channel: '전화', contacts: [] };
   const fromDraft = isNew && intakeDraft;
+  if (isNew && !fromDraft) dupAckKey = null;  // 중복 경고 확인은 같은 작성 중 접수에만 유효 (새로 쓰기·다른 접수에는 다시 확인)
   const r = isNew ? { ...blank, ...(intakeDraft ? intakeDraft.r : {}), items: intakeDraft ? intakeDraft.items : [] } : await api('requests/' + id);
   const items = r.items.map((i) => ({ ...i }));
   const locked = new Set(r.locked_lines || []);
@@ -827,15 +830,16 @@ async function screenRequest(id) {
     priority: +F.priority.value, lat: F.lat.value || null, lon: F.lon.value || null, geo_source: geoSource, dong: F.dong.value, channel: F.channel.value,
     ...(isNew ? { reduction_code: redSel.value, reduction_proof: redProof.value, reduction_checker: redWho.value || (redSel.value ? boot.me.display_name : '') } : {}),
     items: items.map((i) => ({ line_id: i.line_id, fee_rate_id: i.fee_rate_id || null, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty })) });
-  let dupAck = false;
+  // 중복 경고를 본 연락처·주소는 기억한다(화면 밖 변수): 그사이 화면이 다시 그려져도 [접수 등록]을 또 눌러야 하는 일이 없게
+  const dupKey = () => `${digitsOnly(F.phone.value)}|${F.address.value.trim()}`;
   const save = wrap(async () => {
     if (isNew) {
-      if (!dupAck) {
+      if (dupAckKey !== dupKey()) {
         await checkDup();
-        if (dupBox.childNodes.length) { dupAck = true; msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
+        if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
       }
       const res = await post('requests', data());
-      intakeDraft = null;
+      intakeDraft = null; dupAckKey = null;
       toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
     } else {
       const res = await post('requests/' + id, { ...data(), reason: reason.value });
@@ -911,7 +915,7 @@ async function screenRequest(id) {
         !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => { const t = await post(`requests/${id}/receipt-print`); window.open('/print/doc/' + t.token, 'dg-print'); toast('접수증을 열었습니다 (출력 기록이 남습니다)'); }), 'small') : null,
         !isNew && canWork() && r.status !== 'CANCELLED' ? btn('배출 표지 인쇄', wrap(async () => { const t = await post('requests/labels', { ids: [id] }); window.open('/print/doc/' + t.token, 'dg-print'); toast('배출 표지를 열었습니다'); }), 'small') : null,
         btn('← 목록', () => go('#/requests')))),
-    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; render(true); }, 'small')) : null,
+    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; render(true); }, 'small')) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
     r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
     h('div', { class: 'grid2' },
@@ -2143,7 +2147,7 @@ async function render(fromNav) {
       const crumbs = [group ? group[0] : '개인', ...(cur === 'request' ? [navLabel.requests] : []), pageName, ...(subName ? [subName] : [])];
       const d = new Date(boot.today + 'T00:00:00');
       const dayTxt = isNaN(d) ? boot.today : `${boot.today.replace(/-/g, '.')} (${'일월화수목금토'[d.getDay()]})`;
-      const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; intakeDraft = null; clearTimeout(sessTimer); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
+      const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); boot = null; intakeDraft = null; dupAckKey = null; clearTimeout(sessTimer); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
       const navOpen = render.navOpen || false;
       const toggleNav = () => { render.navOpen = !render.navOpen; const sh = $app.querySelector('.shell'); sh.classList.toggle('nav-open', render.navOpen); sh.querySelector('.menu-btn').setAttribute('aria-expanded', render.navOpen ? 'true' : 'false'); };
       const railBtn = () => { render.rail = !render.rail; try { localStorage.setItem('dg-rail', render.rail ? '1' : ''); } catch {} $app.querySelector('.shell').classList.toggle('rail', render.rail); };
