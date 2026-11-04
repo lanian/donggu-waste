@@ -157,6 +157,9 @@ def raw_get(path, headers=None):
         return e.code
 
 
+LAST_PAGE: list = []  # 실패 시 화면 캡처용 (SHOTS/fail.png)
+
+
 def main():
     print("작업 폴더:", WORK)
     subprocess.run([sys.executable, str(ROOT / "pc" / "pc_tool.py"), "init"], env=ENV, check=True, capture_output=True)
@@ -172,7 +175,16 @@ def main():
                 break
             except Exception:
                 time.sleep(0.2)
-        run()
+        try:
+            run()
+        except Exception:
+            for pg in LAST_PAGE[-1:]:
+                try:
+                    pg.screenshot(path=SHOTS / "fail.png", full_page=True)
+                    print("실패 화면:", SHOTS / "fail.png", flush=True)
+                except Exception:
+                    pass
+            raise
     finally:
         srv.terminate()
         out = srv.communicate(timeout=5)[0]
@@ -206,6 +218,7 @@ def run():
             REQUESTS.append((r.url, body))
         ctx.on("request", rec)
         page = ctx.new_page()
+        LAST_PAGE.append(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept(DIALOG["text"]) if d.type == "prompt" else d.accept())
@@ -711,12 +724,20 @@ def run():
 
         # 자동 백업: 백업 키(개인키는 한 번만 내려받음) → 지금 자동 백업
         page.goto(URL + "#/settings/backup")
+        # 화면이 다 그려진 뒤(백업 키 상태가 보인 뒤) 누른다 — 늦은 다시 그리기가 대화 상자와 겹치지 않게
+        expect(page.get_by_text("없음 — 자동 백업 안 함")).to_be_visible()
+        dismiss(page)
         page.get_by_role("button", name="백업 키 만들기").click()
         kd = page.locator(".dlg")
+        expect(kd).to_be_visible()
         kd.get_by_label("개인키 보호 비밀번호 (12자 이상)").fill("backup-key-e2e-01")
         kd.get_by_label("한 번 더").fill("backup-key-e2e-01")
-        with page.expect_download() as kdl:
-            kd.get_by_role("button", name="만들고 개인키 내려받기").click()
+        try:
+            with page.expect_download(timeout=60000) as kdl:
+                kd.get_by_role("button", name="만들고 개인키 내려받기").click()
+        except Exception:
+            print("백업 키 내려받기 실패 — 대화 상자:", kd.all_inner_texts(), "알림:", page.locator(".toast").all_inner_texts(), flush=True)
+            raise
         pem = Path(kdl.value.path()).read_bytes()
         page.get_by_role("button", name="지금 자동 백업").click()
         expect(page.get_by_text(re.compile("자동 백업: donggu-auto-"))).to_be_visible()
