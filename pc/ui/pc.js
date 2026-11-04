@@ -92,13 +92,60 @@ async function apiRaw(path, { method = 'GET', body, raw, retry = true } = {}) {
   if (r.ok) touchSession();
   return r;
 }
+// 오류에는 HTTP 상태(status)와 응답(data)을 붙인다: 409(다른 곳에서 바뀜)는 화면이 따로 안내한다
 async function api(path, opts = {}) {
   const r = await apiRaw(path, opts);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || '오류');
+  if (!r.ok) { const e = new Error(data.error || '오류'); e.status = r.status; e.data = data; throw e; }
   return data;
 }
 const post = (path, body) => api(path, { method: 'POST', body });
+const isStale = (e) => e && e.status === 409;
+// 요청 번호(client_req_id): 양식을 보낼 때마다 새로 만들고, 실패해서 다시 보낼 때는 같은 값을 쓴다(두 번 눌러도 서버는 한 번만 처리).
+// 키별로 화면 밖에 둬서 다시 그려져도 같은 값. 성공하면 지운다.
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join(''));
+const REQ_IDS = new Map();
+const reqId = (key) => { if (!REQ_IDS.has(key)) REQ_IDS.set(key, uuid()); return REQ_IDS.get(key); };
+const reqDone = (key) => REQ_IDS.delete(key);
+// client_req_id를 붙여 보내고, 성공하면 그 키의 번호를 지운다
+async function postOnce(key, path, body) { const r = await post(path, { ...body, client_req_id: reqId(key) }); reqDone(key); return r; }
+
+// ------------------------------------------------------------ 백그라운드 작업 (백업·파기·사진 정리·전체 무결성 검사): 오른쪽 아래 진행 띠, GET /api/jobs/{id}를 불러 끝나면 결과
+function jobsPanel() {
+  let box = document.querySelector('.jobs');
+  if (!box) { box = h('div', { class: 'jobs', 'aria-live': 'polite', role: 'status' }); document.body.append(box); }
+  return box;
+}
+async function runJob(path, body, label) {
+  const start = await post(path, body);
+  if (!start.job_id) return start;  // 이전 서버(바로 결과)
+  const bar = h('progress', { max: 1, 'aria-label': `${label} 진행` });
+  const txt = h('span', { class: 'jt' }, '대기 중');
+  const row = h('div', { class: 'jobrow', 'data-job': start.job_id }, h('b', {}, label), txt, bar);
+  jobsPanel().append(row);
+  try {
+    for (let i = 0; ; i++) {
+      await new Promise((res) => setTimeout(res, i < 4 ? 400 : 900));
+      const j = await api('jobs/' + start.job_id);
+      if (j.total) { bar.max = j.total; bar.value = j.progress || 0; txt.textContent = `${(j.progress || 0).toLocaleString()} / ${j.total.toLocaleString()}`; }
+      else txt.textContent = j.status === 'RUNNING' ? '진행 중…' : j.status === 'QUEUED' ? '대기 중' : '';
+      if (j.status === 'DONE') { row.classList.add('done'); txt.textContent = '끝'; bar.max = 1; bar.value = 1; setTimeout(() => row.remove(), 4000); return j.result; }
+      if (j.status === 'FAILED') { row.classList.add('bad'); txt.textContent = '실패'; setTimeout(() => row.remove(), 8000); throw new Error(`${label} 실패: ${j.error || ''}`); }
+    }
+  } catch (e) { if (!row.classList.contains('bad')) { row.classList.add('bad'); setTimeout(() => row.remove(), 8000); } throw e; }
+}
+
+// 주민 안내 문구(이름·연락처·주소 없음)를 받아 클립보드로. 클립보드를 못 쓰면(LAN의 http 등) 고를 수 있는 글 상자로 보여 준다.
+async function copyNotice(id) {
+  const r = await apiRaw(`requests/${id}/notice`);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || '안내 문구를 만들지 못했습니다.');
+  const text = await r.text();
+  try { await navigator.clipboard.writeText(text); toast('주민 안내 문구를 복사했습니다 (문자·메신저에 붙여 넣기)'); return text; } catch { /* 아래 상자 */ }
+  const ta = h('textarea', { rows: 9, class: 'fill', readonly: true, 'aria-label': '주민 안내 문구' }, text);
+  setTimeout(() => ta.select(), 40);
+  await modal({ title: '주민 안내 문구', ok: '닫기', cancel: null, body: [h('p', { class: 'muted small' }, '복사가 막혀 있어 글을 보여 줍니다. Ctrl+C로 복사하세요.'), ta] });
+  return text;
+}
 // 파일 내려받기 (CSV 등): 서버가 준 파일 이름 대신 화면에서 정한 이름으로 저장
 async function download(path, filename, opts = {}) {
   const r = await apiRaw(path, opts);
@@ -111,15 +158,17 @@ async function download(path, filename, opts = {}) {
 // ------------------------------------------------------------ 대화 상자 (window.prompt·confirm 대신: 제목 연결·초점 가둠·Esc 닫기)
 let dlgSeq = 0;
 const dlgStack = [];
-function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk } = {}) {
+// extra: [{ label, value, cls }] — 확인·취소 말고 다른 답(누르면 value로 닫힘). sticky: 화면을 옮겨도 닫지 않음(다시 로그인)
+function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false } = {}) {
   return new Promise((resolve) => {
     const id = `dlg${++dlgSeq}`;
     const prev = document.activeElement;
     const msg = h('p', { class: 'msg', role: 'alert' });
     const okB = btn(ok, null, danger ? 'danger' : 'primary', { 'data-dlg-ok': '1' });
     const noB = cancel ? btn(cancel, () => close(null)) : null;
+    const exB = extra.map((x) => btn(x.label, () => close(x.value), x.cls || ''));
     const box = h('div', { class: 'dlg' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': id + 't', tabindex: '-1' },
-      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, noB, okB));
+      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, noB, ...exB, okB));
     const back = h('div', { class: 'dlg-back' }, box);
     const focusables = () => [...box.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')].filter((el) => !el.disabled && !el.hidden && el.offsetParent !== null);
     const key = (e) => {
@@ -133,17 +182,22 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
         else if (i < 0) { e.preventDefault(); f[0].focus(); }
       } else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && box.contains(e.target) && !['checkbox', 'file'].includes(e.target.type)) { e.preventDefault(); okB.click(); }
     };
-    const close = (v) => { back.remove(); dlgStack.splice(dlgStack.indexOf(back), 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
+    let closed = false;
+    const close = (v) => { if (closed) return; closed = true; back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
+    back._close = close; back._sticky = sticky;
     okB.addEventListener('click', async () => {
       msg.textContent = ''; okB.disabled = true;
       try { const v = onOk ? await onOk() : true; close(v === undefined ? true : v); } catch (e) { msg.textContent = e.message; } finally { okB.disabled = false; }
     });
     document.addEventListener('keydown', key, true);
     document.body.append(back); dlgStack.push(back);
-    setTimeout(() => (box.querySelector('input:not([type=hidden]):not([readonly]), select, textarea') || okB).focus(), 20);
+    // 처음 초점: 이미 상자 안 칸에 초점이 있으면(바로 입력을 시작함) 옮기지 않는다
+    setTimeout(() => { if (!box.contains(document.activeElement) || document.activeElement === box) (box.querySelector('input:not([type=hidden]):not([readonly]), select, textarea') || okB).focus(); }, 20);
   });
 }
-const confirmDlg = (title, text, opts = {}) => modal({ title, body: [h('p', {}, text)], ok: opts.ok || '확인', danger: !!opts.danger });
+const confirmDlg = (title, text, opts = {}) => modal({ title, body: [h('p', {}, text), ...(opts.more || [])], ok: opts.ok || '확인', danger: !!opts.danger, cancel: opts.cancel || '취소' });
+// 화면을 옮기면(주소 바뀜) 열린 대화 상자를 닫는다(취소로) — 옛 화면의 대화 상자가 새 화면 위에 남지 않게. 다시 로그인 상자는 남긴다.
+addEventListener('hashchange', () => { [...dlgStack].reverse().forEach((b) => { if (!b._sticky && b._close) b._close(null); }); });
 function promptDlg(title, label, opts = {}) {
   const inp = h('input', { placeholder: opts.placeholder || '', class: 'fill' });
   return modal({ title, ok: opts.ok || '확인', danger: !!opts.danger, body: [...(opts.lead || []), h('label', { class: 'f' }, label, inp)],
@@ -170,7 +224,7 @@ function relogin() {
   if (reauth) return reauth;
   const me = boot.me;
   const pw = h('input', { type: 'password', autocomplete: 'current-password', 'aria-label': '비밀번호' });
-  reauth = modal({ title: '다시 로그인', ok: '로그인하고 계속', cancel: '로그인 화면으로',
+  reauth = modal({ title: '다시 로그인', ok: '로그인하고 계속', cancel: '로그인 화면으로', sticky: true,
     body: [h('p', {}, '오래 조작하지 않아 로그아웃되었습니다. 작성 중인 내용은 그대로 있습니다. 다시 로그인하면 하던 작업을 이어서 보냅니다.'),
       h('label', { class: 'f' }, '아이디', h('input', { value: me.username, readonly: true })), h('label', { class: 'f' }, '비밀번호', pw)],
     onOk: async () => {
@@ -201,13 +255,21 @@ function touchSession() {
 }
 // 작업이 끝나 다시 그릴 때, 그 사이 다른 화면으로 옮겼으면 새 화면(입력 중인 양식)을 덮지 않는다.
 // 진행 중인 작업을 시작한 화면(hash)별로 센다: 작업이 겹쳐도(화면 안 여러 카드가 동시에 불러오기) 기준이 흐트러지지 않게.
+// 두 번 누름 막기: 누른 단추(e.currentTarget)를 작업이 끝날 때까지 끈다. Ctrl+Enter도 같은 단추를 누르므로 같은 보호를 받는다.
 const pendingActions = new Map();
 const wrap = (fn, msgEl) => async (...a) => {
+  const ev = a[0];
+  const b = ev && typeof ev === 'object' && 'currentTarget' in ev && ev.currentTarget instanceof HTMLButtonElement ? ev.currentTarget : null;
+  if (b && (b.disabled || b.dataset.busy)) return;
+  if (b) { b.dataset.busy = '1'; b.disabled = true; b.setAttribute('aria-busy', 'true'); }
   const at = location.hash;
   pendingActions.set(at, (pendingActions.get(at) || 0) + 1);
   try { if (msgEl) { msgEl.textContent = ''; msgEl.className = 'msg'; } await fn(...a); }
   catch (e) { if (msgEl) { msgEl.textContent = e.message; msgEl.className = 'err'; } else toast(e.message, true); }
-  finally { const n = pendingActions.get(at) - 1; if (n > 0) pendingActions.set(at, n); else pendingActions.delete(at); }
+  finally {
+    const n = pendingActions.get(at) - 1; if (n > 0) pendingActions.set(at, n); else pendingActions.delete(at);
+    if (b && b.dataset.busy) { delete b.dataset.busy; b.disabled = false; b.removeAttribute('aria-busy'); }
+  }
 };
 
 // ------------------------------------------------------------ 로그인
@@ -325,9 +387,28 @@ async function screenUsers() {
       btn('CSV 내보내기', wrap(async () => { await download(`audit.csv?${qs()}`, `동구-변경이력-${fFrom.value || '처음'}_${fTo.value || '끝'}.csv`); toast('내려받았습니다 (내보낸 기록이 이력에 남습니다)'); }), 'small')),
       h('div', { class: 'tablewrap tall' }, h('table', { class: 'audit grid' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '번호', '내용'].map((t) => h('th', {}, t)))), tbody)), pager,
       h('p', { class: 'muted' }, '이력은 지우거나 고칠 수 없습니다. 새 기록은 해시 사슬로 이어져 고치거나 지우면 [접속기록 → 무결성 검사]에서 드러납니다. 내용에는 이름·연락처·주소를 넣지 않습니다(사유·건수·코드만). CSV도 같은 내용만 담습니다.')),
+    admin ? diagCard() : null,
     purge ? h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '개인정보 파기 대장'), h('span', { class: 'muted small' }, `보유기간 ${purge.retention_years}년 · 지금 대상 ${purge.preview.count}건`)),
       purgeLogTable(purge.log), admin ? h('a', { href: '#/settings/privacy', class: 'small' }, '보유기간·파기 설정 →') : null) : null);
 }
+// 진단 (운영 관리자): DB·사진 크기, 남은 공간, 표별 건수, 예약 작업 마지막 시각(오래되면 빨강)
+const mb = (b) => (b == null ? '—' : b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)}GB` : `${(b / 1024 / 1024).toFixed(1)}MB`);
+function diagCard() {
+  const body = h('div', {}, h('p', { class: 'muted' }, '불러오는 중…'));
+  const load = wrap(async () => {
+    const [d, o] = await Promise.all([api('diag'), api('ops-status')]);
+    body.replaceChildren(
+      h('dl', { class: 'kv compact' }, h('dt', {}, 'DB'), h('dd', {}, `${mb(d.db_bytes)} (WAL ${mb(d.wal_bytes)}, 빈 공간 ${mb(d.free_bytes)}) · 구조 ${d.schema_version} · auto_vacuum ${['NONE', 'FULL', 'INCREMENTAL'][d.auto_vacuum] || d.auto_vacuum}`),
+        h('dt', {}, '사진'), h('dd', {}, `${(d.photos.count || 0).toLocaleString()}장 · ${mb(d.photos.bytes)}`),
+        h('dt', {}, '서버'), h('dd', {}, `로그인 세션 ${d.sessions} · 대기 작업 ${d.jobs_queued} · 예약 확인 ${d.scheduler_tick ? kst(d.scheduler_tick) : '—'}`)),
+      grid(['예약 작업', '마지막 실행', '상태'], o.items.map((x) => [x.label, x.last_at ? `${kst(x.last_at)} (${x.age_days}일 전)` : '기록 없음', chip(x.stale ? '확인 필요' : '정상', x.stale ? 'bad' : 'ok')]), { cls: 'ops-tbl' }),
+      h('details', { class: 'tableview' }, h('summary', {}, '표별 건수'), grid(['표', '건수'], Object.entries(d.tables).map(([t, n]) => [t, n == null ? '—' : n.toLocaleString()]), { num: [1] })),
+      diagHint());
+  });
+  load();
+  return h('div', { class: 'card', id: 'diag' }, h('div', { class: 'panel-h' }, h('h2', {}, '진단'), btn('새로 고침', load, 'small')), body);
+}
+const diagHint = () => h('p', { class: 'muted small' }, '예약 작업은 서버가 켜져 있는 동안 하루 한 번(02:30 이후) 돕니다. 이틀 넘게 기록이 없으면 서버가 밤에 꺼져 있었는지 확인하세요. 큰 DB를 줄이려면 서버를 끄고 python pc/pc_tool.py vacuum.');
 const kst = (iso) => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
 function summarizeDetail(raw) {
   if (!raw) return '';
@@ -398,12 +479,72 @@ async function mapIn(box, opts) {
 
 // ------------------------------------------------------------ 접수 목록
 // ------------------------------------------------------------ 오늘 현황 (대시보드)
+// 지금 시각(한국, HH:MM)과 근무 끝(사용 중 팀의 가장 늦은 끝 시각): 결과 미회수는 근무가 끝난 뒤(또는 지난 날짜)에만 경고한다
+const nowHM = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Seoul', hour12: false }).slice(0, 5);
+const crewEnd = (cid) => ((boot.crews.find((c) => c.id === cid) || {}).shift_end || '17:00');
+const workEnd = () => boot.crews.filter((c) => c.active).map((c) => c.shift_end || '17:00').sort().pop() || '17:00';
+const afterWork = (date, cid) => date < boot.today || (date === boot.today && nowHM() >= (cid ? crewEnd(cid) : workEnd()));
+const md = (d) => (d ? `${+d.slice(5, 7)}/${+d.slice(8, 10)}` : '');
+// 처리할 일(전체 기간, GET /api/pending) → 화면 링크. 결과 미회수 팀은 근무가 끝난 팀만 센다.
+function pendingTodos(pd) {
+  const by = Object.fromEntries((pd ? pd.items : []).map((x) => [x.key, x]));
+  const nr = ((by.no_result_crews || {}).crews || []).filter((c) => afterWork(c.work_date, c.crew_id));
+  const old = (x) => (x && x.oldest ? ` · 가장 오래된 ${md(x.oldest)}` : '');
+  const t = [];
+  const add = (key, n, text, href, cls, roles) => { if (n && roles.split(' ').includes(boot.me.role)) t.push({ key, n, text, href, cls }); };
+  const x = (k) => by[k] || { count: 0 };
+  add('close_approve', x('close_approve').count, `마감 확인 대기 ${x('close_approve').count}일${old(by.close_approve)}`, `#/close?date=${x('close_approve').oldest}`, 'warn', 'ADMIN LEAD');
+  add('refund_approve', x('refund_approve').count, `환불 결재 대기 ${x('refund_approve').count}건${old(by.refund_approve)}`, '#/refunds?status=REQUESTED', 'warn', 'ADMIN LEAD');
+  add('unclosed_days', x('unclosed_days').count, `마감 안 한 지난 날짜 ${x('unclosed_days').count}일${old(by.unclosed_days)}`, `#/close?date=${x('unclosed_days').oldest}`, 'warn', 'ADMIN INTAKE LEAD');
+  add('overdue', x('overdue').count, `지난 예정일 미처리 ${x('overdue').count}건${old(by.overdue)}`, '#/requests?quick=OVERDUE', 'bad', 'ADMIN INTAKE LEAD');
+  add('nodate', x('nodate').count, `예정일 없음 ${x('nodate').count}건`, '#/requests?quick=NODATE', 'warn', 'ADMIN INTAKE LEAD');
+  add('no_result_crews', nr.length, `결과 미회수 팀 ${nr.length}곳 (${[...new Set(nr.map((c) => `${c.crew} ${md(c.work_date)}`))].slice(0, 3).join(', ')})`, '#/results', 'bad', 'ADMIN INTAKE LEAD');
+  add('conflicts', x('conflicts').count, `충돌함 ${x('conflicts').count}건${old(by.conflicts)}`, '#/results?focus=conflicts', 'bad', 'ADMIN INTAKE');
+  return t;
+}
+// 메뉴 숫자(일일 마감·환불·결과 가져오기): 화면을 옮길 때 20초에 한 번 불러온다(작업 뒤에는 바로)
+const badges = { at: 0, counts: {} };
+async function refreshBadges(force) {
+  if (!boot || boot.me.role === 'FIELD' || boot.me.must_change) return;
+  if (!force && Date.now() - badges.at < 20000) return paintBadges();
+  badges.at = Date.now();
+  try {
+    const t = pendingTodos(await api('pending'));
+    const n = (...ks) => t.filter((x) => ks.includes(x.key)).reduce((a, x) => a + x.n, 0);
+    badges.counts = { close: n('close_approve', 'unclosed_days'), refunds: n('refund_approve'), results: n('conflicts', 'no_result_crews') };
+  } catch { /* 숫자는 보조 정보 */ }
+  paintBadges();
+}
+function paintBadges() {
+  document.querySelectorAll('nav.side a[data-k]').forEach((a) => {
+    const n = badges.counts[a.dataset.k] || 0;
+    let b = a.querySelector('.nav-badge');
+    if (!n) { if (b) b.remove(); return; }
+    if (!b) { b = h('span', { class: 'nav-badge' }); a.append(b); }
+    b.textContent = n > 99 ? '99+' : String(n); b.setAttribute('aria-label', `처리할 일 ${n}건`);
+  });
+}
+// 화면 키(서버 readiness의 fix) → 이 화면의 주소
+const FIX_HREF = { 'settings/crews': '#/settings/crews', 'settings/devices': '#/settings/devices', 'settings/route': '#/settings/basic', 'settings/dongs': '#/settings/dongs',
+  'settings/address': '#/settings/addr', 'settings/backup': '#/settings/backup', fee: '#/fees', 'settings/notice': '#/settings/basic', users: '#/users' };
+function readinessCard(rd) {
+  if (!rd || rd.ok) return null;
+  return h('div', { class: 'card readiness' }, h('div', { class: 'panel-h' }, h('h2', {}, '운영 준비 점검'), chip(`${rd.done} / ${rd.total} 완료`, rd.done === rd.total ? 'ok' : 'warn')),
+    h('ul', { class: 'ready-list' }, ...rd.items.map((x) => h('li', { class: x.ok ? 'ok' : 'no' }, h('span', { class: 'mark', 'aria-hidden': 'true' }, x.ok ? '✓' : '✗'),
+      h('span', { class: 'sr-only' }, x.ok ? '완료: ' : '안 됨: '), h('span', { class: 'lbl' }, x.label), x.note ? h('span', { class: 'muted small' }, ` ${x.note}`) : null,
+      !x.ok && FIX_HREF[x.fix] ? h('a', { href: FIX_HREF[x.fix], class: 'small fix' }, '고치기 →') : null))),
+    h('p', { class: 'muted small' }, '모두 끝나면 이 상자는 사라집니다. 운영 매뉴얼 9장(운영 전 확인)과 같은 목록입니다.'));
+}
 async function screenHome() {
   const s = (screenHome.s ||= { date: boot.today });
   const date = h('input', { type: 'date', value: s.date, onchange: (e) => { s.date = e.target.value; render(); } });
   const role0 = boot.me.role, overseer = ['ADMIN', 'LEAD'].includes(role0);
-  const [sum, batches, accSt, bkSt] = await Promise.all([api('close?date=' + s.date), api('batches?date=' + s.date),
-    overseer ? api('access/status').catch(() => null) : null, overseer ? api('backup-status').catch(() => null) : null]);
+  const notField = role0 !== 'FIELD';
+  const [sum, batches, accSt, bkSt, pd, rd, ops] = await Promise.all([api('close?date=' + s.date), api('batches?date=' + s.date),
+    overseer ? api('access/status').catch(() => null) : null, overseer ? api('backup-status').catch(() => null) : null,
+    notField ? api('pending').catch(() => null) : null, role0 === 'ADMIN' ? api('readiness').catch(() => null) : null, overseer ? api('ops-status').catch(() => null) : null]);
+  // 결과 미회수: 지난 날짜이거나 근무가 끝난 뒤에만(근무 중에는 아직 수거 중)
+  const showNoResult = afterWork(s.date);
   const bs = sum.by_status || {};
   const done = bs.DONE || 0, open = (bs.RECEIVED || 0) + (bs.ASSIGNED || 0) + (bs.IN_PROGRESS || 0), revisit = (bs.PARTIAL || 0) + (bs.NOT_COLLECTED || 0) + (bs.ON_HOLD || 0);
   const active = sum.total - (bs.CANCELLED || 0);
@@ -413,10 +554,10 @@ async function screenHome() {
   // 해야 할 일: 담당자가 바로 눌러 처리할 수 있게
   const todo = [
     [sum.unconfirmed_bundles, `수신 미확인 전송 ${sum.unconfirmed_bundles}건`, '#/send', 'warn', 'ADMIN INTAKE'],
-    [sum.no_result.length, `결과 미회수 ${sum.no_result.length}건`, '#/results', 'warn', 'ADMIN INTAKE FIELD'],
+    [showNoResult ? sum.no_result.length : 0, `결과 미회수 ${sum.no_result.length}건`, '#/results', 'warn', 'ADMIN INTAKE FIELD'],
     [sum.conflicts, `충돌·현장 요청 검토 ${sum.conflicts}건`, '#/results', 'bad', 'ADMIN INTAKE'],
     [sum.field_intakes, `현장 접수 확인 ${sum.field_intakes}건`, '#/requests', 'warn', 'ADMIN INTAKE', () => { screenRequests.f = { ...(screenRequests.f || {}), status: '', date_from: '', date_to: '', quick: 'FIELD', page: 1 }; }],
-    [sum.pending_fee.length, `금액 확인 대기 ${sum.pending_fee.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
+    [sum.pending_fee.length, `금액 확인 대기 ${sum.pending_fee.length}건`, '#/requests?quick=FEE', 'warn', 'ADMIN INTAKE'],
     [sum.payments.length, `수납 확인 필요 ${sum.payments.length}건`, '#/close', 'warn', 'ADMIN INTAKE'],
     [sum.photos_missing, `사진 미회수 ${sum.photos_missing}장`, '#/results', '', 'ADMIN INTAKE FIELD'],
     [revisit, `재방문 후보 ${revisit}건`, '#/close', 'warn', 'ADMIN INTAKE'],
@@ -425,6 +566,16 @@ async function screenHome() {
     [accSt && !accSt.done ? 1 : 0, `이번 달 접속기록 점검 (${accSt ? accSt.month : ''})`, '#/access', 'warn', 'ADMIN LEAD'],
     [bkSt && bkSt.stale ? 1 : 0, bkSt && bkSt.last_at ? `백업이 ${Math.floor(bkSt.age_hours)}시간 지났습니다` : '백업 기록이 없습니다', '#/settings/backup', 'bad', 'ADMIN LEAD'],
   ].filter(([n, , , , r]) => n && r.split(' ').includes(role));
+  const backlog = pendingTodos(pd);
+  badges.counts = { close: backlog.filter((x) => ['close_approve', 'unclosed_days'].includes(x.key)).reduce((a, x) => a + x.n, 0),
+    refunds: backlog.filter((x) => x.key === 'refund_approve').reduce((a, x) => a + x.n, 0), results: backlog.filter((x) => ['conflicts', 'no_result_crews'].includes(x.key)).reduce((a, x) => a + x.n, 0) };
+  badges.at = Date.now();
+  // 예약 작업(자동 파기·사진 정리·무결성 검사·백업)이 이틀 넘게 안 돌았으면 경고 띠
+  const opsWarn = ops && ops.warnings && ops.warnings.length ? h('div', { class: 'notice warn ops-warn', role: 'status' }, h('strong', {}, '예약 작업 확인 필요: '), ops.warnings.join(' · '),
+    ' — 서버가 꺼져 있었거나 작업이 실패했을 수 있습니다. ', role0 === 'ADMIN' ? h('a', { href: '#/users?focus=diag' }, '진단 보기 →') : '운영 관리자에게 알리세요.') : null;
+  const backlogCard = notField ? h('div', { class: 'card backlog' }, h('div', { class: 'panel-h' }, h('h2', {}, '밀린 일 (전체 기간)'), backlog.length ? h('span', { class: 'muted small' }, `${backlog.length}종`) : null),
+    backlog.length ? h('ul', { class: 'todo' }, ...backlog.map((x) => h('li', {}, h('a', { href: x.href, class: 'todo-a ' + x.cls, 'data-key': x.key }, h('span', {}, x.text), h('span', { class: 'arr' }, '→')))))
+      : h('p', { class: 'empty' }, '지난 날짜에 밀린 일이 없습니다.')) : null;
   const act = batches.filter((b) => b.status === 'ACTIVE');
   // 배차 지도: 팀 색 핀 + 순서 선 (핀은 이 화면에서만 그림, 지도 서버로 보내지 않음)
   const mapBox = h('div', { class: 'mapbox dash-map' });
@@ -459,7 +610,7 @@ async function screenHome() {
         bkSt && bkSt.auto && bkSt.auto.at && !bkSt.auto.ok ? h('div', { class: 'small err' }, `자동 백업 실패: ${bkSt.auto.error || ''}`) : null,
         bkSt && !bkSt.key ? h('div', { class: 'small muted' }, '백업 키가 없어 자동 백업을 하지 않습니다.') : null))) : null;
   const nodeCls = (st) => (st === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(st) ? 'warn' : st === 'CANCELLED' ? 'neutral' : st === 'IN_PROGRESS' ? 'info' : '');
-  return h('div', { class: 'dash' }, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, h('label', { class: 'f inline' }, h('span', { class: 'sr-only' }, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
+  return h('div', { class: 'dash' }, readinessCard(rd), opsWarn, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, h('label', { class: 'f inline' }, h('span', { class: 'sr-only' }, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
     h('div', { class: 'kpis' },
       kpi('수거 예정', `${active}건`, (bs.CANCELLED ? `취소 ${bs.CANCELLED}건 제외` : ' '), '', '#/requests'),
       kpi('수거 완료', `${done}건`, h('span', { class: 'bar' }, h('i', { style: `width:${pct}%` })), 'ok'),
@@ -470,10 +621,11 @@ async function screenHome() {
       h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '배차 지도'), h('span', { class: 'muted small' }, act.length ? `확정 배정 ${act.length}팀 · ${act.reduce((a, b) => a + b.stops.length, 0)}곳` : '확정된 배정 없음')), mapBox,
         h('p', { class: 'muted small' }, '핀 번호는 팀-방문 순서, 녹색 핀은 수거 완료. 선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다.')),
       h('div', { class: 'dash-side' },
+      backlogCard,
       overseeCard,
       h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '처리할 일'), todo.length ? h('span', { class: 'muted small' }, `${todo.length}종`) : null),
         todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls, , pre]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls, onclick: pre || null }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
-          : h('p', { class: 'empty' }, sum.total ? '지금 처리할 일이 없습니다. 결과를 가져오면 미회수·충돌·수납 확인이 여기에 모입니다.' : '이 날짜의 접수가 없습니다. 다른 날짜를 고르거나 접수를 등록하세요.')),
+          : h('p', { class: 'empty' }, sum.total ? (s.date === boot.today && !showNoResult && sum.no_result.length ? `지금 처리할 일이 없습니다. 결과 미회수는 근무가 끝난 뒤(${workEnd()}) 표시합니다.` : '지금 처리할 일이 없습니다. 결과를 가져오면 미회수·충돌·수납 확인이 여기에 모입니다.') : '이 날짜의 접수가 없습니다. 다른 날짜를 고르거나 접수를 등록하세요.')),
       (sum.dongs || []).length ? h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '동별 현황'), sum.capacity && sum.capacity.limit ? h('span', { class: 'muted small' }, `전체 ${sum.capacity.booked}/${sum.capacity.limit}건`) : null),
         h('div', { class: 'tablewrap' }, h('table', { class: 'dongtbl' }, h('thead', {}, h('tr', {}, ...['동', '담당 팀', '예정', '완료', '미처리', '한도 대비'].map((t) => h('th', { scope: 'col' }, t)))),
           h('tbody', {}, ...sum.dongs.map((x) => h('tr', {}, h('td', {}, x.dong ? h('a', { href: '#/requests', onclick: () => { screenRequests.f = { ...(screenRequests.f || {}), size: 50, dong: x.dong, status: '', date_from: s.date, date_to: s.date, date_field: 'planned', page: 1, quick: 'ALL' }; } }, x.dong) : h('span', { class: 'muted' }, '(동 미지정)'),
@@ -514,7 +666,7 @@ async function screenRequests() {
   const quickBar = h('div', { class: 'quick' });
   const pager = h('div', { class: 'pager' });
   const selBar = h('div', { class: 'selbar' });
-  const QUICK = [['ALL', '전체'], ['TODAY', '오늘 예정'], ['NOLOC', '위치 없음'], ['FEE', '금액 확인 대기'], ['UNASSIGNED', '미배정'], ['REFUND', '환불 필요'], ['FIELD', '현장 접수 확인']];
+  const QUICK = [['ALL', '전체'], ['TODAY', '오늘 예정'], ['OVERDUE', '지난 예정일 미처리'], ['NODATE', '예정일 없음'], ['NOLOC', '위치 없음'], ['FEE', '금액 확인 대기'], ['UNASSIGNED', '미배정'], ['REFUND', '환불 필요'], ['FIELD', '현장 접수 확인']];
   const COLS = [['', null], ['번호', null], ['접수번호', 'receipt_no'], ['예정일', 'planned_date'], ['동', 'dong'], ['이름', 'name'], ['연락처', null], ['배출 주소', 'address'],
     ['품목', null], ['상태', 'status'], ['금액', null], ['위치', null], ['배정', null]];
   let res = { rows: [], total: 0, page: 1, pages: 1, counts: {} };
@@ -666,6 +818,10 @@ let intakeT0 = null, intakeSeen = 0;
 const closeT0 = {}, closeSeen = {};
 const IDLE_RESET_MS = 15 * 60 * 1000;  // 15분 넘게 그 화면을 떠나 있었으면 다시 잰다(다른 일 한 시간을 빼려고)
 let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
+let justSaved = null;  // 방금 등록한 접수 id: 상세 위에 [+ 다음 접수]·[주민 안내 문구 복사]
+const staleMine = new Map();  // 409(다른 곳에서 바뀜) 뒤 [다시 열기]: 접수 id → 내가 적었던 값(다시 넣기용)
+const FORM_LABEL = { name: '이름', phone: '연락처', address: '배출 주소', spot_note: '상세 배출 위치', memo: '요청 메모', planned_date: '수거 예정일', appt_start: '방문 약속 시작', appt_end: '방문 약속 끝', dong: '행정동', channel: '접수 경로' };
+const isPlaceholderContact = () => { const c = (boot.settings.contact_info || '').trim(); return !c || c.includes('설정에서'); };
 const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
@@ -675,6 +831,8 @@ async function screenRequest(id) {
   const fromDraft = isNew && intakeDraft;
   if (isNew && !fromDraft) dupAckKey = null;  // 중복 경고 확인은 같은 작성 중 접수에만 유효 (새로 쓰기·다른 접수에는 다시 확인)
   const r = isNew ? { ...blank, ...(intakeDraft ? intakeDraft.r : {}), items: intakeDraft ? intakeDraft.items : [] } : await api('requests/' + id);
+  const baseVer = r.req_ver;  // 이 화면이 연 접수 버전: 수정·취소·감면에 함께 보내고, 다르면 서버가 409
+  const showDone = !isNew && justSaved === id; if (showDone) justSaved = null;
   const items = r.items.map((i) => ({ ...i }));
   const locked = new Set(r.locked_lines || []);
   const inp = (k, attrs = {}) => h('input', { value: r[k] ?? '', ...attrs });
@@ -854,17 +1012,38 @@ async function screenRequest(id) {
     items: items.map((i) => ({ line_id: i.line_id, fee_rate_id: i.fee_rate_id || null, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty })) });
   // 중복 경고를 본 연락처·주소는 기억한다(화면 밖 변수): 그사이 화면이 다시 그려져도 [접수 등록]을 또 눌러야 하는 일이 없게
   const dupKey = () => `${digitsOnly(F.phone.value)}|${F.address.value.trim()}`;
+  // 409: 저장하지 않고 안내. 적은 값은 화면에 그대로 두고, [다시 열기]를 누르면 새 내용을 불러온 뒤 내 값을 옆에 보여 준다.
+  const staleNote = h('div', { class: 'stale-note', 'aria-live': 'assertive' });
+  const showStale = () => {
+    staleNote.replaceChildren(h('div', { class: 'notice bad', role: 'alert' }, h('strong', {}, '다른 곳에서 바뀌었습니다. '),
+      '저장하지 않았습니다. 내가 적은 내용은 화면에 그대로 있습니다. [다시 열기]를 누르면 바뀐 내용을 불러오고, 내가 적은 값을 옆에 남겨 다시 넣을 수 있습니다. ',
+      btn('다시 열기', () => { staleMine.set(id, { data: data(), base: JSON.parse(baseSnap), reason: reason.value }); render(true); }, 'small primary')));
+    staleNote.scrollIntoView({ block: 'center' });
+  };
   const save = wrap(async () => {
     if (isNew) {
       if (dupAckKey !== dupKey()) {
         await checkDup();
         if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
       }
-      const res = await post('requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
-      intakeDraft = null; dupAckKey = null; intakeT0 = null;
+      // 예정일을 비워 두면 가장 빠른 가능일을 권한다(예정일 없는 접수는 배정·마감에서 빠지기 쉽다)
+      if (!F.planned_date.value) {
+        if (earliest == null) await loadCal();
+        const e = earliest;
+        const v = await modal({ title: '수거 예정일이 비어 있습니다', ok: e ? '이 날로 정하고 등록' : '예정일 없이 등록', cancel: '돌아가기',
+          extra: e ? [{ label: '예정일 없이 등록', value: 'NONE' }] : [],
+          body: [h('p', {}, e ? `가장 빠른 가능일은 ${e.slice(5).replace('-', '월 ')}일입니다(${F.dong.value || '전체'} 기준). 이 날로 정할까요?` : '120일 안에 여유 있는 날이 없습니다. 예정일 없이 등록할까요?'),
+            h('p', { class: 'muted small' }, '예정일 없는 접수는 오늘 현황의 [예정일 없음]에 모입니다.')] });
+        if (!v) return;
+        if (v === true && e) { F.planned_date.value = e; saveDraft(); loadCal(); }
+      }
+      const res = await postOnce('intake', 'requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
+      intakeDraft = null; dupAckKey = null; intakeT0 = null; justSaved = res.id;
       toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
     } else {
-      const res = await post('requests/' + id, { ...data(), reason: reason.value });
+      let res;
+      try { res = await post('requests/' + id, { ...data(), reason: reason.value, req_ver: baseVer }); } catch (e) { if (isStale(e)) { showStale(); throw new Error('다른 곳에서 바뀌어 저장하지 않았습니다.'); } throw e; }
+      staleMine.delete(id);
       toast(res.resend_needed ? '수정했습니다. 이미 배정된 건이라 목록 재전송이 필요합니다.' : '수정했습니다'); (res.warnings || []).forEach((w) => toast(w, true)); render();
     }
   }, msg);
@@ -873,8 +1052,8 @@ async function screenRequest(id) {
     const res = await reasonDlg('접수 취소', boot.cancel_codes, { ok: '취소 기록', danger: true, label: '취소 사유',
       lead: [h('p', {}, '기록은 지워지지 않습니다.'), paid > 0 ? h('div', { class: 'notice bad' }, `납부 기록 ${won(paid)}이 있습니다. 취소하면 '환불 필요'로 표시되고 마감 수납 확인 목록에 나옵니다.`) : null,
         r.closed ? h('div', { class: 'notice warn' }, `마감한 날(${r.closed.work_date})의 접수입니다. '마감 후 수정'으로 기록됩니다.`) : null],
-      submit: (v) => post(`requests/${id}/cancel`, { code: v.code, reason: v.text }) });
-    if (!res) return;
+      submit: async (v) => { try { return await post(`requests/${id}/cancel`, { code: v.code, reason: v.text, req_ver: baseVer }); } catch (e) { if (isStale(e)) { showStale(); return 'STALE'; } throw e; } } });
+    if (!res || res === 'STALE') return;
     if (res.refund_needed) toast(`환불 필요: 납부 기록 ${won(res.paid)}을 돌려주고 수납 기록에 환불을 남기세요.`, true);
     toast(res.field_notice_needed ? '취소했습니다. 이미 휴대폰에 전달된 건이니 수거팀에 전화로 알리세요.' : '취소했습니다'); render();
   }, msg);
@@ -897,14 +1076,13 @@ async function screenRequest(id) {
         x.unit_label !== l.unit_label ? h('span', { class: 'w' }, '단위 다름') : null)));
     q.addEventListener('input', () => { sel = null; draw(); });
     tr.firstChild.replaceChildren(h('div', { class: 'linkbox' }, q, res, h('div', { class: 'row' }, why, who,
-      btn('적용', wrap(async () => { if (!sel) throw new Error('적용할 품목 행을 고르세요.'); await post(`requests/${id}/link`, { line_id: l.line_id, fee_rate_id: sel, reason: why.value, confirmed_by: who.value }); toast('유사 품목 단가를 적용했습니다'); render(); }, m), 'primary'), m),
+      btn('적용', wrap(async () => { if (!sel) throw new Error('적용할 품목 행을 고르세요.'); await post(`requests/${id}/link`, { line_id: l.line_id, fee_rate_id: sel, reason: why.value, confirmed_by: who.value }); toast('유사 품목 단가를 적용했습니다'); linkOpen = null; afterAction(); }, m), 'primary'), m),
       h('p', { class: 'small muted' }, '단가가 확정된 행만, 부과단위가 같은 행만 적용됩니다. 원래 품목 이름은 그대로 두고 적용 기록을 따로 남깁니다.')));
     setTimeout(() => q.focus(), 20);
   };
 
-  // 현장 결과
-  const st = r.state;
-  const field = !isNew && st ? h('div', { class: 'card' }, h('h2', {}, '현장 결과'),
+  // 현장 결과 (아래 카드들은 수정 양식과 따로 다시 그린다: 수납·통화 기록을 남겨도 적던 수정 내용이 지워지지 않게)
+  const fieldCard = (r) => { const st = r.state; return !isNew && st ? h('div', { class: 'card' }, h('h2', {}, '현장 결과'),
     h('div', { class: 'row' }, statusChip(r.status), chip('연락: ' + CONTACT[st.contact]), st.outcome ? chip('저장된 결과: ' + (STATUS[st.outcome] || st.outcome)) : null),
     fieldExtras(st, r),
     h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['품목', '구분', '처음 접수', '현장 수량', '실은 수량', '못 실은 수량', '사유', '스티커', ''].map((t) => h('th', {}, t)))),
@@ -915,7 +1093,7 @@ async function screenRequest(id) {
         h('td', {}, (() => { const k = st.field && st.field.stickers[l.line_id]; return k ? chip(STICKER[k.result] || k.result, k.result === 'OK' ? 'ok' : 'warn', ) : ''; })(),
           (() => { const k = st.field && st.field.stickers[l.line_id]; return k && k.result !== 'OK' ? h('div', { class: 'small muted' }, `${k.number ? '번호 ' + k.number + ' · ' : ''}${k.decision === 'LEAVE' ? '미수거' : k.decision === 'COLLECT' ? '그래도 수거' : ''}`) : null; })()),
         h('td', {}, l.price == null && editable && boot.me.role !== 'FIELD' ? btn('유사 품목 적용', () => { linkOpen = linkOpen === l.line_id ? null : l.line_id; linkBox(l); }, 'small') : null,
-          l.link && editable && boot.me.role !== 'FIELD' ? btn('해제', wrap(async () => { const why = await promptDlg('유사 품목 적용 해제', '해제 사유', { ok: '해제', danger: true }); if (!why) return; await post(`links/${l.link.id}/void`, { reason: why }); toast('해제했습니다'); render(); }), 'small') : null)),
+          l.link && editable && boot.me.role !== 'FIELD' ? btn('해제', wrap(async () => { const why = await promptDlg('유사 품목 적용 해제', '해제 사유', { ok: '해제', danger: true }); if (!why) return; await post(`links/${l.link.id}/void`, { reason: why }); toast('해제했습니다'); afterAction(); }), 'small') : null)),
         h('tr', { class: 'linkrow', hidden: true, 'data-line': l.line_id }, h('td', { colspan: 9 }))])))),
     h('dl', { class: 'kv' }, h('dt', {}, '접수 당시 금액'), h('dd', {}, won(st.fee.received)), h('dt', {}, '현장 추가분'), h('dd', {}, won(st.fee.field_added)),
       h('dt', {}, '접수 대비 증감'), h('dd', {}, (st.fee.diff > 0 ? '+' : '') + won(st.fee.diff)), h('dt', {}, '금액 확인 대기'), h('dd', {}, st.fee.pending_count + '건'),
@@ -923,7 +1101,21 @@ async function screenRequest(id) {
     h('p', { class: 'muted' }, '금액은 현장 확인 수량 기준이며 수납 완료를 뜻하지 않습니다. 일부 수거로 금액을 자동 감액하지 않습니다.'),
     (st.memos || []).length ? h('div', { class: 'notice' }, h('strong', {}, '현장 메모'), h('ul', {}, ...st.memos.map((m) => h('li', {}, m)))) : null,
     r.photos && r.photos.length ? h('div', { class: 'thumbs' }, ...r.photos.map((p) => p.purged_at ? chip(`보관 기간 만료로 정리됨 (${p.purged_at.slice(0, 10)})`) : p.recovery_status === 'RECOVERED' ? h('figure', { class: 'ph' }, photoImg(p.photo_id), h('figcaption', {}, (p.phase === 'BEFORE' ? '수거 전' : '수거 후') + (p.line_id && st.lines.find((l) => l.line_id === p.line_id) ? ` · ${st.lines.find((l) => l.line_id === p.line_id).name}` : ''),
-      p.taken_at ? h('small', { class: 'block' }, `촬영 ${kst(p.taken_at)}${p.has_gps ? ` · 위치 ±${Math.round(p.acc || 0)}m` : ''}`) : null)) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null;
+      p.taken_at ? h('small', { class: 'block' }, `촬영 ${kst(p.taken_at)}${p.has_gps ? ` · 위치 ±${Math.round(p.acc || 0)}m` : ''}`) : null)) : chip(`사진 미회수 (${p.phase === 'BEFORE' ? '전' : '후'})`, 'warn'))) : null) : null; };
+  // 수정 양식에 저장하지 않은 내용이 있는지(처음 그린 값과 비교)
+  let baseSnap = null;
+  const dirty = () => !isNew && baseSnap != null && JSON.stringify(data()) !== baseSnap;
+  const lower = h('div', { class: 'req-lower' });
+  const versionsCard = (rr) => (rr.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...rr.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${kst(v.at)} · ${v.reason}`)))) : null);
+  const ctx = { ver: () => baseVer, stale: () => showStale(), after: () => afterAction() };
+  const lowerCards = (rr) => (isNew ? [] : [fieldCard(rr), paymentCard(rr, ctx), reductionCard(rr, ctx), contactCard(rr, ctx), versionsCard(rr)]);
+  // 아래 카드의 작업(수납·감면·통화·유사 품목·확인 완료)이 끝난 뒤: 수정 중이면 아래 카드만 새로, 아니면 화면 전체를 새로
+  const afterAction = async () => {
+    if (!dirty()) return render();
+    const r2 = await api('requests/' + id);
+    lower.replaceChildren(...lowerCards(r2).filter(Boolean));
+    toast('수정 중인 내용은 그대로 두고 아래 기록만 새로 불러왔습니다');
+  };
 
   // 전화 받는 순서대로: 왼쪽 = 신청자 → 버릴 물건, 오른쪽 = 일정 → 위치. 저장 단추는 화면 아래에 늘 보이게.
   F.lat.tabIndex = -1; F.lon.tabIndex = -1;
@@ -934,13 +1126,22 @@ async function screenRequest(id) {
   const form = h('div', { class: 'reqform', oninput: () => { intakeSeen = Date.now(); saveDraft(); }, onchange: () => saveDraft() },
     h('div', { class: 'pagehead' }, h('h1', {}, isNew ? '전화 접수 등록' : `접수 ${r.receipt_no}`),
       h('div', { class: 'row' }, !isNew && r.levy_no ? h('span', { class: 'chip' }, `부과번호 ${r.levy_no}`) : null,
-        !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => { const t = await post(`requests/${id}/receipt-print`); window.open('/print/doc/' + t.token, 'dg-print'); toast('접수증을 열었습니다 (출력 기록이 남습니다)'); }), 'small') : null,
+        !isNew ? btn('안내 문구 복사', wrap(() => copyNotice(id)), 'small', { title: '주민에게 보낼 안내 글(접수번호·배출일·금액·납부 방법·문의처, 이름·주소 없음)' }) : null,
+        !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => {
+          // 문의처가 아직 기본 문구면 접수증에 그대로 찍힌다: 먼저 알린다
+          if (isPlaceholderContact() && !(await confirmDlg('문의처가 아직 기본 문구입니다', `접수증의 문의처가 "${boot.settings.contact_info}"로 찍힙니다. 설정 → 기본 → 접수증·월보 문구에서 전화번호를 넣으세요.`,
+            { ok: '그대로 인쇄', more: boot.me.role === 'ADMIN' ? [h('a', { href: '#/settings/basic' }, '설정에서 문의처 넣기 →')] : [] }))) return;
+          const t = await post(`requests/${id}/receipt-print`); window.open('/print/doc/' + t.token, 'dg-print'); toast('접수증을 열었습니다 (출력 기록이 남습니다)');
+        }), 'small') : null,
         !isNew && canWork() && r.status !== 'CANCELLED' ? btn('배출 표지 인쇄', wrap(async () => { const t = await post('requests/labels', { ids: [id] }); window.open('/print/doc/' + t.token, 'dg-print'); toast('배출 표지를 열었습니다'); }), 'small') : null,
         btn('← 목록', () => go('#/requests')))),
-    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; intakeT0 = Date.now(); render(true); }, 'small')) : null,
+    fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; reqDone('intake'); intakeT0 = Date.now(); render(true); }, 'small')) : null,
+    showDone ? h('div', { class: 'notice ok-note', role: 'status' }, h('strong', {}, `${r.receipt_no} 등록을 마쳤습니다. `), r.levy_no ? `부과번호 ${r.levy_no} · ` : '', '주민에게 안내 문구를 보내거나 다음 전화를 받으세요. ',
+      btn('+ 다음 접수', () => { intakeDraft = null; dupAckKey = null; go('#/request/new'); }, 'small primary'), ' ', btn('주민 안내 문구 복사', wrap(() => copyNotice(id)), 'small')) : null,
     !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn') }, h('strong', {}, '휴대폰 현장 접수 '),
       r.field_checked_at ? `— ${kst(r.field_checked_at)} 사무실 확인 (${r.field_checked_by || '-'})` : '— 수거팀이 현장에서 받은 접수입니다. 주소·동·품목·금액을 확인하고 필요하면 고친 뒤 [확인 완료]를 누르세요. ',
-      !r.field_checked_at && canWork() ? btn('확인 완료', wrap(async () => { await post(`requests/${id}/field-check`); toast('현장 접수를 확인했습니다'); render(true); }), 'small primary') : null) : null,
+      !r.field_checked_at && canWork() ? btn('확인 완료', wrap(async (e) => { const b = e.currentTarget; await post(`requests/${id}/field-check`); toast('현장 접수를 확인했습니다');
+        if (dirty()) { b.replaceWith(h('span', {}, `— 방금 사무실 확인 (${boot.me.display_name})`)); } else render(true); }), 'small primary') : null) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
     r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
     h('div', { class: 'grid2' },
@@ -966,12 +1167,36 @@ async function screenRequest(id) {
         h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
           h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'), geoMsg),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
+    staleNote,
     actionbar,
-    field,
-    !isNew ? paymentCard(r) : null,
-    !isNew ? reductionCard(r) : null,
-    !isNew ? contactCard(r) : null,
-    !isNew && r.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...r.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${kst(v.at)} · ${v.reason}`)))) : null);
+    lower);
+  lower.replaceChildren(...lowerCards(r).filter(Boolean));
+  baseSnap = JSON.stringify(data());
+  // 409 뒤 다시 연 화면: 내가 적었던 값을 보여 주고 [내 값 다시 넣기]
+  const mine = !isNew && staleMine.get(id);
+  if (mine) {
+    const norm = (k, v) => (k === 'phone' ? digitsOnly(v) : String(v ?? ''));
+    // 내가 고친 칸만(처음 연 값과 다른 칸): 다른 사람이 바꾼 칸은 그대로 둔다
+    const diffs = Object.keys(FORM_LABEL).filter((k) => norm(k, mine.data[k]) !== norm(k, mine.base[k]));
+    const itemsTxt = (arr) => arr.map((i) => `${i.name} ${i.spec || ''} ${i.qty}`).join(', ');
+    const itemsDiff = itemsTxt(mine.data.items) !== itemsTxt(mine.base.items);
+    const flagDiff = ['must_today', 'urgent', 'priority'].filter((k) => String(mine.data[k]) !== String(mine.base[k]));
+    const geoDiff = String(mine.data.lat) !== String(mine.base.lat) || String(mine.data.lon) !== String(mine.base.lon);
+    const refill = () => {
+      diffs.forEach((k) => { if (F[k]) F[k].value = k === 'phone' ? fmtPhone(digitsOnly(mine.data[k])) || mine.data[k] : mine.data[k] ?? ''; });
+      if (flagDiff.includes('must_today')) F.must_today.checked = !!mine.data.must_today;
+      if (flagDiff.includes('urgent')) F.urgent.checked = !!mine.data.urgent;
+      if (flagDiff.includes('priority')) F.priority.value = String(mine.data.priority ?? 0);
+      if (geoDiff && mine.data.lat != null) { F.lat.value = mine.data.lat; F.lon.value = mine.data.lon; geoSource = mine.data.geo_source; }
+      if (itemsDiff) { items.splice(0, items.length, ...mine.data.items.map((i) => ({ ...(r.items.find((x) => x.line_id && x.line_id === i.line_id) || {}), ...i }))); drawItems(); }
+      reason.value = mine.reason || ''; staleMine.delete(id); mineBox.remove(); loadCal(); toast('내가 적었던 값을 다시 넣었습니다. 확인하고 [수정 저장]을 누르세요.');
+    };
+    const mineBox = h('div', { class: 'notice info mine-box' }, h('strong', {}, '바뀐 내용을 다시 불러왔습니다. '), diffs.length || itemsDiff || flagDiff.length || geoDiff ? '내가 고쳤던 값(아직 저장 안 됨):' : '내가 고친 칸은 없었습니다.',
+      h('ul', {}, ...diffs.map((k) => h('li', {}, `${FORM_LABEL[k]}: `, h('b', {}, mine.data[k] || '(비움)'), h('span', { class: 'muted' }, ` (지금 ${r[k] || '(비움)'})`))),
+        itemsDiff ? h('li', {}, '품목: ', h('b', {}, itemsTxt(mine.data.items) || '(없음)')) : null),
+      h('div', { class: 'row' }, btn('내 값 다시 넣기', refill, 'small primary'), btn('버리기', () => { staleMine.delete(id); mineBox.remove(); }, 'small')));
+    form.insertBefore(mineBox, form.children[1] || null);
+  }
   return form;
 }
 
@@ -994,7 +1219,7 @@ function fieldExtras(st, r) {
 }
 
 // 수수료 감면 (접수 상세): 사유·감면율·증빙 확인 방법·확인자. 식별번호는 받지 않는다.
-function reductionCard(r) {
+function reductionCard(r, ctx = {}) {
   const msg = h('span', { class: 'msg' });
   const sel = h('select', { 'aria-label': '감면 사유' }, h('option', { value: '' }, '감면 없음'), ...(boot.settings.reductions || []).filter((x) => x.active !== false || x.code === r.reduction_code).map((x) => h('option', { value: x.code, selected: x.code === r.reduction_code }, `${x.label} ${x.rate}%`)));
   const proof = h('select', { 'aria-label': '증빙 확인 방법' }, h('option', { value: '' }, '(증빙 확인 방법)'), ...(boot.settings.reduction_proofs || []).map((x) => h('option', { value: x, selected: x === r.reduction_proof }, x)));
@@ -1004,14 +1229,15 @@ function reductionCard(r) {
     r.reduction_code ? h('p', { class: 'small muted' }, `증빙 ${r.reduction_proof || '-'} · 확인 ${r.reduction_checker || '-'} · ${kst(r.reduction_at)}`) : null,
     canWork() && r.status !== 'CANCELLED' ? h('div', { class: 'row' }, sel, proof, who, why, btn('감면 저장', wrap(async () => {
       if (!sel.value && !r.reduction_code) throw new Error('감면 사유를 고르세요.');
-      await post(`requests/${r.id}/reduction`, { reduction_code: sel.value, reduction_proof: proof.value, reduction_checker: who.value, reason: why ? why.value : '' });
-      toast(sel.value ? '감면을 적용했습니다' : '감면을 해제했습니다'); render();
+      try { await post(`requests/${r.id}/reduction`, { reduction_code: sel.value, reduction_proof: proof.value, reduction_checker: who.value, reason: why ? why.value : '', req_ver: ctx.ver ? ctx.ver() : r.req_ver }); }
+      catch (e) { if (isStale(e) && ctx.stale) { ctx.stale(); throw new Error('다른 곳에서 바뀌어 저장하지 않았습니다.'); } throw e; }
+      toast(sel.value ? '감면을 적용했습니다' : '감면을 해제했습니다'); await (ctx.after ? ctx.after() : render());
     }, msg), 'primary small'), msg) : null,
     h('p', { class: 'small muted' }, '감면율은 설정의 정책 값입니다(조례 확인 필요). 주민등록번호·수급자 번호 같은 식별번호는 저장하지 않습니다.'));
 }
 
 // 민원·통화 기록 (접수별): 일시·유형·내용·담당자. 내용은 변경 이력에 남기지 않는다.
-function contactCard(r) {
+function contactCard(r, ctx = {}) {
   const msg = h('span', { class: 'msg' });
   const now = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 16);
   const at = h('input', { type: 'datetime-local', value: now, 'aria-label': '일시' });
@@ -1020,21 +1246,18 @@ function contactCard(r) {
   return h('div', { class: 'card' }, h('h2', {}, `민원·통화 기록 ${r.contacts.length}건`),
     r.contacts.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['일시', '유형', '내용', '담당자'].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...r.contacts.map((c) => h('tr', {}, h('td', { class: 'nowrap' }, c.at.replace('T', ' ')), h('td', {}, chip(c.kind, c.kind === '불만' ? 'bad' : c.kind === '독촉' ? 'warn' : '')), h('td', {}, c.content), h('td', {}, c.actor || ''))))) : h('p', { class: 'empty' }, '기록 없음'),
-    canWork() ? h('div', { class: 'row' }, at, kind, content, btn('기록', wrap(async () => { await post(`requests/${r.id}/contacts`, { at: at.value, kind: kind.value, content: content.value }); toast('기록했습니다'); render(); }, msg), 'primary'), msg) : null);
+    canWork() ? h('div', { class: 'row' }, at, kind, content, btn('기록', wrap(async () => { await postOnce(`contact:${r.id}`, `requests/${r.id}/contacts`, { at: at.value, kind: kind.value, content: content.value }); toast('기록했습니다'); await (ctx.after ? ctx.after() : render()); }, msg), 'primary'), msg) : null);
 }
 
 // 수납: 담당자가 확인한 납부 기록. 계산 금액·납부 금액·상태를 따로 보여 주고, 정정은 지우지 않고 사유를 남긴다
-function paymentCard(r) {
+function paymentCard(r, ctx = {}) {
   const p = r.payment;
   const msg = h('span', { class: 'msg' });
-  // 환불은 [환불] 화면의 결재선(신청 → 다른 사람 결재 → 지급 기록)으로만 남긴다
-  const kind = h('select', { 'aria-label': '기록 종류' }, h('option', { value: 'PAY' }, '납부'));
+  const after = () => (ctx.after ? ctx.after() : render());
+  // 여기서는 납부만 기록한다. 환불은 [환불] 화면의 결재선(신청 → 다른 사람 결재 → 지급 기록)으로만 남긴다
   const remain = p.levied != null ? Math.max(0, p.levied - p.paid) : '';
   const amount = h('input', { type: 'number', min: 1, value: remain || '', placeholder: '금액(원)', style: 'width:120px', 'aria-label': '금액' });
-  const methods = () => (kind.value === 'REFUND' ? boot.settings.refund_methods : boot.settings.pay_methods) || ['기타'];
-  const method = h('select', { 'aria-label': '납부 방법' });
-  const fillMethods = () => method.replaceChildren(...methods().map((m) => h('option', { value: m }, m)));
-  fillMethods(); kind.addEventListener('change', fillMethods);
+  const method = h('select', { 'aria-label': '납부 방법' }, ...(boot.settings.pay_methods || ['기타']).map((m) => h('option', { value: m }, m)));
   const ref = h('input', { placeholder: '영수번호·거래번호', class: 'w-s', 'aria-label': '영수번호·거래번호' });
   const paidOn = h('input', { type: 'date', value: boot.today });
   const note = h('input', { placeholder: '메모(입금자명 등)', style: 'flex:1' });
@@ -1052,13 +1275,14 @@ function paymentCard(r) {
     p.records.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['날짜', '구분', '금액', '방법', '영수번호', '출처', '메모', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...p.records.map((x) => h('tr', { class: x.void_reason ? 'muted' : '' }, h('td', {}, x.paid_on), h('td', {}, x.kind === 'PAY' ? '납부' : '환불'),
         h('td', { class: 'num' }, x.void_reason ? h('s', {}, won(x.amount)) : won(x.amount)), h('td', {}, x.method), h('td', { class: 'code' }, x.receipt_ref || ''), h('td', {}, x.source || '수기'), h('td', {}, x.note || '', x.void_reason ? chip('정정: ' + x.void_reason) : null),
-        h('td', {}, x.void_reason ? '' : btn('정정', wrap(async () => { const why = await promptDlg('수납 기록 정정', '정정 사유', { ok: '정정', lead: [h('p', { class: 'muted' }, '기록은 지워지지 않고 정정 표시와 사유가 남습니다.' + (r.closed ? ' 마감한 날의 접수라 "마감 후 수정"으로 기록됩니다.' : ''))] }); if (!why) return; await post(`payments/${x.id}/void`, { reason: why }); render(); }, msg), 'small'))))))) : null,
+        h('td', {}, x.void_reason ? '' : btn('정정', wrap(async () => { const why = await promptDlg('수납 기록 정정', '정정 사유', { ok: '정정', lead: [h('p', { class: 'muted' }, '기록은 지워지지 않고 정정 표시와 사유가 남습니다.' + (r.closed ? ' 마감한 날의 접수라 "마감 후 수정"으로 기록됩니다.' : ''))] }); if (!why) return; await post(`payments/${x.id}/void`, { reason: why }); await after(); }, msg), 'small'))))))) : null,
     p.status === 'REFUND_NEEDED' ? h('div', { class: 'notice bad' }, `취소된 접수에 납부 기록 ${won(p.paid)}이 남아 있습니다. `, h('a', { href: '#/refunds' }, '환불 목록'), '에서 신청 → 결재 → 지급 기록을 남기세요.') : null,
     (r.refunds || []).length ? h('div', { class: 'notice info' }, h('strong', {}, '환불 '), ...(r.refunds || []).map((f) => h('span', { class: 'block' }, chip(REFUND_ST[f.status] || f.status, f.status === 'PAID' ? 'ok' : f.status === 'REJECTED' || f.status === 'VOID' ? 'neutral' : 'warn'),
       ` ${REFUND_CAUSE[f.cause] || f.cause} ${won(f.amount)}${f.approved_by ? ' · 결재 ' + f.approved_by : ''}${f.paid_on ? ' · 지급 ' + f.paid_on : ''}`)), ' ', h('a', { href: '#/refunds' }, '환불 목록 →')) : null,
-    canWork() && !openRefund && r.status === 'PARTIAL' && p.paid > 0 ? h('div', { class: 'row' }, btn('일부 수거 차액 환불 신청', wrap(async () => { go('#/refunds'); }), 'small')) : null,
-    canWork() ? h('div', { class: 'row' }, kind, amount, method, ref, paidOn, note, why, btn('수납 기록', wrap(async () => {
-      await post(`requests/${r.id}/payments`, { kind: kind.value, amount: amount.value, method: method.value, receipt_ref: ref.value, paid_on: paidOn.value, note: note.value, reason: why ? why.value : '' }); toast('수납을 기록했습니다'); render();
+    canWork() && !openRefund && r.status === 'PARTIAL' && p.paid > 0 ? h('div', { class: 'row' }, h('span', { class: 'muted small' }, '일부 수거로 끝났고 납부 기록이 있습니다. 재방문하지 않기로 했으면 '),
+      h('a', { href: '#/refunds', class: 'small', onclick: () => { screenRefunds.s = { status: 'OPEN' }; } }, '환불 화면에서 차액 신청 →')) : null,
+    canWork() ? h('div', { class: 'row' }, h('span', { class: 'chip' }, '납부'), amount, method, ref, paidOn, note, why, btn('수납 기록', wrap(async () => {
+      await postOnce(`pay:${r.id}`, `requests/${r.id}/payments`, { kind: 'PAY', amount: amount.value, method: method.value, receipt_ref: ref.value, paid_on: paidOn.value, note: note.value, reason: why ? why.value : '' }); toast('수납을 기록했습니다'); await after();
     }, msg), 'primary'), msg) : null,
     h('p', { class: 'muted' }, '수납 상태는 부과 금액(계산 금액 − 감면액)과 비교합니다. 일부 수거로 금액을 자동으로 줄이거나 환불을 확정하지 않습니다. 환불은 환불 목록에서 결재를 거쳐 지급 기록을 남깁니다.'));
 }
@@ -1110,13 +1334,80 @@ async function screenDispatch() {
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '노선을 계산하는 중입니다 (몇 초 걸립니다)'));
     let res;
     try { res = await post('route', { date: s.date, crew_ids: [...s.crews].filter((id) => crews.some((c) => c.id === id)) }); } finally { syncCalc(); }
-    s.plan = { res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
+    s.edit = null;
+    s.plan = { date: s.date, res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
       lunch: r.lunch, capacity_m3: r.capacity_m3, capacity_kg: r.capacity_kg, end_load_m3: r.end_load_m3, end_load_kg: r.end_load_kg })),
       unassigned: res.unassigned.map((u) => ({ ...u })) };
     draw();
   }, msg);
   calcBtn.addEventListener('click', calc); syncCalc();
+  // 날짜를 바꾸면 이전 계산 결과는 그 날짜 것이므로 확정하지 못하게(다시 계산하거나 현재 배정을 불러오게)
+  date.addEventListener('change', () => { s.date = date.value; if (s.edit) { s.edit = null; } draw(); });
+  // ---- 확정된 배정 부분 수정 (다시 계산하지 않음): 넣기·빼기·순서·팀 옮기기. 고친 팀마다 새 갱신본 → 그 팀 목록 다시 보내기
+  const loadCurrent = wrap(async () => {
+    s.date = date.value; s.plan = null;
+    out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '확정된 배정을 불러오는 중입니다'));
+    const [cur, bs, cand] = await Promise.all([api('assign/current?date=' + s.date), api('batches?date=' + s.date),
+      api('requests?' + new URLSearchParams({ date_field: 'planned', date_from: s.date, date_to: s.date, status: '', quick: 'UNASSIGNED', size: 200, page: 1 }))]);
+    const names = {}, received = {}, sent = {};
+    bs.filter((b) => b.status === 'ACTIVE').forEach((b) => { b.stops.forEach((x) => { names[x.request_id] = x; }); sent[b.crew_id] = !!b.bundles[0]; received[b.crew_id] = !!(b.bundles[0] && b.bundles[0].receipt_confirmed_at); });
+    s.edit = { date: s.date, cur, names, received, sent, cand: cand.rows, reason: (s.edit && s.edit.reason) || '' };
+    drawEdit();
+  }, msg);
+  const drawEdit = () => {
+    liveMaps.forEach((m) => { try { m.remove(); } catch {} }); liveMaps = [];
+    const E = s.edit;
+    const vers = Object.fromEntries(E.cur.map((b) => [b.crew_id, b.assign_ver]));
+    const crewName = (cid) => (crews.find((c) => c.id === cid) || boot.crews.find((c) => c.id === cid) || { name: cid }).name;
+    const editMsg = h('p', { class: 'msg', 'aria-live': 'polite' });
+    const staleBox = h('div');
+    const why = h('input', { placeholder: '수정 사유 (선택, 예: 주민 요청으로 추가)', value: E.reason, class: 'w-l', 'aria-label': '배정 수정 사유', oninput: (e) => { E.reason = e.target.value; } });
+    const op = (body, touched) => wrap(async () => {
+      const assign_ver = Object.fromEntries(touched.map((c) => [c, vers[c] ?? 0]));
+      let r;
+      try { r = await post('assign/edit', { date: E.date, assign_ver, reason: why.value, ...body }); }
+      catch (e) {
+        if (isStale(e)) {
+          staleBox.replaceChildren(h('div', { class: 'notice bad', role: 'alert' }, h('strong', {}, '배정이 다른 곳에서 바뀌었습니다. '), `${e.data && e.data.crew_id ? crewName(e.data.crew_id) + ' 배정이 ' : ''}다른 화면이나 다른 담당자가 먼저 고쳤습니다. 고치지 않았습니다. `,
+            btn('다시 불러오기', loadCurrent, 'small primary')));
+          throw new Error('다른 곳에서 바뀌어 고치지 않았습니다. [다시 불러오기]를 누르세요.');
+        }
+        throw e;
+      }
+      toast(`고쳤습니다. ${r.resend_needed.map(crewName).join(', ')} 목록을 휴대폰에 다시 보내야 합니다 ([목록 전송]에서 QR 표시).`);
+      await loadCurrent();
+    }, editMsg);
+    const R = E.names;
+    const label = (x) => { const n = R[x.request_id]; return n ? `${n.name} · ${n.address}` : x.receipt_no; };
+    const cols = crews.map((c, ci) => {
+      const b = E.cur.find((x) => x.crew_id === c.id);
+      const stops = b ? b.stops : [];
+      const order = stops.map((x) => x.request_id);
+      const swap = (i, d) => { const o = [...order]; [o[i], o[i + d]] = [o[i + d], o[i]]; return op({ op: 'reorder', crew_id: c.id, order: o }, [c.id]); };
+      const pick = h('select', { class: 'small', 'aria-label': `${c.name}에 넣을 접수` }, h('option', { value: '' }, E.cand.length ? `넣을 접수 고르기 (${E.cand.length}건)` : '이날 미배정 접수 없음'),
+        ...E.cand.map((q) => h('option', { value: q.id }, `${q.receipt_no.replace(/^DG-\d{4}/, '')} ${q.name} · ${q.address}${q.lat == null ? ' (위치 없음)' : ''}`)));
+      const pos = h('input', { type: 'number', min: 1, placeholder: '끝', class: 'w-xs', 'aria-label': `${c.name} 넣을 위치(비우면 끝)` });
+      return h('div', { class: `card route c${(ci % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${c.name} · ${stops.length}곳 `,
+          b ? chip(`갱신본 ${b.assign_ver}`) : chip('배정 없음', 'neutral'), E.received[c.id] ? chip('휴대폰 수신함', 'info') : E.sent[c.id] ? chip('QR 표시함') : null),
+        E.received[c.id] ? h('div', { class: 'notice warn small' }, '이미 휴대폰이 받은 목록입니다. 고치면 수거팀이 QR을 다시 받아야 합니다. 급하면 전화로 먼저 알리세요.') : null,
+        ...stops.map((x, i) => h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
+          h('span', { class: 't' }, label(x), h('br'), h('span', { class: 'muted' }, `${x.receipt_no}${x.eta ? ' · 도착 ' + x.eta : ''}${x.dong ? ' · ' + x.dong : ''}`), ' ', statusChip(x.status), x.unload_after ? chip('뒤에 하차') : null),
+          h('span', { class: 'ctl' }, btn('▲', swap(i, -1), 'small', { 'aria-label': `${c.name} ${i + 1}번 위로`, disabled: i === 0 }), btn('▼', swap(i, 1), 'small', { 'aria-label': `${c.name} ${i + 1}번 아래로`, disabled: i === stops.length - 1 }),
+            crews.length > 1 ? h('select', { class: 'small', 'aria-label': `${i + 1}번 다른 팀으로 옮기기`, onchange: (e) => { if (e.target.value) op({ op: 'move', request_id: x.request_id, to_crew_id: e.target.value }, [c.id, e.target.value])(); } },
+              h('option', { value: '' }, '옮기기…'), ...crews.filter((o) => o.id !== c.id).map((o) => h('option', { value: o.id }, o.name))) : null,
+            btn('빼기', wrap(async () => {
+              if (!(await confirmDlg('배정에서 빼기', `${label(x)}을(를) ${c.name} 배정에서 뺍니다. 접수는 남고 미배정이 됩니다.`, { ok: '빼기', danger: true }))) return;
+              await op({ op: 'remove', request_id: x.request_id }, [c.id])();
+            }), 'small danger', { 'aria-label': `${c.name} ${i + 1}번 빼기` })))),
+        h('div', { class: 'row insert-row' }, pick, pos, btn('넣기', (e) => { if (!pick.value) { toast('넣을 접수를 고르세요', true); return; } op({ op: 'insert', crew_id: c.id, request_id: pick.value, position: pos.value || null }, [c.id])(e); }, 'small primary', { 'aria-label': `${c.name}에 넣기` })));
+    });
+    out.replaceChildren(h('div', { class: 'notice info edit-mode' }, h('strong', {}, `${md(E.date)} 확정 배정 부분 수정 `), '— 다시 계산하지 않고 넣기·빼기·순서·팀 옮기기만 합니다. 도착 예상 시각은 다시 계산되지 않으며, 고친 팀은 목록을 다시 보내야 합니다. ',
+        btn('수정 끝내기', () => { s.edit = null; draw(); }, 'small')),
+      staleBox, h('div', { class: 'row' }, why, editMsg),
+      E.cur.length || E.cand.length ? h('div', { class: 'cols edit-cols' }, ...cols) : h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, `${md(E.date)}에 확정된 배정이 없습니다. [노선 계산]으로 먼저 확정하세요.`)));
+  };
   const draw = () => {
+    if (s.edit && s.edit.date === date.value) return drawEdit();
     liveMaps.forEach((m) => { try { m.remove(); } catch {} }); liveMaps = [];
     const p = s.plan;
     if (!p) { out.replaceChildren(h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, '날짜와 팀을 고르고 [노선 계산]을 누르세요. 결과는 추천안이며 순서를 바꿔 확정할 수 있습니다.'))); return; }
@@ -1172,19 +1463,27 @@ async function screenDispatch() {
         h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi }, o.crew_name))))));
     const mapBox = h('div', { class: 'mapbox' });
     const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
+    const planStale = p.date !== date.value;
     const confirmBtn = btn('배정 확정', wrap(async () => {
+      if (p.date !== date.value) throw new Error(`이 결과는 ${md(p.date)} 계산 결과입니다. 날짜를 바꿨으면 [노선 계산]을 다시 하세요.`);
       if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }
+      // 이미 휴대폰에 보낸(받은) 배정을 다시 확정하면 새 갱신본 → 수거팀이 QR을 다시 받아야 한다
+      const bs = await api('batches?date=' + p.date);
+      const got = bs.filter((b) => b.status === 'ACTIVE' && b.bundles[0] && b.bundles[0].receipt_confirmed_at), shown = bs.filter((b) => b.status === 'ACTIVE' && b.bundles[0] && !b.bundles[0].receipt_confirmed_at);
+      if ((got.length || shown.length) && !(await confirmDlg('수거팀이 QR을 다시 받아야 합니다',
+        `${[...got, ...shown].map((b) => b.crew_name).join(', ')}에 ${md(p.date)} 목록을 이미 ${got.length ? '보냈고 휴대폰이 받았습니다' : 'QR로 표시했습니다'}. 다시 확정하면 새 갱신본이 생겨 [목록 전송]에서 QR을 다시 보여 줘야 하고, 수거팀은 새 목록을 받아야 합니다. 한두 건만 바꾸려면 [현재 배정 불러오기]가 낫습니다.`, { ok: '다시 확정' }))) return;
       const overs = p.routes.filter((rt) => rt.overAt != null);
       if (overs.length && !(await confirmDlg('적재 초과', `${overs.map((rt) => `${rt.crew_name} ${rt.overAt + 1}번부터`).join(', ')} 누적 적재(추정)가 차량 용량을 넘습니다. 그대로 확정할까요? (추정치이므로 현장에서 반입지를 더 들를 수 있습니다)`, { ok: '그대로 확정' }))) return;
       const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
-      const res = await post('assign', { date: s.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
+      const res = await post('assign', { date: p.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
-    }, planMsg), 'primary');
+    }, planMsg), 'primary', { disabled: planStale });
     const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
     const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
     const note = p.res.matrix_source === 'KAKAO' ? p.res.matrix_note : `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`;
-    out.replaceChildren(h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
+    out.replaceChildren(planStale ? h('div', { class: 'notice bad plan-stale', role: 'alert' }, h('strong', {}, `${md(p.date)} 계산 결과입니다. `), `수거일을 ${md(date.value)}로 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하거나 날짜를 되돌리세요.`) : null,
+      h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       daySummaryCard(p.res),
       h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
         ['반입지 경유', `${p.routes.reduce((a, rt) => a + (rt.unloads || 0), 0)}회`, ''], ['마지막 예상 종료', lastEnd || '—', '']].map(([k, v, c]) => h('div', { class: 'kpi ' + c }, h('span', { class: 'k' }, k), h('b', { class: 'v' }, v)))),
@@ -1218,7 +1517,7 @@ async function screenDispatch() {
     h('div', { class: 'card searchbox', role: 'group', 'aria-label': '조회조건' },
       h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'dp-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
         h('span', { class: 'cond-l' }, '수거팀'), h('div', { class: 'cond-v wide' }, crewBox)),
-      h('div', { class: 'cond-btns' }, calcBtn),
+      h('div', { class: 'cond-btns' }, calcBtn, ['ADMIN', 'INTAKE'].includes(boot.me.role) ? btn('현재 배정 불러오기', loadCurrent, '', { title: '이미 확정한 배정에서 한두 건만 넣기·빼기·순서·팀 옮기기 (다시 계산하지 않음)' }) : null),
       crews.length ? null : h('p', { class: 'err' }, '설정에서 수거팀을 먼저 만드세요.'), msg),
     out);
 }
@@ -1252,7 +1551,7 @@ async function screenSend() {
     const batches = await api('batches?date=' + s.date);
     body.replaceChildren(...(batches.length ? batches.map((b) => {
       const last = b.bundles[0];
-      const code = h('input', { placeholder: '휴대폰 수신 확인 코드 8자리', style: 'width:220px' });
+      const code = h('input', { placeholder: '휴대폰 화면의 수신 코드 (R-XXXX XXXX)', 'aria-label': '수신 코드', style: 'width:260px' });
       const msg = h('span', { class: 'msg' });
       return h('div', { class: 'card' + (b.status !== 'ACTIVE' ? ' muted' : '') },
         h('div', { class: 'row', style: 'justify-content:space-between' },
@@ -1263,10 +1562,10 @@ async function screenSend() {
             window.open('/bundle/' + r.bundle_id.slice(0, 8), 'dg-qr', 'width=760,height=900');
             toast(`QR ${r.frames}장 (${r.count}건) 표시`); load();
           }, msg), 'primary', { disabled: !b.device_id }) : null)),
-        !b.device_id ? h('div', { class: 'notice' }, '이 팀에 휴대폰이 연결되어 있지 않아 QR을 보낼 수 없습니다. ', boot.me.role === 'ADMIN' ? h('a', { href: '#/settings' }, '설정에서 연결하기 →') : '운영 관리자에게 연결을 요청하세요.') : null,
+        !b.device_id ? h('div', { class: 'notice' }, '이 팀에 휴대폰이 연결되어 있지 않아 QR을 보낼 수 없습니다. ', boot.me.role === 'ADMIN' ? h('a', { href: '#/settings/crews' }, '설정에서 연결하기 →') : '운영 관리자에게 연결을 요청하세요.') : null,
         b.resend_needed && b.status === 'ACTIVE' ? h('div', { class: 'notice' }, '전송 뒤에 수정된 접수가 있습니다. QR을 다시 표시해 새 목록을 전달하세요. 급한 변경은 수거팀에 전화로 먼저 알리세요.') : null,
         h('div', { class: 'stopchain', 'aria-label': '방문 순서' }, ...b.stops.map((x) => h('span', { class: 'node' }, h('b', {}, x.seq), x.name))),
-        last ? h('div', { class: 'row' }, last.receipt_confirmed_at ? chip('휴대폰 수신 확인됨', 'ok') : chip('QR 표시함 · 수신 미확인', 'warn'),
+        last ? h('div', { class: 'row' }, last.receipt_confirmed_at ? chip('휴대폰 수신 확인됨', 'ok') : [chip('QR 표시함 · 수신 미확인', 'warn'), h('span', { class: 'muted small' }, '수신 코드(R-):')],
           last.receipt_confirmed_at ? null : code, last.receipt_confirmed_at ? null : btn('수신 확인', wrap(async () => { await post(`bundles/${last.id}/receipt`, { code: code.value }); toast('수신이 확인되었습니다'); load(); }, msg)), msg)
           : h('p', { class: 'muted' }, '아직 전송하지 않았습니다.'));
     }) : [h('p', { class: 'muted' }, '이 날짜의 배정이 없습니다. [배정·노선]에서 확정하세요.')]));
@@ -1275,53 +1574,130 @@ async function screenSend() {
   date.setAttribute('aria-label', '수거일'); date.id = 'send-date';
   return h('div', {}, pagehead('목록 전송 (QR)'),
     h('div', { class: 'card searchbox', role: 'search', 'aria-label': '조회조건' }, h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'send-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
-      h('span', { class: 'cond-l' }, '안내'), h('div', { class: 'cond-v wide2' }, h('span', { class: 'muted small' }, 'QR 화면 표시와 휴대폰 수신은 다릅니다. 휴대폰이 보여 주는 확인 코드를 입력해야 "수신 확인"이 됩니다.')))), body);
+      h('span', { class: 'cond-l' }, '안내'), h('div', { class: 'cond-v wide2' }, h('span', { class: 'muted small' }, 'QR 화면 표시와 휴대폰 수신은 다릅니다. 휴대폰이 보여 주는 수신 코드(R-)를 입력해야 "수신 확인"이 됩니다.')))), body);
 }
 
 // ------------------------------------------------------------ 결과·사진 가져오기, 충돌함
+// 확인 코드 표시 (휴대폰과 같은 이름·앞 글자): 수신 코드 R- (휴대폰 → PC), 결과 반영 코드 D-, 사진 회수 코드 P- (PC → 휴대폰)
+const CODE_NAME = { R: '수신 코드', D: '결과 반영 코드', P: '사진 회수 코드' };
+const codeEl = (kind, code) => h('span', { class: 'code-wrap', title: CODE_NAME[kind] }, h('span', { class: 'code-kind' }, kind + '-'), h('span', { class: 'big' }, code ? `${code.slice(0, 4)} ${code.slice(4)}` : ''));
+const IMP_LABEL = { applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수',
+  already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진', seq_reused: '순번 겹침(반영·확인만)', stored_other: '기타 기록 보관', requests: '접수', events: '기록', unloads_applied: '하차' };
+const impSummary = (r) => Object.entries(r || {}).filter(([k, v]) => IMP_LABEL[k] && typeof v === 'number' && v).map(([k, v]) => `${IMP_LABEL[k]} ${v}`).join(' · ') || '변경 없음';
+const IMP_KIND = { RESULT: '결과', PHOTO: '사진', SOLO: '단독 옮김' };
 async function screenResults() {
-  const rep = h('div');
-  const fileIn = (label, path, accept) => {
-    const f = h('input', { type: 'file', accept });
-    const msg = h('p', { class: 'msg' });
-    return h('div', { class: 'card' }, h('h2', {}, label), f, btn('가져오기', wrap(async () => {
-      if (!f.files[0]) throw new Error('파일을 골라 주세요.');
-      const r = await api(path, { method: 'POST', raw: new Uint8Array(await f.files[0].arrayBuffer()) });
-      rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),
-        h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함(확인)', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
-        r.release_code ? h('div', { class: 'notice' }, path.includes('photos') ? '사진 회수 확인 코드' : '보관 종료 확인 코드', ' — 휴대폰에 입력하게 알려 주세요: ', h('span', { class: 'big' }, r.release_code))
-          : path.includes('photos') ? h('p', { class: 'err' }, '해시가 맞지 않는 사진이 있어 확인 코드를 발급하지 않았습니다. 휴대폰에서 사진을 지우지 마세요.') : null));
-      f.value = ''; loadConf();
-    }, msg), 'primary'), msg);
+  // 1) 파일 넣기: 결과(.dgr)·사진(.dgp)을 여러 개 한꺼번에(고르기·끌어 놓기). 결과를 먼저, 사진을 나중에 가져온다.
+  const runBody = h('tbody');
+  const runCard = h('div', { class: 'card', id: 'import-run', hidden: true }, h('h2', {}, '방금 가져온 파일'),
+    h('div', { class: 'tablewrap' }, h('table', { class: 'grid imp-run' }, h('thead', {}, h('tr', {}, ...['파일', '종류', '팀·기기', '결과', '휴대폰에 알려 줄 코드'].map((t) => h('th', { scope: 'col' }, t)))), runBody)));
+  let recent = [];
+  const teamOf = (impId) => { const x = recent.find((y) => y.id === impId); return x ? `${x.crew || '(팀 없음)'} · ${x.device_label || (x.device_id || '').slice(0, 8)}` : ''; };
+  const addRun = (name, kind, r, err) => {
+    runCard.hidden = false;
+    const isPhoto = kind === 'PHOTO';
+    const code = r && r.release_code ? h('span', {}, h('small', { class: 'block muted' }, isPhoto ? '사진 회수 코드' : '결과 반영 코드'), codeEl(isPhoto ? 'P' : 'D', r.release_code))
+      : r && isPhoto && !r.duplicate_file ? h('span', { class: 'err small' }, '해시가 맞지 않는 사진이 있어 코드를 만들지 않았습니다. 휴대폰에서 사진을 지우지 마세요.') : '';
+    const tr = h('tr', { class: 'imp-row' + (err ? ' bad' : ''), 'data-import': r && r.import_id ? r.import_id : '' }, h('td', { class: 'mono' }, name), h('td', {}, isPhoto ? '사진' : '결과'),
+      h('td', { class: 'team' }, r && r.import_id ? teamOf(r.import_id) : ''),
+      h('td', {}, err ? h('span', { class: 'err' }, err) : [r.duplicate_file ? chip('이미 가져온 파일 (변경 없음)', 'neutral') : null, impSummary(r),
+        r.seq_reused ? h('div', { class: 'notice warn small' }, `휴대폰 복원으로 순번이 겹친 기록 ${r.seq_reused}건 — 반영했고 확인만 하면 됩니다.`) : null]),
+      h('td', {}, code));
+    runBody.prepend(tr);
   };
+  const fill = () => runBody.querySelectorAll('tr[data-import]').forEach((tr) => { const t = teamOf(tr.dataset.import); if (t) tr.querySelector('.team').textContent = t; });
+  const importFiles = wrap(async (files) => {
+    const list = [...files].filter((f) => /\.(dgr|dgp)$/i.test(f.name));
+    const skip = [...files].length - list.length;
+    if (skip) toast(`.dgr·.dgp가 아닌 파일 ${skip}개는 건너뛰었습니다`, true);
+    list.sort((a, b) => (/\.dgp$/i.test(a.name) ? 1 : 0) - (/\.dgp$/i.test(b.name) ? 1 : 0));  // 결과 먼저
+    for (const f of list) {
+      const photo = /\.dgp$/i.test(f.name);
+      try { addRun(f.name, photo ? 'PHOTO' : 'RESULT', await api(photo ? 'import/photos' : 'import/result', { method: 'POST', raw: new Uint8Array(await f.arrayBuffer()) })); }
+      catch (e) { addRun(f.name, photo ? 'PHOTO' : 'RESULT', null, e.message); }
+    }
+    await loadRecent(); fill(); if (boot.me.role !== 'FIELD') loadConf(); refreshBadges(true);
+  });
+  const fileIn = h('input', { type: 'file', multiple: true, accept: '.dgr,.dgp', 'aria-label': '결과·사진 파일 (여러 개)', onchange: (e) => { const fs = [...e.target.files]; e.target.value = ''; importFiles(fs); } });
+  const drop = h('div', { class: 'dropzone', tabindex: '-1' }, h('b', {}, '결과 파일(.dgr)·사진 파일(.dgp)을 여기에 끌어 놓으세요'), h('span', { class: 'muted small' }, '여러 팀·여러 개를 한꺼번에 넣어도 됩니다. 결과를 먼저, 사진을 나중에 가져옵니다.'),
+    h('label', { class: 'btnlike' }, '파일 고르기', fileIn));
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); importFiles(e.dataTransfer.files); });
+  // 2) 최근 가져오기: 화면을 다시 열어도 코드를 다시 볼 수 있게, 휴대폰이 코드를 받았는지(직접 표시·다음 목록 수신)
+  const recentBody = h('tbody');
+  const loadRecent = wrap(async () => {
+    recent = await api('imports/recent?limit=30');
+    recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, h('td', { class: 'nowrap' }, kst(x.imported_at)), h('td', {}, IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
+      h('td', {}, x.crew || h('span', { class: 'muted' }, '(팀 없음)'), h('span', { class: 'muted small block' }, x.device_label || (x.device_id || '').slice(0, 8))),
+      h('td', {}, impSummary(x.counts)),
+      h('td', {}, x.release_code && x.kind !== 'SOLO' ? [h('small', { class: 'block muted' }, x.kind === 'PHOTO' ? '사진 회수 코드' : '결과 반영 코드'), codeEl(x.kind === 'PHOTO' ? 'P' : 'D', x.release_code)] : h('span', { class: 'muted' }, '—')),
+      h('td', {}, x.phone_confirmed ? chip(x.phone_confirmed_by === 'MANUAL' ? '휴대폰 입력함' : '휴대폰 확인됨(다음 목록)', 'ok')
+        : x.release_code && x.kind !== 'SOLO' ? [chip('휴대폰 입력 전', 'warn'), ' ', btn('휴대폰에 입력함', wrap(async () => { await post(`imports/${x.id}/confirm`); toast('휴대폰에 코드를 입력했다고 표시했습니다'); loadRecent(); }), 'small')] : '')))
+      : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '아직 가져온 파일이 없습니다.'))]));
+  });
+  const recentCard = h('div', { class: 'card', id: 'recent-imports' }, h('div', { class: 'panel-h' }, h('h2', {}, '최근 가져오기'), btn('새로 고침', loadRecent, 'small')),
+    h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['가져온 시각', '종류', '팀·기기', '건수', '코드', '휴대폰'].map((t) => h('th', { scope: 'col' }, t)))), recentBody)),
+    h('p', { class: 'muted small' }, '결과 반영 코드(D-)를 휴대폰에 넣으면 그 접수들의 이름·연락처·주소가 휴대폰에서 지워지고, 사진 회수 코드(P-)를 넣어야 휴대폰에서 사진을 지울 수 있습니다. 코드를 넣지 않아도 휴대폰이 다음 목록을 받으면 저절로 확인됩니다.'));
+  // 3) 충돌함: 접수별로 묶고, 접수 하나·가져오기 하나의 기록을 한 사유로 [모두 반영/거부]
   const conf = h('div', { class: 'card', id: 'conflicts' });
-  // 휴대폰 현장 요청(현장 접수 확인·정정·취소)과 진짜 충돌(오래된 목록·다른 팀 등)을 나눠 본다
   const REQ_KINDS = ['FIELD_INTAKE', 'CORRECTION', 'CANCEL_REQUEST'];
   let confTab = 'ALL';
+  const bulk = (what, id, action, n, label) => wrap(async () => {
+    const why = await promptDlg(`${label} ${n}건 ${action === 'APPLY' ? '모두 반영' : '모두 거부'}`, '판단 사유', { ok: action === 'APPLY' ? '모두 반영' : '모두 거부', danger: action === 'REJECT',
+      lead: [h('p', {}, action === 'APPLY' ? '같은 사유로 기록마다 반영합니다. 반영할 수 없는 기록은 건너뛰고 알려 줍니다.' : '같은 사유로 모두 거부합니다. 원 기록은 남습니다.')] });
+    if (!why) return;
+    const r = await post('conflicts/bulk', { action, reason: why, [what]: id });
+    toast(`${r.resolved}건 ${action === 'APPLY' ? '반영' : '거부'}했습니다`);
+    (r.failed || []).forEach((f) => toast(`${EVENT_KIND[f.kind] || f.kind}: ${f.error}`, true));
+    loadConf(); refreshBadges(true);
+  });
   const loadConf = wrap(async () => {
     const all = await api('conflicts');
     const nReq = all.filter((c) => REQ_KINDS.includes(c.kind)).length;
     const list = all.filter((c) => confTab === 'ALL' || (confTab === 'REQ') === REQ_KINDS.includes(c.kind));
     const tabs = h('div', { class: 'quick conf-tabs' }, ...[['ALL', '전체', all.length], ['REQ', '현장 요청', nReq], ['CONFLICT', '충돌', all.length - nReq]].map(([k, t, n]) =>
       h('button', { type: 'button', class: 'qchip' + (confTab === k ? ' on' : ''), 'aria-pressed': confTab === k ? 'true' : 'false', onclick: () => { confTab = k; loadConf(); } }, t, h('b', {}, n))));
-    conf.replaceChildren(h('div', { class: 'panel-h' }, h('h2', {}, `충돌함 ${all.length}건`), h('span', { class: 'muted small' }, '사유를 보고 반영 또는 거부 (거부해도 원 기록은 남음)')), tabs,
-      list.length ? grid(['접수', '기록 종류', '기록 내용', '휴대폰 시각', '충돌 사유', '처리'], list.map((c) => {
+    // 가져오기별 묶음
+    const byImp = new Map();
+    list.forEach((c) => { if (c.import_id) byImp.set(c.import_id, (byImp.get(c.import_id) || 0) + 1); });
+    const impSel = h('select', { 'aria-label': '가져오기 고르기' }, ...[...byImp].map(([id, n]) => { const x = recent.find((y) => y.id === id); return h('option', { value: id }, `${x ? `${kst(x.imported_at)} ${x.crew || x.device_label || ''}` : id.slice(0, 8)} · ${n}건`); }));
+    const impBar = byImp.size ? h('div', { class: 'row imp-bulk' }, h('span', { class: 'muted small' }, '가져오기별:'), impSel,
+      btn('이 가져오기 모두 반영', (e) => bulk('import_id', impSel.value, 'APPLY', byImp.get(impSel.value), '이 가져오기')(e), 'small'),
+      btn('이 가져오기 모두 거부', (e) => bulk('import_id', impSel.value, 'REJECT', byImp.get(impSel.value), '이 가져오기')(e), 'small danger')) : null;
+    // 접수별 묶음 (처음 나온 순서 유지)
+    const groups = new Map();
+    list.forEach((c) => { const k = c.request_id || '-'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); });
+    const rowsEl = [];
+    for (const [rid, cs] of groups) {
+      const c0 = cs[0];
+      rowsEl.push(h('tr', { class: 'grp' }, h('td', { colspan: 6 }, h('div', { class: 'row' },
+        rid !== '-' ? h('a', { href: `#/request/${rid}` }, c0.receipt_no || rid.slice(0, 8)) : h('span', { class: 'muted' }, '(접수 없음)'), ' ', c0.name || '', c0.request_status ? statusChip(c0.request_status) : null,
+        h('span', { class: 'muted small' }, `기록 ${cs.length}건`), h('span', { class: 'grow' }),
+        rid !== '-' && cs.length > 1 ? btn('이 접수 기록 모두 반영', (e) => bulk('request_id', rid, 'APPLY', cs.length, c0.receipt_no || '이 접수')(e), 'small') : null,
+        rid !== '-' && cs.length > 1 ? btn('이 접수 기록 모두 거부', (e) => bulk('request_id', rid, 'REJECT', cs.length, c0.receipt_no || '이 접수')(e), 'small danger') : null))));
+      cs.forEach((c) => {
         const why = h('input', { placeholder: '판단 사유', class: 'w-m', 'aria-label': '판단 사유' });
-        return [h('span', {}, c.request_id ? h('a', { href: `#/request/${c.request_id}` }, c.receipt_no || c.request_id.slice(0, 8)) : '-', ' ', c.name || '', h('br'), c.request_status ? statusChip(c.request_status) : null),
-          EVENT_KIND[c.kind] || c.kind, c.kind === 'CORRECTION' ? correctionBody(c) : eventBody(c.kind, c.body_json), kst(c.device_ts), c.conflict_reason,
-          h('span', { class: 'row' }, why, btn('반영', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'APPLY', reason: why.value }); toast('반영했습니다'); loadConf(); }), 'small'),
-            btn('거부', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'REJECT', reason: why.value }); toast('거부로 기록했습니다'); loadConf(); }), 'small danger'))];
-      }), { cls: 'conflicts' }) : h('p', { class: 'empty' }, confTab === 'REQ' ? '확인할 현장 요청이 없습니다.' : '확인할 충돌이 없습니다.'));
+        rowsEl.push(h('tr', { class: 'ev' }, h('td', { class: 'muted small' }, c.import_id ? teamOf(c.import_id) || '' : ''),
+          h('td', {}, EVENT_KIND[c.kind] || c.kind), h('td', {}, c.kind === 'CORRECTION' ? correctionBody(c) : eventBody(c.kind, c.body_json)), h('td', { class: 'nowrap' }, kst(c.device_ts)),
+          h('td', {}, c.conflict_reason, c.warning ? h('div', {}, chip(c.warning, 'warn')) : null),
+          h('td', {}, h('span', { class: 'row' }, why, btn('반영', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'APPLY', reason: why.value }); toast('반영했습니다'); loadConf(); refreshBadges(true); }), 'small'),
+            btn('거부', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'REJECT', reason: why.value }); toast('거부로 기록했습니다'); loadConf(); refreshBadges(true); }), 'small danger')))));
+      });
+    }
+    conf.replaceChildren(h('div', { class: 'panel-h' }, h('h2', {}, `충돌함 ${all.length}건`), h('span', { class: 'muted small' }, '사유를 보고 반영 또는 거부 (거부해도 원 기록은 남음)')), tabs, impBar,
+      list.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'grid conflicts' }, h('thead', {}, h('tr', {}, ...['팀', '기록 종류', '기록 내용', '휴대폰 시각', '충돌 사유·경고', '처리'].map((t) => h('th', { scope: 'col' }, t)))), h('tbody', {}, ...rowsEl)))
+        : h('p', { class: 'empty' }, confTab === 'REQ' ? '확인할 현장 요청이 없습니다.' : '확인할 충돌이 없습니다.'));
   });
-  loadConf();
-  const showReport = (r, isPhoto) => rep.replaceChildren(h('div', { class: 'card' }, h('h2', {}, r.duplicate_file ? '이미 가져온 파일입니다 (변경 없음)' : '가져오기 결과'),
-    h('dl', { class: 'kv' }, ...Object.entries(r).filter(([k]) => !['release_code', 'import_id', 'duplicate_file'].includes(k)).map(([k, v]) => [h('dt', {}, ({ applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함(확인)', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수', already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진' })[k] || k), h('dd', {}, v)])),
-    r.release_code ? h('div', { class: 'notice' }, isPhoto ? '사진 회수 확인 코드' : '보관 종료 확인 코드', ' — 휴대폰에 입력하게 알려 주세요: ', h('span', { class: 'big' }, r.release_code)) : null));
+  const field = boot.me.role === 'FIELD';  // 수거팀 계정은 충돌함을 보지 않는다(사무실 판단)
+  loadRecent().then(() => { fill(); if (!field) loadConf(); });
   return h('div', {}, pagehead('결과 가져오기', h('a', { href: '#conflicts', class: 'small', onclick: (e) => { e.preventDefault(); conf.scrollIntoView(); } }, '충돌함으로 ↓')),
-    h('div', { class: 'grid2' }, fileIn('결과 파일 (.dgr) — 업무 메일 첨부', 'import/result', '.dgr'), fileIn('사진 파일 (.dgp) — 승인된 보안 매체', 'import/photos', '.dgp')),
-    webcamCard((r) => { showReport(r, false); loadConf(); }),
+    h('div', { class: 'card' }, h('h2', {}, '결과·사진 파일 넣기'), drop,
+      h('p', { class: 'muted small' }, '결과 파일은 업무 메일 첨부, 사진 파일은 승인된 보안 매체로 받습니다. 같은 파일을 여러 번 넣어도 한 번만 반영됩니다.')),
+    runCard,
+    recentCard,
+    webcamCard((r) => { addRun('휴대폰 화면 QR (웹캠)', 'RESULT', r); loadRecent().then(fill); loadConf(); }),
     soloCard(),
-    rep, conf, h('p', { class: 'muted' }, '같은 결과를 여러 번 가져와도 한 번만 반영됩니다. 오래된 배정·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.'));
+    field ? null : conf, h('p', { class: 'muted' }, '오래된 배정·다른 팀·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.'));
 }
 
 // 휴대폰 기록 종류·내용을 사람이 읽는 표로 (충돌함)
@@ -1414,7 +1790,9 @@ function soloCard() {
     out.replaceChildren(h('div', { class: 'notice' },
       h('p', {}, `백업 ${d.created_at ? kst(d.created_at) : ''} · 접수 ${d.requests}건 중 새 접수 ${d.new}건 (이미 PC에 있음 ${d.already}건) · 현장 기록 ${d.events}건 · 사진 ${d.photos}장 · 하차 ${d.unloads}회`),
       h('p', { class: 'small' }, '이미 PC에 있는 접수와 그 기록은 덮어쓰지 않습니다. 접수번호가 PC와 겹치면 끝에 S를 붙입니다.'),
-      btn('PC로 옮기기', wrap(async () => { const r = await send(false); toast(r.duplicate_file ? '이미 가져온 파일입니다' : `접수 ${r.requests}건 · 기록 ${r.events}건 · 사진 ${r.photos_recovered}장 · 하차 ${r.unloads_applied}회 옮김`); out.replaceChildren(); }, msg), 'primary')));
+      d.invalid ? h('div', { class: 'notice bad small' }, `옮기지 못하는 접수 ${d.invalid}건 (아래 표). 나머지만 옮깁니다.`,
+        grid(['접수(앞 8자)', '접수번호', '문제'], (d.errors || []).map((x) => [h('span', { class: 'mono' }, x.request_id), x.receipt_no || '', x.error]))) : null,
+      btn('PC로 옮기기', wrap(async () => { const r = await send(false); toast(r.duplicate_file ? '이미 가져온 파일입니다' : `접수 ${r.requests}건 · 기록 ${r.events}건 · 사진 ${r.photos_recovered}장 · 하차 ${r.unloads_applied}회 옮김${r.renamed ? ` · 접수번호 S 표시 ${r.renamed}건` : ''}${r.invalid ? ` · 못 옮김 ${r.invalid}건` : ''}`); out.replaceChildren(); }, msg), 'primary')));
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '휴대폰 단독 방식 자료 옮기기 (.dgb)'),
     h('p', { class: 'muted' }, '휴대폰만으로 운영하던 접수·현장 기록·사진을 PC 원본으로 옮깁니다. 휴대폰 [백업·복원]에서 만든 암호화 백업 파일을 승인된 보안 매체로 가져와 넣으세요.'),
@@ -1513,6 +1891,8 @@ async function screenClose() {
     body.replaceChildren(...[
       h('div', { class: 'card' }, h('h2', {}, `${s.date} 접수 ${d.total}건`), h('div', { class: 'row' }, ...Object.entries(d.by_status).map(([k, v]) => { const el = statusChip(k); el.textContent = `${STATUS[k] || k} ${v}`; return el; })),
         h('p', {}, `충돌 미처리 ${d.conflicts}건 · 사진 미회수 ${d.photos_missing}장 · 수신 미확인 전송 ${d.unconfirmed_bundles}건`),
+        (d.crews_no_result || []).length ? h('div', { class: 'notice bad' }, h('strong', {}, '결과를 가져오지 않은 팀: '), d.crews_no_result.map((c) => `${c.crew}(${kst(c.sent_at)} 전송)`).join(', '),
+          afterWork(s.date) ? ' — 수거팀에 [결과 보내기]를 요청하세요. ' : ` — 근무 끝(${workEnd()}) 전이면 아직 수거 중일 수 있습니다. `, h('a', { href: '#/results' }, '결과 가져오기 →')) : null,
         d.working ? h('p', { class: 'notice warn small' }, `${s.date}은(는) ${d.working}입니다.`) : null,
         last ? h('p', {}, chip('마감 기록됨', 'ok'), chip(last.status === 'APPROVED' ? `팀장 확인 (${last.approved_by})` : '팀장 확인 전', last.status === 'APPROVED' ? 'ok' : 'warn'),
           ` ${last.seq}회차 · ${kst(last.closed_at)} · ${last.closed_by || '-'} ${last.note || ''}`) : null),
@@ -1539,8 +1919,15 @@ async function screenClose() {
         h('tbody', {}, ...d.closes.map((c) => h('tr', {}, h('td', {}, `${c.seq}회차`), h('td', { class: 'nowrap' }, kst(c.closed_at)), h('td', {}, c.closed_by || '-'), h('td', {}, `${c.carried}건`), h('td', {}, c.note || ''),
           h('td', {}, c.status === 'APPROVED' ? `${c.approved_by} · ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : chip('확인 전', 'warn'))))))) : null,
       h('div', { class: 'card row' }, ['ADMIN', 'INTAKE'].includes(role) ? [note, btn(last ? '마감 다시 기록' : '마감 기록', wrap(async () => {
-        if (!(await confirmDlg(last ? '마감 다시 기록' : '마감 기록', `${s.date} 마감을 기록합니다.` + (d.carry.length ? ` 미처리 ${d.carry.length}건의 예정일이 다음 업무일로 옮겨집니다.` : '') + ' 기록은 회차로 쌓이며 팀장 확인을 받아야 합니다.', { ok: '마감 기록' }))) return;
-        const r = await post('close', { date: s.date, note: note.value, close_secs: closeT0[s.date] ? Math.round((Date.now() - closeT0[s.date]) / 1000) : null }); delete closeT0[s.date]; toast(`마감을 기록했습니다 (${r.seq}회차${r.carried.length ? ` · 이월 ${r.carried.length}건` : ''})`); load(true);
+        // 목록을 보냈는데 결과 파일을 가져오지 않은 팀: 마감을 막지는 않지만 확인창에 먼저 보여 준다
+        const nr = d.crews_no_result || [];
+        const warnBox = nr.length ? h('div', { class: 'notice bad close-warn' }, h('strong', {}, `결과를 가져오지 않은 팀 ${nr.length}곳`),
+          h('ul', {}, ...nr.map((c) => h('li', {}, `${c.crew}: ${kst(c.sent_at)}에 목록을 보냈는데 그 뒤 결과 파일이 없습니다.`))),
+          h('p', { class: 'small' }, '수거팀에 [결과 보내기]를 요청해 가져온 뒤 마감하는 것이 좋습니다. 그대로 마감하면 그 팀 접수는 이월됩니다.')) : null;
+        if (!(await confirmDlg(last ? '마감 다시 기록' : '마감 기록', `${s.date} 마감을 기록합니다.` + (d.carry.length ? ` 미처리 ${d.carry.length}건의 예정일이 다음 업무일로 옮겨집니다.` : '') + ' 기록은 회차로 쌓이며 팀장 확인을 받아야 합니다.',
+          { ok: nr.length ? '그래도 마감 기록' : '마감 기록', more: warnBox ? [warnBox] : [] }))) return;
+        const r = await postOnce(`close:${s.date}`, 'close', { date: s.date, note: note.value, close_secs: closeT0[s.date] ? Math.round((Date.now() - closeT0[s.date]) / 1000) : null }); delete closeT0[s.date];
+        toast(`마감을 기록했습니다 (${r.seq}회차${r.carried.length ? ` · 이월 ${r.carried.length}건` : ''})`); (r.warnings || []).forEach((w) => toast(w, true)); load(true); refreshBadges(true);
       }), 'primary')] : null,
         ['ADMIN', 'LEAD'].includes(role) && last && last.status === 'RECORDED' ? btn('팀장 확인', wrap(async () => {
           const why = await modal({ title: `${s.date} 마감 확인 (${last.seq}회차)`, ok: '확인 기록', body: [h('p', {}, '담당자가 기록한 마감 내용(이월·수납 확인·마감 후 수정)을 검토했으면 확인을 기록합니다. 기록한 사람은 확인할 수 없습니다.'), h('label', { class: 'f' }, '메모', h('input', { id: 'approve-note', class: 'fill' }))],
@@ -1655,7 +2042,7 @@ function unloadCard(d) {
     d.unloads.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '시각', '반입지', '부피', '중량', '메모'].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...d.unloads.map((u) => h('tr', {}, h('td', {}, u.crew_name), h('td', {}, u.at_time || ''), h('td', {}, u.place), h('td', {}, u.volume_m3 ?? ''), h('td', {}, u.weight_kg ?? ''), h('td', {}, u.note || ''))))) : h('p', { class: 'muted' }, '기록 없음'),
     boot.crews.length ? h('div', { class: 'row' }, crew, at, place, vol, kg, note, btn('하차 기록', wrap(async () => {
-      await post('unloads', { crew_id: crew.value, work_date: d.work_date, at_time: at.value, place: place.value, volume_m3: vol.value, weight_kg: kg.value, note: note.value });
+      await postOnce(`unload:${d.work_date}`, 'unloads', { crew_id: crew.value, work_date: d.work_date, at_time: at.value, place: place.value, volume_m3: vol.value, weight_kg: kg.value, note: note.value });
       toast('하차를 기록했습니다'); render();
     }, msg), 'primary'), msg) : null);
 }
@@ -1707,14 +2094,43 @@ async function screenSettings(tab) {
   return h('div', {}, pagehead('설정'), tabs, ...[].concat(body));
 }
 const fp9 = (f) => (f.length === 9 ? `${f.slice(0, 3)} ${f.slice(3, 6)} ${f.slice(6)}` : f);
+const regState = { fp: '' };  // 방금 등록한 기기의 지문: 목록을 다시 그려도 보이게 화면 밖에 둔다
+// 지문 확인 뒤 "어느 팀에 연결할까요?": 있는 팀 고르기 또는 새 팀 만들기 (나중에 해도 됨)
+async function crewChooser(dev) {
+  const crews = boot.crews.filter((c) => c.active);
+  const pick = h('select', { 'aria-label': '연결할 팀' }, ...crews.map((c) => h('option', { value: c.id }, `${c.name}${c.device_id && c.device_id !== dev.id ? ' (다른 휴대폰 연결됨 → 바꿈)' : ''}`)),
+    h('option', { value: '__new', selected: !crews.length }, '+ 새 팀 만들기'));
+  const nm = h('input', { placeholder: '새 팀 이름 (예: 1팀)', 'aria-label': '새 팀 이름' });
+  const sync = () => { nm.closest('label').hidden = pick.value !== '__new'; };
+  const body = [h('p', {}, `${dev.label || dev.id.slice(0, 8)} 휴대폰을 사용하기 시작했습니다. 이 휴대폰으로 목록을 받을 팀을 고르세요.`), h('label', { class: 'f' }, '팀', pick), h('label', { class: 'f' }, '새 팀 이름', nm)];
+  pick.addEventListener('change', sync); setTimeout(sync, 0);
+  return modal({ title: '어느 팀에 연결할까요?', ok: '연결', cancel: '나중에', body,
+    onOk: async () => {
+      if (pick.value === '__new') {
+        if (!nm.value.trim()) throw new Error('새 팀 이름을 적어 주세요.');
+        await post('crews', { id: null, name: nm.value.trim(), device_id: dev.id, capacity_m3: 8, capacity_kg: 0, shift_start: '09:00', shift_end: '17:00', active: true });
+        return nm.value.trim();
+      }
+      const c = crews.find((x) => x.id === pick.value);
+      await post('crews', { id: c.id, name: c.name, device_id: dev.id, capacity_m3: c.capacity_m3, capacity_kg: c.capacity_kg || 0, shift_start: c.shift_start, shift_end: c.shift_end, active: !!c.active });
+      return c.name;
+    } });
+}
 function settingsDevices() {
   const devMsg = h('p', { class: 'msg' }), regMsg = h('p', { class: 'msg' });
   const regImg = h('img', { alt: '기기 등록 QR', style: 'width:260px;image-rendering:pixelated' });
   api('registration-qr').then((r) => { regImg.src = r.image; }).catch(() => {});
   const code = h('textarea', { placeholder: '휴대폰 화면의 기기 코드 (DGD1.…) — 웹캠이 없을 때만 붙여 넣기', rows: 3, style: 'width:100%' });
   const label = h('input', { placeholder: '기기 이름 (예: 1팀 업무폰)' });
-  const fp = h('p', { class: 'big' });
-  const register = wrap(async () => { const r = await post('devices/register', { code: code.value, label: label.value }); fp.textContent = `지문 ${fp9(r.fingerprint)}`; toast(r.confirmed ? '이미 등록된 기기입니다.' : '등록했습니다. 지문이 휴대폰과 같으면 아래 목록에서 [지문 같음 · 사용 시작]을 누르세요.'); boot = null; setTimeout(() => { if (location.hash.startsWith('#/settings')) render(); }, 2500); }, regMsg);
+  const fp = h('p', { class: 'big' }, regState.fp);
+  // 등록하면 바로 목록을 새로 그린다(지문은 regState에 남겨 다시 그린 화면에도 보임)
+  const register = wrap(async () => {
+    const r = await post('devices/register', { code: code.value, label: label.value });
+    regState.fp = `지문 ${fp9(r.fingerprint)}`; fp.textContent = regState.fp;
+    toast(r.confirmed ? '이미 등록된 기기입니다.' : '등록했습니다. 지문이 휴대폰과 같으면 아래 목록에서 [지문 같음 · 사용 시작]을 누르세요.');
+    boot = await api('bootstrap');
+    if (location.hash.startsWith('#/settings/devices')) render(true);
+  }, regMsg);
   // 휴대폰 화면의 기기 코드 QR을 이 PC 웹캠으로 읽어 바로 등록 (코드를 옮겨 적거나 보낼 필요 없음)
   const camVideo = h('video', { playsinline: true, muted: true, class: 'regcam', hidden: true });
   const camBtn = btn('휴대폰 QR 웹캠으로 읽기', wrap(async () => {
@@ -1730,7 +2146,13 @@ function settingsDevices() {
   const devs = grid(['기기', '이름', '상태', '등록', ''], boot.devices.map((d) => [d.id.slice(0, 8), d.label || '',
     pending(d) ? h('span', {}, chip('지문 확인 대기', 'warn'), h('br'), h('b', { class: 'fp-inline' }, fp9(d.fingerprint || ''))) : d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),
     d.registered_at.slice(0, 10), h('span', { class: 'row' },
-      pending(d) ? btn('지문 같음 · 사용 시작', wrap(async () => { await post(`devices/${d.id}/confirm`); toast('사용을 시작했습니다'); boot = null; render(); }, devMsg), 'small primary') : null,
+      pending(d) ? btn('지문 같음 · 사용 시작', wrap(async () => {
+        await post(`devices/${d.id}/confirm`); toast('사용을 시작했습니다'); regState.fp = '';
+        boot = await api('bootstrap');
+        const crewName = await crewChooser(d);
+        if (crewName) toast(`${crewName}에 연결했습니다`);
+        boot = null; render(true);
+      }, devMsg), 'small primary') : null,
       ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
       btn(t, wrap(async () => { if (k !== 'ACTIVE' && !(await confirmDlg(`휴대폰 ${t}`, `${d.id.slice(0, 8)} 기기를 '${t}'합니다. 이 기기로는 목록을 보낼 수 없고 결과도 받지 않습니다. 계속할까요?`, { ok: t, danger: true }))) return; await post(`devices/${d.id}/status`, { status: k }); boot = null; render(); }, devMsg), 'small')))]), { empty: '등록된 휴대폰이 없습니다.' });
   return [h('div', { class: 'grid2' },
@@ -1759,6 +2181,48 @@ function settingsCrews() {
       h('p', { class: 'small muted' }, '최대 중량은 차량 등록증의 최대 적재량입니다(1톤 차량이면 1000). 비우면 무게는 따지지 않고 부피만 봅니다.'), crewMsg),
     volumeCard()];
 }
+// 좌표 칸 도우미: [지도에서 고르기](지도를 눌러 핀) · [주소로 찾기](이 PC의 주소 자료). 위도·경도 칸을 채운다.
+async function mapPickDlg(title, lat, lon) {
+  const box = h('div', { class: 'mapbox pickmap' });
+  const info = h('p', { class: 'muted small', 'aria-live': 'polite' }, lat ? `지금 좌표 ${lat}, ${lon}` : '지도를 눌러 위치를 고르세요.');
+  let pick = null;
+  const p = modal({ title, wide: true, ok: '이 위치로', body: [info, box], onOk: () => { if (!pick) throw new Error('지도를 눌러 위치를 고르세요.'); return pick; } });
+  setTimeout(async () => {
+    try {
+      const d = boot.settings.depot;
+      const has = lat !== '' && lat != null && !isNaN(+lat);
+      const { map, ml } = await mapIn(box, { center: has ? [+lon, +lat] : [d.lon, d.lat], zoom: has ? 16 : 13 });
+      let mk = has ? M.pin(ml, map, { lng: +lon, lat: +lat, label: '●', cls: 'me' }) : null;
+      map.on('click', (e) => {
+        pick = { lat: Math.round(e.lngLat.lat * 1e6) / 1e6, lon: Math.round(e.lngLat.lng * 1e6) / 1e6 };
+        if (mk) mk.remove(); mk = M.pin(ml, map, { lng: pick.lon, lat: pick.lat, label: '●', cls: 'me' });
+        info.textContent = `고른 좌표 ${pick.lat}, ${pick.lon}`;
+      });
+    } catch { box.replaceChildren(h('p', { class: 'pad muted' }, '지도를 불러오지 못했습니다(인터넷 연결 확인). [주소로 찾기]를 쓰거나 좌표를 직접 적으세요.')); }
+  }, 30);
+  return p;
+}
+function coordTools(latEl, lonEl, what, labelEl) {
+  const pickMap = btn('지도에서 고르기', wrap(async () => {
+    const r = await mapPickDlg(`${what} 위치 고르기`, latEl.value, lonEl.value);
+    if (r) { latEl.value = r.lat; lonEl.value = r.lon; toast(`${what} 좌표를 채웠습니다. [저장]을 눌러야 반영됩니다.`); }
+  }), 'small', { 'aria-label': `${what} 지도에서 고르기` });
+  const byAddr = btn('주소로 찾기', wrap(async () => {
+    const inp = h('input', { class: 'fill', placeholder: '도로명과 건물번호 (예: 필문대로 245)' });
+    const r = await modal({ title: `${what} 주소로 찾기`, ok: '찾기', body: [h('label', { class: 'f' }, '주소', inp), h('p', { class: 'muted small' }, '이 PC에 넣은 주소 위치 자료에서 찾습니다(외부로 보내지 않음). 건물 출입구 기준입니다.')],
+      onOk: async () => {
+        if (!inp.value.trim()) throw new Error('주소를 적어 주세요.');
+        const g = await api('geocode?address=' + encodeURIComponent(inp.value.trim()));
+        if (!g || g.none) throw new Error(boot.addr_count ? '주소 자료에서 찾지 못했습니다. 도로명과 건물번호를 확인하거나 [지도에서 고르기]를 쓰세요.' : '이 PC에 주소 위치 자료가 없습니다. [지도에서 고르기]를 쓰세요.');
+        if (g.ambiguous) throw new Error(`여러 지역에 있습니다(${g.options.join(', ')}). 구 이름을 넣어 주세요.`);
+        return { ...g, q: inp.value.trim() };
+      } });
+    if (!r) return;
+    latEl.value = r.lat; lonEl.value = r.lon; if (labelEl && !labelEl.value) labelEl.value = r.label || r.q;
+    toast(`${what} 좌표를 채웠습니다 (${r.label || r.q}). [저장]을 눌러야 반영됩니다.`);
+  }), 'small', { 'aria-label': `${what} 주소로 찾기` });
+  return h('span', { class: 'row coordtools' }, pickMap, byAddr);
+}
 function settingsBasic() {
   const routeMsg = h('p', { class: 'msg' }), infoMsg = h('p', { class: 'msg' });
   const st = boot.settings;
@@ -1779,20 +2243,23 @@ function settingsBasic() {
   const contact = h('input', { value: st.contact_info, class: 'fill', 'aria-label': '문의처' });
   const guide = h('textarea', { rows: 2, class: 'fill', 'aria-label': '배출 장소 안내' }, st.disposal_guide);
   const title = h('input', { value: st.monthly_report_title, class: 'fill', 'aria-label': '월보 제목' });
+  const payGuide = h('textarea', { rows: 2, class: 'fill', maxlength: 300, 'aria-label': '납부 안내' }, st.payment_guide || '');
+  const roundUnit = h('select', { 'aria-label': '감면액 끝수 단위' }, ...(boot.reduction_round_units || [1, 10]).map((u) => h('option', { value: u, selected: +u === +(st.reduction_round_unit || 1) }, u === 1 ? '1원 (원 미만 버림)' : `${u}원 (${u}원 미만 버림)`)));
   return [h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'ftable' },
-      ft('차고지', dlat, dlon, dlabel), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
-      ft('반입지', ulat, ulon, ulabel, '하차', umin, '분 · 차량당 최대', umax, '회'),
+      ft('차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel)), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
+      ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차', umin, '분 · 차량당 최대', umax, '회'),
       ft('반입지 받는 시간', uhs, '~', uhe, h('span', { class: 'muted small' }, '비우면 따지지 않음')),
       ft('쉬는 시간', lus, '~', lue, '사이에', lum, '분', h('span', { class: 'muted small' }, '예: 11:30~13:30 사이 60분. 비우면 넣지 않음')),
-      ft('적재 순서', h('label', { class: 'row' }, bfirst, '큰 짐(장롱·침대·대형 냉장고 등)은 차가 비어 있을 때 싣는 순서를 선호'), h('span', { class: 'muted small' }, '이동시간이 비슷하면 큰 짐을 먼저')), ft('종료지', elat, elon, elabel, h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
+      ft('적재 순서', h('label', { class: 'row' }, bfirst, '큰 짐(장롱·침대·대형 냉장고 등)은 차가 비어 있을 때 싣는 순서를 선호'), h('span', { class: 'muted small' }, '이동시간이 비슷하면 큰 짐을 먼저')), ft('종료지', elat, elon, elabel, coordTools(elat, elon, '종료지', elabel), h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
       ft('관할 구역', jur, h('span', { class: 'muted small' }, '주소의 구 이름이 다르면 접수할 때 경고 (막지는 않음)'))),
     h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
     h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
       unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value,
       unload_hours: { start: uhs.value, end: uhe.value }, lunch: { start: lus.value, end: lue.value, minutes: lum.value }, base_first: bfirst.checked }); toast('저장했습니다'); boot = null; render(); }, routeMsg), 'primary')), routeMsg),
-    h('div', { class: 'card' }, h('h2', {}, '접수증·월보 문구'), h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('월보 제목', title)),
-      h('p', { class: 'small muted' }, '문의처·배출 장소 안내는 접수증(신청인 보관용)에, 월보 제목은 통계 → [월보 출력]에 쓰입니다.'),
-      h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { contact_info: contact.value, disposal_guide: guide.value, monthly_report_title: title.value }); toast('저장했습니다'); boot = null; render(); }, infoMsg), 'primary')), infoMsg),
+    h('div', { class: 'card' }, h('h2', {}, '접수증·안내 문구·월보'), isPlaceholderContact() ? h('div', { class: 'notice warn small' }, '문의처가 아직 기본 문구입니다. 접수증·주민 안내 문구에 그대로 나가니 전화번호를 넣으세요.') : null,
+      h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('납부 안내', payGuide, h('span', { class: 'muted small' }, '납부 방법·기한 (300자, 접수증·안내 문구)')), ft('감면액 끝수', roundUnit), ft('월보 제목', title)),
+      h('p', { class: 'small muted' }, '문의처·배출 장소 안내·납부 안내는 접수증(신청인 보관용)과 [안내 문구 복사]에, 월보 제목은 통계 → [월보 출력]에 쓰입니다.'),
+      h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { contact_info: contact.value, disposal_guide: guide.value, payment_guide: payGuide.value, ...(+roundUnit.value !== +(st.reduction_round_unit || 1) ? { reduction_round_unit: +roundUnit.value } : {}), monthly_report_title: title.value }); toast('저장했습니다'); boot = null; render(); }, infoMsg), 'primary')), infoMsg),
     noticeCard()];
 }
 function settingsFees() {
@@ -1845,8 +2312,8 @@ function autoBackupCard() {
     toast(`백업 키를 만들었습니다 (지문 ${r.fpr}). 내려받은 개인키 파일을 오프라인으로 보관하세요.`); load();
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '자동 백업'), stat,
-    h('div', { class: 'row' }, btn('백업 키 만들기', keygen, 'small'), btn('지금 자동 백업', wrap(async () => { const r = await post('backup/auto'); toast(r.ok ? `자동 백업: ${r.file}` : r.error, !r.ok); load(); }, msg), 'small'),
-      btn('보관 기간 지난 백업 정리', wrap(async () => { const r = await post('backup/retention'); toast(`${r.deleted.length}개 지웠습니다`); }, msg), 'small')),
+    h('div', { class: 'row' }, btn('백업 키 만들기', keygen, 'small'), btn('지금 자동 백업', wrap(async () => { const r = await runJob('backup/auto', {}, '자동 백업'); toast(r.ok ? `자동 백업: ${r.file}` : (r.error || '자동 백업 실패'), !r.ok); load(); }, msg), 'small'),
+      btn('보관 기간 지난 백업 정리', wrap(async () => { const r = await runJob('backup/retention', {}, '백업 보관 정리'); toast(`${(r.deleted || []).length}개 지웠습니다`); }, msg), 'small')),
     h('div', { class: 'ftable' },
       h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '자동 백업'), h('div', { class: 'ft-v' }, h('label', { class: 'row' }, auto, '서버가 켜져 있는 동안 매일'), time, h('span', { class: 'muted small' }, '(늦게 켜면 켜자마자) · 마감 확인 때도 백업'))),
       h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '두 번째 보관 위치'), h('div', { class: 'ft-v' }, dest2, h('span', { class: 'muted small' }, '복사 뒤 해시로 확인'))),
@@ -1873,7 +2340,7 @@ async function privacyCard() {
       h('div', { class: 'row' }, btn('파기 실행', wrap(async () => {
         if (!p.count) throw new Error('파기할 대상이 없습니다.');
         if (!(await confirmDlg('개인정보 파기', `${p.count}건의 이름·연락처·주소 등을 가명 처리합니다. 되돌릴 수 없습니다. 파기 대장에 일시·건수·작업자·기준이 남습니다. 계속할까요?`, { ok: '파기', danger: true }))) return;
-        const r = await post('privacy/purge'); toast(`${r.count}건 파기했습니다`); render();
+        const r = await runJob('privacy/purge', {}, '개인정보 파기'); toast(`${r.count}건 파기했습니다`); render();
       }, msg), 'danger', { disabled: !p.count }), h('span', { class: 'muted small' }, '마감 확인(팀장) 때와 명령 ', h('code', {}, 'python pc/pc_tool.py purge-pii'), '로도 실행됩니다.')),
       h('div', { class: 'notice warn' }, '이전 백업 파일에는 파기 전 개인정보가 남아 있습니다. 백업은 [백업] 탭의 보관 일수에 따라 지워지며, 외부 매체로 옮긴 사본은 담당자가 같은 기간에 지워야 합니다.'), msg),
     h('div', { class: 'card' }, h('h2', {}, '파기 대장'), purgeLogTable(d.log), h('p', { class: 'small muted' }, '사용자·이력 화면에서도 볼 수 있습니다.'))];
@@ -2031,7 +2498,7 @@ async function screenRefunds() {
     if (work && c.status === 'DRAFT') out.push(btn('신청', wrap(async () => {
       const amt = h('input', { type: 'number', value: c.amount, min: 1, max: c.amount, class: 'fill' }), note = h('input', { class: 'fill', placeholder: '메모 (예: 주민 요청, 입금 확인)' });
       if (!(await modal({ title: `환불 신청 · ${c.receipt_no}`, ok: '신청', body: [h('p', {}, `${REFUND_CAUSE[c.cause]} · 돌려줄 금액 ${won(c.amount)}`), h('label', { class: 'f' }, '환불 금액', amt), h('label', { class: 'f' }, '메모', note)],
-        onOk: () => post('refunds/request', { case_id: c.id, amount: amt.value, note: note.value }) }))) return;
+        onOk: () => postOnce(`refund:${c.id}`, 'refunds/request', { case_id: c.id, amount: amt.value, note: note.value }) }))) return;
       toast('환불을 신청했습니다. 팀장(검토자)·관리자의 결재가 필요합니다.'); render();
     }, msg), 'small primary'));
     if (lead && c.status === 'REQUESTED') {
@@ -2055,7 +2522,9 @@ async function screenRefunds() {
     return out;
   };
   const stCls = (st) => (st === 'PAID' ? 'ok' : ['REJECTED', 'VOID'].includes(st) ? 'neutral' : st === 'REQUESTED' ? 'info' : 'warn');
-  return h('div', {}, pagehead('환불'),
+  return h('div', {}, pagehead('환불', role === 'ADMIN' ? btn('환불 전체 점검', wrap(async () => {
+      const r = await runJob('refunds/sync', {}, '환불 전체 점검'); toast(`환불 전체 점검: ${r.checked}건 확인 · 새로 생김 ${r.created} · 해소 ${r.closed}`); render();
+    }, msg), 'small', { title: '자동 환불 건(납부 뒤 취소·과납)을 전체 접수와 맞춤. 평소에는 쓰기마다 그 접수만, 밤마다 전체' }) : null),
     h('div', { class: 'card searchbox', role: 'group', 'aria-label': '상태' }, h('div', { class: 'cond' }, h('span', { class: 'cond-l' }, '상태'), h('div', { class: 'cond-v wide' }, tabs))),
     gridbar(d.rows.length), msg,
     h('div', { class: 'card tablecard' }, grid(['접수번호', '부과번호', '동', '사유', '금액', '상태', '신청', '결재', '지급', '처리'], d.rows.map((c) => [h('a', { href: `#/request/${c.request_id}` }, c.receipt_no), c.levy_no || '', c.dong || '',
@@ -2065,7 +2534,7 @@ async function screenRefunds() {
     d.partial.length ? h('div', { class: 'card' }, h('h2', {}, `일부 수거 차액 환불 후보 ${d.partial.length}건`),
       h('p', { class: 'muted small' }, '일부 수거로 끝나 실제로 실은 수량 기준 부과 금액보다 더 낸 경우입니다. 재방문하지 않기로 했을 때만 신청하세요(자동으로 신청하지 않음).'),
       grid(['접수번호', '부과번호', '동', '부과 금액', '납부', '차액', ''], d.partial.map((x) => [h('a', { href: `#/request/${x.request_id}` }, x.receipt_no), x.levy_no || '', x.dong || '', won(x.levied), won(x.paid), won(x.due),
-        work ? btn('차액 환불 신청', wrap(async () => { await post('refunds/request', { request_id: x.request_id, cause: 'PARTIAL', amount: x.due, note: '일부 수거 차액' }); toast('신청했습니다'); render(); }, msg), 'small') : '']), { num: [3, 4, 5] })) : null,
+        work ? btn('차액 환불 신청', wrap(async () => { await postOnce(`refund-partial:${x.request_id}`, 'refunds/request', { request_id: x.request_id, cause: 'PARTIAL', amount: x.due, note: '일부 수거 차액' }); toast('신청했습니다'); render(); }, msg), 'small') : '']), { num: [3, 4, 5] })) : null,
     h('p', { class: 'muted' }, '납부 뒤 취소(환불 필요)·과납은 자동으로 "신청 전" 건이 생깁니다. 접수 담당자가 신청하고, 팀장(검토자)·관리자 중 신청하지 않은 사람이 결재한 뒤, 지급일·방법을 기록합니다. 계좌번호는 저장하지 않습니다.'));
 }
 
@@ -2091,12 +2560,15 @@ async function screenAccess() {
   });
   [from, to, actor, action].forEach((x) => x.addEventListener('change', () => { s.page = 1; load(); }));
   load();
-  const showVerify = (v) => vres.replaceChildren(h('div', { class: 'notice ' + (v.ok ? 'info' : 'bad') }, h('strong', {}, v.ok ? '무결성 검사 정상' : '무결성 검사 실패'),
+  const showVerify = (v, kind = '') => vres.replaceChildren(h('div', { class: 'notice ' + (v.ok ? 'info' : 'bad') }, h('strong', {}, `${kind}무결성 검사 ${v.ok ? '정상' : '실패'}`),
     ` · 접속기록 ${v.access.checked}행 ${v.access.ok ? '정상' : `— ${v.access.broken_id}번에서 끊김: ${v.access.why}`} · 변경 이력 ${v.audit.checked}행 ${v.audit.ok ? '정상' : `— ${v.audit.broken_id}번에서 끊김: ${v.audit.why}`}`,
     v.audit.legacy ? ` (해시 사슬 이전 기록 ${v.audit.legacy}행은 검사 대상 아님)` : ''));
-  const verify = wrap(async () => showVerify(await api('integrity')));
+  // 빠른 검사: 저장한 검사점 뒤 새 행만(바로). 전체 검사: 처음부터 끝까지(백그라운드 작업, 진행 표시)
+  const verify = wrap(async () => { const v = await api('integrity'); showVerify(v, '빠른 '); if (v.incremental || (v.access && v.access.incremental)) toast('빠른 검사: 지난 검사점 뒤 새 기록만 확인했습니다'); });
+  const verifyFull = wrap(async () => showVerify(await runJob('integrity/full', {}, '전체 무결성 검사'), '전체 '));
   const done = st.done;
-  return h('div', {}, pagehead('개인정보 접속기록', btn('무결성 검사', verify, 'small'), btn('CSV 내보내기', wrap(async () => { await download(`access.csv?${qs()}`, `동구-접속기록-${s.date_from}_${s.date_to}.csv`); toast('내려받았습니다 (내보낸 기록이 이력에 남습니다)'); }), 'small')),
+  return h('div', {}, pagehead('개인정보 접속기록', btn('빠른 무결성 검사', verify, 'small', { title: '지난 검사점 뒤에 쌓인 기록만 확인 (몇 초)' }),
+    boot.me.role === 'ADMIN' ? btn('전체 무결성 검사', verifyFull, 'small', { title: '처음부터 끝까지 확인 (백그라운드 작업, 기록이 많으면 몇 분)' }) : null, btn('CSV 내보내기', wrap(async () => { await download(`access.csv?${qs()}`, `동구-접속기록-${s.date_from}_${s.date_to}.csv`); toast('내려받았습니다 (내보낸 기록이 이력에 남습니다)'); }), 'small')),
     h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, `이번 달 접속기록 점검 (${st.month})`), done ? chip(`점검 완료 · ${done.actor} ${kst(done.at)}`, done.result && done.result.ok ? 'ok' : 'bad') : chip('점검 전', 'warn')),
       h('p', { class: 'muted' }, `이번 달 개인정보 조회 ${st.views_this_month.toLocaleString()}건. 매월 한 번 아래 목록에서 업무와 관계없는 조회·대량 조회·근무시간 외 조회가 없는지 보고 [점검 완료]를 기록하세요. 기록할 때 무결성 검사를 함께 합니다.`),
       h('div', { class: 'row' }, h('input', { id: 'acc-note', class: 'fill', placeholder: '점검 메모 (예: 이상 없음, 대량 조회 1건 사유 확인)', 'aria-label': '점검 메모' }),
@@ -2268,8 +2740,9 @@ function backupCard() {
     h('p', { class: 'muted' }, '백업 파일은 별도 백업 비밀번호로 암호화됩니다. 비밀번호를 잃으면 열 수 없으니 책임자가 따로 보관하세요. 백업 파일은 승인된 보안 매체로만 옮깁니다.'),
     h('div', { class: 'row' }, pass, pass2, btn('지금 백업', wrap(async () => {
       if (pass.value !== pass2.value) throw new Error('두 번 입력한 백업 비밀번호가 다릅니다.');
-      const r = await post('backup', { passphrase: pass.value }); pass.value = pass2.value = '';
-      toast(`백업했습니다: ${r.name}`); load();
+      const pw = pass.value; pass.value = pass2.value = '';
+      const r = await runJob('backup', { passphrase: pw }, '수동 백업');
+      toast(`백업했습니다: ${r.name} (${(r.bytes / 1024 / 1024).toFixed(1)}MB)`); load();
     }, msg), 'primary')),
     h('p', { class: 'small muted' }, '백업 폴더: ', dirEl),
     h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['파일', '종류', '만든 시각', '크기', '확인'].map((t) => h('th', {}, t)))), list)),
@@ -2279,9 +2752,69 @@ function backupCard() {
     h('div', { class: 'row' }, '백업 폴더', bdir, btn('저장', wrap(async () => { await post('settings', { photo_retention_days: days.value, backup_dir: bdir.value }); toast('저장했습니다'); boot = null; render(); }, msg), 'small')),
     h('div', { class: 'row' }, purgeInfo, btn('기간 지난 사진 정리', wrap(async () => {
       if (!(await confirmDlg('기간 지난 사진 정리', `회수일로부터 ${st.photo_retention_days}일이 지나고 처리가 끝난 접수의 사진을 지웁니다. 기록(해시·시각)은 남습니다. 계속할까요?`, { ok: '정리', danger: true }))) return;
-      const r = await post('photo-purge'); toast(`사진 ${r.count}장을 정리했습니다`); load();
+      const r = await runJob('photo-purge', {}, '사진 정리'); toast(`사진 ${r.count}장을 정리했습니다${r.bytes ? ` (${(r.bytes / 1024 / 1024).toFixed(1)}MB)` : ''}`); load();
     }, msg), 'small')),
     h('p', { class: 'small muted' }, '처리가 끝난 접수(수거 완료·취소 또는 그날 마감)의 사진만 정리합니다. 사진 원본은 지워지고 해시·회수 시각·정리 시각은 이력으로 남습니다.'), msg);
+}
+
+// ------------------------------------------------------------ 도움말 (역할별 하루 순서 + 예외 처리, 운영 매뉴얼 4·5장 요약). 화면 안 정적 글, 외부 연결 없음
+const HELP_DAY = {
+  INTAKE: [['오전·수시', [
+    ['오늘 현황', '밀린 일(지난 예정일 미처리·예정일 없음·마감 안 한 날·충돌함)부터 확인', '#/home'],
+    ['접수', '[+ 전화 접수 등록] → 신청자 → 품목 → 예정일(예약 달력·[가장 빠른 가능일]) → 위치. 저장 뒤 [주민 안내 문구 복사]', '#/request/new'],
+    ['수정·취소', '수정은 사유 필수. "다른 곳에서 바뀌었습니다"가 뜨면 [다시 열기] → [내 값 다시 넣기]', '#/requests'],
+    ['배정·노선', '날짜·팀 → [노선 계산] → 미배정 사유 확인 → [배정 확정]. 확정 뒤 한두 건만 바꿀 때는 [현재 배정 불러오기]', '#/dispatch'],
+    ['목록 전송', '[QR 표시] → 휴대폰 [오늘 목록 받기] → 휴대폰의 수신 코드(R-) 입력', '#/send']]],
+  ['오후', [
+    ['결과 가져오기', '결과(.dgr)·사진(.dgp) 파일을 한꺼번에 끌어 놓기 → 결과 반영 코드(D-)·사진 회수 코드(P-)를 수거팀에 알려 주고 [휴대폰에 입력함]', '#/results'],
+    ['충돌함', '사유를 보고 반영·거부. 한 접수·한 가져오기의 기록은 [모두 반영/거부]로 한 번에', '#/results?focus=conflicts'],
+    ['수납·환불', '접수 상세 → 수납 기록. 납부 뒤 취소·과납은 환불 화면에서 신청', '#/refunds'],
+    ['일일 마감', '확인 목록을 보고 [마감 기록] → 팀장 확인 요청. "결과를 가져오지 않은 팀"이 나오면 먼저 결과를 받기', '#/close']]]],
+  LEAD: [['매일', [
+    ['오늘 현황', '팀별 진행, 밀린 일(마감 확인 대기·환불 결재 대기)', '#/home'],
+    ['마감 확인', '담당자가 기록한 회차를 보고 [팀장 확인]. 기록한 사람은 확인할 수 없음', '#/close'],
+    ['환불 결재', '결재 대기 건 [결재] 또는 [반려](사유)', '#/refunds?status=REQUESTED']]],
+  ['매월', [
+    ['접속기록 점검', '많은 조회·근무 시간 밖 조회 확인 → [빠른 무결성 검사] → [점검 완료]. 실패면 즉시 정보보호 담당에', '#/access'],
+    ['월보', '통계·보고서 → 지난달 → [월보 출력]', '#/stats']]]],
+  ADMIN: [['매일', [
+    ['오늘 현황', '운영 준비 점검(✗ 항목), 예약 작업 경고 띠, 밀린 일 확인', '#/home'],
+    ['백업', '자동 백업 성공 여부. 키가 없으면 [백업 키 만들기]. [지금 백업]은 진행 띠로 끝을 확인', '#/settings/backup']]],
+  ['매주·매월', [
+    ['사용자·이력', '로그인 실패·중지할 계정, 진단(DB 크기·마지막 작업 시각)', '#/users'],
+    ['접속기록', '팀장과 월 점검, 필요하면 [전체 무결성 검사]', '#/access'],
+    ['설정', '행정동·한도·휴무일, 문의처·납부 안내 문구, 감면 사유', '#/settings/basic']]]],
+  FIELD: [['업무 끝', [
+    ['결과 가져오기', '휴대폰 [결과 보내기]로 만든 파일을 넣고, 화면의 결과 반영 코드(D-)를 휴대폰에 입력', '#/results'],
+    ['사진', '사진 파일(.dgp)을 넣은 뒤 사진 회수 코드(P-)를 입력해야 휴대폰에서 사진을 지울 수 있음', '#/results']]]],
+};
+const HELP_EXC = [
+  ['휴대폰 분실', '설정 → 기기 → [분실 처리]. 그 기기로는 목록·결과를 주고받지 않음. 보안 담당 보고'],
+  ['휴대폰 고장·교체', '새 휴대폰 등록 → [지문 같음·사용 시작] → 팀 고르기 → 목록 다시 보내기'],
+  ['"다른 곳에서 바뀌었습니다"', '다른 사람이 먼저 저장함. [다시 열기] → 바뀐 내용 확인 → [내 값 다시 넣기] → 저장'],
+  ['결과 파일 "검증 실패"', '다른 PC용·손상 파일. 아무것도 반영 안 됨 → 휴대폰에서 다시 만들기'],
+  ['같은 파일 두 번', '"이미 가져온 파일" — 중복 반영 없음'],
+  ['충돌', '충돌함에서 사유와 함께 반영/거부. 거부해도 원 기록은 남음'],
+  ['정정·취소 요청(현장)', '충돌함 [현장 요청]에서 주민 확인 뒤 반영 또는 거부'],
+  ['금액 확인 대기', '0원으로 정하지 않음. 수수료표 개정·승인 또는 유사 품목 적용'],
+  ['한도 초과·휴무일', '경고만 함. [가장 빠른 가능일] 또는 배정에서 [다른 날로 미루기]'],
+  ['확정 뒤 한 건 추가·빼기', '배정·노선 → [현재 배정 불러오기] → 넣기·빼기·순서·팀 옮기기 → 그 팀 목록 다시 보내기'],
+  ['마감 후 결과가 늦게 옴', '가져온 뒤 다시 [마감 기록] → 새 회차 → 팀장 재확인'],
+  ['접속기록 무결성 실패', '정보보호 담당에 즉시 보고. DB를 고치지 말 것'],
+  ['자동 백업 실패', '설정 → 백업의 오류 확인 → [지금 자동 백업] 다시 실행'],
+  ['지도가 안 뜸', '인터넷 확인. 지도 없이도 접수·노선(직선거리)·전송은 됨'],
+];
+function screenHelp() {
+  const role = boot.me.role;
+  const day = HELP_DAY[role] || HELP_DAY.INTAKE;
+  return h('div', { class: 'help' }, pagehead(`도움말 · ${boot.me.role_label}`),
+    h('p', { class: 'muted' }, '하루 업무 순서와 자주 생기는 예외입니다. 자세한 내용은 운영 매뉴얼(docs/운영매뉴얼.md) 4·5장을 보세요. 단축키: ', h('kbd', {}, '/'), ' 찾기 · ', h('kbd', {}, 'N'), ' 새 접수 · ', h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter'), ' 저장'),
+    ...day.map(([title, steps]) => h('div', { class: 'card' }, h('h2', {}, title), h('ol', { class: 'help-steps' }, ...steps.map(([k, t, href]) => h('li', {}, h('a', { href }, h('b', {}, k)), ' — ', t))))),
+    h('div', { class: 'card' }, h('h2', {}, '예외 처리'), grid(['상황', '처리'], HELP_EXC.map(([a, b]) => [h('b', {}, a), b]), { cls: 'help-exc' })),
+    h('div', { class: 'card' }, h('h2', {}, '코드 이름 (휴대폰과 같음)'), h('dl', { class: 'kv' },
+      h('dt', {}, '수신 코드 R-'), h('dd', {}, '휴대폰이 목록을 받은 뒤 보여 줌 → PC [목록 전송]에 입력'),
+      h('dt', {}, '결과 반영 코드 D-'), h('dd', {}, 'PC가 결과 파일을 반영한 뒤 보여 줌 → 휴대폰에 입력하면 그 접수의 개인정보가 휴대폰에서 지워짐'),
+      h('dt', {}, '사진 회수 코드 P-'), h('dd', {}, 'PC가 사진을 해시까지 확인한 뒤 보여 줌 → 휴대폰에 입력해야 사진을 지울 수 있음'))));
 }
 
 // ------------------------------------------------------------ 화면 설정: 테마(자동·밝게·어둡게)·글자 크기 — 사용자별로 서버에 저장
@@ -2322,11 +2855,22 @@ async function render(fromNav) {
       else { boot = await api('bootstrap'); touchSession(); }
     }
     if (boot) {
-      const [, route, arg] = (location.hash || '#/home').split('/');
+      // 주소 뒤 조건(#/requests?quick=OVERDUE 등): 화면 상태에 한 번 넣고 주소에서는 지운다(다시 그려도 사용자가 바꾼 조건을 덮지 않게)
+      const [pathPart, query] = (location.hash || '#/home').split('?');
+      if (query) {
+        const q = new URLSearchParams(query), r0 = pathPart.split('/')[1];
+        if (r0 === 'requests' && q.get('quick')) screenRequests.f = { ...(screenRequests.f || {}), q: '', status: '', date_from: '', date_to: '', dong: '', crew: '', pay: '', channel: '', quick: q.get('quick'), page: 1 };
+        if (r0 === 'close' && /^\d{4}-\d\d-\d\d$/.test(q.get('date') || '')) screenClose.s = { date: q.get('date') };
+        if (r0 === 'refunds' && q.has('status')) screenRefunds.s = { status: q.get('status') };
+        if (q.get('focus')) render.focus = q.get('focus');
+        history.replaceState(null, '', pathPart);
+      }
+      const [, route0, arg] = pathPart.split('/');
+      const route = route0;
       const role = boot.me.role;
       applyPrefs(boot.me.prefs);
       const screens = { home: screenHome, requests: screenRequests, request: () => screenRequest(arg), dispatch: screenDispatch, send: screenSend, results: screenResults, close: screenClose, qrtest: screenQrTest, fees: screenFees, stats: screenStats, pilot: screenPilot,
-        settings: () => screenSettings(arg), users: screenUsers, me: screenMe, revenue: screenRevenue, refunds: screenRefunds, access: screenAccess };
+        settings: () => screenSettings(arg), users: screenUsers, me: screenMe, revenue: screenRevenue, refunds: screenRefunds, access: screenAccess, help: screenHelp };
       // 역할별 메뉴 (서버도 같은 기준으로 막는다)
       const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
         ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD LEAD'], ['revenue', '세입·대사', 'ADMIN INTAKE LEAD'], ['refunds', '환불', 'ADMIN INTAKE LEAD'],
@@ -2335,7 +2879,7 @@ async function render(fromNav) {
       const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
       let cur = route || 'home';
       if (boot.me.must_change) cur = 'me';
-      if (!['request', 'me'].includes(cur) && !nav.some(([k]) => k === cur)) cur = 'home';
+      if (!['request', 'me', 'help'].includes(cur) && !nav.some(([k]) => k === cur)) cur = 'home';
       const content = await (screens[cur] || screenHome)();
       const active = cur === 'request' ? 'requests' : cur;
       // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
@@ -2343,7 +2887,7 @@ async function render(fromNav) {
       const ICON = { home: '현', requests: '접', dispatch: '배', send: '전', results: '결', close: '마', revenue: '세', refunds: '환', stats: '통', fees: '수', qrtest: 'Q', settings: '설', users: '이', access: '기' };
       const navLabel = Object.fromEntries(NAV.map(([k, t]) => [k, t]));
       const group = GROUPS.find(([, ks]) => ks.includes(active));
-      const pageName = cur === 'request' ? (arg === 'new' ? '전화 접수 등록' : '접수 상세') : cur === 'me' ? '내 계정' : navLabel[active];
+      const pageName = cur === 'request' ? (arg === 'new' ? '전화 접수 등록' : '접수 상세') : cur === 'me' ? '내 계정' : cur === 'help' ? '도움말' : navLabel[active];
       const subName = cur === 'settings' ? (SETTING_TABS.find(([k]) => k === arg) || SETTING_TABS[0])[1] : null;
       const crumbs = [group ? group[0] : '개인', ...(cur === 'request' ? [navLabel.requests] : []), pageName, ...(subName ? [subName] : [])];
       const d = new Date(boot.today + 'T00:00:00');
@@ -2360,6 +2904,7 @@ async function render(fromNav) {
           h('span', { class: 'grow' }),
           h('span', { class: 'tb-date' }, h('span', { class: 'sr-only' }, '업무 기준일 '), dayTxt),
           prefsControls(),
+          h('a', { href: '#/help', class: 'tb-help' + (cur === 'help' ? ' on' : ''), title: '오늘 할 일 순서와 예외 처리' }, '도움말'),
           h('a', { href: '#/me', class: 'who' + (active === 'me' ? ' on' : ''), title: '내 계정' }, h('b', {}, boot.me.display_name), h('small', {}, boot.me.role_label)),
           h('a', { href: '#', class: 'tb-logout', onclick: logout }, '로그아웃')),
         h('nav', { class: 'side', id: 'side-nav', 'aria-label': '업무 메뉴' },
@@ -2367,7 +2912,7 @@ async function render(fromNav) {
           ...GROUPS.map(([gt, ks]) => {
             const items = nav.filter(([k]) => ks.includes(k));
             return items.length ? h('div', { class: 'navgrp' + (group && group[0] === gt ? ' cur' : '') }, h('span', { class: 'navgrp-t', 'aria-hidden': 'true' }, gt),
-              ...items.map(([k, t]) => h('a', { href: '#/' + k, class: active === k ? 'on' : '', 'aria-current': active === k ? 'page' : null, title: t, onclick: () => { render.navOpen = false; } },
+              ...items.map(([k, t]) => h('a', { href: '#/' + k, 'data-k': k, class: active === k ? 'on' : '', 'aria-current': active === k ? 'page' : null, title: t, onclick: () => { render.navOpen = false; } },
                 h('span', { class: 'ic', 'aria-hidden': 'true' }, ICON[k] || '·'), h('span', { class: 'nt' }, t)))) : null;
           })),
         h('main', {}, h('nav', { class: 'crumb', 'aria-label': '현재 위치' }, h('span', {}, '홈'), ...crumbs.map((c, i) => h('span', { 'aria-current': i === crumbs.length - 1 ? 'page' : null }, c))), content));
@@ -2382,6 +2927,8 @@ async function render(fromNav) {
   if (my !== renderSeq) return;
   const prevHash = render.lastHash; render.lastHash = location.hash;
   $app.replaceChildren(view);
+  if (boot) { paintBadges(); refreshBadges(); }
+  if (render.focus) { const f = render.focus; render.focus = null; setTimeout(() => { const el = document.getElementById(f); if (el) el.scrollIntoView({ block: 'start' }); }, 300); }
   const h1 = $app.querySelector('main h1, .login h1, .login strong');
   if (h1) document.title = `${h1.textContent} · 동구 대형폐기물`;
   if (prevHash !== location.hash && h1 && !document.querySelector('main [autofocus]')) { h1.tabIndex = -1; if (!$app.querySelector('main input:focus')) h1.focus({ preventScroll: true }); }
@@ -2391,9 +2938,9 @@ addEventListener('hashchange', () => render(true));
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && render.navOpen && !dlgStack.length) { render.navOpen = false; const sh = $app.querySelector('.shell'); if (sh) sh.classList.remove('nav-open'); } });
 // 단축키 (입력 칸 밖에서): / 찾기, N 새 접수 / 입력 중: Ctrl+Enter 저장
 addEventListener('keydown', (e) => {
-  if (!boot) return;
+  if (!boot || dlgStack.length) return;  // 대화 상자가 열려 있으면 단축키를 쓰지 않는다
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { const b = document.querySelector('[data-save]'); if (b) { e.preventDefault(); b.click(); } return; }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { const b = document.querySelector('[data-save]'); if (b && !b.disabled) { e.preventDefault(); b.click(); } return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === '/') { const q = document.querySelector('main input[type=search]'); if (q) { e.preventDefault(); q.focus(); } }
   else if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') { if (['ADMIN', 'INTAKE'].includes(boot.me.role)) { e.preventDefault(); go('#/request/new'); } }

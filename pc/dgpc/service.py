@@ -1857,7 +1857,7 @@ def fee_usage(con, limit: int = 10) -> list[str]:
 
 def list_conflicts(con, include_resolved=False):
     sql = """SELECT e.event_id, e.kind, e.body_json, e.conflict_reason, e.apply_status, e.resolved_reason, e.device_ts, e.assign_ver,
-        r.receipt_no, r.name, r.status AS request_status, e.request_id FROM result_event e LEFT JOIN request r ON r.id=e.request_id
+        r.receipt_no, r.name, r.status AS request_status, e.request_id, e.import_id, e.warning FROM result_event e LEFT JOIN request r ON r.id=e.request_id
         WHERE e.conflict_reason IS NOT NULL AND e.kind NOT IN ('DIAL_INTENT')"""
     if not include_resolved:
         sql += " AND e.apply_status='CONFLICT'"

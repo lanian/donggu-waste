@@ -96,3 +96,12 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 - 이전 단계(PRAGMA user_version): 1 = v0.12 이하 구조, 2 = v0.13. 기존 DB를 처음 열 때 `state/pre-migration/pc-v{이전}-to-v{새}-….db`로 파일을 복사해 둔다(같은 DB 키로 암호화된 그대로). DB가 프로그램보다 새 버전이면 열지 않는다.
 - 접수 일괄 등록(CSV)·대사 파일의 **실제 반영**은 아직 잠금 안에서 읽고 넣는다(미리보기는 잠금 밖). 2,000·5,000행 제한이라 짧다.
 - 마감 확인(`close/approve`) 뒤 자동 파기·자동 백업은 이전처럼 그 요청 안에서 돈다(예약 작업과 별개).
+
+## 9. 화면(pc/ui) 반영 결과 (2026-11-04)
+
+- 서버 한 줄 변경: `GET /api/conflicts` 행에 `import_id`·`warning`을 더했다(가져오기별 [모두 반영/거부], 순번 재사용 경고 표시). `tests/test_pc.py` v13에 확인 1개 추가(525개).
+- 접수 수정·취소·감면에 `req_ver`를 보내고 409면 "다른 곳에서 바뀌었습니다" + [다시 열기] → 다시 연 화면에 내가 고친 칸만 보여 주고 [내 값 다시 넣기].
+- 작업 번호 응답(수동·자동 백업, 백업 정리, 개인정보 파기, 사진 정리, 전체 무결성 검사, 환불 전체 점검)은 오른쪽 아래 진행 띠(`.jobs`)에서 `GET /api/jobs/{id}`를 불러 끝나면 결과를 알린다. 접속기록 화면은 [빠른 무결성 검사]·[전체 무결성 검사](관리자).
+- `client_req_id`: 새 접수·수납·하차·통화 기록·환불 신청·마감에 보낸다(키별로 화면 밖에 두고 성공하면 지움, 실패 뒤 다시 보내면 같은 값). 모든 작업 단추는 누른 동안 꺼진다(두 번 누름·Ctrl+Enter).
+- 새로 쓰는 API: `pending`(오늘 현황 '밀린 일'·메뉴 숫자), `readiness`(관리자 오늘 현황 맨 위, 모두 ✓이면 숨김), `ops-status`(경고 띠·진단), `diag`(사용자·이력 화면 진단), `assign/current`·`assign/edit`(배정 화면 [현재 배정 불러오기]), `conflicts/bulk`, `imports/recent`·`imports/{id}/confirm`(결과 가져오기 '최근 가져오기'), `requests/{id}/notice`([안내 문구 복사]).
+- 화면 주소에 조건을 붙일 수 있다: `#/requests?quick=OVERDUE|NODATE|FEE…`, `#/close?date=YYYY-MM-DD`, `#/refunds?status=REQUESTED`, `#/results?focus=conflicts` (한 번 반영하고 주소에서 지움).

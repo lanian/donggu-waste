@@ -2066,6 +2066,9 @@ def v13():
        "충돌함에 들어가는 현장 품목도 정리해서 저장(단가 = PC 표, 수량 0~9999)")
     con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps({"line_id": lid, "fee_rate_id": ward["id"], "name": "장롱", "qty": 1,
                                                                                      "unit_price": 1, "price_status": "CONFIRMED"}), evs[1]["event_id"]))  # 이전 버전이 저장한 정리 안 된 기록 흉내
+    lc13 = [c for c in S.list_conflicts(con) if c["request_id"] == rc_]
+    ok(len(lc13) == 2 and all(c["import_id"] == imp["import_id"] and "warning" in c for c in lc13),
+       "충돌함 목록에 가져오기 번호(import_id)·경고(warning) — 화면이 가져오기별 [모두 반영/거부]")
     bulk = S.resolve_conflicts_bulk(con, "APPLY", "팀장 확인: 실제 수거", request_id=rc_)
     fl = [l for l in S.get_request(con, rc_)["state"]["lines"] if l["line_id"] == lid][0]
     ok(bulk["resolved"] == 2 and fl["price"] == ward["price"] and fl["qty_confirmed"] == 0, f"충돌함 [반영]도 직접 가져오기와 같게 정리: 휴대폰 단가 1원 무시 → PC 표 {ward['price']:,}원")
