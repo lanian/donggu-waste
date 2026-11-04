@@ -1535,9 +1535,10 @@ def v12_field():
     ok(S.one(con, "SELECT COUNT(*) AS n FROM request WHERE id=?", (rid,))["n"] == 1, "같은 현장 접수가 다시 와도 접수는 하나")
     # 다른 휴대폰이 이 현장 접수 건의 결과를 보내면: 배정된 적 없는 접수 → 충돌
     rid2 = str(uuid.uuid4())
-    i2 = ph.ev({"request_id": rid2, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"name": "현장둘", "phone": "010-0000-7003", "address": "가상시 동구 예시로 74",
+    i2 = ph.ev({"request_id": rid2, "assign_ver": 0, "req_ver": 1}, "FIELD_INTAKE", {"channel": "전화", "name": "현장둘", "phone": "010-0000-7003", "address": "가상시 동구 예시로 74",
                                                                                  "planned_date": day, "items": [{"line_id": str(uuid.uuid4()), "fee_rate_id": chair["id"], "qty": 1}]})
     S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": [i2]}, P.TYPE_RESULT))
+    ok(S.one(con, "SELECT channel FROM request WHERE id=?", (rid2,))["channel"] == "전화", "휴대폰에서 고른 접수 경로(전화)가 PC 원본 접수 경로로")
     oth = other.ev({"request_id": rid2, "assign_ver": 0, "req_ver": 1}, "ATTEMPT", {"outcome": "NOT_COLLECTED"}, assign_ver=0)
     oth["assign_ver"] = 0
     S.import_result(con, other.seal({"schema": "dg.result/1", "work_date": day, "events": [oth]}, P.TYPE_RESULT))

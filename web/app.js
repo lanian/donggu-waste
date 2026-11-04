@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.6';
+export const APP_VERSION = '0.12.7';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -409,7 +409,7 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
         dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
         !solo && s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
-        !solo && s.field ? h('em', { class: 'chip new' }, '현장 접수') : null,
+        !solo && s.field ? h('em', { class: 'chip new' }, `${s.channel || '현장'} 접수`) : null,
         !solo && cancelAsked(s.request_id) ? h('em', { class: 'chip warn' }, '취소 요청') : null,
         h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
         h('em', { class: 'chip p-' + d.progress }, s.removed ? '목록에서 제외됨' : cancelled ? '취소' : LABEL.progress[d.progress]),
@@ -495,13 +495,15 @@ async function screenHome() {
   const top = h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), themeToggle(), btn('잠금', lockNow, 'ghost'));
   // 목록이 있으면 하루 한두 번 쓰는 버튼은 작게, 방문 순서가 먼저 보이게
   const stale = n && dl && dl.work_date < todayKST();
+  // 접수 등록(현장·전화)은 기기 등록 전에도 받아 둘 수 있다(PC로 보내는 것만 등록 뒤에)
+  const intakeBtn = btn('+ 접수 등록 (현장·전화)', () => { ui.form = null; go('#/intake'); }, 'big intake-btn');
   const actions = dl
-    ? h('section', { class: 'actions grid2' },
+    ? h('section', { class: 'actions' }, h('div', { class: 'grid2' },
       btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered }),
-      btn(n ? `결과 보내기 ${n}건` : '결과 보내기', () => go('#/export'), 'big' + (stale ? ' warn' : '')))
+      btn(n ? `결과 보내기 ${n}건` : '결과 보내기', () => go('#/export'), 'big' + (stale ? ' warn' : ''))), intakeBtn)
     : h('section', { class: 'actions' },
       btn('오늘 목록 받기', () => go('#/scan'), 'primary huge', { disabled: !registered }),
-      btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (stale ? 'warn' : '')));
+      btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (stale ? 'warn' : '')), intakeBtn);
   const out = [top, workerBar(), ...(await homeBanners())];
   if (!registered) out.push(h('section', { class: 'card notice' }, h('p', {}, '먼저 관리자와 함께 기기 등록을 해 주세요.'), btn('기기 등록', () => go('#/register'), 'primary')));
   out.push(actions);
@@ -509,9 +511,7 @@ async function screenHome() {
   const every = pcStops();
   const later = every.filter((s) => s.field && s.planned_date !== wd);  // 다른 날로 받은 현장 접수
   const today = every.filter((s) => !later.includes(s));
-  const moreBtns = h('div', { class: 'grid2' },
-    btn('+ 현장 접수', () => { ui.form = null; go('#/intake'); }, 'big', { disabled: !registered }),
-    btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big'));
+  const moreBtns = btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big');
   if (!today.length) { out.push(h('p', { class: 'empty' }, '받은 목록이 없습니다.')); out.push(moreBtns); }
   else {
     const stops = today.map((s) => ({ s, d: deriveStop(s, st.events) }));
@@ -946,7 +946,7 @@ async function screenStop(id) {
     h('p', { class: 'small' }, stop.eta ? `${stop.receipt_no} · 도착 예정 ${stop.eta}` : stop.receipt_no),
     stop.levy_no ? h('p', { class: 'small levy-no' }, `부과번호 ${stop.levy_no}`) : null,
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
-    stop.field ? h('p', { class: 'notice' }, `이 휴대폰에서 받은 현장 접수입니다(임시번호 ${stop.receipt_no}${stop.planned_date ? ` · 예정일 ${stop.planned_date}` : ''}). PC 접수번호는 PC 반영 뒤 목록에 나옵니다.`) : null,
+    stop.field ? h('p', { class: 'notice' }, `이 휴대폰에서 받은 ${stop.channel || '현장'} 접수입니다(임시번호 ${stop.receipt_no}${stop.planned_date ? ` · 예정일 ${stop.planned_date}` : ''}). PC 접수번호는 PC 반영 뒤 목록에 나옵니다.`) : null,
     cancelAsked(stop.request_id) ? h('p', { class: 'notice' }, '취소를 요청했습니다. PC 담당자가 확인하기 전까지는 원래 접수 그대로입니다.') : null,
     stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
     stop.revisit ? h('p', { class: 'notice' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
@@ -1618,6 +1618,9 @@ function lineFromRow(r, qty, table) {
   return { line_id: crypto.randomUUID(), fee_rate_id: r.id, fee_version_id: table.version_id, name: r.name, spec: r.spec, unit: r.unit, unit_label: r.unit_label,
     qty, unit_price: r.price, amount: r.status === 'CONFIRMED' ? r.price * qty : null, price_status: r.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING' };
 }
+// PC 연결 방식 휴대폰에서 받는 접수의 경로(PC 접수 경로와 같은 이름)
+const FIELD_CHANNELS = ['현장', '전화', '방문'];
+let registeredNow = true;  // 화면 그릴 때 갱신(접수 화면의 미등록 안내용)
 function screenIntake(id) {
   // PC 연결 방식: 새 현장 접수만(PC 원본은 고치지 않음 — 바꿀 내용은 지점 화면의 [정정 요청])
   const onField = !isSolo();
@@ -1629,7 +1632,7 @@ function screenIntake(id) {
     const src = editing || st.intakeDraft || {};
     ui.form = { id: id || null, name: src.name || '', phone: src.phone || '', address: src.address || '', dong: src.dong || '', spot_note: src.spot_note || '', memo: src.memo || '',
       lat: src.addrLat ?? null, lon: src.addrLon ?? null, zip: src.zip || '', dongCands: [],
-      planned_date: src.planned_date || (onField ? pcWorkDate() : todayKST(1)), eta: src.eta || '', items: JSON.parse(JSON.stringify(src.items || [])), reason: '', dupAck: false,
+      planned_date: src.planned_date || (onField ? pcWorkDate() : todayKST(1)), eta: src.eta || '', channel: src.channel || '현장', items: JSON.parse(JSON.stringify(src.items || [])), reason: '', dupAck: false,
       pick: { q: '', sel: null, qty: 1 } };
   }
   const f = ui.form;
@@ -1662,7 +1665,7 @@ function screenIntake(id) {
   drawItems();
   const msg = h('p', { class: 'msg' });
   const dupBox = h('div', {});
-  const save = btn(editing ? '수정 저장' : onField ? '현장 접수 저장' : '접수 등록', async () => {
+  const save = btn(editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록', async () => {
     const phone = digits(f.phone);
     if (!f.name.trim()) return (msg.textContent = '이름을 적어 주세요.');
     if (!/^0\d{8,10}$/.test(phone)) return (msg.textContent = '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
@@ -1677,7 +1680,7 @@ function screenIntake(id) {
         dupBox.replaceChildren(h('section', { class: 'card notice' },
           h('p', {}, `비슷한 접수가 ${dups.length}건 있습니다. ` + (onField ? '같은 건이면 새로 받지 말고 그 지점에서 품목 추가·정정 요청을 하세요.' : '같은 건이면 등록하지 말고 기존 접수를 수정하세요.')),
           h('ul', { class: 'small list' }, ...dups.map((r) => h('li', {}, `${r.receipt_no} · ${r.name} · ${fmtPhone(r.phone)} · ${r.address}` + (r.planned_date ? ` · ${r.planned_date}` : '')))),
-          h('p', {}, `별개 접수가 맞으면 [${onField ? '현장 접수 저장' : '접수 등록'}]을 한 번 더 누르세요. (자동으로 합치지 않습니다)`)));
+          h('p', {}, `별개 접수가 맞으면 [${onField ? '접수 저장' : '접수 등록'}]을 한 번 더 누르세요. (자동으로 합치지 않습니다)`)));
         dupBox.scrollIntoView({ block: 'center' });
         return;
       }
@@ -1691,15 +1694,17 @@ function screenIntake(id) {
       // 현장 접수: 임시번호로 이 휴대폰 목록에 넣고, 결과 보내기 때 PC로 보내 PC 원본 접수가 된다(금액은 PC 표로 다시 계산)
       const rd = todayKST();
       const n = (st.receiptCounter[rd] || 0) + 1; st.receiptCounter[rd] = n;
-      const temp = `현장-${rd.slice(5).replace('-', '')}-${n}`;
+      const ch = FIELD_CHANNELS.includes(f.channel) ? f.channel : '현장';
+      const temp = `${ch}-${rd.slice(5).replace('-', '')}-${n}`;
       const seq = allStops().reduce((m, x) => Math.max(m, Number(x.seq) || 0), 0) + 1;
-      const fstop = { request_id: crypto.randomUUID(), receipt_no: temp, field: true, req_ver: 1, assign_ver: 0, seq, ...data,
+      const fstop = { request_id: crypto.randomUUID(), receipt_no: temp, field: true, channel: ch, req_ver: 1, assign_ver: 0, seq, ...data,
         appt: data.eta ? [data.eta, null] : null, status: 'ACTIVE', received_at: now };
       st.fieldStops = [...(st.fieldStops || []), fstop]; st.intakeDraft = null;
-      await addEvent(fstop, 'FIELD_INTAKE', { temp_no: temp, ...data,
+      await addEvent(fstop, 'FIELD_INTAKE', { temp_no: temp, channel: ch, ...data,
         items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) });
-      ui.form = null; toast(`${temp} 현장 접수를 저장했습니다. 결과 보내기 때 PC로 갑니다`);
-      go(data.planned_date === pcWorkDate() ? `#/stop/${fstop.request_id}` : '#/home');
+      ui.form = null; toast(`${temp} ${ch} 접수를 저장했습니다. 결과 보내기 때 PC로 갑니다`);
+      // 지금 그 자리에서 받은 현장 접수는 바로 처리할 수 있게 그 지점으로, 전화·방문 접수는 목록으로
+      go(ch === '현장' && data.planned_date === pcWorkDate() ? `#/stop/${fstop.request_id}` : '#/home');
       return;
     }
     if (editing) {
@@ -1719,12 +1724,17 @@ function screenIntake(id) {
     }
   }, 'primary huge');
   return h('main', {},
-    h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, editing ? `접수 수정 ${editing.receipt_no}` : onField ? '현장 접수' : '전화 접수 등록')),
-    onField ? h('section', { class: 'card notice' }, h('p', {}, '수거 중 주민이 새로 요청한 건을 받습니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
+    h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
+    onField && !registeredNow ? h('section', { class: 'card notice warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
+      btn('기기 등록', () => go('#/register'), 'ghost')) : null,
+    onField ? h('section', { class: 'card notice' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
       h('p', { class: 'small' }, '금액은 PC 수수료표로 다시 계산됩니다. 표에 없는 품목은 "확인 대기"로 갑니다. 이미 목록에 있는 집의 품목이 늘었으면 새로 받지 말고 그 지점에서 [품목 추가]를 하세요.')) : null,
     !editing && st.intakeDraft ? h('p', { class: 'small' }, '작성 중이던 내용을 불러왔습니다. ',
       btn('지우고 새로 쓰기', async () => { st.intakeDraft = null; await commit(); ui.form = null; render(); }, 'ghost')) : null,
     h('section', { class: 'card' },
+      onField ? h('div', {}, h('div', { class: 'fld-label' }, '접수 경로'),
+        h('div', { class: 'grid3', role: 'group', 'aria-label': '접수 경로' }, ...FIELD_CHANNELS.map((c) =>
+          btn(c, () => { f.channel = c; saveDraft(); render(); }, f.channel === c ? 'opt on' : 'opt', { 'aria-pressed': f.channel === c ? 'true' : 'false' })))) : null,
       field('name', '이름', { autocomplete: 'off' }),
       field('phone', '연락처', { type: 'tel', inputmode: 'tel', autocomplete: 'off', placeholder: '010-0000-0000' }),
       addrSearch({
@@ -2282,7 +2292,7 @@ async function render() {
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
       'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings, unload: screenUnload,
-      mode: screenMode, intake: () => screenIntake(arg), fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
+      mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
   if (my !== renderSeq) return; // 그 사이 다른 화면으로 이동

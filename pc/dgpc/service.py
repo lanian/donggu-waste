@@ -1333,7 +1333,8 @@ def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
             continue
         items.append(x)
     data = {k: str(b.get(k) or "")[:300] for k in ("name", "phone", "address", "spot_note", "memo", "planned_date")}
-    data.update(channel="현장", items=items, appt_start=b.get("eta") if re.fullmatch(r"\d\d:\d\d", str(b.get("eta") or "")) else None)
+    ch = b.get("channel") if b.get("channel") in ("현장", "전화", "방문") else "현장"  # 휴대폰에서 고른 접수 경로
+    data.update(channel=ch, items=items, appt_start=b.get("eta") if re.fullmatch(r"\d\d:\d\d", str(b.get("eta") or "")) else None)
     if _num(b.get("lat")) is not None and _num(b.get("lon")) is not None:
         data.update(lat=_num(b["lat"]), lon=_num(b["lon"]), geo_source="ADDR")
     dong_s = str(b.get("dong") or "").strip()[:20]
@@ -1347,7 +1348,7 @@ def _field_request(con, rid: str, b: dict, dev_id: str) -> str:
     dong, _ = _resolve_dong(con, data, d["address"])
     _, receipt = _insert_request(con, d, built, data, dong, rid=rid)
     con.execute("UPDATE request SET origin_device=? WHERE id=?", (dev_id, rid))
-    audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": "현장", "origin": "FIELD", "device": (dev_id or "")[:8],
+    audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": ch, "origin": "FIELD", "device": (dev_id or "")[:8],
                                           **({"temp_no": str(b["temp_no"])[:30]} if b.get("temp_no") else {}), **({"dong": dong} if dong else {})})
     return receipt
 

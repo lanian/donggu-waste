@@ -138,6 +138,10 @@ def main():
             page.get_by_role("button", name="PC와 연결해서 사용").click()
             expect(page.get_by_text("먼저 관리자와 함께 기기 등록")).to_be_visible(timeout=20000)
             page.screenshot(path=SHOTS / "01_home_unregistered.png")
+            ok(page.get_by_role("button", name="+ 접수 등록 (현장·전화)").is_enabled(), "기기 등록 전에도 접수 등록 단추는 눌림(보내기만 등록 뒤에)")
+            page.get_by_role("button", name="+ 접수 등록 (현장·전화)").click()
+            expect(page.get_by_text("이 휴대폰은 아직 PC에 등록되지 않았습니다")).to_be_visible()
+            page.get_by_role("button", name="← 취소").click()
             page.get_by_role("button", name="기기 등록").click()
             code_box = page.locator("textarea.code")
             expect(code_box).to_be_visible(timeout=30000)
@@ -558,8 +562,10 @@ def pc_field(pw, url):
     ok("순서 바꿈(이 휴대폰만)" in page.locator(".meta").inner_text() and page.get_by_role("button", name="PC 순서로 되돌리기").is_visible(),
        "PC 연결 방식에서도 방문 순서 바꾸기(이 휴대폰만, 다시 열어도 유지, PC 순서로 되돌리기)")
     # 현장 접수
-    page.get_by_role("button", name="+ 현장 접수").click()
-    expect(page.locator("h1", has_text="현장 접수")).to_be_visible()
+    page.get_by_role("button", name="+ 접수 등록 (현장·전화)").click()
+    expect(page.locator("h1", has_text="접수 등록 (PC로 보냄)")).to_be_visible()
+    ok(page.get_by_role("group", name="접수 경로").get_by_role("button", name="현장").get_attribute("aria-pressed") == "true"
+       and page.get_by_role("group", name="접수 경로").get_by_role("button", name="전화").count() == 1, "PC 연결 방식 접수: 경로 현장(기본)·전화·방문 고르기")
     page.get_by_label("이름").fill("가상현장")
     page.get_by_label("연락처").fill("010-0000-6161")
     page.get_by_label("배출 주소").fill("가상시 동구 현장길 3")
@@ -605,7 +611,7 @@ def pc_field(pw, url):
     page.locator(".pick-foot").get_by_role("button", name="완료").click()
     expect(page.locator("#intake-items .line.orig")).to_have_count(2)
     page.screenshot(path=SHOTS / "30_pc_field_intake.png", full_page=True)
-    page.get_by_role("button", name="현장 접수 저장").click()
+    page.get_by_role("button", name="접수 저장").click()
     expect(page.locator(".who .name")).to_have_text("가상현장", timeout=15000)
     ok(page.get_by_text(re.compile("이 휴대폰에서 받은 현장 접수입니다\\(임시번호 현장-")).is_visible(), "현장 접수 저장 → 바로 그 지점 화면(임시번호, PC 반영 전 안내)")
     page.get_by_role("button", name="전부 실음 · 수거 완료").click()
