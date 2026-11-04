@@ -1,6 +1,7 @@
 # 시험(CI)과 휴대폰 앱(web/) 배포.
-#   - main push · PR      : 시험만 (배포 안 함)
-#   - v* 태그 push        : 시험 → 버전·태그 검사 → github-pages 환경 승인 → Pages 배포
+#   - main push           : 시험 → 버전 검사 → Pages 배포 (예전처럼 자동. 환경에 승인자를 지정했으면 승인 뒤 배포)
+#   - PR                  : 시험만 (배포 안 함)
+#   - v* 태그 push        : 시험 → 버전·태그 검사 → Pages 배포
 #   - 수동 실행(workflow_dispatch, main 또는 v* 태그에서): 위와 같음
 # 업무 데이터는 저장소와 Pages에 없다. 절차와 승인 설정은 docs/배포·운영.md 참고.
 name: CI · Pages 배포
@@ -149,9 +150,9 @@ jobs:
   deploy:
     name: 휴대폰 앱 배포 (GitHub Pages)
     needs: [version, test, e2e]
-    # v* 태그 push, 또는 main·v* 태그에서 수동 실행할 때만. main push·PR 은 시험만.
+    # main push(자동), v* 태그 push, 또는 main·v* 태그에서 수동 실행. PR 은 시험만.
     if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
       (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
