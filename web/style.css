@@ -505,3 +505,7 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .btn.nav-btn.no-loc { opacity: .75; border-style: dashed; }
 /* 배출 주소 확인·동 추천 */
 .addr-check p, .dong-check p { margin: 4px 2px 0; } .warnp { color: var(--warn); font-weight: 600; } .ok-note { color: var(--brand-soft-ink); font-weight: 700; }
+/* 현장 점검 */
+.check-item h2 { display: flex; align-items: center; gap: 8px; } .check-item h2 .chip { margin-left: auto; }
+.check-item.r-OK { border-left: 4px solid var(--brand); } .check-item.r-FAIL { border-left: 4px solid var(--bad, #c0392b); }
+.check-btns { margin: 8px 0; } .check-pre { white-space: pre-wrap; font-size: .8rem; max-height: 50vh; overflow: auto; user-select: text; }

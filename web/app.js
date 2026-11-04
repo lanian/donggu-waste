@@ -12,7 +12,7 @@ import * as NAV from './nav.js';
 import * as J from './juso.js';
 import qrcode from './vendor/qrcode.mjs';
 
-export const APP_VERSION = '0.12.12';
+export const APP_VERSION = '0.12.13';
 const BACKUP_WARN_MS = 24 * 3600 * 1000; // 단독 모드: 마지막 백업 후 24시간 지나면 경고
 const LOCK_CHOICES = [5, 10, 15];        // 무조작 자동 잠금(분), 설정에서 고름. 기본 10분
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;    // 다른 앱에 2분 넘게 있으면 잠금
@@ -1534,7 +1534,7 @@ async function screenExport() {
   const cleanup = btn('오늘 자료 정리', async () => {
     if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
     for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
-    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage'].map((k) => [k, st[k]]));
+    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck'].map((k) => [k, st[k]]));
     st = { ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
     await commit(); toast('정리했습니다'); go('#/home');
   }, 'ghost', { disabled: !allConfirmed || !st.daylist });
@@ -2260,6 +2260,8 @@ async function screenSettings() {
       h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
       choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
     await installCard(),
+    h('section', { class: 'card' }, h('h2', {}, '현장 점검'), h('p', { class: 'small' }, '설치·지문·주소 검색·길안내·카메라가 이 휴대폰에서 되는지 눌러 보고, 결과를 담당자에게 보냅니다.'),
+      btn(`현장 점검${st.deviceCheck && Object.keys(st.deviceCheck).length ? ` (${CHECKS.filter(([k]) => st.deviceCheck[k] && st.deviceCheck[k].result).length}/${CHECKS.length})` : ''}`, () => go('#/check'), 'big')),
     h('section', { class: 'card' }, h('dl', {},
       h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
       h('dt', {}, '실행 위치'), h('dd', {}, runningAsApp() ? '설치한 앱' : '브라우저 탭'),
@@ -2367,6 +2369,91 @@ async function installCard() {
       : h('p', {}, '브라우저 메뉴(⋮)에서 [앱 설치] 또는 [홈 화면에 추가]를 누르세요. 메뉴에 [앱 열기]만 보이면 이미 설치된 것입니다.'));
 }
 
+// ------------------------------------------------------------ 현장 점검 (실제 휴대폰에서 확인할 것)
+// 자동 시험(가상 브라우저)으로는 확인할 수 없는 것을 수거팀이 이 휴대폰에서 눌러 보고 결과를 남긴다.
+// 결과에는 개인정보가 없고(기기·브라우저 정보와 된다/안 된다/메모), [결과 복사]로 담당자에게 전달한다.
+const CHECK_SPOT = { lat: 35.1462, lon: 126.9233 };  // 시험용 좌표(동구 부근 공공장소), 주민 위치 아님
+const CHECKS = [
+  ['install', '앱 설치', '홈 화면 아이콘으로 열리고, 설정 → 실행 위치가 "설치한 앱"으로 나오는지'],
+  ['bio', '지문·얼굴 잠금 해제', '설정 → 잠금에서 등록하고, 잠근 뒤 지문·얼굴로 열리는지'],
+  ['juso', '주소 검색(행안부)', '승인키를 넣은 뒤 아래 [시험]으로 검색이 되는지(브라우저가 막으면 안 됨)'],
+  ['nav_kakao', '길안내: 카카오맵', '[시험]으로 카카오맵이 열리고 목적지가 맞는지(앱이 없으면 웹 지도)'],
+  ['nav_tmap', '길안내: T맵', '[시험]으로 T맵이 열리는지'],
+  ['nav_naver', '길안내: 네이버지도', '[시험]으로 네이버지도가 열리는지'],
+  ['camera', '사진(카메라 다녀오기)', '[시험]으로 사진을 찍고 돌아왔을 때 사진이 남는지(앱이 다시 열리며 사라지면 "안 됨")'],
+  ['qr', '목록 QR 받기', 'PC [QR 실측]으로 몇 초 만에 읽히는지(메모에 초)'],
+  ['call', '전화·문자 앱', '지점 화면 [전화]·[문자]로 전화·문자 앱이 열리고, 돌아오면 그대로인지'],
+];
+function deviceInfo() {
+  const ua = navigator.userAgent;
+  const os = /Android\s[\d.]+/.exec(ua)?.[0] || (/iPhone OS [\d_]+/.exec(ua)?.[0] || '').replace(/_/g, '.') || (isIOS() ? 'iOS' : '기타');
+  const br = /SamsungBrowser\/[\d.]+/.exec(ua)?.[0] || /CriOS\/[\d.]+|Chrome\/[\d.]+/.exec(ua)?.[0] || (/Version\/[\d.]+.*Safari/.test(ua) ? 'Safari ' + /Version\/([\d.]+)/.exec(ua)[1] : '기타');
+  const model = /;\s*([^;)]+)\sBuild\//.exec(ua)?.[1] || /\(Linux; Android [\d.]+; ([^;)]+)\)/.exec(ua)?.[1] || '';
+  return { os, browser: br, model: model.trim(), app: APP_VERSION, standalone: runningAsApp() };
+}
+async function screenCheck() {
+  st.deviceCheck = st.deviceCheck || {};
+  const R = st.deviceCheck;
+  const mark = async (k, result, note) => { R[k] = { ...(R[k] || {}), result, at: new Date().toISOString(), ...(note != null ? { note: String(note).slice(0, 120) } : {}) }; await commit(); render(); };
+  // 카메라 시험 중 앱이 다시 열렸는지: 시험 전에 표시를 남기고, 돌아왔을 때 결과가 없으면 '다시 열림'
+  try { if (sessionStorage.getItem('dg-cam-test') && !(R.camera && R.camera.result)) { sessionStorage.removeItem('dg-cam-test'); R.camera = { result: 'FAIL', note: '카메라 다녀온 뒤 앱이 다시 열림(사진 없음)', at: new Date().toISOString() }; await commit(); } } catch {}
+  const autoBits = [];
+  autoBits.push(['실행 위치', runningAsApp() ? '설치한 앱' : '브라우저 탭']);
+  autoBits.push(['지문·얼굴', (await S.getBio().catch(() => null)) ? '등록됨' : (await BIO.bioAvailable()) ? '등록 가능(아직 안 함)' : '지원 안 함']);
+  autoBits.push(['화면 켜짐 유지', 'wakeLock' in navigator ? '지원' : '지원 안 함']);
+  try { autoBits.push(['자료 보존', navigator.storage && navigator.storage.persisted ? ((await navigator.storage.persisted()) ? '보존 요청됨' : '보존 요청 안 됨') : '확인 불가']); } catch {}
+  const tests = {
+    juso: async () => {
+      if (!st.jusoKey) return toast('설정에서 주소 검색 승인키를 먼저 넣어 주세요', 'bad');
+      try { const r = await J.searchAddress({ key: st.jusoKey, keyword: '동구청' }); await mark('juso', r.items.length ? 'OK' : 'FAIL', r.items.length ? `결과 ${r.items.length}건` : '결과 없음'); }
+      catch (e) { await mark('juso', 'FAIL', `${e.code || e.name || '오류'}`); }
+    },
+    nav_kakao: () => launchApp(NAV.navUrls('kakao', { ...CHECK_SPOT, label: '시험 목적지' }, { ios: isIOS(), appname: location.origin })),
+    nav_tmap: () => launchApp(NAV.navUrls('tmap', { ...CHECK_SPOT, label: '시험 목적지' }, { ios: isIOS(), appname: location.origin })),
+    nav_naver: () => launchApp(NAV.navUrls('naver', { ...CHECK_SPOT, label: '시험 목적지' }, { ios: isIOS(), appname: location.origin })),
+    camera: () => {
+      const inp = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden' });
+      inp.addEventListener('change', async () => {
+        try { sessionStorage.removeItem('dg-cam-test'); } catch {}
+        const f = inp.files && inp.files[0];
+        await mark('camera', f ? 'OK' : 'FAIL', f ? `사진 받음(${Math.round(f.size / 1024)}KB, 저장하지 않음)` : '사진 없음');
+      });
+      try { sessionStorage.setItem('dg-cam-test', '1'); } catch {}
+      handoff(); document.body.append(inp); inp.click(); setTimeout(() => inp.remove(), 60000);
+    },
+  };
+  const go3 = (k) => h('div', { class: 'grid3 check-btns', role: 'group', 'aria-label': '결과' }, ...[['OK', '된다'], ['FAIL', '안 된다'], ['NA', '해당 없음']].map(([v, t]) =>
+    btn(t, () => mark(k, v), 'opt' + ((R[k] || {}).result === v ? ' on' : ''), { 'aria-pressed': (R[k] || {}).result === v ? 'true' : 'false' })));
+  const done = CHECKS.filter(([k]) => R[k] && R[k].result).length;
+  const summary = () => {
+    const d = deviceInfo();
+    const L = { OK: '된다', FAIL: '안 된다', NA: '해당 없음' };
+    return [`[동구 수거 현장 점검] ${new Date().toLocaleString('ko-KR')}`, `기기: ${[d.model, d.os, d.browser].filter(Boolean).join(' · ')} · 앱 ${d.app} · ${d.standalone ? '설치한 앱' : '브라우저'}`,
+      ...autoBits.map(([a, b]) => `- ${a}: ${b}`),
+      ...CHECKS.map(([k, t]) => `- ${t}: ${R[k] && R[k].result ? L[R[k].result] : '아직'}${R[k] && R[k].note ? ` (${R[k].note})` : ''}`)].join('\n');
+  };
+  const copyBtn = btn('결과 복사(담당자에게 보내기)', async () => {
+    const t = summary();
+    try { await navigator.clipboard.writeText(t); toast('결과를 복사했습니다. 업무 메일·메신저에 붙여 넣어 보내세요'); }
+    catch { await sheet({ title: '점검 결과', text: '아래 내용을 길게 눌러 복사하세요.', body: h('pre', { class: 'check-pre' }, t), choices: [], cancel: '닫기' }); }
+  }, 'primary big');
+  return h('main', { class: 'with-tabs' },
+    h('header', { class: 'bar' }, btn('← 설정', () => go('#/settings'), 'ghost'), h('h1', { class: 'bar-title' }, '현장 점검')),
+    h('section', { class: 'card notice' }, h('p', {}, '자동 시험으로는 확인할 수 없는 것을 이 휴대폰에서 눌러 보고 결과를 남깁니다. 결과에는 주민 정보가 들어가지 않습니다.'),
+      h('p', { class: 'small' }, `진행 ${done}/${CHECKS.length}`)),
+    h('section', { class: 'card' }, h('h2', {}, '이 휴대폰'), h('dl', {}, ...Object.entries(deviceInfo()).filter(([k]) => k !== 'standalone').flatMap(([k, v]) => [h('dt', {}, ({ os: '운영체제', browser: '브라우저', model: '모델', app: '앱 버전' })[k] || k), h('dd', {}, v || '-')]),
+      ...autoBits.flatMap(([a, b]) => [h('dt', {}, a), h('dd', {}, b)]))),
+    ...CHECKS.map(([k, t, how]) => h('section', { class: 'card check-item' + (R[k] && R[k].result ? ' r-' + R[k].result : '') },
+      h('h2', {}, t, R[k] && R[k].result ? h('span', { class: 'chip ' + (R[k].result === 'OK' ? 'ok' : R[k].result === 'FAIL' ? 'bad' : '') }, ({ OK: '된다', FAIL: '안 된다', NA: '해당 없음' })[R[k].result]) : null),
+      h('p', { class: 'small' }, how),
+      tests[k] ? btn('시험', tests[k], 'big') : null,
+      go3(k),
+      (() => { const n = h('input', { type: 'text', class: 'search', placeholder: '메모 (예: 3.2초, 앱이 없어 웹으로 열림)', value: (R[k] || {}).note || '', 'aria-label': `${t} 메모`, maxlength: 120 });
+        n.addEventListener('change', async () => { R[k] = { ...(R[k] || {}), note: n.value.trim().slice(0, 120) }; await commit(); }); return n; })())),
+    h('div', { class: 'cta' }, copyBtn, btn('점검 결과 지우기', async () => { if (await ask('점검 결과를 모두 지울까요?', '지우기', { danger: true })) { st.deviceCheck = {}; await commit(); render(); } }, 'ghost')),
+    tabBar('set'));
+}
+
 // ------------------------------------------------------------ 라우팅
 let renderSeq = 0;
 async function render() {
@@ -2391,7 +2478,7 @@ async function render() {
     view = await ({
       home: screenHome, scan: screenScan, received: screenReceived, register: screenRegister,
       'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings, unload: screenUnload,
-      mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
+      check: screenCheck, mode: screenMode, intake: async () => { registeredNow = !!(await S.getRaw('pc')) && !!(await S.getRaw('device')); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();
   }
   } catch (e) { view = errorScreen(e); }

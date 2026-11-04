@@ -189,6 +189,26 @@ def main():
             expect(page.get_by_role("button", name="홈 화면에 앱 설치")).to_have_count(0)
             page.wait_for_timeout(300)
             ok(True, "브라우저가 설치를 제안하면 [홈 화면에 앱 설치] → 설치 창")
+            # 현장 점검: 실제 휴대폰에서 눌러 볼 것(길안내·카메라 시험, 결과 복사 — 주민 정보 없음)
+            page.get_by_role("button", name=re.compile("^현장 점검")).click()
+            expect(page.locator("h1", has_text="현장 점검")).to_be_visible()
+            n_open = len(page.evaluate("window.__dgOpened"))
+            page.locator(".check-item", has_text="길안내: 카카오맵").get_by_role("button", name="시험").click()
+            page.wait_for_function(f"() => window.__dgOpened.length > {n_open + 1}")  # 앱 주소 + (앱 없을 때) 웹 지도
+            ok(page.evaluate("window.__dgOpened")[n_open].startswith("kakaomap://route?ep=35.1462"), "현장 점검: [시험]으로 카카오맵 열기(시험 좌표만)")
+            page.locator(".check-item", has_text="길안내: 카카오맵").get_by_role("button", name="된다", exact=True).click()
+            with page.expect_file_chooser() as fc:
+                page.locator(".check-item", has_text="사진(카메라").get_by_role("button", name="시험").click()
+            fc.value.set_files(str(ROOT / "web/icons/icon-192.png"))
+            expect(page.locator(".check-item", has_text="사진(카메라").locator("input.search")).to_have_value(re.compile("^사진 받음"))
+            ok(page.locator(".check-item.r-OK").count() == 2, "현장 점검: 카메라 다녀오기 시험 → 자동으로 '된다'(사진은 저장하지 않음), 결과 표시")
+            page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+            page.get_by_role("button", name=re.compile("^결과 복사")).click()
+            copied = page.evaluate("navigator.clipboard.readText()")
+            ok("[동구 수거 현장 점검]" in copied and "길안내: 카카오맵: 된다" in copied and "사진(카메라 다녀오기): 된다" in copied and "앱 " + page.evaluate("document.title") is not None,
+               "현장 점검 결과 복사: 기기·브라우저·앱 버전과 항목별 결과(주민 정보 없음)")
+            page.evaluate("window.__dgOpened = []")  # 뒤의 문자·길안내 시험이 열린 주소를 처음부터 세게
+            page.goto(url + "#/settings")
             page.get_by_label("작업자 1 이름").fill("김수거")
             page.get_by_label("작업자 2 이름").fill("이수거")
             page.get_by_role("button", name="작업자 저장").click()
