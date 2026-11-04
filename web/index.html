@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- 외부 통신은 바탕 지도 서버(tiles.openfreemap.org) 하나만 허용한다. 업무 자료를 보내는 코드는 없다. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data: https://tiles.openfreemap.org; media-src 'self' blob: mediastream:; connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- 외부 통신 허용: 바탕 지도 서버(tiles.openfreemap.org)와 행정안전부 도로명주소 API(business.juso.go.kr, 주소 검색어만).
+     이름·연락처를 보내는 코드는 없다. 길안내는 통신이 아니라 휴대폰의 지도 앱을 여는 것(좌표와 'N번 수거지'만). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data: https://tiles.openfreemap.org; media-src 'self' blob: mediastream:; connect-src 'self' https://tiles.openfreemap.org https://business.juso.go.kr; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#ffffff">
 <meta name="mobile-web-app-capable" content="yes">

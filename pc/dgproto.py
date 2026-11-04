@@ -303,6 +303,8 @@ def parse_device_code(code: str) -> tuple[bytes, bytes, bytes]:
 # ---------------------------------------------------------------- 목록 압축 형식 v2
 # 같은 수수료표 버전을 PC와 휴대폰이 함께 갖고 있으므로, 품목은 [행ID, 품목ID, 수량]만 보내고 이름·규격·단가는
 # 휴대폰이 표에서 채운다. UUID는 22자 base64url, 빈 값·기본값은 생략한다. 휴대폰은 v1·v2를 모두 받는다.
+# v0.10: 지점에 선택 항목 "d"(행정동 이름, 예: "충장동")를 더했다. 없으면 빈 값으로 풀며, 이전 앱은 모르는 키를 무시하므로
+#        형식 번호(dg.daylist/2)는 그대로 둔다.
 import base64 as _b64
 import uuid as _uuid
 
@@ -319,7 +321,7 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
     stops = []
     for s in p["stops"]:
         c = {"q": s["seq"], "i": _sid(s["request_id"]), "r": s["receipt_no"], "v": s["req_ver"], "n": s["name"], "p": s["phone"], "a": s["address"]}
-        for k, short in (("spot_note", "o"), ("memo", "m"), ("eta", "e")):
+        for k, short in (("spot_note", "o"), ("memo", "m"), ("eta", "e"), ("dong", "d")):
             if s.get(k):
                 c[short] = s[k]
         if s.get("lat") is not None:
@@ -328,9 +330,17 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
             c["t"] = s["appt"]
         if s.get("revisit"):
             c["rv"] = 1
+        # v0.11 선택 키: "rd" 감면율(%, 정수, 감면 있을 때만), "lv" 부과번호. 없으면 이전 형식 그대로.
+        red = s.get("reduction") or {}
+        if red and int(red.get("rate") or 0) > 0:
+            c["rd"] = int(red["rate"])
+        if s.get("levy_no"):
+            c["lv"] = str(s["levy_no"])
         if s.get("unload_after"):
             u = s["unload_after"]
             c["u"] = [u.get("eta", ""), u.get("label", "반입지"), u.get("minutes", 0), u.get("volume_m3", 0)]
+            if u.get("lat") is not None and u.get("lon") is not None:  # 반입지 좌표(선택, 5·6번째 값) — 휴대폰 v0.10.1 길안내용
+                c["u"] += [round(float(u["lat"]), 6), round(float(u["lon"]), 6)]
         items = []
         for it in s["items"]:
             row = fee_rows.get(it.get("fee_rate_id") or "")
@@ -384,9 +394,11 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
                           "price_status": status})
         y = c.get("y")
         stops.append({"seq": c["q"], "request_id": _uid(c["i"]), "receipt_no": c["r"], "req_ver": c["v"], "name": c["n"], "phone": c["p"],
-                      "address": c["a"], "spot_note": c.get("o", ""), "memo": c.get("m", ""), "lat": y[0] if y else None, "lon": y[1] if y else None,
+                      "address": c["a"], "dong": c.get("d", ""), "spot_note": c.get("o", ""), "memo": c.get("m", ""), "lat": y[0] if y else None, "lon": y[1] if y else None,
                       "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items,
-                      **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3]}} if c.get("u") else {})})
+                      "levy_no": c.get("lv", ""), **({"reduction": {"rate": int(c["rd"])}} if c.get("rd") else {}),
+                      **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3],
+                                            "lat": c["u"][4] if len(c["u"]) > 5 else None, "lon": c["u"][5] if len(c["u"]) > 5 else None}} if c.get("u") else {})})
     ft = {"version_id": p["fee"]}
     if p.get("fb"):
         ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))

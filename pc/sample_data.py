@@ -18,6 +18,33 @@ _SURNAMES = "김이박최정강조윤장임"
 _GIVEN = ["가상", "예시", "시험", "샘플", "모의", "연습", "보기", "견본"]
 _ROADS = ["예시로", "가상대로", "시험길", "샘플로", "모의로"]
 
+# 시험용 가상 행정동 (실제 동 이름이 아님). 판별 낱말은 위 가상 도로명과 맞춘다.
+SAMPLE_DONGS = [
+    {"name": "가상1동", "keywords": ["예시로"], "weekdays": [0, 2, 4], "daily_limit": 20},
+    {"name": "가상2동", "keywords": ["가상대로", "시험길"], "weekdays": [1, 3], "daily_limit": 15},
+    {"name": "가상3동", "keywords": ["샘플로", "모의로"], "weekdays": [], "daily_limit": None},
+]
+
+
+def dong_of(address: str) -> str:
+    """가상 주소 → 가상 행정동 (make_daylist 용)."""
+    for d in SAMPLE_DONGS:
+        if any(k in address for k in d["keywords"]):
+            return d["name"]
+    return ""
+
+
+def seed_dongs(con, crew_ids: list[str] | None = None) -> list[str]:
+    """가상 행정동을 넣는다(이미 있는 이름은 건너뜀). crew_ids 를 주면 차례로 기본 담당 팀으로 연결."""
+    from dgpc import area
+    out = []
+    for i, d in enumerate(SAMPLE_DONGS):
+        if area.get_dong(con, d["name"]):
+            continue
+        crew = crew_ids[i % len(crew_ids)] if crew_ids else None
+        out.append(area.save_dong(con, {**d, "crew_id": crew, "sort": i}))
+    return out
+
 
 ADDR_STYLES = {"mixed": None, "short": 0, "medium": 1, "long": 2}
 
@@ -61,6 +88,7 @@ def make_daylist(count: int, work_date: str, assign_ver: int = 1, seed: int = 7,
             "memo": rng.choice(["", "오전 방문 희망", "도착 전 전화 요청"]),
             "items": items,
         })
+        stops[-1]["dong"] = dong_of(stops[-1]["address"])
     return {
         "schema": "dg.daylist/1",
         "work_date": work_date,

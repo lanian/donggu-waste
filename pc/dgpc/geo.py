@@ -92,7 +92,13 @@ HEADER_NAMES = {
     "sigungu": ("시군구명", "시군구"), "road": ("도로명",), "main": ("건물본번", "건물번호본번", "본번"), "sub": ("건물부번", "건물번호부번", "부번"),
     "x": ("x좌표", "x", "xpos", "entx", "출입구x좌표"), "y": ("y좌표", "y", "ypos", "enty", "출입구y좌표"),
     "lat": ("위도", "lat", "latitude"), "lon": ("경도", "lon", "lng", "longitude"), "underground": ("지하여부",),
+    # 선택: 관할 행정동·법정동(읍면동) 열이 있으면 접수의 행정동 자동 판별에 쓴다
+    "dong_h": ("관할행정동", "행정동명", "행정동"), "dong_b": ("읍면동명", "법정동명", "법정동"),
+    # 선택: 건물명(행안부 '건물명'·'시군구용건물명'), 지번(도로명주소 한글·건물 DB의 지번본번·부번) — 있으면 주소 찾기에 쓴다
+    "bname": ("건물명", "시군구용건물명", "건축물대장건물명", "상세건물명"), "jibun_main": ("지번본번", "지번본번(번지)", "번지"),
+    "jibun_sub": ("지번부번", "지번부번(호)", "호"), "san": ("산여부",),
 }
+_DONG_RE = re.compile(r"[가-힣0-9·]{1,10}(동|읍|면|가)")
 
 
 def decode(raw: bytes) -> str:
@@ -153,10 +159,22 @@ def detect_columns(rows: list[list[str]]) -> dict:
         cols["lat"], cols["lon"] = lats[-1], lons[-1]
     else:
         raise ValueError("좌표 열(UTM-K X·Y 또는 위도·경도)을 찾지 못했습니다. --columns 로 지정해 주세요.")
+    # 건물명: 위치정보요약DB는 건물부번 바로 뒤가 건물명, 그 뒤가 우편번호(5자리)
+    z = cols["sub"] + 2
+    if z < width and share(lambda v: bool(re.fullmatch(r"\d{5}", v.strip())), z) > 0.9 and share(lambda v: bool(re.fullmatch(r"[\d.]+", v.strip())), z - 1) < 0.5:
+        cols["bname"] = z - 1
     # 시군구명: '구/군/시'로 끝나는 짧은 열
     sg = [i for i in range(road_i) if share(lambda v: bool(re.fullmatch(r"[가-힣]{1,6}(구|군|시)(\s[가-힣]+구)?", v.strip())), i) > 0.9]
     if sg:
         cols["sigungu"] = sg[-1]
+    # 읍면동명(도로명 앞)·관할행정동(도로명 뒤): '동·읍·면·가'로 끝나는 짧은 열 (없어도 됨)
+    used = {v for k, v in cols.items() if k != "header"}
+    dongs = [i for i in range(width) if i not in used and share(lambda v: bool(_DONG_RE.fullmatch(v.strip())), i) > 0.9]
+    before, after = [i for i in dongs if i < road_i], [i for i in dongs if i > road_i]
+    if before:
+        cols["dong_b"] = before[-1]
+    if after:
+        cols["dong_h"] = after[-1]
     return cols
 
 
@@ -171,7 +189,8 @@ def parse_columns_arg(s: str) -> dict:
 
 
 def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
-    """(시군구, 도로명, 본번, 부번, 위도, 경도) 를 하나씩 돌려준다. region 이 있으면 시군구명에 그 글자가 든 것만."""
+    """(시군구, 도로명, 본번, 부번, 위도, 경도, 관할행정동, 법정동, 건물명, 지번본번, 지번부번) 를 하나씩 돌려준다.
+    region 이 있으면 시군구명에 그 글자가 든 것만. 없는 열은 빈 문자열(지번은 None)."""
     text = decode(raw)
     delim = _sniff_delim(text[:5000])
     reader = csv.reader(io.StringIO(text), delimiter=delim)
@@ -198,7 +217,14 @@ def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
                 lat, lon = float(r[cols["lat"]]), float(r[cols["lon"]])
             if not (33 < lat < 39 and 124 < lon < 132) or not road or main <= 0:
                 continue
-            pts.append((sg, road, main, sub, round(lat, 7), round(lon, 7)))
+            dh = r[cols["dong_h"]].strip() if cols.get("dong_h") is not None else ""
+            db = r[cols["dong_b"]].strip() if cols.get("dong_b") is not None else ""
+            bn = r[cols["bname"]].strip()[:60] if cols.get("bname") is not None else ""
+            jm = js = None
+            if cols.get("jibun_main") is not None and r[cols["jibun_main"]].strip().isdigit():
+                jm = int(r[cols["jibun_main"]])
+                js = int(r[cols["jibun_sub"]]) if cols.get("jibun_sub") is not None and r[cols["jibun_sub"]].strip().isdigit() else 0
+            pts.append((sg, road, main, sub, round(lat, 7), round(lon, 7), dh, db, bn, jm, js))
         except (ValueError, IndexError):
             continue
     return {"columns": cols, "delimiter": delim, "points": pts}

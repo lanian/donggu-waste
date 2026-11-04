@@ -1,0 +1,8 @@
+# PC 프로그램 직접 의존성 (사람이 고치는 파일). 실제 설치는 고정본 pc/requirements.txt 로 한다.
+# 고친 뒤에는 docs/배포·운영.md "의존성 고정" 절차대로 requirements.txt 를 다시 만든다.
+cryptography>=42
+qrcode[pil]>=7.4
+# sqlcipher3 0.6.4부터 Windows·macOS·Linux 모두 SQLCipher 내장 휠 제공 (예전 Linux용 sqlcipher3-binary 불필요)
+sqlcipher3>=0.6.4
+ortools>=9.10
+keyring>=25

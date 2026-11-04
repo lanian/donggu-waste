@@ -30,6 +30,12 @@ FEE_TABLE = json.loads((ROOT / "data" / "fee_table.json").read_text(encoding="ut
 FEE_ROWS = {r["id"]: r for r in FEE_TABLE["rows"]}
 TYPE_PHOTOS = 4
 FINAL = {"DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"}
+CHANNELS = ("전화", "방문", "온라인", "단체(공동주택)", "기타")  # 접수 경로
+# 사유 코드 (코드 + 직접 입력 글). 기타(OTHER)는 글이 꼭 있어야 한다.
+CANCEL_CODES = {"OUT_OF_AREA": "관할 밖", "RESIDENT": "주민 취소", "DUPLICATE": "중복 접수", "ITEM_REFUSED": "품목 불가", "OTHER": "기타"}
+POSTPONE_CODES = {"RESIDENT": "주민 요청", "OVER_CAPACITY": "수거 한도 초과", "NO_ROUTE": "배정 불가(노선·시간)", "REVISIT": "재방문(미수거·보류)",
+                  "HOLIDAY": "휴무일", "OTHER": "기타"}
+CONTACT_KINDS = ("문의", "독촉", "변경요청", "불만")
 
 
 class UserError(Exception):
@@ -69,9 +75,26 @@ def one(con, sql, args=()):
 ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("actor", default="system")
 
 
+def chain_hash(prev: str, fields: list) -> str:
+    """해시 사슬: sha256(이전 해시 + 이 행 내용(JSON)). 한 행을 고치거나 지우면 그 뒤 사슬이 모두 어긋난다."""
+    body = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256((prev + body).encode("utf-8")).hexdigest()
+
+
+def _audit_fields(r: dict) -> list:
+    return [r["id"], r["entity"], r["entity_id"], r["action"], r["detail"], r["at"], r["actor"]]
+
+
 def audit(con, entity, entity_id, action, detail=None):
-    con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor) VALUES (?,?,?,?,?,?)",
-                (entity, entity_id, action, json.dumps(detail, ensure_ascii=False) if detail is not None else None, now(), ACTOR.get()))
+    prev = con.execute("SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+    prev = prev[0] if prev else (get_setting(con, "audit_chain_anchor", "") or "")
+    d = json.dumps(detail, ensure_ascii=False) if detail is not None else None
+    at, actor = now(), ACTOR.get()
+    cur = con.execute("INSERT INTO audit_log (entity, entity_id, action, detail, at, actor, prev_hash, legacy) VALUES (?,?,?,?,?,?,?,0)",
+                      (entity, entity_id, action, d, at, actor, prev))
+    rid = cur.lastrowid
+    con.execute("UPDATE audit_log SET hash=? WHERE id=?",
+                (chain_hash(prev, _audit_fields({"id": rid, "entity": entity, "entity_id": entity_id, "action": action, "detail": d, "at": at, "actor": actor})), rid))
 
 
 # ------------------------------------------------------------------ PC 키 (암호화 DB 안에 보관)
@@ -163,6 +186,7 @@ def settings(con) -> dict:
     return {
         "depot": get_setting(con, "depot", {"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}),
         "osrm_url": get_setting(con, "osrm_url", ""),
+        "external": external_settings(con),
         "service_min_base": get_setting(con, "service_min_base", 5),
         "service_min_per_item": get_setting(con, "service_min_per_item", 3),
         "photo_retention_days": get_setting(con, "photo_retention_days", 90),
@@ -172,16 +196,65 @@ def settings(con) -> dict:
         "unload_min": get_setting(con, "unload_min", 20),
         "max_unloads": get_setting(con, "max_unloads", 2),
         "backup_dir": get_setting(con, "backup_dir", ""),
+        "capacity": _area().capacity_settings(con),
+        "intake_notices": get_setting(con, "intake_notices", []),
+        "contact_info": get_setting(con, "contact_info", "동구청 청소 담당 부서 (전화번호는 설정에서 입력)"),
+        "disposal_guide": get_setting(con, "disposal_guide", "수거일 아침 7시까지 집 앞(공동주택은 관리사무소가 정한 곳)에 내놓고, 이 표지를 물건에 붙여 주세요."),
+        "monthly_report_title": get_setting(con, "monthly_report_title", "대형폐기물 수거 월보"),
+        "reductions": _fin().reductions(con), "reduction_proofs": list(_fin().PROOF_METHODS),
+        "pii_retention_years": get_setting(con, "pii_retention_years", 3), "access_log_retention_years": max(2, get_setting(con, "access_log_retention_years", 2)),
+        "pay_methods": list(PAY_METHODS), "refund_methods": list(REFUND_PAY_METHODS),
+        **_backup_conf(con),
         "fee_version": fee_state(con)["version_id"], "fee_label": FEE_TABLE["label"],
         "fee_checked_on": FEE_TABLE["source_checked_on"], "fee_effective_from": fee_state(con)["effective_from"],
     }
 
 
+def _area():
+    from dgpc import area
+    return area
+
+
+def _backup_conf(con):
+    from dgpc import backup
+    return backup.conf(con)
+
+
 def save_settings(con, data: dict):
     with tx(con):
+        if "capacity" in data:
+            _area().save_capacity(con, data["capacity"] or {})
+        if "intake_notices" in data:
+            notes = []
+            for n in data["intake_notices"] or []:
+                kws = n.get("keywords") or []
+                if isinstance(kws, str):
+                    kws = re.split(r"[,\n]+", kws)
+                kws = [k.strip()[:30] for k in kws if k and k.strip()][:30]
+                text = (n.get("text") or "").strip()[:300]
+                if not text:
+                    continue
+                if not kws:
+                    raise UserError("접수 시 안내마다 품목 낱말을 하나 이상 적어 주세요.")
+                notes.append({"keywords": kws, "text": text})
+            set_setting(con, "intake_notices", notes[:30])
+        audit(con, "settings", "pc", "SAVE", {"keys": ",".join(sorted(data))[:120]})
+        for k, lim in (("contact_info", 200), ("disposal_guide", 400), ("monthly_report_title", 60)):
+            if k in data:
+                v = (data[k] or "").strip()[:lim]
+                if k == "monthly_report_title" and not v:
+                    raise UserError("월보 제목을 적어 주세요.")
+                set_setting(con, k, v)
+        if "reductions" in data:
+            _fin().save_reductions(con, data["reductions"])
+        from dgpc import backup as _bk, privacy as _pv
+        _pv.save_settings(con, data)
+        _bk.save_settings(con, data)
         if "depot" in data:
             d = data["depot"]
             set_setting(con, "depot", {"lat": float(d["lat"]), "lon": float(d["lon"]), "label": str(d.get("label", "차고지"))})
+        if "external" in data:
+            _save_external(con, data["external"] or {})
         if "osrm_url" in data:
             u = (data["osrm_url"] or "").strip()
             if u and not re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/?$", u):
@@ -216,6 +289,129 @@ def save_settings(con, data: dict):
             if b and not Path(b).is_absolute():
                 raise UserError("백업 폴더는 이 PC의 전체 경로로 적어 주세요 (예: D:\\동구백업).")
             set_setting(con, "backup_dir", b)
+
+
+# ------------------------------------------------------------------ 외부 서비스 설정 (v0.11): 행안부 주소 API 승인키·카카오모빌리티 키
+# 키는 암호화 DB(meta)에만 두고, 화면(브라우저)에는 저장 뒤 가린 값만 보낸다.
+EXTERNAL_KEYS = {"juso_search_key": "주소 검색 승인키", "juso_coord_key": "좌표 승인키", "kakao_rest_key": "카카오모빌리티 REST 키"}
+TRAVEL_METHODS = ("ESTIMATE", "OSRM", "KAKAO")
+
+
+def secret(con, name: str) -> str:
+    return get_setting(con, "ext_" + name, "") or ""
+
+
+def travel_method(con) -> str:
+    m = get_setting(con, "travel_method", None)
+    if m in TRAVEL_METHODS:
+        return m
+    return "OSRM" if get_setting(con, "osrm_url", "") else "ESTIMATE"  # 이전 설정 그대로(OSRM 주소가 있으면 OSRM)
+
+
+def external_settings(con) -> dict:
+    from dgpc import external as X
+    return {"keys": {k: {"set": bool(secret(con, k)), "mask": X.mask(secret(con, k)), "label": lab} for k, lab in EXTERNAL_KEYS.items()},
+            "travel_method": travel_method(con)}
+
+
+def _save_external(con, d: dict):
+    from dgpc import external as X
+    for k, lab in EXTERNAL_KEYS.items():
+        if k not in (d.get("keys") or {}):
+            continue
+        v = ((d.get("keys") or {})[k] or "").strip()
+        if v and not X.KEY_RE.match(v):
+            raise UserError(f"{lab} 형식이 올바르지 않습니다 (영문·숫자 8자 이상).")
+        set_setting(con, "ext_" + k, v)
+        audit(con, "settings", "external", "KEY_SET" if v else "KEY_CLEAR", {"key": k})  # 키 값은 남기지 않는다
+    if "travel_method" in d:
+        m = d["travel_method"]
+        if m not in TRAVEL_METHODS:
+            raise UserError("이동시간 계산 방식을 골라 주세요.")
+        if m == "KAKAO" and not secret(con, "kakao_rest_key"):
+            raise UserError("카카오모빌리티 REST 키를 먼저 저장하세요.")
+        set_setting(con, "travel_method", m)
+
+
+def _known_names(con) -> list[str]:
+    return [r["name"] for r in rows(con, "SELECT DISTINCT name FROM request WHERE pii_purged_at IS NULL AND name IS NOT NULL AND length(name) >= 2")]
+
+
+def _dong_for_juso(con, it: dict) -> str | None:
+    area = _area()
+    for n in (it.get("hemdNm"), it.get("emdNm")):
+        if n and area.get_dong(con, n):
+            return n
+    addr = f'{it.get("road_part1") or it.get("road") or ""} {it.get("emdNm") or ""} {it.get("hemdNm") or ""}'
+    return area.detect_dong(con, addr).get("dong")
+
+
+def juso_search(con, q: str, name: str = "") -> dict:
+    """PC가 대신 묻는 행정안전부 도로명주소 검색. 보내는 것은 검색어와 승인키뿐.
+    검색어가 전화번호·신청인 이름·저장된 주민 이름을 담고 있으면 보내지 않는다. 접속기록에는 검색어 없이 건수만 남긴다."""
+    from dgpc import external as X, privacy as _pv
+    key = secret(con, "juso_search_key")
+    if not key:
+        return {"configured": False, "items": []}
+    kw = X.clean_keyword(q)
+    if len(kw) < 2:
+        return {"configured": True, "items": []}
+    why = X.keyword_guard(kw, name, _known_names(con))
+    if why:
+        return {"configured": True, "items": [], "blocked": why}
+    try:
+        res = X.juso_search(key, kw)
+    except X.ExternalError as e:
+        _pv.record_access(con, "SEARCH", "", 0, "행안부 주소 검색 실패 (검색어 기록 안 함)")
+        return {"configured": True, "items": [], "error": str(e), "code": e.code}
+    items = []
+    for it in res["items"]:
+        addr = it["road_part1"] + (f' ({", ".join(x for x in (it["emdNm"], it["bdNm"]) if x)})' if it["emdNm"] or it["bdNm"] else "")
+        items.append({"kind": "행안부", "address": addr, "label": addr + (f' · 지번 {it["jibun"]}' if it["jibun"] else ""), "zip": it["zip"],
+                      "dong": _dong_for_juso(con, it), "emdNm": it["emdNm"], "hemdNm": it["hemdNm"], "bname": it["bdNm"], "ref": it["ref"],
+                      "lat": None, "lon": None})
+    _pv.record_access(con, "SEARCH", "", len(items), "행안부 주소 검색 (검색어 기록 안 함)")
+    return {"configured": True, "items": items, "total": res["total"], "coord": bool(secret(con, "juso_coord_key"))}
+
+
+def juso_coord(con, ref: dict) -> dict:
+    """고른 행안부 검색 결과의 출입구 좌표(WGS84). 보내는 것은 좌표 승인키와 건물 식별 번호뿐."""
+    from dgpc import external as X
+    key = secret(con, "juso_coord_key")
+    if not key:
+        return {"none": True, "reason": "좌표 승인키가 없어 위치는 지도에서 지정하세요."}
+    try:
+        lat, lon = X.juso_coord(key, ref)
+    except X.ExternalError as e:
+        return {"none": True, "reason": str(e), "code": e.code}
+    return {"lat": lat, "lon": lon}
+
+
+def external_test(con, service: str) -> dict:
+    """설정 화면 [연결 시험]: 개인정보 없는 고정 값으로 한 번 묻는다."""
+    from dgpc import external as X
+    try:
+        if service == "juso":
+            key = secret(con, "juso_search_key")
+            if not key:
+                raise UserError("주소 검색 승인키를 먼저 저장하세요.")
+            r = X.juso_search(key, "동구청", per=1)
+            msg = f"주소 검색 정상 (시험 검색 '동구청' {r['total']}건)"
+            if secret(con, "juso_coord_key") and r["items"]:
+                X.juso_coord(secret(con, "juso_coord_key"), r["items"][0]["ref"])
+                msg += " · 좌표 정상"
+            return {"ok": True, "message": msg}
+        if service == "kakao":
+            key = secret(con, "kakao_rest_key")
+            if not key:
+                raise UserError("카카오모빌리티 REST 키를 먼저 저장하세요.")
+            d = get_setting(con, "depot", {"lat": 35.1462, "lon": 126.9233})
+            o = (float(d["lat"]), float(d["lon"]))
+            sec = X.kakao_direction(key, o, (o[0] + 0.005, o[1] + 0.005))
+            return {"ok": sec is not None, "message": f"카카오모빌리티 정상 (차고지 부근 시험 경로 {sec}초)" if sec is not None else "응답은 왔으나 경로가 없습니다."}
+    except X.ExternalError as e:
+        return {"ok": False, "message": str(e), "code": e.code}
+    raise UserError("알 수 없는 서비스입니다.")
 
 
 # ------------------------------------------------------------------ 접수
@@ -277,9 +473,28 @@ def validate(data: dict) -> dict:
     for k in ("lat", "lon"):
         v = data.get(k)
         d[k] = float(v) if v not in (None, "") else None
+    d["channel"] = (data.get("channel") or "전화").strip()
+    if d["channel"] not in CHANNELS:
+        raise UserError("접수 경로를 골라 주세요 (" + ", ".join(CHANNELS) + ").")
     if not data.get("items"):
         raise UserError("버릴 물건을 하나 이상 추가해 주세요.")
     return d
+
+
+def _resolve_dong(con, data: dict, address: str) -> tuple[str | None, list[str]]:
+    """접수의 행정동: 화면에서 고른 값(빈 값 = 미지정)이 있으면 그것, 없으면 주소로 자동 판별. 경고 문구도 함께."""
+    area = _area()
+    if "dong" in data:
+        v = (data.get("dong") or "").strip()
+        if v and not area.get_dong(con, v):
+            raise UserError(f"등록되지 않은 행정동입니다({v}). 설정 → 행정동 관리에서 확인하세요.")
+        dong = v or None
+    else:
+        dong = area.detect_dong(con, address)["dong"]
+    warn = []
+    if not dong and area.list_dongs(con, active_only=True):
+        warn.append("행정동을 정하지 못했습니다. 주소를 확인하고 동을 골라 주세요.")
+    return dong, warn
 
 
 def find_duplicates(con, phone: str, address: str, exclude_id: str | None = None) -> list[dict]:
@@ -291,24 +506,40 @@ def find_duplicates(con, phone: str, address: str, exclude_id: str | None = None
     return out
 
 
+def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | None) -> tuple[str, str]:
+    """접수 한 건 넣기(트랜잭션은 호출하는 쪽). 접수번호는 오늘 날짜의 다음 번호."""
+    rid, ts = str(uuid.uuid4()), now()
+    day = today_kst().replace("-", "")
+    n = con.execute("SELECT COUNT(*) FROM request WHERE receipt_no LIKE ?", (f"DG-{day}-%",)).fetchone()[0] + 1
+    receipt = f"DG-{day}-{n:04d}"
+    from dgpc import store as _store
+    dcode = (one(con, "SELECT code FROM dong WHERE name=?", (dong,)) or {}).get("code") if dong else None
+    levy = _store.next_levy_no(con, today_kst()[:4], dcode)
+    red = _fin().apply_reduction_fields(con, data) or {}
+    con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
+        planned_date, appt_start, appt_end, must_today, urgent, priority, status, received_at, updated_at, dong, channel, levy_no,
+        reduction_code, reduction_rate, reduction_label, reduction_proof, reduction_checker, reduction_at)
+        VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RECEIVED',?,?,?,?,?,?,?,?,?,?,?)""",
+                (rid, receipt, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
+                 (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None else None, d["planned_date"] or None, d["appt_start"] or None,
+                 d["appt_end"] or None, d["must_today"], d["urgent"], d["priority"], ts, ts, dong, d["channel"], levy,
+                 red.get("reduction_code"), red.get("reduction_rate"), red.get("reduction_label"), red.get("reduction_proof"), red.get("reduction_checker"), red.get("reduction_at")))
+    for it in items:
+        _insert_item(con, rid, it)
+    return rid, receipt
+
+
 def create_request(con, data: dict) -> dict:
     d = validate(data)
     items = build_items(data["items"], con)
-    rid, ts = str(uuid.uuid4()), now()
-    day = today_kst().replace("-", "")
+    dong, dwarn = _resolve_dong(con, data, d["address"])
+    red = _fin().apply_reduction_fields(con, data)
     with tx(con):
-        n = con.execute("SELECT COUNT(*) FROM request WHERE receipt_no LIKE ?", (f"DG-{day}-%",)).fetchone()[0] + 1
-        receipt = f"DG-{day}-{n:04d}"
-        con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
-            planned_date, appt_start, appt_end, must_today, urgent, priority, status, received_at, updated_at)
-            VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RECEIVED',?,?)""",
-                    (rid, receipt, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
-                     (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None else None, d["planned_date"] or None, d["appt_start"] or None,
-                     d["appt_end"] or None, d["must_today"], d["urgent"], d["priority"], ts, ts))
-        for it in items:
-            _insert_item(con, rid, it)
-        audit(con, "request", rid, "CREATE", {"receipt_no": receipt})
-    return {"id": rid, "receipt_no": receipt, "warnings": jurisdiction_warnings(con, d["address"])}
+        rid, receipt = _insert_request(con, d, items, data, dong)
+        audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": d["channel"], **({"dong": dong} if dong else {}),
+                                              **({"reduction": red["reduction_code"], "rate": red["reduction_rate"], "proof": red["reduction_proof"]} if red else {})})
+    warn = jurisdiction_warnings(con, d["address"]) + dwarn + _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
+    return {"id": rid, "receipt_no": receipt, "dong": dong, "warnings": warn, "levy_no": one(con, "SELECT levy_no FROM request WHERE id=?", (rid,))["levy_no"]}
 
 
 def _insert_item(con, rid, it):
@@ -332,6 +563,20 @@ def locked_lines(con, rid) -> set[str]:
     return out
 
 
+# ------------------------------------------------------------------ 마감 통제: 마감한 날의 접수·수납을 고치면 사유 필수 + "마감 후 수정" 표시
+def close_info(con, work_date: str | None) -> dict | None:
+    """그날의 가장 최근 마감 회차(없으면 None)."""
+    if not work_date:
+        return None
+    return one(con, "SELECT * FROM day_close_log WHERE work_date=? ORDER BY seq DESC LIMIT 1", (work_date,))
+
+
+def _after_close(con, rid: str) -> dict:
+    """그 접수의 예정일이 이미 마감된 날이면 이력에 붙일 표시 {'after_close': 날짜}."""
+    r = one(con, "SELECT planned_date FROM request WHERE id=?", (rid,))
+    return {"after_close": r["planned_date"]} if r and close_info(con, r["planned_date"]) else {}
+
+
 def update_request(con, rid: str, data: dict, reason: str) -> dict:
     cur = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not cur:
@@ -339,24 +584,27 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
     if cur["status"] == "CANCELLED":
         raise UserError("취소된 접수는 수정할 수 없습니다.")
     if not (reason or "").strip():
-        raise UserError("수정 사유를 적어 주세요.")
-    d = validate(data)
+        raise UserError("수정 사유를 적어 주세요." + (" (마감한 날의 접수입니다)" if close_info(con, cur["planned_date"]) else ""))
+    d = validate({"channel": cur["channel"], **data})
     items = build_items(data["items"], con)
+    dong, dwarn = _resolve_dong(con, data, d["address"]) if "dong" in data or d["address"] != cur["address"] else (cur["dong"], [])
     locked = locked_lines(con, rid)
     old_items = {i["line_id"]: i for i in rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))}
     new_ids = {i["line_id"] for i in items}
     for lid in locked:
         if lid in old_items and (lid not in new_ids or next(i for i in items if i["line_id"] == lid)["qty"] != old_items[lid]["qty"]):
             raise UserError(f"현장 결과가 있는 품목({old_items[lid]['name']})은 바꾸거나 지울 수 없습니다.")
+    flag = _after_close(con, rid)
     with tx(con):
         con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
                     (rid, cur["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), reason.strip(), now()))
         con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note=?, memo=?, lat=?, lon=?,
-            geo_source=COALESCE(?, geo_source), planned_date=?, appt_start=?, appt_end=?, must_today=?, urgent=?, priority=?, updated_at=? WHERE id=?""",
+            geo_source=COALESCE(?, geo_source), planned_date=?, appt_start=?, appt_end=?, must_today=?, urgent=?, priority=?, updated_at=?,
+            dong=?, channel=? WHERE id=?""",
                     (d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
                      (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None and (d["lat"], d["lon"]) != (cur["lat"], cur["lon"]) else None,
                      d["planned_date"] or None, d["appt_start"] or None, d["appt_end"] or None, d["must_today"], d["urgent"],
-                     d["priority"], now(), rid))
+                     d["priority"], now(), dong, d["channel"], rid))
         for lid in old_items:
             if lid not in new_ids:
                 con.execute("UPDATE request_item SET removed=1 WHERE line_id=?", (lid,))
@@ -366,24 +614,54 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
                             (it["qty"], it["amount"], it["unit_price"], it["price_status"], it["line_id"]))
             else:
                 _insert_item(con, rid, it)
-        audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"]})
+        audit(con, "request", rid, "UPDATE", {"reason": reason.strip(), "from_ver": cur["req_ver"], **flag})
+    warn = jurisdiction_warnings(con, d["address"]) + dwarn
+    if (d["planned_date"] or None) != cur["planned_date"] or dong != cur["dong"]:
+        warn += _area().capacity_warnings(con, d["planned_date"] or None, dong, rid)
     return {"id": rid, "resend_needed": bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,))),
-            "warnings": jurisdiction_warnings(con, d["address"])}
+            "warnings": warn, "after_close": bool(flag)}
 
 
-def cancel_request(con, rid: str, reason: str) -> dict:
-    cur = one(con, "SELECT status FROM request WHERE id=?", (rid,))
+def _reason(codes: dict, code: str | None, text: str | None, what: str) -> tuple[str, str, str]:
+    """(코드, 직접 입력 글, 화면·이력용 글). 코드가 없으면 글만으로(이전 방식) 기타 처리."""
+    text = (text or "").strip()
+    if not code:
+        if not text:
+            raise UserError(f"{what} 사유를 적어 주세요.")
+        code = "OTHER"
+    if code not in codes:
+        raise UserError(f"{what} 사유 코드가 올바르지 않습니다.")
+    if code == "OTHER" and not text:
+        raise UserError(f"{what} 사유를 직접 적어 주세요 (기타).")
+    full = codes[code] + (f": {text}" if text else "")
+    return code, text[:200], full[:220]
+
+
+def _cancel(con, rid: str, code: str, text: str, full: str) -> dict:
+    """취소 한 건(트랜잭션은 호출하는 쪽). 납부 기록이 남아 있으면 환불 필요로 표시된다."""
+    cur = one(con, "SELECT status, planned_date FROM request WHERE id=?", (rid,))
     if not cur:
         raise UserError("접수를 찾을 수 없습니다.")
-    if not (reason or "").strip():
-        raise UserError("취소 사유를 적어 주세요.")
+    if cur["status"] == "CANCELLED":
+        raise UserError("이미 취소된 접수입니다.")
     act = one(con, "SELECT a.batch_id, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE a.request_id=?", (rid,))
     sent = act and one(con, "SELECT 1 AS x FROM transfer_bundle WHERE batch_id=?", (act["batch_id"],))
+    flag = _after_close(con, rid)
+    paid = payment_status(con, rid)["paid"]
+    con.execute("UPDATE request SET status='CANCELLED', cancel_code=?, cancel_reason=?, cancelled_at=?, updated_at=? WHERE id=?",
+                (code, text or None, now(), now(), rid))
+    con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
+    audit(con, "request", rid, "CANCEL", {"code": code, "reason": full, "was": cur["status"], **({"refund_needed": paid} if paid > 0 else {}), **flag})
+    return {"field_notice_needed": bool(sent), "refund_needed": paid > 0, "paid": paid}
+
+
+def cancel_request(con, rid: str, reason: str = "", code: str | None = None) -> dict:
+    """접수 취소(사유 코드 + 직접 입력). 이미 납부한 금액이 있으면 환불 필요로 알려 준다(마감 수납 확인·'환불 필요' 목록)."""
+    code, text, full = _reason(CANCEL_CODES, code, reason, "취소")
     with tx(con):
-        con.execute("UPDATE request SET status='CANCELLED', cancel_reason=?, updated_at=? WHERE id=?", (reason.strip(), now(), rid))
-        con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
-        audit(con, "request", rid, "CANCEL", {"reason": reason.strip(), "was": cur["status"]})
-    return {"field_notice_needed": bool(sent)}
+        res = _cancel(con, rid, code, text, full)
+    _fin().sync_refunds(con)
+    return res
 
 
 def set_location(con, rid: str, lat: float, lon: float, source: str = "MANUAL"):
@@ -405,30 +683,110 @@ def is_chosung(s: str) -> bool:
     return any("ㄱ" <= ch <= "ㅎ" for ch in s or "") and all("ㄱ" <= ch <= "ㅎ" or ch.isascii() for ch in s)
 
 
-def list_requests(con, q: str = "", date: str = "", status: str = "") -> list[dict]:
+SORTABLE = {"receipt_no": "receipt_no", "planned_date": "COALESCE(planned_date,'9999')", "received_at": "received_at", "name": "name",
+            "dong": "COALESCE(dong,'')", "status": "status", "channel": "channel", "address": "address"}
+QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND")
+
+
+def _enrich(con, r: dict) -> dict:
+    r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
+    r["state"] = derive(con, r)
+    r["warnings"] = jurisdiction_warnings(con, r["address"])
+    r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
+        JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
+    return r
+
+
+def _request_sql(f: dict) -> tuple[str, list]:
+    """조회조건 → SQL (검색어·날짜 범위·상태·팀·동·경로). 초성·수납 상태·빠른 조회는 계산 뒤 거른다."""
     sql, args = "SELECT * FROM request WHERE 1=1", []
-    cho = [t for t in (q or "").split() if is_chosung(t)]
-    q = " ".join(t for t in (q or "").split() if not is_chosung(t))
-    if date:
-        sql += " AND planned_date=?"; args.append(date)
+    q = " ".join(t for t in (f.get("q") or "").split() if not is_chosung(t))
+    if f.get("date"):
+        sql += " AND planned_date=?"; args.append(f["date"])
+    col = "received_at" if f.get("date_field") == "received" else "planned_date"
+    for k, op in (("date_from", ">="), ("date_to", "<=")):
+        v = f.get(k)
+        if v:
+            if not re.fullmatch(r"\d{4}-\d\d-\d\d", v):
+                raise UserError("조회 기간을 날짜로 골라 주세요.")
+            if col == "received_at":  # 접수일은 한국시간 날짜 기준 → UTC 시각 범위
+                d0 = dt.datetime.fromisoformat(v).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+                if op == "<=":
+                    d0 += dt.timedelta(days=1)
+                sql += f" AND received_at {'>=' if op == '>=' else '<'} ?"; args.append(d0.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            else:
+                sql += f" AND planned_date {op} ?"; args.append(v)
+    status = f.get("status") or ""
     if status == "OPEN":
         sql += " AND status NOT IN ('DONE','CANCELLED')"
     elif status:
         sql += " AND status=?"; args.append(status)
+    if f.get("crew"):
+        sql += """ AND id IN (SELECT a.request_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE b.crew_id=?)"""
+        args.append(f["crew"])
+    if f.get("dong"):
+        if f["dong"] == "-":
+            sql += " AND dong IS NULL"
+        else:
+            sql += " AND dong=?"; args.append(f["dong"])
+    if f.get("channel"):
+        sql += " AND channel=?"; args.append(f["channel"])
     if q:
         qp = norm_phone(q)
         sql += " AND (name LIKE ? OR address LIKE ? OR receipt_no LIKE ?" + (" OR phone LIKE ?" if qp else "") + ")"
         args += [f"%{q}%"] * 3 + ([f"%{qp}%"] if qp else [])
-    out = rows(con, sql + " ORDER BY COALESCE(planned_date,'9999'), received_at DESC" + ("" if cho else " LIMIT 500"), args)
+    return sql, args
+
+
+def _quick_ok(con, r: dict, key: str, today: str) -> bool:
+    if key == "TODAY":
+        return r["planned_date"] == today
+    if key == "NOLOC":
+        return r["lat"] is None
+    if key == "UNASSIGNED":
+        return r["status"] not in ("DONE", "CANCELLED") and not one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (r["id"],))
+    if key == "FEE":
+        return derive(con, r)["fee"]["final"] is None
+    if key == "REFUND":
+        return r["status"] == "CANCELLED" and payment_status(con, r["id"])["status"] == "REFUND_NEEDED"
+    return True
+
+
+def search_requests(con, f: dict | None = None, scope_ids: set[str] | None = None, with_counts: bool = True) -> dict:
+    """접수 목록 조회(서버 쪽 쪽 나눔). f: q, date, date_field(planned|received), date_from, date_to, status, crew, dong, channel,
+    pay(수납 상태), quick, sort, dir, page(1부터), size. 돌려줌: rows(이 쪽), total(조건에 맞는 전체), counts(빠른 조회별 건수)."""
+    f = dict(f or {})
+    sql, args = _request_sql(f)
+    key = SORTABLE.get(f.get("sort") or "", None)
+    desc = (f.get("dir") or "").lower() == "desc"
+    order = f" ORDER BY {key} {'DESC' if desc else 'ASC'}, received_at DESC" if key else " ORDER BY COALESCE(planned_date,'9999'), received_at DESC"
+    out = rows(con, sql + order, args)
+    cho = [t for t in (f.get("q") or "").split() if is_chosung(t)]
     if cho:  # 초성 검색: 이름·주소의 초성 (예: ㄱㅅㅎ → 가상하나)
-        out = [r for r in out if all(t in chosung_of(re.sub(r"\s+", "", (r["name"] or "") + "|" + (r["address"] or ""))) for t in cho)][:500]
-    for r in out:
-        r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
-        r["state"] = derive(con, r)
-        r["warnings"] = jurisdiction_warnings(con, r["address"])
-        r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
-            JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
-    return out
+        out = [r for r in out if all(t in chosung_of(re.sub(r"\s+", "", (r["name"] or "") + "|" + (r["address"] or ""))) for t in cho)]
+    if scope_ids is not None:
+        out = [r for r in out if r["id"] in scope_ids]
+    if f.get("pay"):
+        out = [r for r in out if payment_status(con, r["id"])["status"] == f["pay"]]
+    today = today_kst()
+    counts = {k: sum(1 for r in out if _quick_ok(con, r, k, today)) for k in QUICK if k != "ALL"} if with_counts else {}
+    counts["ALL"] = len(out)
+    quick = f.get("quick") or "ALL"
+    if quick not in QUICK:
+        raise UserError("빠른 조회 값이 올바르지 않습니다.")
+    if quick != "ALL":
+        out = [r for r in out if _quick_ok(con, r, quick, today)]
+    total = len(out)
+    size = max(1, min(500, int(f.get("size") or 50)))
+    pages = max(1, -(-total // size))
+    page = max(1, min(pages, int(f.get("page") or 1)))
+    part = [_enrich(con, r) for r in out[(page - 1) * size: page * size]]
+    return {"rows": part, "total": total, "page": page, "size": size, "pages": pages, "counts": counts}
+
+
+def list_requests(con, q: str = "", date: str = "", status: str = "") -> list[dict]:
+    """조건에 맞는 접수(최대 500건, 노선 계산 등 내부용). 화면 목록은 search_requests(쪽 나눔·전체 건수)를 쓴다."""
+    return search_requests(con, {"q": q, "date": date, "status": status, "size": 500}, with_counts=False)["rows"]
 
 
 def get_request(con, rid: str) -> dict:
@@ -441,14 +799,19 @@ def get_request(con, rid: str) -> dict:
     r["state"] = derive(con, r)
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event
         WHERE request_id=? ORDER BY device_ts""", (rid,))
-    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at, line_id FROM photo WHERE request_id=?", (rid,))
+    r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at, line_id, taken_at, acc, (lat IS NOT NULL) AS has_gps FROM photo WHERE request_id=?", (rid,))
+    r["refunds"] = rows(con, "SELECT * FROM refund_case WHERE request_id=? ORDER BY created_at DESC", (rid,))
     r["payment"] = payment_status(con, rid)
+    r["contacts"] = list_contacts(con, rid)
+    r["cancel_label"] = (CANCEL_CODES.get(r["cancel_code"] or "", "") + (": " if r["cancel_code"] and r["cancel_reason"] else "") + (r["cancel_reason"] or "")) if r["status"] == "CANCELLED" else None
+    ci = close_info(con, r["planned_date"])
+    r["closed"] = {"work_date": ci["work_date"], "seq": ci["seq"], "status": ci["status"]} if ci else None
     return r
 
 
 # ------------------------------------------------------------------ 현장 결과로 현재 상태 계산
 def _events_for(con, rid):
-    return rows(con, """SELECT e.kind, e.body_json FROM result_event e JOIN result_import i ON i.id=e.import_id
+    return rows(con, """SELECT e.kind, e.body_json, e.device_ts FROM result_event e JOIN result_import i ON i.id=e.import_id
         WHERE e.request_id=? AND e.apply_status='APPLIED' ORDER BY i.imported_at, e.device_seq""", (rid,))
 
 
@@ -462,9 +825,39 @@ def derive(con, req: dict) -> dict:
     by = {l["line_id"]: l for l in lines}
     contact, outcome, loc, n = "NOT_CONTACTED", None, None, 0
     memos = []
+    # 휴대폰 v0.10 기록: 도착·스티커 확인·추가 금액 고지·문자/길안내(횟수만)·작업자·부재 증거
+    fx = {"arrive": None, "stickers": {}, "fee_notices": [], "sms": {}, "nav": 0, "nav_apps": {}, "workers": [], "no_photo_reason": None, "other_kinds": {}}
+    known = {"CONTACT", "FIELD_ITEM_ADD", "ITEM_RESULT", "ATTEMPT", "LOCATION_FIX", "FIELD_MEMO", "PHOTO_META", "REVISIT_APPT", "DIAL_INTENT", "UNLOAD",
+             "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT"}
     for e in _events_for(con, req["id"]):
-        b = json.loads(e["body_json"])
+        try:
+            b = json.loads(e["body_json"]) or {}
+        except ValueError:
+            b = {}
+        if not isinstance(b, dict):
+            b = {}
         k = e["kind"]
+        w = b.get("worker")
+        if isinstance(w, str) and w.strip() and w.strip()[:10] not in fx["workers"]:
+            fx["workers"].append(w.strip()[:10])
+        if k == "ARRIVE":
+            fx["arrive"] = {"at": e["device_ts"], "acc": b.get("acc"), "has_gps": b.get("lat") is not None, "worker": w}
+        elif k == "STICKER_CHECK" and b.get("line_id"):
+            fx["stickers"][b["line_id"]] = {"result": b.get("result"), "number": (b.get("number") or "")[:30], "decision": b.get("decision"), "at": e["device_ts"]}
+        elif k == "FEE_NOTICE":
+            fx["fee_notices"].append({"at": e["device_ts"], "received": b.get("received"), "total": b.get("total"), "extra": b.get("extra"),
+                                      "pending": b.get("pending"), "response": b.get("response"), "lines": len(b.get("lines") or []), "worker": w})
+        elif k == "SMS_INTENT":
+            t = b.get("template") or "OTHER"
+            fx["sms"][t] = fx["sms"].get(t, 0) + 1
+        elif k == "NAV_INTENT":
+            fx["nav"] += 1
+            a_ = str(b.get("app") or "기타")[:20]
+            fx["nav_apps"][a_] = fx["nav_apps"].get(a_, 0) + 1
+        elif k == "ATTEMPT" and b.get("no_photo_reason"):
+            fx["no_photo_reason"] = b.get("no_photo_reason")
+        elif k not in known:
+            fx["other_kinds"][k] = fx["other_kinds"].get(k, 0) + 1
         if k == "CONTACT":
             contact = b.get("result", contact)
         elif k == "FIELD_ITEM_ADD" and b.get("line_id") not in by:
@@ -479,7 +872,7 @@ def derive(con, req: dict) -> dict:
         elif k == "ATTEMPT":
             outcome = b.get("outcome"); n += 1
         elif k == "LOCATION_FIX":
-            loc = {"lat": b.get("lat"), "lon": b.get("lon")}
+            loc = {"lat": b.get("lat"), "lon": b.get("lon"), "source": b.get("source")}
         elif k == "FIELD_MEMO":
             memos.append((b.get("text") or "")[:300])
     # 표에 없던 품목을 담당자가 유사 품목 단가로 확정한 기록(근거·확인자)을 덧씌운다. 원래 행은 그대로 둔다.
@@ -498,7 +891,7 @@ def derive(con, req: dict) -> dict:
     qty_by_unit: dict[str, int] = {}
     for l in lines:
         qty_by_unit[l["unit_label"]] = qty_by_unit.get(l["unit_label"], 0) + l["qty_confirmed"]
-    return {"lines": lines, "contact": contact, "outcome": outcome, "field_loc": loc, "has_field_records": n > 0, "memos": memos,
+    return {"lines": lines, "contact": contact, "outcome": outcome, "field_loc": loc, "has_field_records": n > 0, "memos": memos, "field": fx,
             "fee": {"received": received, "confirmed_subtotal": subtotal, "diff": subtotal - received,
                     "field_added": sum(l["price"] * l["qty_confirmed"] for l in lines if l["kind"] == "FIELD" and l["price"] is not None),
                     "pending_count": len(pending), "final": None if pending else subtotal, "qty_by_unit": qty_by_unit},
@@ -517,9 +910,11 @@ def _refresh_status(con, rid):
     elif st["has_field_records"]:
         new = "IN_PROGRESS"
     if st["field_loc"] and st["field_loc"]["lat"] is not None:
-        con.execute("UPDATE request SET lat=?, lon=?, geo_source='FIELD' WHERE id=?", (st["field_loc"]["lat"], st["field_loc"]["lon"], rid))
+        con.execute("UPDATE request SET lat=?, lon=?, geo_source=? WHERE id=?",
+                    (st["field_loc"]["lat"], st["field_loc"]["lon"], "ADDR" if st["field_loc"].get("source") == "ADDR" else "FIELD", rid))
     if new != r["status"]:
-        con.execute("UPDATE request SET status=?, updated_at=? WHERE id=?", (new, now(), rid))
+        con.execute("UPDATE request SET status=?, updated_at=?, completed_at=CASE WHEN ? IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD') THEN ? ELSE completed_at END WHERE id=?",
+                    (new, now(), new, now(), rid))
         audit(con, "request", rid, "STATUS", {"from": r["status"], "to": new})
     if new in FINAL:
         con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
@@ -607,6 +1002,10 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
     stops = []
     # 배정 확정 때 저장한 반입지 경유(하차) 위치: 그 지점을 마친 뒤 반입지에 들른다
     unload_by = {x["request_id"]: x["unload_after"] for x in json.loads(b["route_json"] or "[]") if isinstance(x, dict) and x.get("unload_after")}
+    us = get_setting(con, "unload_site", None)  # 반입지 좌표를 함께 보낸다(휴대폰 길안내용, 설정에 있을 때만)
+    if us and us.get("lat") is not None:
+        for u_ in unload_by.values():
+            u_.setdefault("lat", us["lat"]); u_.setdefault("lon", us["lon"])
     for s in rows(con, "SELECT request_id, seq, eta FROM assignment_stop WHERE batch_id=? ORDER BY seq", (batch_id,)):
         r = one(con, "SELECT * FROM request WHERE id=?", (s["request_id"],))
         if r["status"] == "CANCELLED":
@@ -629,7 +1028,11 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
             extra_u = {"unload_after": unload_by[r["id"]]}
         else:
             extra_u = {}
-        stops.append({**extra_u, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"],
+        # "dong": 행정동 이름(문자열). 휴대폰 목록 형식(dgproto)이 아직 모르면 압축할 때 빠진다.
+        # "reduction": 감면율(%)·사유. 휴대폰 목록 압축 형식에는 감면율만 "rd"로 싣는다(사유 이름은 복지 정보라 휴대폰에 보내지 않음).
+        # "levy_no": 부과번호 → "lv"
+        red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or ""}} if r.get("reduction_code") else {}
+        stops.append({**extra_u, **red_, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],
                       "lat": r["lat"], "lon": r["lon"], "eta": s["eta"] or (r["appt_start"] or ""),
                       "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None,
@@ -699,6 +1102,19 @@ def _open_from_device(con, data: bytes, expect_type: int):
     return dev_id, head, payload, release
 
 
+KNOWN_KINDS = {"CONTACT", "FIELD_ITEM_ADD", "ITEM_RESULT", "ATTEMPT", "LOCATION_FIX", "FIELD_MEMO", "PHOTO_META", "REVISIT_APPT", "DIAL_INTENT", "UNLOAD",
+               "ARRIVE", "STICKER_CHECK", "FEE_NOTICE", "SMS_INTENT", "NAV_INTENT"}
+# 취소된 접수라도 충돌함으로 보내지 않는 기록(연락·사진·도착·문자/길안내 앱 열기 — 결과를 바꾸지 않음)
+CANCELLED_OK_KINDS = ("CONTACT", "DIAL_INTENT", "PHOTO_META", "ARRIVE", "SMS_INTENT", "NAV_INTENT")
+
+
+def _num(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
     sha = hashlib.sha256(data).hexdigest()
     prev = one(con, "SELECT summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
@@ -732,11 +1148,22 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                                                          ("휴대폰 기록 " + (b.get("note") or "")).strip()[:200], now()))
                     counts["unloads"] = counts.get("unloads", 0) + 1
                 continue
+            ev.setdefault("request_id", "")
+            if not isinstance(ev.get("body"), dict):
+                ev["body"] = {}
+            if not ev["request_id"] and ev.get("kind") not in KNOWN_KINDS:
+                # 앞으로 생길 팀 단위 기록(알 수 없는 종류): 접수와 무관하게 보관만 하고 병합을 막지 않는다
+                con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
+                    body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,'APPLIED',NULL,?)""",
+                            (ev["event_id"], imp, dev_id, ev["seq"], "", ev.get("assign_ver") or 0, None, str(ev.get("kind") or "?")[:40],
+                             json.dumps(ev["body"], ensure_ascii=False), ev.get("device_ts")))
+                counts["stored_other"] = counts.get("stored_other", 0) + 1
+                continue
             req = one(con, "SELECT status, req_ver FROM request WHERE id=?", (ev["request_id"],))
             reason = None
             if not req:
                 reason = "PC에 없는 접수"
-            elif req["status"] == "CANCELLED" and ev["kind"] not in ("CONTACT", "DIAL_INTENT", "PHOTO_META"):
+            elif req["status"] == "CANCELLED" and ev["kind"] not in CANCELLED_OK_KINDS:
                 reason = "취소된 접수의 결과"
             elif ev["kind"] in ("ITEM_RESULT", "FIELD_ITEM_ADD", "ATTEMPT"):
                 act = one(con, """SELECT b.assign_ver, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
@@ -758,8 +1185,9 @@ def import_result(con, data: bytes, channel: str = "MAIL") -> dict:
                          ev["kind"], json.dumps(ev.get("body", {}), ensure_ascii=False), status, note, ev.get("device_ts")))
             if ev["kind"] == "PHOTO_META" and not reason:
                 b = ev.get("body", {})
-                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id) VALUES (?,?,?,?,?,?,?)",
-                            (b.get("photo_id"), ev["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id")))
+                con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id, taken_at, lat, lon, acc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (b.get("photo_id"), ev["request_id"], b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id"),
+                             (b.get("taken_at") or b.get("file_ts") or None), _num(b.get("lat")), _num(b.get("lon")), _num(b.get("acc"))))
                 counts["photos_expected"] += 1
             if not reason:
                 touched.add(ev["request_id"])
@@ -866,6 +1294,45 @@ def photo_bytes(con, photo_id: str) -> bytes | None:
 
 
 # ------------------------------------------------------------------ 일일 마감
+CARRY_KIND = {"RECEIVED": "미배정", "ASSIGNED": "결과 없음", "IN_PROGRESS": "최종 결과 없음", "PARTIAL": "일부 수거 · 재방문 약속 없음",
+              "NOT_COLLECTED": "미수거 · 재방문 약속 없음", "ON_HOLD": "보류 · 재방문 약속 없음"}
+
+
+def carry_candidates(con, work_date: str) -> list[dict]:
+    """마감 때 다음 업무일로 넘길 접수: 그날 예정인데 끝나지 않은 건(미배정, 결과 없음, 재방문 약속 없는 일부·미수거·보류).
+    재방문 약속이 있는 건은 이미 그 날짜로 옮겨져 있어 여기에 나오지 않는다."""
+    area = _area()
+    out = []
+    for r in rows(con, "SELECT id, receipt_no, name, status, dong FROM request WHERE planned_date=? AND status NOT IN ('DONE','CANCELLED') ORDER BY receipt_no", (work_date,)):
+        out.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "dong": r["dong"],
+                    "kind": CARRY_KIND.get(r["status"], r["status"]), "to": area.next_working_day(con, work_date, r["dong"])})
+    return out
+
+
+def _carry(con, c: dict, work_date: str):
+    """한 건을 다음 업무일로 옮긴다(이전 일정은 버전으로 보존, 활성 배정은 풀어 다시 배정할 수 있게)."""
+    r = one(con, "SELECT * FROM request WHERE id=?", (c["id"],))
+    con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
+                (r["id"], r["req_ver"], json.dumps(_snapshot(con, r["id"]), ensure_ascii=False), f"마감 이월 ({work_date} → {c['to']})", now()))
+    released = con.execute("DELETE FROM active_assignment WHERE request_id=?", (r["id"],)).rowcount
+    con.execute("UPDATE request SET req_ver=req_ver+1, planned_date=?, status=CASE WHEN status='ASSIGNED' THEN 'RECEIVED' ELSE status END, updated_at=? WHERE id=?",
+                (c["to"], now(), r["id"]))
+    audit(con, "request", r["id"], "CARRY", {"reason": "마감 이월", "from": work_date, "to": c["to"], "kind": c["kind"], **({"released": True} if released else {})})
+
+
+def _post_close_edits(con, work_date: str) -> list[dict]:
+    """마감한 뒤 그날 접수·수납을 고친 기록(변경 이력의 '마감 후 수정' 표시)."""
+    out = []
+    for a in rows(con, """SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log
+            WHERE entity IN ('request','payment') AND json_extract(detail, '$.after_close')=? ORDER BY id""", (work_date,)):
+        d = json.loads(a["detail"] or "{}")
+        rid = a["entity_id"] if a["entity"] == "request" else d.get("request")
+        rq = one(con, "SELECT receipt_no FROM request WHERE id=?", (rid,)) if rid else None
+        out.append({"at": a["at"], "actor": a["actor"], "entity": a["entity"], "action": a["action"], "request_id": rid,
+                    "receipt_no": rq["receipt_no"] if rq else "", "reason": d.get("reason") or ""})
+    return out
+
+
 def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     reqs = rows(con, "SELECT * FROM request WHERE planned_date=?", (work_date,))
     if crew_id:
@@ -885,35 +1352,124 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
                             "next_date": r["planned_date"] if r["planned_date"] != work_date else None, "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None})
         if r["id"] in assigned_ids and r["status"] == "ASSIGNED":
             no_result.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"]})
+    # 휴대폰 v0.10 기록 확인: 스티커 없음·불일치, 추가 금액 고지 거부, 미수거인데 사진도 사진 없는 사유도 없음
+    sticker_issues, fee_refused, no_evidence = [], [], []
+    for r in reqs:
+        if r["status"] == "CANCELLED":
+            continue
+        fx = derive(con, r)["field"]
+        bad = [v for v in fx["stickers"].values() if v["result"] in ("MISSING", "MISMATCH")]
+        if bad:
+            sticker_issues.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "count": len(bad),
+                                   "kinds": sorted({"없음" if v["result"] == "MISSING" else "번호 불일치" for v in bad}),
+                                   "left": sum(1 for v in bad if v["decision"] == "LEAVE")})
+        if any(n["response"] == "REFUSED" for n in fx["fee_notices"]):
+            last = [n for n in fx["fee_notices"] if n["response"] == "REFUSED"][-1]
+            fee_refused.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "extra": last["extra"]})
+        if r["status"] == "NOT_COLLECTED" and not fx["no_photo_reason"] and not one(con, "SELECT 1 AS x FROM photo WHERE request_id=?", (r["id"],)):
+            no_evidence.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"]})
     ids = {r["id"] for r in reqs}
     photos = [x for x in rows(con, """SELECT p.photo_id, p.request_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
         WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,)) if x["request_id"] in ids]
     conflicts = [c for c in list_conflicts(con) if c["request_id"] in ids]
     unconfirmed = rows(con, """SELECT t.id, t.work_date, t.assign_ver FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id
         WHERE t.work_date=? AND t.receipt_confirmed_at IS NULL""" + (" AND b.crew_id=?" if crew_id else ""), (work_date, crew_id) if crew_id else (work_date,))
-    closed = one(con, "SELECT * FROM day_close WHERE work_date=?", (work_date,))
     unpaid = []
     for r in reqs:
-        if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
+        if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD", "CANCELLED"):
             ps = payment_status(con, r["id"])
-            if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING"):
-                unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"], "paid": ps["paid"]})
+            if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING", "REFUND_NEEDED", "OVERREFUNDED_REVIEW"):
+                unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
+                               "levied": ps["levied"], "paid": ps["paid"]})
+    if not crew_id:  # 예정일이 없거나 다른 날인 접수라도 이날 취소했고 환불할 돈이 남았으면 함께 본다
+        d0 = dt.datetime.fromisoformat(work_date).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+        rng = (d0.strftime("%Y-%m-%dT%H:%M:%SZ"), (d0 + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        for r in rows(con, "SELECT * FROM request WHERE status='CANCELLED' AND cancelled_at>=? AND cancelled_at<? AND COALESCE(planned_date,'')!=?", (*rng, work_date)):
+            ps = payment_status(con, r["id"])
+            if ps["status"] == "REFUND_NEEDED":
+                unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
+                               "levied": ps["levied"], "paid": ps["paid"]})
     unloads = [u for u in list_unloads(con, work_date) if not crew_id or u["crew_id"] == crew_id]
+    # 동별 현황 (오늘 건수·완료·미처리·한도 대비)
+    area = _area()
+    dongs = []
+    by_dong: dict[str, list] = {}
+    for r in reqs:
+        by_dong.setdefault(r["dong"] or "", []).append(r)
+    for d in area.list_dongs(con):
+        lst = by_dong.pop(d["name"], [])
+        if not lst and not d["active"]:
+            continue
+        live = [r for r in lst if r["status"] != "CANCELLED"]
+        dongs.append({"dong": d["name"], "total": len(live), "done": sum(r["status"] == "DONE" for r in live),
+                      "open": sum(r["status"] not in ("DONE",) for r in live), "limit": d["daily_limit"], "limit_m3": d["daily_limit_m3"],
+                      "m3": round(sum(area.request_volume(con, r["id"]) for r in live), 2) if d["daily_limit_m3"] else None,
+                      "crew": d["crew_name"], "working": area.working_reason(con, work_date, d) is None})
+    for name, lst in by_dong.items():  # 동 미지정·지운 동
+        live = [r for r in lst if r["status"] != "CANCELLED"]
+        dongs.append({"dong": name or None, "total": len(live), "done": sum(r["status"] == "DONE" for r in live), "open": sum(r["status"] != "DONE" for r in live),
+                      "limit": None, "limit_m3": None, "m3": None, "crew": None, "working": True})
+    closes = rows(con, "SELECT id, seq, closed_at, closed_by, note, carried_json, status, approved_by, approved_at, approve_note FROM day_close_log WHERE work_date=? ORDER BY seq", (work_date,))
+    for c in closes:
+        c["carried"] = len(json.loads(c.pop("carried_json") or "[]"))
+    cap = area.capacity_settings(con)
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
-            "payments": unpaid, "unloads": unloads,
+            "payments": unpaid, "unloads": unloads, "sticker_issues": sticker_issues, "fee_refused": fee_refused, "no_evidence": no_evidence,
             "unload_total": {"volume_m3": round(sum(u["volume_m3"] or 0 for u in unloads), 2), "weight_kg": round(sum(u["weight_kg"] or 0 for u in unloads), 1)},
-            "closed": closed}
+            "carry": [] if crew_id else carry_candidates(con, work_date), "dongs": dongs,
+            "capacity": {"limit": cap["daily_count"], "booked": sum(1 for r in reqs if r["status"] != "CANCELLED")},
+            "working": area.working_reason(con, work_date),
+            "post_close_edits": [] if crew_id else _post_close_edits(con, work_date),
+            "closes": closes, "closed": closes[-1] if closes else None}
 
 
 def close_day(con, work_date: str, note: str = "") -> dict:
+    """마감 기록(담당자). 끝나지 않은 건은 다음 업무일로 예정일을 옮기고(마감 이월), 기록은 회차로 쌓는다(덮어쓰지 않음).
+    팀장(검토자)이 approve_close 로 확인한다."""
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d", work_date or ""):
+        raise UserError("마감할 날짜를 골라 주세요.")
     s = day_summary(con, work_date)
-    s.pop("closed", None)
+    carry = s["carry"]
+    for k in ("closed", "closes", "post_close_edits", "dongs"):
+        s.pop(k, None)
+    for k in ("sticker_issues", "fee_refused", "no_evidence"):  # 요약에는 건수만
+        s[k] = len(s.get(k) or [])
     with tx(con):
-        con.execute("INSERT INTO day_close VALUES (?,?,?,?) ON CONFLICT(work_date) DO UPDATE SET closed_at=excluded.closed_at, summary_json=excluded.summary_json, note=excluded.note",
-                    (work_date, now(), json.dumps(s, ensure_ascii=False), note))
-        audit(con, "day", work_date, "CLOSE", {"open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"]})
-    return s
+        for c in carry:
+            _carry(con, c, work_date)
+        seq = (one(con, "SELECT MAX(seq) AS n FROM day_close_log WHERE work_date=?", (work_date,))["n"] or 0) + 1
+        con.execute("""INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note, carried_json, status)
+            VALUES (?,?,?,?,?,?,?,?,'RECORDED')""", (str(uuid.uuid4()), work_date, seq, now(), ACTOR.get(), json.dumps(s, ensure_ascii=False), (note or "")[:300],
+                                                   json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
+        audit(con, "day", work_date, "CLOSE", {"seq": seq, "open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"],
+                                               "carried": len(carry)})
+    return {**s, "seq": seq, "carried": carry}
+
+
+def approve_close(con, work_date: str, note: str = "") -> dict:
+    """팀장 확인(두 번째 단계). 마감을 기록한 사람은 확인할 수 없다. 다시 마감하면 새 회차를 다시 확인해야 한다."""
+    c = close_info(con, work_date)
+    if not c:
+        raise UserError("아직 마감 기록이 없습니다. 담당자가 먼저 마감을 기록해야 합니다.")
+    if c["status"] == "APPROVED":
+        raise UserError("이미 확인한 마감입니다.")
+    if c["closed_by"] and c["closed_by"] == ACTOR.get():
+        raise UserError("마감을 기록한 사람은 확인할 수 없습니다. 팀장(검토자)이 확인해 주세요.")
+    with tx(con):
+        con.execute("UPDATE day_close_log SET status='APPROVED', approved_by=?, approved_at=?, approve_note=? WHERE id=?",
+                    (ACTOR.get(), now(), (note or "")[:300], c["id"]))
+        audit(con, "day", work_date, "APPROVE", {"seq": c["seq"]})
+    out = dict(close_info(con, work_date))
+    # 마감 확인 뒤: 보유기간 지난 개인정보 파기, 오래된 접속기록 정리, 자동 백업 (실패해도 확인은 그대로)
+    from dgpc import backup as _bk, privacy as _pv
+    try:
+        out["pii_purge"] = _pv.purge_pii(con, trigger="CLOSE_APPROVE")["count"]
+        _pv.purge_old_access(con)
+    except Exception:  # noqa: BLE001
+        out["pii_purge"] = None
+    out["backup"] = {k: v for k, v in _bk.make_auto(con, "CLOSE_APPROVE").items() if k in ("ok", "file", "error")}
+    return out
 
 
 # ------------------------------------------------------------------ QR 실측 (가상 자료, 업무 자료와 분리)
@@ -962,48 +1518,67 @@ def list_qr_tests(con) -> list[dict]:
 
 
 # ------------------------------------------------------------------ 수납 (담당자 확인 기록) — 계산 금액·납부 금액·상태를 분리
-PAY_METHODS = ("현장 납부", "무통장 입금", "기타")
+PAY_METHODS = ("현장 카드", "현장 현금", "가상계좌", "무통장 입금", "스티커 구매", "기타")
+LEGACY_PAY_METHODS = ("현장 납부",)  # 이전 버전 기록·시험용 (화면에는 내지 않음)
+REFUND_PAY_METHODS = ("계좌 이체", "현금", "카드 취소", "기타")
+
+
+def _fin():
+    from dgpc import finance
+    return finance
 
 
 def payment_status(con, rid: str) -> dict:
     r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     final = derive(con, r)["fee"]["final"]
+    fs = _fin().fee_summary(r, final)
+    owed = fs["levied"]
     recs = rows(con, "SELECT * FROM payment WHERE request_id=? ORDER BY recorded_at", (rid,))
     live = [x for x in recs if not x["void_reason"]]
     paid = sum(x["amount"] for x in live if x["kind"] == "PAY") - sum(x["amount"] for x in live if x["kind"] == "REFUND")
     if r["status"] == "CANCELLED" and paid == 0:
         status = "NONE"
-    elif final is None:
+    elif r["status"] == "CANCELLED":  # 납부 뒤 취소: 돌려줄 돈이 남아 있음 (마감 수납 확인·'환불 필요' 목록)
+        status = "REFUND_NEEDED" if paid > 0 else "OVERREFUNDED_REVIEW"
+    elif owed is None:
         status = "AMOUNT_PENDING" if paid == 0 else "PAID_AMOUNT_PENDING"
+    elif owed == 0 and paid == 0:
+        status = "EXEMPT"  # 전액 감면
     elif paid == 0:
         status = "UNPAID"
-    elif paid < final:
+    elif paid < owed:
         status = "UNDERPAID"
-    elif paid == final:
+    elif paid == owed:
         status = "PAID"
     else:
         status = "OVERPAID_REVIEW"
-    return {"calculated": final, "paid": paid, "status": status, "records": recs}
+    return {**fs, "paid": paid, "status": status, "records": recs, "levy_no": r.get("levy_no")}
 
 
 def add_payment(con, rid: str, data: dict) -> dict:
     if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (rid,)):
         raise UserError("접수를 찾을 수 없습니다.")
+    flag = _after_close(con, rid)
+    why = (data.get("reason") or "").strip()
+    if flag and not why:
+        raise UserError(f"마감한 날({flag['after_close']})의 접수입니다. 수납 기록 사유를 적어 주세요.")
     kind = data.get("kind", "PAY")
     amount = int(data.get("amount") or 0)
     method = data.get("method") or ""
     paid_on = data.get("paid_on") or today_kst()
     if kind not in ("PAY", "REFUND") or amount <= 0:
         raise UserError("금액을 1원 이상으로 적어 주세요.")
-    if method not in PAY_METHODS:
+    if method not in PAY_METHODS + LEGACY_PAY_METHODS + (REFUND_PAY_METHODS if kind == "REFUND" else ()):
         raise UserError("납부 방법을 골라 주세요.")
+    ref = (data.get("receipt_ref") or "").strip()[:40] or None
     if not re.fullmatch(r"\d{4}-\d\d-\d\d", paid_on):
         raise UserError("날짜 형식이 올바르지 않습니다.")
     pid = str(uuid.uuid4())
     with tx(con):
-        con.execute("INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (pid, rid, kind, amount, method, paid_on, (data.get("note") or "").strip(), now()))
-        audit(con, "payment", pid, kind, {"request": rid, "amount": amount, "method": method})
+        con.execute("INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, receipt_ref, source) VALUES (?,?,?,?,?,?,?,?,?,'수기')",
+                    (pid, rid, kind, amount, method, paid_on, (data.get("note") or "").strip()[:100], now(), ref))
+        audit(con, "payment", pid, kind, {"request": rid, "amount": amount, "method": method, **({"ref": ref} if ref else {}), **({"reason": why[:200]} if why else {}), **flag})
+    _fin().sync_refunds(con)
     return payment_status(con, rid)
 
 
@@ -1015,7 +1590,8 @@ def void_payment(con, pid: str, reason: str) -> dict:
         raise UserError("정정 사유를 적어 주세요.")
     with tx(con):
         con.execute("UPDATE payment SET void_reason=?, voided_at=? WHERE id=?", (reason.strip(), now(), pid))
-        audit(con, "payment", pid, "VOID", {"reason": reason.strip()})
+        audit(con, "payment", pid, "VOID", {"request": p["request_id"], "reason": reason.strip(), **_after_close(con, p["request_id"])})
+    _fin().sync_refunds(con)
     return payment_status(con, p["request_id"])
 
 
@@ -1069,7 +1645,7 @@ import hashlib as _hl
 import hmac as _hmac
 import secrets as _secrets
 
-ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀"}
+ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀", "LEAD": "팀장(검토자)"}
 
 
 def _pw_hash(pw: str, salt: bytes) -> str:
@@ -1130,6 +1706,36 @@ def check_login(con, username: str, password: str) -> dict | None:
             "crew_id": u["crew_id"]}
 
 
+THEMES = ("auto", "light", "dark")
+FONT_SIZES = (13, 14, 15, 16)
+
+
+def user_prefs(con, uid: str) -> dict:
+    r = one(con, "SELECT prefs_json FROM app_user WHERE id=?", (uid,))
+    p = json.loads(r["prefs_json"]) if r and r["prefs_json"] else {}
+    return {"theme": p.get("theme") if p.get("theme") in THEMES else "auto", "font": p.get("font") if p.get("font") in FONT_SIZES else 14}
+
+
+def save_prefs(con, uid: str, data: dict) -> dict:
+    """사용자별 화면 설정(테마: 자동·밝게·어둡게, 글자 크기 13~16px). 서버(DB)에 저장해 어느 PC에서나 같게."""
+    cur = user_prefs(con, uid)
+    if "theme" in data:
+        if data["theme"] not in THEMES:
+            raise UserError("테마 값이 올바르지 않습니다.")
+        cur["theme"] = data["theme"]
+    if "font" in data:
+        try:
+            f = int(data["font"])
+        except (TypeError, ValueError):
+            f = 0
+        if f not in FONT_SIZES:
+            raise UserError("글자 크기 값이 올바르지 않습니다.")
+        cur["font"] = f
+    with tx(con):
+        con.execute("UPDATE app_user SET prefs_json=? WHERE id=?", (json.dumps(cur), uid))
+    return cur
+
+
 def list_users(con) -> list[dict]:
     return rows(con, """SELECT u.id, u.username, u.display_name, u.role, u.active, u.must_change, u.created_at, u.last_login_at, u.crew_id, c.name AS crew_name
         FROM app_user u LEFT JOIN crew c ON c.id=u.crew_id ORDER BY u.created_at""")
@@ -1161,16 +1767,375 @@ def set_password(con, uid: str, password: str, must_change: bool = False, old: s
         audit(con, "user", uid, "PASSWORD", {"reset_by_admin": must_change})
 
 
-def list_audit(con, entity: str = "", date: str = "", actor: str = "", limit: int = 300) -> list[dict]:
-    sql, args = "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log WHERE 1=1", []
+AUDIT_ENTITIES = {"request": "접수", "payment": "수납", "batch": "배정", "bundle": "목록 전송", "import": "결과 가져오기", "event": "충돌 처리",
+                  "photo": "사진", "photo_import": "사진 가져오기", "day": "마감", "device": "휴대폰", "crew": "수거팀", "user": "사용자",
+                  "backup": "백업", "fee": "수수료표", "address": "주소 자료", "report": "보고서·내보내기", "unload": "하차", "volume": "적재 보정",
+                  "dong": "행정동", "holiday": "휴무일", "settings": "설정", "contact": "민원·통화", "request_import": "접수 일괄 등록",
+                  "privacy": "개인정보 파기", "access": "접속기록", "refund": "환불", "revenue": "세입·대사"}
+_AUDIT_HIDE = ("name", "phone", "address", "memo", "location_note", "sha256", "content", "spot_note")
+
+
+def _audit_where(entity="", date="", actor="", date_from="", date_to="", action="") -> tuple[str, list]:
+    sql, args = " WHERE 1=1", []
     if entity:
         sql += " AND entity=?"; args.append(entity)
-    if date:  # 한국시간 날짜 → UTC 범위
-        d0 = dt.datetime.fromisoformat(date).replace(tzinfo=KST).astimezone(dt.timezone.utc)
-        sql += " AND at >= ? AND at < ?"; args += [d0.strftime("%Y-%m-%dT%H:%M:%SZ"), (d0 + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")]
+    if action:
+        sql += " AND action=?"; args.append(action)
+    if date:
+        date_from = date_to = date
+    for v, op in ((date_from, ">="), (date_to, "<")):  # 한국시간 날짜 → UTC 범위
+        if not v:
+            continue
+        if not re.fullmatch(r"\d{4}-\d\d-\d\d", v):
+            raise UserError("기간을 날짜로 골라 주세요.")
+        d0 = dt.datetime.fromisoformat(v).replace(tzinfo=KST).astimezone(dt.timezone.utc)
+        if op == "<":
+            d0 += dt.timedelta(days=1)
+        sql += f" AND at {op} ?"; args.append(d0.strftime("%Y-%m-%dT%H:%M:%SZ"))
     if actor:
         sql += " AND actor=?"; args.append(actor)
-    return rows(con, sql + " ORDER BY id DESC LIMIT ?", args + [limit])
+    return sql, args
+
+
+def list_audit(con, entity: str = "", date: str = "", actor: str = "", limit: int = 300, date_from: str = "", date_to: str = "",
+               action: str = "", offset: int = 0) -> list[dict]:
+    w, args = _audit_where(entity, date, actor, date_from, date_to, action)
+    return rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT ? OFFSET ?",
+                args + [int(limit), int(offset)])
+
+
+def audit_page(con, f: dict) -> dict:
+    """변경 이력 조회(쪽 나눔·전체 건수). f: entity, action, actor, date_from, date_to, page, size."""
+    w, args = _audit_where(f.get("entity", ""), f.get("date", ""), f.get("actor", ""), f.get("date_from", ""), f.get("date_to", ""), f.get("action", ""))
+    total = one(con, "SELECT COUNT(*) AS n FROM audit_log" + w, args)["n"]
+    size = max(1, min(1000, int(f.get("size") or 100)))
+    pages = max(1, -(-total // size))
+    page = max(1, min(pages, int(f.get("page") or 1)))
+    return {"rows": list_audit(con, limit=size, offset=(page - 1) * size, entity=f.get("entity", ""), date=f.get("date", ""), actor=f.get("actor", ""),
+                               date_from=f.get("date_from", ""), date_to=f.get("date_to", ""), action=f.get("action", "")),
+            "total": total, "page": page, "pages": pages, "size": size}
+
+
+def _audit_detail_text(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(d, dict):
+        return str(d)[:200]
+    return "; ".join(f"{k}={json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v}" for k, v in d.items() if k not in _AUDIT_HIDE)[:500]
+
+
+def audit_csv(con, f: dict) -> bytes:
+    """거른 변경 이력 CSV(엑셀용 BOM). 이력 내용에는 원래 이름·연락처·주소가 없고, 혹시 있을 만한 칸도 빼고 내보낸다."""
+    import csv
+    import io
+    w, args = _audit_where(f.get("entity", ""), f.get("date", ""), f.get("actor", ""), f.get("date_from", ""), f.get("date_to", ""), f.get("action", ""))
+    buf = io.StringIO()
+    wr = csv.writer(buf)
+    wr.writerow(["번호", "시각(한국시간)", "작업자", "대상", "작업", "대상 번호", "내용"])
+    n = 0
+    for a in rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT 100000", args):
+        t = dt.datetime.fromisoformat(a["at"].replace("Z", "+00:00")).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+        wr.writerow([a["id"], t, a["actor"] or "", AUDIT_ENTITIES.get(a["entity"], a["entity"]), a["action"], (a["entity_id"] or "")[:8], _audit_detail_text(a["detail"])])
+        n += 1
+    with tx(con):
+        audit(con, "report", "audit", "EXPORT", {"rows": n, **{k: f[k] for k in ("entity", "actor", "date_from", "date_to") if f.get(k)}})
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+# ------------------------------------------------------------------ 민원·통화 기록 (접수별)
+def list_contacts(con, rid: str) -> list[dict]:
+    return rows(con, "SELECT id, at, kind, content, actor, recorded_at FROM contact_log WHERE request_id=? ORDER BY at DESC, recorded_at DESC", (rid,))
+
+
+def add_contact(con, rid: str, data: dict) -> str:
+    if not one(con, "SELECT 1 AS x FROM request WHERE id=?", (rid,)):
+        raise UserError("접수를 찾을 수 없습니다.")
+    kind = data.get("kind") or ""
+    if kind not in CONTACT_KINDS:
+        raise UserError("유형을 골라 주세요 (" + ", ".join(CONTACT_KINDS) + ").")
+    content = (data.get("content") or "").strip()
+    if not content:
+        raise UserError("내용을 적어 주세요.")
+    at = (data.get("at") or "").strip() or dt.datetime.now(KST).strftime("%Y-%m-%dT%H:%M")
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d", at):
+        raise UserError("일시 형식이 올바르지 않습니다.")
+    cid = str(uuid.uuid4())
+    with tx(con):
+        con.execute("INSERT INTO contact_log (id, request_id, at, kind, content, actor, recorded_at) VALUES (?,?,?,?,?,?,?)",
+                    (cid, rid, at.replace(" ", "T"), kind, content[:1000], ACTOR.get(), now()))
+        audit(con, "contact", cid, "ADD", {"request": rid, "kind": kind})  # 내용은 이력에 넣지 않는다(개인정보가 섞일 수 있음)
+    return cid
+
+
+# ------------------------------------------------------------------ 일괄 처리 (접수 목록에서 고른 건들, 한 트랜잭션·건별 이력)
+def _ids(con, ids) -> list[str]:
+    ids = list(dict.fromkeys(i for i in (ids or []) if isinstance(i, str) and i))
+    if not ids:
+        raise UserError("처리할 접수를 하나 이상 고르세요.")
+    if len(ids) > 1000:
+        raise UserError("한 번에 1,000건까지 처리할 수 있습니다.")
+    if any(not one(con, "SELECT 1 AS x FROM request WHERE id=?", (i,)) for i in ids):
+        raise UserError("없는 접수가 포함되어 있습니다.")
+    return ids
+
+
+def _reschedule(con, rid: str, to: str, full: str, code: str):
+    r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+    if r["status"] in ("DONE", "CANCELLED"):
+        raise UserError(f"{r['receipt_no']}: 수거 완료·취소된 접수는 예정일을 바꿀 수 없습니다.")
+    if r["planned_date"] == to:
+        return False
+    flag = _after_close(con, rid)
+    con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
+                (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), f"예정일 변경 · {full}", now()))
+    act = one(con, "SELECT b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE a.request_id=?", (rid,))
+    released = False
+    if act and act["work_date"] != to:  # 다른 날 배정에 들어 있으면 풀어서 새 날짜에 다시 배정하게
+        con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,))
+        released = True
+    con.execute("UPDATE request SET req_ver=req_ver+1, planned_date=?, status=CASE WHEN status='ASSIGNED' AND ? THEN 'RECEIVED' ELSE status END, updated_at=? WHERE id=?",
+                (to, 1 if released else 0, now(), rid))
+    audit(con, "request", rid, "RESCHEDULE", {"from": r["planned_date"], "to": to, "code": code, "reason": full, **({"released": True} if released else {}), **flag})
+    return True
+
+
+def reschedule_requests(con, ids, to: str, code: str | None = None, text: str = "") -> dict:
+    """예정일 변경(여러 건, 한 트랜잭션). 사유 코드 필수. 다른 날 배정에 들어 있던 건은 배정을 풉니다."""
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d", to or ""):
+        raise UserError("바꿀 수거 예정일을 골라 주세요.")
+    code, text, full = _reason(POSTPONE_CODES, code, text, "예정일 변경")
+    ids = _ids(con, ids)
+    changed = 0
+    with tx(con):
+        for rid in ids:
+            changed += bool(_reschedule(con, rid, to, full, code))
+    area = _area()
+    warn = []
+    for dname in sorted({(one(con, "SELECT dong FROM request WHERE id=?", (i,)) or {}).get("dong") or "" for i in ids}):
+        warn += area.capacity_warnings(con, to, dname or None)
+    return {"changed": changed, "warnings": list(dict.fromkeys(warn))}
+
+
+def cancel_requests(con, ids, code: str | None = None, text: str = "") -> dict:
+    code, text, full = _reason(CANCEL_CODES, code, text, "취소")
+    ids = _ids(con, ids)
+    res = {"cancelled": 0, "skipped": 0, "field_notice_needed": 0, "refund_needed": []}
+    with tx(con):
+        for rid in ids:
+            if one(con, "SELECT status FROM request WHERE id=?", (rid,))["status"] == "CANCELLED":
+                res["skipped"] += 1
+                continue
+            r = _cancel(con, rid, code, text, full)
+            res["cancelled"] += 1
+            res["field_notice_needed"] += r["field_notice_needed"]
+            if r["refund_needed"]:
+                res["refund_needed"].append(one(con, "SELECT receipt_no FROM request WHERE id=?", (rid,))["receipt_no"])
+    _fin().sync_refunds(con)
+    return res
+
+
+def set_requests_dong(con, ids, dong: str, reason: str = "") -> dict:
+    """동 지정(여러 건). 마감한 날의 접수가 섞여 있으면 사유가 필요하다."""
+    dong = (dong or "").strip() or None
+    if dong and not _area().get_dong(con, dong):
+        raise UserError("등록되지 않은 행정동입니다.")
+    ids = _ids(con, ids)
+    if any(_after_close(con, i) for i in ids) and not (reason or "").strip():
+        raise UserError("마감한 날의 접수가 섞여 있습니다. 동 지정 사유를 적어 주세요.")
+    n = 0
+    with tx(con):
+        for rid in ids:
+            r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+            if r["dong"] == dong:
+                continue
+            why = "동 지정" + (f" · {reason.strip()[:200]}" if (reason or "").strip() else "")
+            con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)", (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), why, now()))
+            con.execute("UPDATE request SET req_ver=req_ver+1, dong=?, updated_at=? WHERE id=?", (dong, now(), rid))
+            audit(con, "request", rid, "SET_DONG", {"from": r["dong"], "to": dong, **({"reason": reason.strip()[:200]} if (reason or "").strip() else {}), **_after_close(con, rid)})
+            n += 1
+    return {"changed": n}
+
+
+EXPORT_COLS = ["접수번호", "부과번호", "접수일", "수거 예정일", "완료일", "행정동", "접수 경로", "상태", "상태 코드", "품목(현장 확인 수량)", "수거 수량 합계", "남은 수량 합계",
+               "계산 금액(원)", "감면 사유", "감면율(%)", "감면액(원)", "부과 금액(원)", "납부 기록(원)", "수납 상태", "수납 상태 코드", "수수료표 버전", "수거팀"]
+STATUS_LABEL = {"RECEIVED": "접수", "ASSIGNED": "배정", "IN_PROGRESS": "처리 중", "PARTIAL": "일부 수거", "DONE": "수거 완료", "NOT_COLLECTED": "미수거",
+                "ON_HOLD": "보류", "CANCELLED": "취소"}
+PAY_LABEL = {"NONE": "해당 없음", "AMOUNT_PENDING": "금액 확인 대기", "PAID_AMOUNT_PENDING": "납부 기록 있음·금액 미확정", "UNPAID": "미납", "UNDERPAID": "부족",
+             "PAID": "납부 확인", "OVERPAID_REVIEW": "과납 확인 필요", "REFUND_NEEDED": "환불 필요", "OVERREFUNDED_REVIEW": "환불 초과 확인 필요", "EXEMPT": "전액 감면"}
+
+
+def _export_row(con, r: dict) -> list:
+    st = derive(con, r)
+    ps = payment_status(con, r["id"])
+    ver = one(con, "SELECT fee_version_id FROM request_item WHERE request_id=? AND fee_version_id IS NOT NULL LIMIT 1", (r["id"],))
+    a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
+        WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
+    blank = lambda v: "" if v is None else v
+    return [r["receipt_no"], r.get("levy_no") or "", _kst_date(r["received_at"]), r["planned_date"], _kst_date(r.get("completed_at")) or "", r["dong"] or "", r["channel"] or "",
+            STATUS_LABEL.get(r["status"], r["status"]), r["status"],
+            "; ".join(f'{l["name"]} {l["spec"]} {l["qty_confirmed"]}{l["unit_label"]}' for l in st["lines"]),
+            sum(l["qty_collected"] for l in st["lines"]), sum(l["remaining"] for l in st["lines"]),
+            blank(ps["calculated"]), ps.get("reduction_label") or "", ps["reduction_rate"] or "", blank(ps["reduction"]) if ps["reduction_rate"] else "", blank(ps["levied"]),
+            ps["paid"], PAY_LABEL.get(ps["status"], ps["status"]), ps["status"], ver["fee_version_id"] if ver else "", a["name"] if a else ""]
+
+
+def export_requests(con, ids, include_pii: bool = False) -> bytes:
+    """고른 접수 CSV(엑셀용 BOM). 기본은 통계 CSV와 같이 이름·연락처·주소 없이. 개인정보 포함은 접수 담당자·관리자만(서버가 막음),
+    화면에서 확인을 받고, 건마다 내보낸 기록을 남긴다."""
+    import csv
+    import io
+    ids = _ids(con, ids)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(EXPORT_COLS + (["이름", "연락처", "배출 주소", "상세 위치"] if include_pii else []))
+    with tx(con):
+        for rid in ids:
+            r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+            w.writerow(_export_row(con, r) + ([r["name"], r["phone"], r["address"], r["spot_note"]] if include_pii else []))
+            audit(con, "request", rid, "EXPORT", {"pii": bool(include_pii)})
+        if include_pii:
+            from dgpc import privacy as _pv
+            _pv.record_access(con, "EXPORT", "", len(ids), "고른 접수 CSV(개인정보 포함)")
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def print_requests(con, ids) -> dict:
+    """고른 접수 목록 인쇄용 자료(이름·연락처·주소 포함 → 파쇄 안내, 건마다 출력 기록)."""
+    ids = _ids(con, ids)
+    out = []
+    with tx(con):
+        for rid in ids:
+            r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
+            r["items"] = rows(con, "SELECT name, spec, qty, unit_label FROM request_item WHERE request_id=? AND removed=0", (rid,))
+            r["assigned"] = one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
+                JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (rid,))
+            out.append(r)
+            audit(con, "request", rid, "PRINT", None)
+        from dgpc import privacy as _pv
+        _pv.record_access(con, "PRINT", ids[0] if len(ids) == 1 else "", len(ids), "고른 접수 목록 인쇄")
+    out.sort(key=lambda r: (r["planned_date"] or "9999", r["dong"] or "", r["receipt_no"]))
+    return {"rows": out, "printed_at": dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M")}
+
+
+# ------------------------------------------------------------------ 접수 일괄 등록 (CSV·엑셀에서 저장한 CSV)
+IMPORT_COLS = ["이름", "연락처", "배출 주소", "상세 위치", "수거 예정일", "행정동", "접수 경로", "메모"] + [f"{k}{i}" for i in range(1, 6) for k in ("품목", "규격", "수량")]
+
+
+def import_template() -> bytes:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(IMPORT_COLS)
+    w.writerow(["가상신청", "010-0000-0000", "가상시 동구 예시로 1", "1층 현관 앞", "", "", "단체(공동주택)", "가상 예시 행(지우고 쓰세요)",
+                "의자", "고정식 의자", "2", "장롱", "120cm 이상 1쪽당", "1"] + [""] * 9)
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def _match_fee(con, name: str, spec: str) -> str | None:
+    rows_now = fee_rows(con)
+    n, sp = norm_addr(name), norm_addr(spec)
+    hits = [r for r in rows_now.values() if norm_addr(r["name"]) == n and (not sp or norm_addr(r["spec"]) == sp)]
+    return hits[0]["id"] if len(hits) == 1 else None
+
+
+def parse_import(con, raw: bytes) -> list[dict]:
+    """CSV를 읽어 행마다 접수 자료·오류·경고·중복 후보를 만든다(저장하지 않음)."""
+    import csv
+    import io
+    from dgpc import geo
+    text = geo.decode(raw)
+    rd = list(csv.reader(io.StringIO(text)))
+    rd = [r for r in rd if any(c.strip() for c in r)]
+    if not rd:
+        raise UserError("빈 파일입니다.")
+    head = [c.strip() for c in rd[0]]
+    for need in ("이름", "연락처", "배출 주소", "품목1"):
+        if need not in head:
+            raise UserError(f"서식의 머리줄이 다릅니다('{need}' 열 없음). [서식 내려받기]로 받은 파일을 쓰세요.")
+    if len(rd) > 2001:
+        raise UserError("한 번에 2,000행까지 넣을 수 있습니다.")
+    col = {h: i for i, h in enumerate(head)}
+    get = lambda r, k: (r[col[k]].strip() if k in col and col[k] < len(r) else "")
+    area = _area()
+    out, seen_phone, seen_addr = [], {}, {}
+    for n, r in enumerate(rd[1:], start=2):
+        errors, warns = [], []
+        items = []
+        for i in range(1, 6):
+            nm, sp, q = get(r, f"품목{i}"), get(r, f"규격{i}"), get(r, f"수량{i}")
+            if not nm:
+                continue
+            try:
+                qty = int(q or "1")
+                if qty <= 0:
+                    raise ValueError
+            except ValueError:
+                errors.append(f"수량{i}이(가) 1 이상의 숫자가 아님")
+                continue
+            fid = _match_fee(con, nm, sp)
+            if fid:
+                items.append({"fee_rate_id": fid, "qty": qty})
+            else:
+                items.append({"name": (nm + (" " + sp if sp else ""))[:60], "qty": qty})
+                warns.append(f"'{(nm + ' ' + sp).strip()}' 수수료표에서 찾지 못해 금액 확인 대기")
+        data = {"name": get(r, "이름"), "phone": get(r, "연락처"), "address": get(r, "배출 주소"), "spot_note": get(r, "상세 위치"),
+                "memo": get(r, "메모"), "planned_date": get(r, "수거 예정일"), "channel": get(r, "접수 경로") or "단체(공동주택)", "items": items}
+        dname = get(r, "행정동")
+        d = None
+        try:
+            d = validate(data)
+            build_items(items, con)
+        except UserError as e:
+            errors.append(str(e))
+        if dname:
+            if not area.get_dong(con, dname):
+                errors.append(f"등록되지 않은 행정동({dname})")
+            data["dong"] = dname
+        elif d:
+            data["dong"] = area.detect_dong(con, d["address"])["dong"] or ""
+            if not data["dong"] and area.list_dongs(con, active_only=True):
+                warns.append("행정동을 정하지 못함")
+        dups = []
+        if d:
+            dups = [x["receipt_no"] for x in find_duplicates(con, d["phone"], d["address"])]
+            p_, a_ = d["phone"], norm_addr(d["address"])
+            if p_ in seen_phone or a_ in seen_addr:
+                dups.append(f"파일 {seen_phone.get(p_) or seen_addr.get(a_)}행")
+            seen_phone.setdefault(p_, n); seen_addr.setdefault(a_, n)
+            warns += area.capacity_warnings(con, d["planned_date"] or None, data.get("dong") or None)
+        out.append({"line": n, "data": data, "errors": errors, "warnings": list(dict.fromkeys(warns)), "duplicates": dups,
+                    "summary": {"name": data["name"], "phone": norm_phone(data["phone"]), "address": data["address"], "planned_date": data["planned_date"],
+                                "dong": data.get("dong") or "", "channel": data["channel"], "items": len(items)}})
+    return out
+
+
+def import_requests(con, raw: bytes, preview: bool = True, skip_duplicates: bool = False) -> dict:
+    """미리보기(오류·경고·중복 후보 표시) → 등록. 등록할 때 오류 있는 행은 건너뛰고(또는 중복 후보도 건너뛰고) 한 트랜잭션으로 넣는다."""
+    rowsx = parse_import(con, raw)
+    info = {"rows": len(rowsx), "errors": sum(1 for r in rowsx if r["errors"]), "duplicates": sum(1 for r in rowsx if r["duplicates"]),
+            "ok": sum(1 for r in rowsx if not r["errors"])}
+    if preview:
+        return {**info, "lines": [{k: r[k] for k in ("line", "errors", "warnings", "duplicates", "summary")} for r in rowsx]}
+    batch = str(uuid.uuid4())
+    created, skipped = [], []
+    with tx(con):
+        for r in rowsx:
+            if r["errors"] or (skip_duplicates and r["duplicates"]):
+                skipped.append(r["line"])
+                continue
+            d = validate(r["data"])
+            items = build_items(r["data"]["items"], con)
+            dong = r["data"].get("dong") or None
+            rid, receipt = _insert_request(con, d, items, r["data"], dong)
+            audit(con, "request", rid, "CREATE", {"receipt_no": receipt, "channel": d["channel"], "import": batch[:8], **({"dong": dong} if dong else {})})
+            created.append(receipt)
+        audit(con, "request_import", batch, "IMPORT", {"rows": len(rowsx), "created": len(created), "skipped": len(skipped)})
+    return {**info, "created": len(created), "receipts": created, "skipped_lines": skipped}
 
 
 # ------------------------------------------------------------------ 사진 보관 기간 정리
@@ -1181,7 +2146,7 @@ def purge_candidates(con, today: str | None = None) -> list[dict]:
     cutoff = (dt.datetime.combine(t - dt.timedelta(days=days), dt.time()).replace(tzinfo=KST)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return rows(con, """SELECT p.photo_id, p.request_id, p.bytes, p.recovered_at, r.receipt_no, r.status FROM photo p JOIN request r ON r.id=p.request_id
         WHERE p.recovery_status='RECOVERED' AND p.purged_at IS NULL AND p.data IS NOT NULL AND p.recovered_at < ?
-          AND (r.status IN ('DONE','CANCELLED') OR EXISTS (SELECT 1 FROM day_close d WHERE d.work_date=r.planned_date))
+          AND (r.status IN ('DONE','CANCELLED') OR EXISTS (SELECT 1 FROM day_close_log d WHERE d.work_date=r.planned_date))
         ORDER BY p.recovered_at""", (cutoff,))
 
 
@@ -1214,6 +2179,7 @@ def make_backup(con, passphrase: str) -> dict:
     h = hashlib.sha256(dest.read_bytes()).hexdigest()
     with tx(con):
         audit(con, "backup", dest.name, "BACKUP", {"file": dest.name, "bytes": dest.stat().st_size, "sha256": h[:16]})
+        set_setting(con, "last_backup_at", now())
     return {"file": str(dest), "name": dest.name, "bytes": dest.stat().st_size, "sha256": h}
 
 
@@ -1221,8 +2187,9 @@ def list_backups(con) -> list[dict]:
     d = backup_dir(con)
     if not d.exists():
         return []
-    return [{"name": f.name, "bytes": f.stat().st_size, "at": dt.datetime.fromtimestamp(f.stat().st_mtime, KST).strftime("%Y-%m-%d %H:%M")}
-            for f in sorted(d.glob("*.dgbak"), reverse=True)]
+    files = sorted([*d.glob("*.dgbak"), *d.glob("*.dgabk")], key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{"name": f.name, "bytes": f.stat().st_size, "auto": f.suffix == ".dgabk",
+             "at": dt.datetime.fromtimestamp(f.stat().st_mtime, KST).strftime("%Y-%m-%d %H:%M")} for f in files]
 
 
 def verify_backup(con, name: str, passphrase: str) -> dict:
@@ -1352,11 +2319,19 @@ def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None =
     if not pts:
         raise UserError("가져올 주소 좌표가 없습니다. 지역 이름(시군구) 거르기나 파일 형식을 확인하세요.")
     info = {"columns": {k: v for k, v in res["columns"].items()}, "delimiter": res["delimiter"], "count": len(pts),
-            "sample": [{"sigungu": p[0], "road": p[1], "main": p[2], "sub": p[3], "lat": p[4], "lon": p[5]} for p in pts[:5]]}
+            "sample": [{"sigungu": p[0], "road": p[1], "main": p[2], "sub": p[3], "lat": p[4], "lon": p[5], "dong_h": p[6], "dong_b": p[7], "bname": p[8],
+                        "jibun": (f"{p[9]}" + (f"-{p[10]}" if p[10] else "")) if p[9] else ""} for p in pts[:5]],
+            "has_dong": any(p[6] or p[7] for p in pts[:200]), "has_bname": any(p[8] for p in pts[:2000]), "has_jibun": any(p[9] for p in pts[:2000])}
     if preview:
         return info
     with tx(con):
-        con.executemany("INSERT OR IGNORE INTO addr_point (sigungu, road, main, sub, lat, lon) VALUES (?,?,?,?,?,?)", pts)
+        # 같은 주소가 이미 있으면 좌표는 그대로 두고, 비어 있던 행정동·법정동만 채운다
+        con.executemany("""INSERT INTO addr_point (sigungu, road, main, sub, lat, lon, dong_h, dong_b, bname, jibun_main, jibun_sub, bname_cho)
+            VALUES (?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),?,?,NULLIF(?,''))
+            ON CONFLICT(road, main, sub, sigungu) DO UPDATE SET dong_h=COALESCE(addr_point.dong_h, excluded.dong_h), dong_b=COALESCE(addr_point.dong_b, excluded.dong_b),
+            bname=COALESCE(addr_point.bname, excluded.bname), bname_cho=COALESCE(addr_point.bname_cho, excluded.bname_cho),
+            jibun_main=COALESCE(addr_point.jibun_main, excluded.jibun_main), jibun_sub=COALESCE(addr_point.jibun_sub, excluded.jibun_sub)""",
+                        [(*p, chosung_of(re.sub(r"\s+", "", p[8] or ""))) for p in pts])
         audit(con, "address", "import", "IMPORT", {"count": len(pts), "region": region})
     info["total"] = one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
     return info
@@ -1386,7 +2361,54 @@ def geocode(con, address: str) -> dict | None:
         return {"ambiguous": True, "options": [c["sigungu"] for c in cands]}
     c = cands[0]
     label = f'{c["road"]} {c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
-    return {"lat": c["lat"], "lon": c["lon"], "label": label, "exact": exact, "sigungu": c["sigungu"]}
+    return {"lat": c["lat"], "lon": c["lon"], "label": label, "exact": exact, "sigungu": c["sigungu"], "dong_h": c.get("dong_h") or "", "dong_b": c.get("dong_b") or ""}
+
+
+def _addr_std(c: dict) -> str:
+    """주소 자료 한 줄 → 표준 문자열 '시군구 도로명 본번-부번 (법정동, 건물명)'."""
+    base = f'{c["sigungu"] + " " if c["sigungu"] else ""}{c["road"]} {c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
+    ref = ", ".join(x for x in (c.get("dong_b") or "", c.get("bname") or "") if x)
+    return base + (f" ({ref})" if ref else "")
+
+
+def addr_search(con, q: str, limit: int = 12) -> list[dict]:
+    """주소 찾기 제안: 도로명(도로명+번호), 지번(법정동+번지), 건물명·아파트명(초성 가능). 이 PC의 주소 자료만 쓴다."""
+    from dgpc import geo
+    q = (q or "").strip()
+    if len(q) < 2:
+        return []
+    found: list[tuple[str, dict]] = []
+    seen = set()
+    def add(kind, cs):
+        for c in cs:
+            k = (c["road"], c["main"], c["sub"], c["sigungu"])
+            if k not in seen and len(found) < limit:
+                seen.add(k); found.append((kind, c))
+    pa = geo.parse_address(q)
+    if pa:
+        add("도로명", rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? ORDER BY (sub=?) DESC, sub LIMIT ?", (pa["road"], pa["main"], pa["sub"], limit)))
+    m = re.search(r"([가-힣0-9]+?(?:동|가|리))\s*(산\s*)?(\d+)(?:\s*-\s*(\d+))?\s*$", q)
+    if m and not pa:
+        args = [f"%{m.group(1)}%", int(m.group(3))]
+        sql = "SELECT * FROM addr_point WHERE dong_b LIKE ? AND jibun_main=?"
+        if m.group(4):
+            sql += " AND jibun_sub=?"; args.append(int(m.group(4)))
+        add("지번", rows(con, sql + " ORDER BY jibun_sub LIMIT ?", args + [limit]))
+    qn = re.sub(r"\s+", "", q)
+    if is_chosung(qn):
+        add("건물명", rows(con, "SELECT * FROM addr_point WHERE bname_cho LIKE ? ORDER BY length(bname), bname LIMIT ?", (f"%{qn}%", limit)))
+    else:
+        add("건물명", rows(con, "SELECT * FROM addr_point WHERE REPLACE(bname,' ','') LIKE ? ORDER BY length(bname), bname LIMIT ?", (f"%{qn}%", limit)))
+        if re.fullmatch(r"[가-힣A-Za-z0-9·.]+(대로|로|길)", qn):
+            add("도로명", rows(con, "SELECT * FROM addr_point WHERE road=? ORDER BY main, sub LIMIT ?", (qn, limit)))
+    area = _area()
+    out = []
+    for kind, c in found:
+        addr = _addr_std(c)
+        dong = c.get("dong_h") if c.get("dong_h") and area.get_dong(con, c["dong_h"]) else area.detect_dong(con, addr).get("dong")
+        out.append({"kind": kind, "address": addr, "label": addr + (f' · 지번 {c["dong_b"] or ""} {c["jibun_main"]}{"-" + str(c["jibun_sub"]) if c["jibun_sub"] else ""}' if kind == "지번" else ""),
+                    "lat": c["lat"], "lon": c["lon"], "dong": dong, "bname": c.get("bname") or ""})
+    return out
 
 
 def geocode_missing(con, date: str = "") -> dict:
@@ -1413,31 +2435,64 @@ def _kst_date(iso: str | None) -> str | None:
         return iso[:10]
 
 
-def stats(con, start: str, end: str) -> dict:
-    """기간(수거 예정일 기준) 집계. 이름·연락처·주소는 쓰지 않는다."""
+STATS_BASIS = {"planned": "수거 예정일", "received": "접수일", "completed": "완료일"}
+
+
+def _basis_date(r: dict, basis: str) -> str | None:
+    if basis == "received":
+        return _kst_date(r["received_at"])
+    if basis == "completed":
+        return _kst_date(r.get("completed_at")) if r["status"] in FINAL else (_kst_date(r.get("cancelled_at")) if r["status"] == "CANCELLED" else None)
+    return r["planned_date"]
+
+
+def stats(con, start: str, end: str, basis: str = "planned") -> dict:
+    """기간 집계(기준: 수거 예정일·접수일·완료일). 이름·연락처·주소는 쓰지 않는다."""
     for d in (start, end):
         if not re.fullmatch(r"\d{4}-\d\d-\d\d", d or ""):
             raise UserError("기간을 날짜로 골라 주세요.")
     if start > end:
         raise UserError("시작일이 끝일보다 늦습니다.")
-    reqs = rows(con, "SELECT * FROM request WHERE planned_date BETWEEN ? AND ?", (start, end))
-    received = rows(con, "SELECT received_at FROM request")
+    if basis not in STATS_BASIS:
+        raise UserError("집계 기준을 골라 주세요.")
+    fin = _fin()
+    allr = rows(con, "SELECT * FROM request")
+    reqs = []
+    for r in allr:
+        bd = _basis_date(r, basis)
+        if bd and start <= bd <= end:
+            r["_bd"] = bd
+            reqs.append(r)
     by_day: dict[str, dict] = {}
     def day(d):
         return by_day.setdefault(d, {"date": d, "received": 0, "planned": 0, "done": 0, "partial": 0, "not_collected": 0, "cancelled": 0,
-                                     "calculated": 0, "paid": 0, "unload_m3": 0.0, "unload_kg": 0.0})
-    for r in received:
+                                     "calculated": 0, "levied": 0, "paid": 0, "unload_m3": 0.0, "unload_kg": 0.0})
+    for r in allr:
         d = _kst_date(r["received_at"])
         if d and start <= d <= end:
             day(d)["received"] += 1
-    totals = {"requests": len(reqs), "by_status": {}, "calculated": 0, "paid": 0, "amount_pending": 0, "unpaid": 0,
-              "field_added_lines": 0, "lead_days_avg": None}
+    totals = {"requests": len(reqs), "by_status": {}, "calculated": 0, "reduction": 0, "levied": 0, "paid": 0, "amount_pending": 0, "unpaid": 0,
+              "field_added_lines": 0, "lead_days_avg": None, "reduction_count": 0}
     items: dict[str, dict] = {}
+    cats: dict[str, dict] = {}
+    reds: dict[str, dict] = {}
+    months: dict[str, dict] = {}
     leads = []
     crews: dict[str, dict] = {}
+    dongs: dict[str, dict] = {}
+    channels: dict[str, dict] = {}
     for r in reqs:
-        dd = day(r["planned_date"])
+        dd = day(r["_bd"])
+        mm = months.setdefault(r["_bd"][:7], {"month": r["_bd"][:7], "count": 0, "done": 0, "revisit": 0, "cancelled": 0, "calculated": 0, "reduction": 0, "levied": 0, "paid": 0})
+        mm["count"] += 1
         dd["planned"] += 1
+        dg = dongs.setdefault(r["dong"] or "", {"dong": r["dong"] or "", "planned": 0, "done": 0, "revisit": 0, "cancelled": 0, "levied": 0, "paid": 0})
+        ch = channels.setdefault(r["channel"] or "전화", {"channel": r["channel"] or "전화", "planned": 0, "done": 0, "cancelled": 0})
+        dg["planned"] += 1; ch["planned"] += 1
+        dg["done"] += r["status"] == "DONE"; ch["done"] += r["status"] == "DONE"; mm["done"] += r["status"] == "DONE"
+        rv = r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD")
+        dg["revisit"] += rv; mm["revisit"] += rv
+        dg["cancelled"] += r["status"] == "CANCELLED"; ch["cancelled"] += r["status"] == "CANCELLED"; mm["cancelled"] += r["status"] == "CANCELLED"
         totals["by_status"][r["status"]] = totals["by_status"].get(r["status"], 0) + 1
         key = {"DONE": "done", "PARTIAL": "partial", "NOT_COLLECTED": "not_collected", "CANCELLED": "cancelled"}.get(r["status"])
         if key:
@@ -1450,19 +2505,31 @@ def stats(con, start: str, end: str) -> dict:
             if ps["calculated"] is None:
                 totals["amount_pending"] += 1
             else:
-                totals["calculated"] += ps["calculated"]; dd["calculated"] += ps["calculated"]
-            totals["paid"] += ps["paid"]; dd["paid"] += ps["paid"]
+                totals["calculated"] += ps["calculated"]; dd["calculated"] += ps["calculated"]; mm["calculated"] += ps["calculated"]
+                totals["levied"] += ps["levied"]; dd["levied"] += ps["levied"]; mm["levied"] += ps["levied"]; dg["levied"] += ps["levied"]
+                if ps["reduction_rate"]:
+                    totals["reduction"] += ps["reduction"]; mm["reduction"] += ps["reduction"]
+                    rd = reds.setdefault(r["reduction_label"] or r["reduction_code"], {"label": r["reduction_label"] or r["reduction_code"], "rate": ps["reduction_rate"], "count": 0, "amount": 0})
+                    rd["count"] += 1; rd["amount"] += ps["reduction"]
+            totals["paid"] += ps["paid"]; dd["paid"] += ps["paid"]; mm["paid"] += ps["paid"]; dg["paid"] += ps["paid"]
             if ps["status"] in ("UNPAID", "UNDERPAID"):
                 totals["unpaid"] += 1
+        if r.get("reduction_code"):
+            totals["reduction_count"] += 1
         for l in st["lines"]:
             if l["kind"] == "FIELD":
                 totals["field_added_lines"] += 1
             k = f'{l["name"]}|{l["spec"]}'
             it = items.setdefault(k, {"name": l["name"], "spec": l["spec"], "unit_label": l["unit_label"], "requested": 0, "collected": 0})
             it["requested"] += l["qty_confirmed"]; it["collected"] += l["qty_collected"]
-        rd = _kst_date(r["received_at"])
-        if rd and r["status"] == "DONE":
-            leads.append((dt.date.fromisoformat(r["planned_date"]) - dt.date.fromisoformat(rd)).days)
+            cat = (FEE_ROWS.get(l.get("fee_rate_id") or "") or {}).get("category") or "표에 없는 품목"
+            c_ = cats.setdefault(cat, {"category": cat, "lines": 0, "requested": 0, "collected": 0, "amount": 0})
+            c_["lines"] += 1; c_["requested"] += l["qty_confirmed"]; c_["collected"] += l["qty_collected"]
+            if l["price"] is not None:
+                c_["amount"] += l["price"] * l["qty_confirmed"]
+        rd_ = _kst_date(r["received_at"])
+        if rd_ and r["status"] == "DONE" and r["planned_date"]:
+            leads.append((dt.date.fromisoformat(r["planned_date"]) - dt.date.fromisoformat(rd_)).days)
         a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
             WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
         if a:
@@ -1480,36 +2547,47 @@ def stats(con, start: str, end: str) -> dict:
     totals["unload_m3"] = round(sum(d["unload_m3"] for d in days), 2)
     totals["unload_kg"] = round(sum(d["unload_kg"] for d in days), 1)
     totals["received"] = sum(d["received"] for d in days)
-    top = sorted(items.values(), key=lambda x: -x["requested"])[:15]
-    return {"start": start, "end": end, "totals": totals, "days": days, "items": top, "crews": sorted(crews.values(), key=lambda c: c["crew"])}
+    rev = fin.revenue(con, start, end, "month")
+    return {"start": start, "end": end, "basis": basis, "basis_label": STATS_BASIS[basis], "totals": totals, "days": days,
+            "items": sorted(items.values(), key=lambda x: (-x["requested"], x["name"])), "crews": sorted(crews.values(), key=lambda c: c["crew"]),
+            "dongs": sorted(dongs.values(), key=lambda x: (x["dong"] == "", x["dong"])),
+            "channels": sorted(channels.values(), key=lambda x: CHANNELS.index(x["channel"]) if x["channel"] in CHANNELS else 99),
+            "categories": sorted(cats.values(), key=lambda x: -x["requested"]), "reductions": sorted(reds.values(), key=lambda x: -x["amount"]),
+            "months": [months[k] for k in sorted(months)], "revenue": {"methods": rev["methods"], "totals": rev["totals"]}}
 
 
-def stats_csv(con, start: str, end: str, kind: str = "requests") -> bytes:
+def stats_csv(con, start: str, end: str, kind: str = "requests", basis: str = "planned") -> bytes:
     """엑셀에서 열리는 CSV(UTF-8 BOM). 이름·연락처·주소·메모는 넣지 않는다."""
     import csv
     import io
     buf = io.StringIO()
     w = csv.writer(buf)
     if kind == "days":
-        s = stats(con, start, end)
-        w.writerow(["날짜", "접수", "수거 예정", "수거 완료", "일부 수거", "미수거", "취소", "계산 금액(원)", "납부 기록(원)", "하차 부피(m3)", "하차 중량(kg)"])
+        s = stats(con, start, end, basis)
+        w.writerow(["날짜", "접수", "수거 예정", "수거 완료", "일부 수거", "미수거", "취소", "계산 금액(원)", "부과 금액(원)", "납부 기록(원)", "하차 부피(m3)", "하차 중량(kg)"])
         for d in s["days"]:
-            w.writerow([d["date"], d["received"], d["planned"], d["done"], d["partial"], d["not_collected"], d["cancelled"], d["calculated"], d["paid"], d["unload_m3"], d["unload_kg"]])
+            w.writerow([d["date"], d["received"], d["planned"], d["done"], d["partial"], d["not_collected"], d["cancelled"], d["calculated"], d["levied"], d["paid"], d["unload_m3"], d["unload_kg"]])
+    elif kind in ("dongs", "items", "categories", "months", "reductions", "channels"):
+        s = stats(con, start, end, basis)
+        spec = {"dongs": (["행정동", "건수", "수거 완료", "재방문·보류", "취소", "부과 금액(원)", "납부 기록(원)"], lambda x: [x["dong"] or "(동 미지정)", x["planned"], x["done"], x["revisit"], x["cancelled"], x["levied"], x["paid"]]),
+                "items": (["품목", "규격", "단위", "확인 수량", "수거 수량"], lambda x: [x["name"], x["spec"], x["unit_label"], x["requested"], x["collected"]]),
+                "categories": (["품목 분류", "품목 행", "확인 수량", "수거 수량", "계산 금액(원)"], lambda x: [x["category"], x["lines"], x["requested"], x["collected"], x["amount"]]),
+                "months": (["월", "건수", "수거 완료", "재방문·보류", "취소", "계산 금액(원)", "감면액(원)", "부과 금액(원)", "납부 기록(원)"],
+                           lambda x: [x["month"], x["count"], x["done"], x["revisit"], x["cancelled"], x["calculated"], x["reduction"], x["levied"], x["paid"]]),
+                "reductions": (["감면 사유", "감면율(%)", "건수", "감면액(원)"], lambda x: [x["label"], x["rate"], x["count"], x["amount"]]),
+                "channels": (["접수 경로", "건수", "수거 완료", "취소"], lambda x: [x["channel"], x["planned"], x["done"], x["cancelled"]])}[kind]
+        w.writerow(spec[0])
+        for x in s[kind]:
+            w.writerow(spec[1](x))
     else:
-        stats(con, start, end)  # 기간 검사
-        w.writerow(["접수번호", "접수일", "수거 예정일", "상태", "품목(현장 확인 수량)", "수거 수량 합계", "남은 수량 합계", "계산 금액(원)", "납부 기록(원)", "수납 상태", "수수료표 버전", "수거팀"])
-        for r in rows(con, "SELECT * FROM request WHERE planned_date BETWEEN ? AND ? ORDER BY planned_date, receipt_no", (start, end)):
-            st = derive(con, r)
-            ps = payment_status(con, r["id"])
-            ver = one(con, "SELECT fee_version_id FROM request_item WHERE request_id=? AND fee_version_id IS NOT NULL LIMIT 1", (r["id"],))
-            a = one(con, """SELECT c.name FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id JOIN crew c ON c.id=b.crew_id
-                WHERE s.request_id=? ORDER BY b.created_at DESC LIMIT 1""", (r["id"],))
-            w.writerow([r["receipt_no"], _kst_date(r["received_at"]), r["planned_date"], r["status"],
-                        "; ".join(f'{l["name"]} {l["spec"]} {l["qty_confirmed"]}{l["unit_label"]}' for l in st["lines"]),
-                        sum(l["qty_collected"] for l in st["lines"]), sum(l["remaining"] for l in st["lines"]),
-                        "" if ps["calculated"] is None else ps["calculated"], ps["paid"], ps["status"], ver["fee_version_id"] if ver else "", a["name"] if a else ""])
-    audit(con, "report", kind, "EXPORT", {"start": start, "end": end})
-    return ("﻿" + buf.getvalue()).encode("utf-8")
+        stats(con, start, end, basis)  # 기간 검사
+        w.writerow(EXPORT_COLS)
+        for r in sorted(rows(con, "SELECT * FROM request ORDER BY planned_date, receipt_no"), key=lambda r: (_basis_date(r, basis) or "", r["receipt_no"])):
+            bd = _basis_date(r, basis)
+            if bd and start <= bd <= end:
+                w.writerow(_export_row(con, r))
+    audit(con, "report", kind, "EXPORT", {"start": start, "end": end, "basis": basis})
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
 def dispatch_sheet(con, batch_id: str) -> dict:
@@ -1517,6 +2595,8 @@ def dispatch_sheet(con, batch_id: str) -> dict:
     payload, b = build_daylist(con, batch_id)
     with tx(con):
         audit(con, "batch", batch_id, "PRINT", {"stops": len(payload["stops"])})
+        from dgpc import privacy as _pv
+        _pv.record_access(con, "PRINT", "", len(payload["stops"]), f"배차표 {b['work_date']} {b['crew_name']}")
     for st in payload["stops"]:
         st["status"] = one(con, "SELECT status FROM request WHERE id=?", (st["request_id"],))["status"]
     return {"work_date": payload["work_date"], "crew": payload["crew"], "assign_ver": payload["assign_ver"], "fee_version": payload["fee_table"]["version_id"],
@@ -1566,17 +2646,24 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
     with tx(con):
         con.execute("INSERT INTO result_import VALUES (?,?,?,?,?,NULL,NULL)", (imp, "USB", "SOLO", sha, now()))
         for r in new:
-            d = validate({**r, "items": r.get("items") or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
+            # 휴대폰에서 보관 기간이 지나 개인정보를 지운 접수(pii_purged): 이름·연락처·주소가 비어 있어도 가명으로 옮긴다
+            purged = bool(r.get("pii_purged")) or not ((r.get("name") or "").strip() and norm_phone(r.get("phone")) and (r.get("address") or "").strip())
+            rr = {**r, "name": "(정리됨)", "phone": "00000000000", "address": "(정리됨)", "spot_note": "", "memo": "", "lat": None, "lon": None} if purged else r
+            d = validate({**rr, "items": r.get("items") or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
+            dong_s = (r.get("dong") or "").strip()[:20] or None
             rec = r["receipt_no"]
             if one(con, "SELECT 1 AS x FROM request WHERE receipt_no=?", (rec,)):
                 rec = re.sub(r"-(\d+)$", r"-S\1", rec)  # PC 접수번호와 겹치면 단독 표시(S)
+            from dgpc import store as _store
+            dcode = (one(con, "SELECT code FROM dong WHERE name=?", (dong_s,)) or {}).get("code") if dong_s else None
             con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
-                planned_date, appt_start, appt_end, must_today, urgent, priority, status, cancel_reason, received_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?)""",
+                planned_date, appt_start, appt_end, must_today, urgent, priority, status, cancel_reason, received_at, updated_at, dong, levy_no, pii_purged_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?)""",
                         (r["request_id"], rec, int(r.get("req_ver") or 1), d["name"], d["phone"], d["address"], d["spot_note"], d["memo"],
-                         r.get("lat"), r.get("lon"), "MANUAL" if r.get("lat") is not None else None, d["planned_date"] or None, None, None,
-                         "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", r.get("cancel_reason"),
-                         r.get("received_at") or now(), r.get("updated_at") or now()))
+                         rr.get("lat"), rr.get("lon"), ({"ADDR": "ADDR", "GPS": "FIELD"}.get(r.get("geo_source"), "MANUAL")) if rr.get("lat") is not None else None, d["planned_date"] or None, None, None,
+                         "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", None if purged else r.get("cancel_reason"),
+                         r.get("received_at") or now(), r.get("updated_at") or now(), dong_s,
+                         _store.next_levy_no(con, _store.levy_year(r.get("received_at")), dcode), (r.get("pii_purged") if isinstance(r.get("pii_purged"), str) else now()) if purged else None))
             for it in r.get("items") or []:
                 con.execute("""INSERT INTO request_item (line_id, request_id, fee_rate_id, fee_version_id, name, spec, unit, unit_label, qty,
                     unit_price, amount, price_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -1584,8 +2671,11 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                              it["name"], it.get("spec") or "", it.get("unit") or "EA", it.get("unit_label") or "개", int(it["qty"]),
                              it.get("unit_price"), it.get("amount"), it.get("price_status") or "PENDING"))
             for v in r.get("versions") or []:
+                snap = v.get("snapshot") or {}
+                if purged and isinstance(snap, dict):
+                    snap = {k: x for k, x in snap.items() if k not in ("name", "phone", "address", "spot_note", "memo", "lat", "lon")}
                 con.execute("INSERT OR IGNORE INTO request_version VALUES (?,?,?,?,?)",
-                            (r["request_id"], int(v.get("req_ver") or 1), json.dumps(v.get("snapshot") or {}, ensure_ascii=False), v.get("reason") or "휴대폰 단독 수정", v.get("at") or now()))
+                            (r["request_id"], int(v.get("req_ver") or 1), json.dumps(snap, ensure_ascii=False), v.get("reason") or "휴대폰 단독 수정", v.get("at") or now()))
             counts["requests"] += 1
         for e in events:
             if one(con, "SELECT 1 AS x FROM result_event WHERE event_id=?", (e["event_id"],)):
@@ -1655,7 +2745,8 @@ def link_similar(con, rid: str, line_id: str, fee_rate_id: str, reason: str, con
     with tx(con):
         con.execute("INSERT INTO item_link (id, request_id, line_id, fee_rate_id, fee_version_id, unit_price, reason, confirmed_by, actor, at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (lid, rid, line_id, fee_rate_id, fee_state(con)["version_id"], int(row["price"]), reason.strip()[:200], confirmed_by.strip()[:40], ACTOR.get(), now()))
-        audit(con, "request", rid, "LINK_SIMILAR", {"line": line_id[:8], "fee_rate_id": fee_rate_id, "price": row["price"], "confirmed_by": confirmed_by.strip()[:40]})
+        audit(con, "request", rid, "LINK_SIMILAR", {"line": line_id[:8], "fee_rate_id": fee_rate_id, "price": row["price"], "confirmed_by": confirmed_by.strip()[:40],
+                                                    "reason": reason.strip()[:200], **_after_close(con, rid)})
     return lid
 
 

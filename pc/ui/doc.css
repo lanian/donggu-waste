@@ -1,0 +1,31 @@
+/* 접수증·배출 표지·월보 인쇄 (A4 세로, 흑백 인쇄에서도 읽히게) */
+@page { size: A4 portrait; margin: 12mm; }
+* { box-sizing: border-box; }
+body { font: 12.5px/1.5 "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; color: #000; margin: 16px; font-variant-numeric: tabular-nums; }
+.tools { margin-bottom: 10px; } .tools button { font: inherit; padding: 6px 16px; }
+h1 { font-size: 20px; margin: 0 0 10px; border-bottom: 2px solid #000; padding-bottom: 6px; } h1 small { font-size: 13px; font-weight: 400; }
+h2 { font-size: 14px; margin: 14px 0 6px; }
+table { width: 100%; border-collapse: collapse; margin: 0 0 8px; }
+th, td { border: 1px solid #555; padding: 5px 7px; text-align: left; vertical-align: top; }
+th { background: #eee; font-size: 12px; white-space: nowrap; }
+table.kv th { width: 150px; }
+td.r { text-align: right; white-space: nowrap; }
+td.big { font-size: 17px; font-weight: 800; }
+.foot { font-size: 11px; color: #333; margin-top: 12px; }
+.receipt { max-width: 720px; }
+tr { break-inside: avoid; }
+/* 배출 표지: A4 한 장에 2×3 */
+body.labels { margin: 0; }
+.sheet { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3, 1fr); gap: 6mm; width: 186mm; height: 268mm; page-break-after: always; break-after: page; margin: 0 auto; }
+.sheet:last-child { page-break-after: auto; break-after: auto; }
+.label { border: 2px dashed #000; padding: 4mm; display: grid; grid-template-columns: 1fr 30mm; grid-template-rows: auto auto auto 1fr auto; gap: 1mm 3mm; overflow: hidden; }
+.label .lh { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid #000; padding-bottom: 1mm; }
+.label .rno { font-size: 17px; letter-spacing: .5px; }
+.label .lday { font-size: 30px; font-weight: 900; line-height: 1.1; }
+.label .ldong { font-size: 18px; font-weight: 700; }
+.label .litem { font-size: 20px; font-weight: 800; line-height: 1.25; }
+.label .litem small { display: block; font-size: 13px; font-weight: 400; }
+.label .lqr { grid-column: 2; grid-row: 2 / 5; width: 30mm; height: 30mm; image-rendering: pixelated; align-self: start; }
+.label .lnote { grid-column: 1 / -1; font-size: 11px; border-top: 1px solid #000; padding-top: 1mm; }
+@media screen { .sheet { border: 1px solid #ccc; margin-bottom: 16px; padding: 6mm; width: calc(186mm + 12mm); height: calc(268mm + 12mm); } }
+@media print { .tools { display: none; } body { margin: 0; } }
