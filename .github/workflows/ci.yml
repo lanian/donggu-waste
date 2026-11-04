@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '${{ env.PYTHON_VERSION }}' }
       # 태그 실행이면 GITHUB_REF_TYPE=tag · GITHUB_REF_NAME=v… 를 읽어 태그까지 비교
       - run: python tools/check_version.py
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: pc/requirements.txt }
       - run: pip install -r pc/requirements.txt   # 해시 고정본 → 자동으로 --require-hashes
       - run: npm ci
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
         run: echo "DG_TEST_DIR=$RUNNER_TEMP/${{ matrix.suite }}" >> "$GITHUB_ENV"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: .github/requirements-e2e.txt }
       - run: pip install -r .github/requirements-e2e.txt   # pc/requirements.txt 와 같은 버전 + Playwright (해시 고정)
       - name: Playwright Chromium 설치
@@ -118,7 +118,7 @@ jobs:
         os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '${{ env.PYTHON_VERSION }}', cache: pip, cache-dependency-path: pc/requirements.txt }
       - name: 의존성 설치 (바이너리 휠만, 소스 빌드 금지)
         id: install
