@@ -249,7 +249,7 @@ def run():
             expect(page.get_by_role("heading", name="전화 접수 등록")).to_be_visible()
             # 화면이 다 그려진 뒤(예약 달력까지) 입력한다: 늦게 끝난 다시 그리기가 입력한 양식을 덮지 않게
             expect(page.locator(".calday").first).to_be_visible()
-            page.wait_for_load_state("networkidle")
+            quiet(page)
             page.get_by_label("이름").fill(name)
             page.get_by_label("연락처").fill(phone_no)
             page.get_by_label("배출 주소").fill(addr)
@@ -591,7 +591,7 @@ def run():
         later2 = (dt.date.fromisoformat(today) + dt.timedelta(days=45)).isoformat()
         page.goto(URL + "#/request/new")
         expect(page.locator(".calday").first).to_be_visible()
-        page.wait_for_load_state("networkidle")
+        quiet(page)
         page.get_by_label("이름").fill("가상주소")
         page.get_by_label("연락처").fill("01000005009")
         n_juso = len(FAKE["juso"])
@@ -1003,13 +1003,21 @@ def playwright_with_fail_shot():
             raise
 
 
+def quiet(pg, ms=8000):
+    """네트워크가 조용해질 때까지 기다리되, 지도 조각을 계속 받는 경우(CI) 시간이 지나면 그냥 진행한다."""
+    try:
+        pg.wait_for_load_state("networkidle", timeout=ms)
+    except Exception:  # noqa: BLE001
+        pg.wait_for_timeout(500)
+
+
 def settled(pg):
     """화면이 다 그려질 때까지(늦게 오는 예약 현황 등) 기다린다 — 그 전에 입력하면 늦은 다시 그리기가 지울 수 있다."""
-    pg.wait_for_load_state("networkidle")
+    quiet(pg)
     expect(pg.locator("main h1")).to_be_visible()
     if pg.get_by_role("group", name="예약 현황").count():
         expect(pg.get_by_role("group", name="예약 현황").get_by_role("button").first).to_be_visible()
-    pg.wait_for_load_state("networkidle")
+    quiet(pg)
 
 
 def dismiss(pg):

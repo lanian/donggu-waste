@@ -1025,12 +1025,14 @@ def scheduler(stop: threading.Event, every_s: int = 30):
     last_daily = None
     while not stop.wait(every_s):
         try:
+            S.ACTOR.set("system")
+            PV.CLIENT.set("local")
             with LOCK:
-                S.ACTOR.set("system")
-                PV.CLIENT.set("local")
-                if BK.due(CON):
-                    r = BK.make_auto(CON, "SCHEDULE")
-                    LOG.info("자동 백업 %s", "성공" if r["ok"] else "실패: " + scrub(r.get("error", "")))
+                is_due = BK.due(CON)
+            if is_due:  # 잠금은 DB를 쓰는 짧은 동안만(파일 봉인·복사는 잠금 밖) → 백업 중에도 화면 요청이 기다리지 않음
+                r = BK.make_auto(CON, "SCHEDULE", lock=LOCK)
+                LOG.info("자동 백업 %s", "성공" if r["ok"] else "실패: " + scrub(r.get("error", "")))
+            with LOCK:
                 if last_daily != S.today_kst():
                     last_daily = S.today_kst()
                     PV.purge_old_access(CON)

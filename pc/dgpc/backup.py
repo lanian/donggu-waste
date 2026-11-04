@@ -162,15 +162,22 @@ def mark_backup(con, ok: bool = True):
         S.set_setting(con, "last_backup_at", S.now())
 
 
-def make_auto(con, reason: str = "SCHEDULE") -> dict:
-    """공개키로 자동 백업. 실패해도 예외를 밖으로 내지 않고 상태에 남긴다(마감 확인을 막지 않게)."""
-    c = conf(con)
-    k = key_info(con)
+def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
+    """공개키로 자동 백업. 실패해도 예외를 밖으로 내지 않고 상태에 남긴다(마감 확인을 막지 않게).
+
+    lock: 서버의 DB 잠금. 주면 DB를 읽는 동안(설정 읽기·암호화 내보내기·결과 기록)만 잡고, 시간이 오래 걸리는
+    파일 작업(봉인·해시·두 번째 위치 복사·보관 정리)은 잠금 밖에서 한다 → 백업 중에도 PC 화면이 거의 멈추지 않음."""
+    from contextlib import nullcontext
+    guard = lock if lock is not None else nullcontext()
+    with guard:
+        c = conf(con)
+        k = key_info(con)
+        bdir = S.backup_dir(con)
     res = {"at": S.now(), "reason": reason, "ok": False}
     try:
         if not k:
             raise S.UserError("백업 키가 없어 자동 백업을 하지 않았습니다. 설정 → 백업에서 백업 키를 만드세요.")
-        d = S.backup_dir(con)
+        d = bdir
         d.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now(S.KST).strftime("%Y%m%d-%H%M%S")
         dest = d / f"donggu-auto-{stamp}.dgabk"
@@ -180,7 +187,8 @@ def make_auto(con, reason: str = "SCHEDULE") -> dict:
         tmp = d / f".tmp-{secrets.token_hex(6)}.db"
         secret = secrets.token_urlsafe(32)
         try:
-            store.backup_to(con, tmp, secret)
+            with guard:
+                store.backup_to(con, tmp, secret)
             head = seal_secret(k["pub"], secret.encode())
             with open(dest, "wb") as out, open(tmp, "rb") as src:
                 out.write(head)
@@ -205,12 +213,12 @@ def make_auto(con, reason: str = "SCHEDULE") -> dict:
                 res["dest2"] = {"ok": ok2, "path": str(d2), **({} if ok2 else {"error": "복사본 해시가 다릅니다"})}
             except OSError as e:
                 res["dest2"] = {"ok": False, "path": c["backup_dest2"], "error": f"복사 실패({e.__class__.__name__})"}
-        res["deleted"] = apply_retention(con)
+        res["deleted"] = apply_retention(con, c, bdir)
     except S.UserError as e:
         res["error"] = str(e)
     except Exception as e:  # 디스크·권한 문제 등: 내용(경로 외)은 남기지 않는다
         res["error"] = f"자동 백업 실패({e.__class__.__name__})"
-    with S.tx(con):
+    with guard, S.tx(con):
         S.set_setting(con, "backup_status", res)
         if res["ok"]:
             mark_backup(con)
@@ -263,10 +271,10 @@ def plan_retention(files: list[Path], keep_daily: int, keep_monthly: int, max_da
     return drop
 
 
-def apply_retention(con) -> list[str]:
-    c = conf(con)
+def apply_retention(con, c: dict | None = None, bdir: Path | None = None) -> list[str]:
+    c = c or conf(con)
     out = []
-    for d in [S.backup_dir(con)] + ([Path(c["backup_dest2"])] if c["backup_dest2"] else []):
+    for d in [bdir or S.backup_dir(con)] + ([Path(c["backup_dest2"])] if c["backup_dest2"] else []):
         if not d.exists():
             continue
         files = sorted([*d.glob("donggu-backup-*.dgbak"), *d.glob("donggu-auto-*.dgabk")])

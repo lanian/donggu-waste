@@ -1094,6 +1094,18 @@ def v11():
         BK.save_settings(con, {"backup_dest2": str(dest2), "backup_time": "00:00"})
     raises(lambda: BK.save_settings(con, {"backup_time": "25:00"}), "HH:MM", "자동 백업 시각 형식")
     ok(BK.due(con), "정한 시각이 지났고 오늘 자동 백업이 없으면 실행 대상")
+    class TrackLock:  # 서버 잠금 흉내: 잡은 횟수와 잡은 채로 파일을 다루는지 본다
+        def __init__(self): self.n = 0; self.held = False
+        def __enter__(self): self.n += 1; self.held = True
+        def __exit__(self, *a): self.held = False
+    tl = TrackLock()
+    real_sha = BK._sha
+    held_during_hash = []
+    BK._sha = lambda p_: (held_during_hash.append(tl.held), real_sha(p_))[1]
+    ab0 = BK.make_auto(con, "TEST-LOCK", lock=tl)
+    BK._sha = real_sha
+    ok(ab0["ok"] and tl.n == 3 and held_during_hash and not any(held_during_hash),
+       "자동 백업: DB 잠금은 설정 읽기·내보내기·결과 기록 때만(3번), 해시·복사 같은 파일 작업은 잠금 밖 → 백업 중 화면이 멈추지 않음")
     ab = BK.make_auto(con, "TEST")
     f_ = S.backup_dir(con) / ab["file"]
     rawb = f_.read_bytes()
