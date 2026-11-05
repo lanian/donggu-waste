@@ -1386,6 +1386,11 @@ def v11_external():
         r3 = S.juso_coord(con, res["items"][1]["ref"] | {"rn": "서남로", "sggNm": "동구"})
         ok(r3["source"] == "LOCAL" and r3["how"] == "ROAD" and abs(r3["lat"] - 35.1531) < 1e-6 and len(calls) == n,
            "도로명코드로 못 찾으면 도로명·건물번호로 (관할 '동구' 안, 식별 번호 없는 예전 자료)")
+        # 리뷰 반영: 지하 주소는 같은 번호의 지상 건물 좌표로 채우지 않음(도로명 대체에서도 지하여부가 같아야 함)
+        rug = S.juso_coord(con, res["items"][1]["ref"] | {"rn": "서남로", "sggNm": "동구", "udrtYn": "1", "rnMgtSn": "291104000098"})
+        ok(rug.get("source") != "LOCAL" and rug.get("how") != "ROAD",
+           "지하 주소(udrtYn=1)에 지상 '서남로 3'만 있으면 도로명 대체로 고르지 않음 → 좌표 API·지도 지정으로")
+        n = len(calls)
         ref9 = {**res["items"][1]["ref"], "rnMgtSn": "291104000099", "rn": "서남로", "buldMnnm": "9", "sggNm": "서구"}
         S.save_settings(con, {"external": {"keys": {"juso_coord_key": ""}}})
         r9 = S.juso_coord(con, ref9)

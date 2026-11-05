@@ -92,7 +92,7 @@ def _int(v) -> int | None:
 def match_juso(con, ref: dict) -> dict | None:
     """행안부 도로명주소 검색 결과(ref) → 이 PC 주소 위치 자료의 한 곳. 외부로 아무것도 보내지 않는다.
     1) 도로명코드(rnMgtSn 12자리)·지하여부·건물본번·부번 — 정확히 같은 건물
-    2) 도로명(rn, 공백 없앰)·건물본번·부번 — 관할 시군구 안에서만(식별 번호가 없는 예전 자료용)
+    2) 도로명(rn, 공백 없앰)·지하여부·건물본번·부번 — 관할 시군구 안에서만(식별 번호가 없는 예전 자료용)
     3) 지번: 법정동코드(admCd)·지번본번·부번, 없으면 법정동 이름(emdNm)·번지 — 관할 시군구 안, 산 번지는 빼고
     여러 곳이면 지상 먼저, 출입구일련번호·시군구·도로명 순으로 첫 곳. 돌려주는 값: {lat, lon, how, label, dong_h, dong_b}"""
     ref = ref or {}
@@ -117,8 +117,9 @@ def match_juso(con, ref: dict) -> dict | None:
     same_sgg, sgg_args = ("(bjd_cd IS NULL OR substr(bjd_cd, 1, 5)=?)", (adm[:5],)) if adm else ("1", ())
     rn = geo.norm_road(ref.get("rn") or "")
     if named and main and rn:
-        c = one(con, f"SELECT * FROM addr_point WHERE road=? AND main=? AND sub=? AND sigungu LIKE ? AND {same_sgg} {order}",
-                (rn, main, sub, sg_like, *sgg_args, ug))
+        # 지하여부도 같아야 한다: 지하 주소를 지상 건물(또는 그 반대) 좌표로 채우지 않게(없으면 좌표 API·지도 지정으로 넘어감)
+        c = one(con, f"SELECT * FROM addr_point WHERE road=? AND main=? AND sub=? AND underground=? AND sigungu LIKE ? AND {same_sgg} {order}",
+                (rn, main, sub, ug, sg_like, *sgg_args, ug))
         if c:
             return _match_out(c, "ROAD")
     if jm and not san:
