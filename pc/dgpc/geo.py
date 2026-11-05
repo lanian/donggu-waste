@@ -236,6 +236,8 @@ def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
             if cols.get("jibun_main") is not None and r[cols["jibun_main"]].strip().isdigit():
                 jm = int(r[cols["jibun_main"]])
                 js = int(r[cols["jibun_sub"]]) if cols.get("jibun_sub") is not None and r[cols["jibun_sub"]].strip().isdigit() else 0
+            if cols.get("san") is not None and r[cols["san"]].strip() == "1":
+                jm, js = -1, None  # 산 번지: 지번으로 찾지 않는다(같은 번호의 일반 필지와 섞이지 않게). -1 = 저장된 지번도 지움
             rc = r[cols["road_cd"]].strip() if cols.get("road_cd") is not None else ""
             bc = r[cols["bjd_cd"]].strip() if cols.get("bjd_cd") is not None else ""
             es = r[cols["entr_sn"]].strip() if cols.get("entr_sn") is not None else ""

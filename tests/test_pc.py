@@ -1391,6 +1391,15 @@ def v11_external():
         ok(rug.get("source") != "LOCAL" and rug.get("how") != "ROAD",
            "지하 주소(udrtYn=1)에 지상 '서남로 3'만 있으면 도로명 대체로 고르지 않음 → 좌표 API·지도 지정으로")
         n = len(calls)
+        # 리뷰 반영: 산 번지 행은 지번 대체 일치에서 같은 번호의 일반 필지로 잡히지 않음(다시 가져오면 예전 지번도 지움)
+        xs, ys = geo.wgs84_to_utmk(35.1601, 126.9401)
+        S.import_addr_points(con, ("시군구명,읍면동명,도로명,건물본번,건물부번,지번본번,지번부번,산여부,X좌표,Y좌표\n"
+                                   f"동구,가상동,산길,5,0,88,3,1,{xs:.3f},{ys:.3f}\n").encode())
+        ok(S.one(con, "SELECT jibun_main FROM addr_point WHERE road='산길' AND main=5")["jibun_main"] is None, "산 번지 행은 지번을 저장하지 않음(전에 저장된 지번도 지움)")
+        rsan = S.juso_coord(con, {**res["items"][1]["ref"], "rnMgtSn": "291104000097", "rn": "없는길", "buldMnnm": "1", "sggNm": "동구",
+                                  "emdNm": "가상동", "lnbrMnnm": "88", "lnbrSlno": "3", "mtYn": "0"})
+        ok(not (rsan.get("source") == "LOCAL" and rsan.get("how") == "JIBUN"), "일반 필지 88-3을 산 88-3 좌표로 채우지 않음 → 좌표 API·지도 지정으로")
+        n = len(calls)
         ref9 = {**res["items"][1]["ref"], "rnMgtSn": "291104000099", "rn": "서남로", "buldMnnm": "9", "sggNm": "서구"}
         S.save_settings(con, {"external": {"keys": {"juso_coord_key": ""}}})
         r9 = S.juso_coord(con, ref9)

@@ -35,8 +35,8 @@ def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None =
         raise UserError("가져올 주소 좌표가 없습니다. 지역 이름(시군구) 거르기나 파일 형식을 확인하세요.")
     info = {"columns": {k: v for k, v in res["columns"].items()}, "delimiter": res["delimiter"], "count": len(pts),
             "sample": [{"sigungu": p[0], "road": p[1], "main": p[2], "sub": p[3], "lat": p[4], "lon": p[5], "dong_h": p[6], "dong_b": p[7], "bname": p[8],
-                        "jibun": (f"{p[9]}" + (f"-{p[10]}" if p[10] else "")) if p[9] else "", "underground": p[11], "road_cd": p[12]} for p in pts[:5]],
-            "has_dong": any(p[6] or p[7] for p in pts[:200]), "has_bname": any(p[8] for p in pts[:2000]), "has_jibun": any(p[9] for p in pts[:2000]),
+                        "jibun": ("산" if p[9] == -1 else (f"{p[9]}" + (f"-{p[10]}" if p[10] else "")) if p[9] else ""), "underground": p[11], "road_cd": p[12]} for p in pts[:5]],
+            "has_dong": any(p[6] or p[7] for p in pts[:200]), "has_bname": any(p[8] for p in pts[:2000]), "has_jibun": any(p[9] and p[9] > 0 for p in pts[:2000]),
             "has_codes": any(p[12] for p in pts[:2000])}
     if preview:
         return info
@@ -52,9 +52,12 @@ def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None =
             entr_sn=CASE WHEN excluded.entr_sn IS NOT NULL AND (addr_point.entr_sn IS NULL OR excluded.entr_sn < addr_point.entr_sn) THEN excluded.entr_sn ELSE addr_point.entr_sn END,
             dong_h=COALESCE(addr_point.dong_h, excluded.dong_h), dong_b=COALESCE(addr_point.dong_b, excluded.dong_b),
             bname=COALESCE(addr_point.bname, excluded.bname), bname_cho=COALESCE(addr_point.bname_cho, excluded.bname_cho),
-            jibun_main=COALESCE(addr_point.jibun_main, excluded.jibun_main), jibun_sub=COALESCE(addr_point.jibun_sub, excluded.jibun_sub),
+            jibun_main=CASE WHEN excluded.jibun_main=-1 THEN -1 ELSE COALESCE(addr_point.jibun_main, excluded.jibun_main) END,
+            jibun_sub=CASE WHEN excluded.jibun_main=-1 THEN NULL ELSE COALESCE(addr_point.jibun_sub, excluded.jibun_sub) END,
             road_cd=COALESCE(excluded.road_cd, addr_point.road_cd), bjd_cd=COALESCE(excluded.bjd_cd, addr_point.bjd_cd)""",
                         [(*p, chosung_of(re.sub(r"\s+", "", p[8] or ""))) for p in pts])
+        # 산 번지(-1 표시)는 지번 없이 둔다: 지번 대체 일치에서 같은 번호의 일반 필지로 잡히지 않게
+        con.execute("UPDATE addr_point SET jibun_main=NULL, jibun_sub=NULL WHERE jibun_main=-1")
         audit(con, "address", "import", "IMPORT", {"count": len(pts), "region": region})
         info["total"] = one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
         set_setting(con, "addr_import", {"at": now(), "count": len(pts), "total": info["total"], "region": region, "codes": info["has_codes"]})
