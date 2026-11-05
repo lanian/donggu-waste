@@ -92,6 +92,9 @@ async function screenHome() {
   // 예약 작업(자동 파기·사진 정리·무결성 검사·백업)이 이틀 넘게 안 돌았으면 경고 띠
   const opsWarn = ops && ops.warnings && ops.warnings.length ? h('div', { class: 'notice warn ops-warn', role: 'status' }, h('strong', {}, '예약 작업 확인 필요: '), ops.warnings.join(' · '),
     ' — 서버가 꺼져 있었거나 작업이 실패했을 수 있습니다. ', role0 === 'ADMIN' ? h('a', { href: '#/users?focus=diag' }, '진단 보기 →') : '운영 관리자에게 알리세요.') : null;
+  // 주소 위치 자료가 45일 넘음(행안부 매월 갱신): 새 주소를 못 찾으니 새 자료로 바꾸라는 안내
+  const addrWarn = ops && ops.addr_warning ? h('div', { class: 'notice warn addr-warn', role: 'status' }, h('strong', {}, '주소 위치 자료 갱신: '), ops.addr_warning, ' ',
+    role0 === 'ADMIN' ? h('a', { href: '#/settings/addr' }, '설정 → 주소 위치 자료 →') : '운영 관리자에게 알리세요.') : null;
   const backlogCard = notField ? h('div', { class: 'card backlog' }, h('div', { class: 'panel-h' }, h('h2', {}, '밀린 일 (전체 기간)'), backlog.length ? h('span', { class: 'muted small' }, `${backlog.length}종`) : null),
     backlog.length ? h('ul', { class: 'todo' }, ...backlog.map((x) => h('li', {}, h('a', { href: x.href, class: 'todo-a ' + x.cls, 'data-key': x.key }, h('span', {}, x.text), h('span', { class: 'arr' }, '→')))))
       : h('p', { class: 'empty' }, '지난 날짜에 밀린 일이 없습니다.')) : null;
@@ -129,7 +132,7 @@ async function screenHome() {
         bkSt && bkSt.auto && bkSt.auto.at && !bkSt.auto.ok ? h('div', { class: 'small err' }, `자동 백업 실패: ${bkSt.auto.error || ''}`) : null,
         bkSt && !bkSt.key ? h('div', { class: 'small muted' }, '백업 키가 없어 자동 백업을 하지 않습니다.') : null))) : null;
   const nodeCls = (st) => (st === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(st) ? 'warn' : st === 'CANCELLED' ? 'neutral' : st === 'IN_PROGRESS' ? 'info' : '');
-  return h('div', { class: 'dash' }, readinessCard(rd), opsWarn, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, h('label', { class: 'f inline' }, h('span', { class: 'sr-only' }, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
+  return h('div', { class: 'dash' }, readinessCard(rd), opsWarn, addrWarn, h('div', { class: 'pagehead' }, h('h1', {}, '오늘 현황'), h('div', { class: 'row' }, h('label', { class: 'f inline' }, h('span', { class: 'sr-only' }, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
     h('div', { class: 'kpis' },
       kpi('수거 예정', `${active}건`, (bs.CANCELLED ? `취소 ${bs.CANCELLED}건 제외` : ' '), '', '#/requests'),
       kpi('수거 완료', `${done}건`, h('span', { class: 'bar' }, h('i', { style: `width:${pct}%` })), 'ok'),

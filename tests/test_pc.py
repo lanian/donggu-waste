@@ -1316,7 +1316,8 @@ def v11_external():
         if u.path.endswith("addrLinkApi.do"):
             return FakeResp({"results": {"common": {"errorCode": "0", "totalCount": "2"}, "juso": [
                 {"roadAddr": "광주광역시 동구 서남로 1 (가상동)", "roadAddrPart1": "광주광역시 동구 서남로 1", "jibunAddr": "광주광역시 동구 가상동 1-1", "bdNm": "가상빌딩",
-                 "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상9동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0"},
+                 "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상9동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0",
+                 "rn": "서남로", "sggNm": "동구", "siNm": "광주광역시", "lnbrMnnm": "1", "lnbrSlno": "1", "mtYn": "0"},
                 {"roadAddr": "광주광역시 동구 서남로 3", "roadAddrPart1": "광주광역시 동구 서남로 3", "jibunAddr": "", "bdNm": "", "zipNo": "61401", "emdNm": "모르는동", "hemdNm": "",
                  "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "3", "buldSlno": "0"}]}})
         return FakeResp({"results": {"common": {"errorCode": "0", "totalCount": "1"}, "juso": [{"entX": f"{utm[0]:.6f}", "entY": f"{utm[1]:.6f}"}]}})
@@ -1351,6 +1352,66 @@ def v11_external():
            f"좌표 요청: 건물 식별 번호·좌표 승인키만, UTM-K → WGS84 ({co['lat']}, {co['lon']})")
         n = len(calls)
         ok(S.juso_coord(con, {**res["items"][0]["ref"], "admCd": "가상하나"})["none"] and len(calls) == n, "건물 식별 번호가 숫자 형식이 아니면 보내지 않음")
+        ok(co["source"] == "JUSO" and res["items"][0]["ref"]["rn"] == "서남로" and res["items"][0]["ref"]["lnbrMnnm"] == "1", "이 PC 주소 위치 자료가 없으면 좌표 승인키로 행안부 좌표 API (source JUSO)")
+
+        # 행안부 검색 결과 → 이 PC 주소 위치 자료(위치정보요약DB)로 좌표 채우기 (좌표 API 없이)
+        def yline(road, main, sub, lat, lon, rcd="291103166047", under="0", entr="1", bjd="2911010800", sg="동구", bname=""):
+            x_, y_ = geo.wgs84_to_utmk(lat, lon)
+            return "|".join(["29110", entr, bjd, "광주광역시", sg, "가상동", rcd, road, under, str(main), str(sub), bname, "61400", "주택", "0", "가상9동", f"{x_:.6f}", f"{y_:.6f}"])
+        ylines = [yline("서남로", 1, 0, 35.1521, 126.9311, entr="7"), yline("서남로", 1, 0, 35.1501, 126.9301, entr="2"),  # 출입구 둘: 일련번호 작은 것
+                  yline("서남로", 1, 0, 35.1491, 126.9291, under="1", entr="3"), yline("서남로", 5, 2, 35.1511, 126.9321)]
+        ylines += [yline(f"가상{i}길", i, 0, 35.14 + i * 1e-4, 126.92, rcd=f"2911031{i:05d}") for i in range(1, 30)]
+        yraw = "\n".join(ylines).encode("cp949")
+        ypv = S.import_addr_points(con, yraw, preview=True)
+        ok(ypv["columns"].get("road_cd") == 6 and ypv["columns"].get("bjd_cd") == 2 and ypv["columns"].get("entr_sn") == 1 and ypv["columns"].get("underground") == 8
+           and ypv["has_codes"], f"머리글 없는 위치정보요약DB: 도로명코드 6·법정동코드 2·출입구일련번호 1·지하여부 8 열 찾기 ({ypv['columns']})")
+        S.import_addr_points(con, yraw)
+        pt = S.rows(con, "SELECT * FROM addr_point WHERE road='서남로' AND main=1 ORDER BY underground")
+        ok(len(pt) == 2 and pt[0]["road_cd"] == "291103166047" and pt[0]["bjd_cd"] == "2911010800" and pt[0]["entr_sn"] == 2 and abs(pt[0]["lat"] - 35.1501) < 1e-6
+           and pt[1]["underground"] == 1, "가져오기: 도로명코드·법정동코드·지하여부 보관, 출입구가 여럿이면 출입구일련번호가 가장 작은 것(2) 하나, 지하는 따로")
+        S.import_addr_points(con, "\n".join([yline("서남로", 1, 0, 35.1600, 126.9400, entr="9")] + ylines[4:]).encode("cp949"))
+        ok(abs(S.one(con, "SELECT lat FROM addr_point WHERE road='서남로' AND main=1 AND underground=0")["lat"] - 35.1501) < 1e-6, "다시 가져와도 같은 출입구(일련번호 작은 것)를 유지 — 정해진 하나")
+        n = len(calls)
+        lc = S.juso_coord(con, res["items"][0]["ref"])
+        ok(lc["source"] == "LOCAL" and lc["how"] == "CODE" and abs(lc["lat"] - 35.1501) < 1e-6 and len(calls) == n,
+           "좌표 승인키가 있어도 이 PC 자료를 먼저: 도로명코드·지하여부·본번·부번으로 정확히 (외부 호출 없음, source LOCAL)")
+        lu = S.juso_coord(con, {**res["items"][0]["ref"], "udrtYn": "1"})
+        ok(lu["source"] == "LOCAL" and abs(lu["lat"] - 35.1491) < 1e-6, "지하여부가 1이면 지하 건물 좌표")
+        ok(S.juso_search(con, "서남로 1")["coord"], "검색 응답 coord: 주소 위치 자료나 좌표 승인키가 있으면 true")
+        n = len(calls)
+        # 예전 자료(식별 번호 없음): 도로명·건물번호로 (관할 시군구 안)
+        x0, y0 = geo.wgs84_to_utmk(35.1531, 126.9331)
+        S.import_addr_points(con, ("시군구명,읍면동명,도로명,건물본번,건물부번,지번본번,지번부번,X좌표,Y좌표\n"
+                                   f"동구,가상동,서남로,3,0,,,{x0:.3f},{y0:.3f}\n동구,가상동,옛길,8,0,77,2,{x0 + 50:.3f},{y0:.3f}\n서구,가상동,서남로,9,0,,,{x0:.3f},{y0:.3f}\n").encode())
+        r3 = S.juso_coord(con, res["items"][1]["ref"] | {"rn": "서남로", "sggNm": "동구"})
+        ok(r3["source"] == "LOCAL" and r3["how"] == "ROAD" and abs(r3["lat"] - 35.1531) < 1e-6 and len(calls) == n,
+           "도로명코드로 못 찾으면 도로명·건물번호로 (관할 '동구' 안, 식별 번호 없는 예전 자료)")
+        ref9 = {**res["items"][1]["ref"], "rnMgtSn": "291104000099", "rn": "서남로", "buldMnnm": "9", "sggNm": "서구"}
+        S.save_settings(con, {"external": {"keys": {"juso_coord_key": ""}}})
+        r9 = S.juso_coord(con, ref9)
+        ok(r9.get("none") and r9["code"] == "NOT_LOCAL" and "이 PC 주소 위치 자료에 없는 주소" in r9["reason"] and "최신" in r9["reason"] and len(calls) == n,
+           "관할(동구) 밖 시군구 결과는 이름으로 맞추지 않음 → 좌표 승인키도 없으면 '이 PC 주소 위치 자료에 없는 주소 — 지도에서 지정' (외부 호출 없음)")
+        rj = S.juso_coord(con, {"admCd": "2911010800", "rnMgtSn": "291104000098", "udrtYn": "0", "buldMnnm": "4", "buldSlno": "0", "rn": "새길", "sggNm": "동구",
+                                "emdNm": "가상동", "lnbrMnnm": "77", "lnbrSlno": "2", "mtYn": "0"})
+        ok(rj["source"] == "LOCAL" and rj["how"] == "JIBUN" and abs(rj["lon"] - S.one(con, "SELECT lon FROM addr_point WHERE road='옛길'")["lon"]) < 1e-9,
+           "도로명으로도 못 찾으면 지번(법정동 + 번지)으로")
+        ok(S.juso_coord(con, {"admCd": "2911010800", "rnMgtSn": "291104000098", "udrtYn": "0", "buldMnnm": "4", "buldSlno": "0", "rn": "새길", "sggNm": "동구",
+                              "emdNm": "가상동", "lnbrMnnm": "77", "lnbrSlno": "2", "mtYn": "1"}).get("none"), "산 번지는 지번으로 맞추지 않음")
+        ok(S.juso_search(con, "서남로 1")["coord"] and S.addr_stats(con)["imported_at"], "좌표 승인키 없이도 주소 위치 자료가 있으면 coord true")
+        S.save_settings(con, {"external": {"keys": {"juso_coord_key": "JUSOCOORDKEY-654321"}}})
+        n = len(calls)
+        rk = S.juso_coord(con, ref9)
+        ok(rk["source"] == "JUSO" and len(calls) == n + 1 and calls[-1]["path"] == "/addrlink/addrCoordApi.do"
+           and sorted(calls[-1]["q"]) == ["admCd", "buldMnnm", "buldSlno", "confmKey", "resultType", "rnMgtSn", "udrtYn"],
+           "이 PC 자료에 없고 좌표 승인키가 있으면 그때만 행안부 좌표 API (도로명·시군구·지번은 보내지 않음)")
+        # 주소 위치 자료 날짜: 45일 넘으면 대시보드 경고·설정 화면 안내
+        from dgpc import ops as OPS_
+        ok(not S.addr_stats(con)["stale"] and not OPS_.ops_status(con)["addr_warning"], "방금 가져온 주소 위치 자료는 경고 없음")
+        S.set_setting(con, "addr_import", {**S.get_setting(con, "addr_import"), "at": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=46)).isoformat(timespec="seconds")})
+        ast = S.addr_stats(con)
+        rdy = {x["key"]: x for x in OPS_.readiness(con)["items"]}["address"]
+        ok(ast["stale"] and ast["age_days"] >= 46 and "46일 전" in OPS_.ops_status(con)["addr_warning"] and rdy["ok"] and rdy["label"] == "주소 위치 자료 또는 승인키"
+           and "45일 넘음" in rdy["note"], "주소 위치 자료가 45일 넘으면 오늘 현황 경고(운영 준비 점검은 통과·메모로 안내)")
         # 검색어 안전장치: 전화번호·이름 칸 값·저장된 주민 이름
         S.create_request(con, {"name": "홍길가상", "phone": "01000007777", "address": "가상시 동구 예시로 7", "planned_date": "2026-11-05",
                                "items": [{"fee_rate_id": S.FEE_TABLE["rows"][0]["id"], "qty": 1}]})
@@ -1434,8 +1495,8 @@ def v11_external():
         import random as _r
         rng = _r.Random(3)
         pts = [(35.1462, 126.9233)] + [(round(35.14 + rng.uniform(-0.02, 0.02), 6), round(126.92 + rng.uniform(-0.02, 0.02), 6)) for _ in range(33)] + [(35.30, 126.92)]  # 마지막: 17km 밖
-        cache = routing.TravelCache(con)
-        mat, info = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", cache, min_interval_s=0)
+        db_before = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("audit_log", "meta")}
+        mat, info = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", min_interval_s=0)
         posts = [c for c in kc if c["path"] == "/v1/destinations/directions"]
         gets = [c for c in kc if c["path"] == "/v1/directions"]
         ok(all(len(c["body"]["destinations"]) <= 30 and c["body"]["radius"] <= 10000 for c in posts) and len(posts) == 34 * 2 and all(c["method"] == "POST" for c in posts),
@@ -1446,41 +1507,39 @@ def v11_external():
            and all(c["auth"] == "KakaoAK KAKAOKEY-0000-1111" for c in kc) and not re.search(r"[가-힣]", body_txt), "카카오모빌리티에는 좌표(경도 x·위도 y)와 'KakaoAK 키' 머리글만, 이름·주소 없음")
         ok(info["fallback_pairs"] == 0 and info["road_pairs"] == 35 * 34 and mat[0][1] == math.ceil((int(routing.haversine_km(pts[0], pts[1]) * 100) + 60) / 60) and mat[3][3] == 0,
            f"N×N 행렬(35×35) 모두 도로 시간, 분 단위 올림 (API {info['api_calls']}회)")
+        n1 = len(kc)
         kc.clear()
-        mat2, info2 = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", cache, min_interval_s=0)
-        ok(not kc and info2["cache_hits"] == 35 * 34 and mat2 == mat, "두 번째 계산: DB 캐시(좌표 소수 5자리 쌍)로 API 호출 없음")
-        ok(S.one(con, "SELECT COUNT(*) AS n FROM travel_cache")["n"] == 35 * 34 and not S.rows(con, "SELECT origin FROM travel_cache WHERE origin GLOB '*[가-힣]*'"),
-           "캐시 표에는 좌표 쌍과 초만 (이름·주소 없음)")
-        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=31)).isoformat(timespec="seconds")
-        con.execute("UPDATE travel_cache SET fetched_at=? WHERE origin=?", (old, routing._ck(pts[0])))
-        kc.clear()
-        routing.kakao_matrix(pts[:3], "KAKAOKEY-0000-1111", cache, min_interval_s=0)
-        ok(len(kc) == 1 and kc[0]["body"]["origin"]["y"] == "35.14620", "30일 지난 캐시는 쓰지 않고 다시 물음 (지난 것은 정리)")
+        mat2, info2 = routing.kakao_matrix(pts, "KAKAOKEY-0000-1111", min_interval_s=0)
+        ok(len(kc) == n1 and info2["api_calls"] == info["api_calls"] and "cache_hits" not in info2 and mat2 == mat,
+           f"두 번째 계산도 카카오모빌리티에 새로 물음(보관한 이동시간 없음, API {len(kc)}회)")
+        ok(not con.execute("SELECT 1 FROM sqlite_master WHERE name='travel_cache'").fetchone() and not hasattr(routing, "TravelCache")
+           and {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("audit_log", "meta")} == db_before,
+           "카카오 이동시간은 DB에 쓰지 않음 (travel_cache 표 없음, 계산 전후 DB 그대로)")
         # 일부 실패 → 그 쌍만 직선 추정
         kc.clear()
         fail_keys.add(f"{pts[2][0]:.5f},{pts[2][1]:.5f}")
         sub = [(35.15, 126.93), pts[2], (35.151, 126.931), (35.152, 126.935)]
-        mat3, info3 = routing.kakao_matrix(sub, "KAKAOKEY-0000-1111", routing.TravelCache(con), min_interval_s=0)
+        mat3, info3 = routing.kakao_matrix(sub, "KAKAOKEY-0000-1111", min_interval_s=0)
         est = routing._estimate_min(sub[0], sub[1])
         ok(info3["fallback_pairs"] == 3 and mat3[0][1] == est and routing.matrix_note("KAKAO", info3) == "도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)",
            "경로를 못 받은 쌍만 직선거리 추정 → '도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)'")
         # 시간 초과: 더 묻지 않고 전부 추정
         X.urlopen = lambda req, timeout: (_ for _ in ()).throw(urllib.error.URLError(socket.timeout("timed out")))
         far = [(35.16, 126.94), (35.161, 126.941), (35.163, 126.945)]
-        m4, s4, i4 = routing.build_matrix(far, method="KAKAO", kakao_key="KAKAOKEY-0000-1111", cache=routing.TravelCache(con))
+        m4, s4, i4 = routing.build_matrix(far, method="KAKAO", kakao_key="KAKAOKEY-0000-1111")
         ok(s4 == "ESTIMATE" and i4["api_calls"] == 1 and m4 == routing.estimate_matrix(far) and "카카오모빌리티로 구하지 못함" in routing.matrix_note(s4, i4),
            "시간 초과 → 첫 실패에서 멈추고 전부 직선거리 추정, 화면 문구에 표시")
         X.urlopen = kakao_fake
         kc.clear()
-        _m, s5, i5 = routing.build_matrix(far, method="KAKAO", kakao_key="WRONGKEY-000000", cache=None)
+        _m, s5, i5 = routing.build_matrix(far, method="KAKAO", kakao_key="WRONGKEY-000000")
         ok(s5 == "ESTIMATE" and len(kc) == 1 and "인증" in i5["error"], "틀린 키(401) → 한 번만 묻고 직선거리 추정")
-        _m, s6, i6 = routing.build_matrix(far, method="KAKAO", kakao_key="", cache=None)
+        _m, s6, i6 = routing.build_matrix(far, method="KAKAO", kakao_key="")
         ok(s6 == "ESTIMATE" and "REST 키" in routing.matrix_note(s6, i6), "키 없이 카카오 방식 → 직선거리 추정과 이유 표시")
         kc.clear()
-        mm, _ = routing.kakao_matrix([(35.15 + i * 1e-3, 126.93) for i in range(6)], "KAKAOKEY-0000-1111", None, max_calls=2, min_interval_s=0)
+        mm, _ = routing.kakao_matrix([(35.15 + i * 1e-3, 126.93) for i in range(6)], "KAKAOKEY-0000-1111", max_calls=2, min_interval_s=0)
         ok(len(kc) == 2, "호출 수 한도(max_calls)를 넘으면 더 묻지 않음 (나머지 직선 추정)")
         t0 = time.monotonic()
-        routing.kakao_matrix([(35.17 + i * 1e-3, 126.93) for i in range(3)], "KAKAOKEY-0000-1111", None, min_interval_s=0.15)
+        routing.kakao_matrix([(35.17 + i * 1e-3, 126.93) for i in range(3)], "KAKAOKEY-0000-1111", min_interval_s=0.15)
         ok(time.monotonic() - t0 >= 0.3, "호출 사이 최소 간격(초당 호출 수 제한)")
         # 노선 계산 전체: 카카오 방식
         S.save_settings(con, {"external": {"keys": {"kakao_rest_key": "KAKAOKEY-0000-1111"}, "travel_method": "KAKAO"}})
@@ -1488,7 +1547,7 @@ def v11_external():
         crew = {"id": "c1", "name": "가상", "capacity_m3": 20, "shift_start": "09:00", "shift_end": "17:00"}
         reqs = [{"id": f"r{i}", "lat": 35.145 + i * 2e-3, "lon": 126.92 + i * 1e-3, "items": [{"name": "의자", "qty": 1}]} for i in range(4)]
         pl = routing.plan(reqs, [crew], {"lat": 35.1462, "lon": 126.9233}, travel_method="KAKAO", kakao_key=S.secret(con, "kakao_rest_key"),
-                          travel_cache=routing.TravelCache(con), time_limit_s=1)
+                          time_limit_s=1)
         ok(pl["matrix_source"] == "KAKAO" and pl["matrix_note"].startswith("도로 시간: 카카오모빌리티") and len(pl["routes"][0]["stops"]) == 4, f"노선 계산: {pl['matrix_note']}")
         S.save_settings(con, {"external": {"travel_method": "ESTIMATE"}})
         ok(routing.plan(reqs, [crew], {"lat": 35.1462, "lon": 126.9233}, travel_method=S.travel_method(con), time_limit_s=1)["matrix_source"] == "ESTIMATE", "기본(직선거리 추정)으로 되돌리면 외부 호출 없음")
@@ -1925,8 +1984,31 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2, 3, 4] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
-       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 4, "다시 열면 멈춘 단계부터 다시 실행(2·3·4단계)")
+    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 6, "다시 열면 멈춘 단계부터 다시 실행(2~6단계)")
+    # 5단계(주소 위치 자료 식별 번호)·6단계(카카오 이동시간 보관 중단): 4단계까지의 DB에 옛 자료를 넣고 올린다
+    m4 = sqlcipher3.connect(str(mp.parent / "m4.db"), isolation_level=None)
+    m4.execute("PRAGMA key = 'test-db-key-not-for-production'")
+    saved_m = store.MIGRATIONS, store.LATEST
+    store.MIGRATIONS, store.LATEST = saved_m[0][:4], 4
+    try:
+        store.run_migrations(m4)
+    finally:
+        store.MIGRATIONS, store.LATEST = saved_m
+    m4.execute("INSERT INTO addr_point (sigungu, road, main, sub, lat, lon, dong_h, bname, jibun_main) VALUES ('동구','옛로',3,0,35.15,126.92,'가상1동','옛빌라',12)")
+    m4.execute("CREATE TABLE travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY (origin, dest))")
+    m4.execute("INSERT INTO travel_cache VALUES ('35.15000,126.92000','35.15100,126.92100',120,'2026-11-01T00:00:00+00:00')")
+    old_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
+    ok(store.run_migrations(m4) == [5, 6], "4단계 DB → 5·6단계 실행")
+    a4 = m4.execute("SELECT sigungu, road, main, lat, dong_h, bname, jibun_main, underground, road_cd, bjd_cd, entr_sn FROM addr_point").fetchall()
+    new_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
+    ok(a4 == [("동구", "옛로", 3, 35.15, "가상1동", "옛빌라", 12, 0, None, None, None)] and "underground" in new_pk and "underground" not in old_pk
+       and {"ix_addr_point_rcd", "ix_addr_point_bjd"} <= {r[0] for r in m4.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()},
+       "이전 단계 5: 주소 위치 자료에 지하여부(기본 키)·도로명코드·법정동코드·출입구일련번호 — 기존 좌표·동·건물명·지번 그대로(지상, 식별 번호는 다시 가져오면 채움)")
+    ok(not m4.execute("SELECT 1 FROM sqlite_master WHERE name='travel_cache'").fetchone(), "이전 단계 6: 카카오 이동시간 보관 표(travel_cache)와 남은 좌표 쌍 삭제")
+    m4.execute("PRAGMA user_version = 4")
+    ok(store.run_migrations(m4) == [5, 6] and m4.execute("SELECT COUNT(*) FROM addr_point").fetchone()[0] == 1, "5·6단계는 여러 번 실행해도 같음")
+    m4.close()
     mc.execute("PRAGMA user_version = 99")
     try:
         store.run_migrations(mc)
@@ -2021,7 +2103,7 @@ def v13():
     # 3단계 이전: 기존 감면 접수는 그때의 설정값으로 채움(지금까지와 같은 금액)
     con.execute("UPDATE request SET reduction_round_unit=NULL WHERE id=?", (ru1,))
     con.execute("PRAGMA user_version = 2")
-    ok(store.run_migrations(con) == [3, 4] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
+    ok(store.run_migrations(con) == [3, 4, 5, 6] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
        and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] is None and lev(ru1) == (2480, 2480),
        "이전 단계 3: 기존 감면 접수에 지금 설정값(10) 채움, 감면 없는 접수는 비움")
     S.save_settings(con, {"reduction_round_unit": 1})
@@ -2194,7 +2276,7 @@ def v13():
     legacy_now = S.release_info(con, dev)["seq"]
     con.execute("DELETE FROM result_seq WHERE gen=''")
     con.execute("PRAGMA user_version = 3")
-    ok(store.run_migrations(con) == [4] and S.release_info(con, dev)["seq"] == legacy_now == legacy0, "이전 단계 4: 이전 기록 순번을 세대 ''로 채움(rel.seq 같음)")
+    ok(store.run_migrations(con) == [4, 5, 6] and S.release_info(con, dev)["seq"] == legacy_now == legacy0, "이전 단계 4: 이전 기록 순번을 세대 ''로 채움(rel.seq 같음)")
 
     # 7. 완료일 = 휴대폰 최종 결과 시각
     fut = ph.ev(stop_b, "ATTEMPT", {"outcome": "DONE"})

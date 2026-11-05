@@ -372,31 +372,43 @@ async function privacyCard() {
 }
 function addrCard() {
   const msg = h('p', { class: 'msg' });
-  const stat = h('span', { class: 'muted' });
-  api('addr-stats').then((x) => { stat.textContent = x.count ? `${x.count.toLocaleString()}건 (${x.sigungu.join(', ')})` : '아직 없음'; }).catch(() => {});
+  const stat = h('span', { class: 'muted addr-stat' }, '불러오는 중…');
+  const staleBox = h('div');
+  api('addr-stats').then((x) => {
+    stat.textContent = x.count ? `${x.count.toLocaleString()}곳 (${x.sigungu.join(', ')})` + (x.imported_at ? ` · ${x.imported_at.slice(0, 10)} 가져옴` : ' · 가져온 날짜 모름')
+      + (x.count && x.with_codes < x.count ? ` · 행안부 식별 번호 ${x.with_codes.toLocaleString()}곳(다시 가져오면 채워짐)` : '') : '아직 없음';
+    staleBox.replaceChildren(x.stale ? h('p', { class: 'notice warn small addr-stale' }, `가져온 지 ${x.stale_days}일이 넘었습니다. 새로 생긴 주소는 찾지 못하니 아래 순서로 새 파일을 받아 다시 가져오세요.`) : '');
+  }).catch(() => { stat.textContent = '-'; });
   const file = h('input', { type: 'file', accept: '.txt,.csv' });
   const region = h('input', { placeholder: '시군구 거르기 (예: 동구)', value: '동구', style: 'width:180px' });
   const cols = h('input', { placeholder: '열 번호 직접 지정 (비우면 자동)', style: 'width:260px' });
   const out = h('div');
   const send = async (preview) => {
     const f = file.files[0]; if (!f) throw new Error('파일을 고르세요.');
+    if (/\.zip$/i.test(f.name)) throw new Error('압축 파일(.zip)은 먼저 풀고, 안의 .txt 파일을 고르세요.');
     const buf = new Uint8Array(await f.arrayBuffer());
     return api(`addr-import?region=${encodeURIComponent(region.value)}&preview=${preview ? 1 : 0}&columns=${encodeURIComponent(cols.value)}`, { method: 'POST', raw: buf });
   };
   const prev = wrap(async () => {
     const r = await send(true);
-    out.replaceChildren(h('div', { class: 'notice' }, h('p', {}, `찾은 열: ${Object.entries(r.columns).filter(([k]) => k !== 'header').map(([k, v]) => `${k}=${v}`).join(', ')} · ${r.count.toLocaleString()}건`),
-      h('ul', {}, ...r.sample.map((x) => h('li', {}, `${x.sigungu} ${x.road} ${x.main}${x.sub ? '-' + x.sub : ''} → ${x.lat.toFixed(6)}, ${x.lon.toFixed(6)}`))),
+    out.replaceChildren(h('div', { class: 'notice' }, h('p', {}, `찾은 열: ${Object.entries(r.columns).filter(([k]) => k !== 'header').map(([k, v]) => `${k}=${v}`).join(', ')} · ${r.count.toLocaleString()}건`
+      + (r.has_codes ? ' · 행안부 식별 번호(도로명코드) 있음' : ' · 도로명코드 열 없음(행안부 결과는 도로명·번호로 찾음)')),
+      h('ul', {}, ...r.sample.map((x) => h('li', {}, `${x.sigungu} ${x.road} ${x.underground ? '지하 ' : ''}${x.main}${x.sub ? '-' + x.sub : ''} → ${x.lat.toFixed(6)}, ${x.lon.toFixed(6)}`))),
       h('p', { class: 'small' }, '표본 주소가 지도에서 맞는 곳인지 확인한 뒤 가져오세요.'),
       btn('이대로 가져오기', wrap(async () => { const x = await send(false); toast(`${x.count.toLocaleString()}건 가져옴 (전체 ${x.total.toLocaleString()}건)`); out.replaceChildren(); setBoot(null); render(); }, msg), 'primary')));
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '주소 위치 자료'),
-    h('p', { class: 'muted' }, '행정안전부 도로명주소 "위치정보요약DB" 파일을 이 PC에 넣으면 접수 화면에서 주소로 위치를 찾습니다. 모든 처리는 이 PC 안에서 하며 외부로 보내지 않습니다. 큰 파일은 명령으로 가져오세요: ', h('code', {}, 'python pc/pc_tool.py import-addr <파일·폴더> --region 동구')),
-    h('ol', { class: 'small steps-list' },
-      h('li', {}, '주소기반산업지원서비스(business.juso.go.kr)에서 "위치정보요약DB"의 광주광역시 파일을 내려받습니다(매월 갱신, 월 1회 다시 가져오기 권장).'),
-      h('li', {}, '압축을 풀고 안의 .txt 파일을 아래 [파일 선택]으로 고릅니다. 시군구 거르기는 "동구" 그대로 둡니다.'),
-      h('li', {}, '[미리보기]로 표본 주소가 지도에서 맞는지 본 뒤 [이대로 가져오기]. 그 뒤 접수 화면의 주소 찾기에서 도로명·지번·건물명으로 검색됩니다.')),
-    h('div', { class: 'row' }, '저장된 자료', stat),
+    h('p', { class: 'muted' }, '행정안전부 도로명주소 "위치정보요약DB" 파일을 이 PC에 넣으면 접수 화면의 주소 찾기와 [주소로 위치 찾기]가 이 PC 안에서 위치(건물 출입구)를 채웁니다. '
+      + '행안부 주소 검색 결과를 고를 때도 이 자료에서 먼저 좌표를 찾으므로 좌표 승인키는 없어도 됩니다. 모든 처리는 이 PC 안에서 하며 외부로 보내지 않습니다.'),
+    h('div', { class: 'row' }, '저장된 자료', stat), staleBox,
+    h('h3', {}, '파일 받기·넣기 (월 1회 갱신 권장)'),
+    h('ol', { class: 'small steps-list addr-steps' },
+      h('li', {}, '행정안전부 주소정보 누리집(business.juso.go.kr)에서 주소 DB → "위치정보요약DB"로 갑니다(메뉴 이름은 바뀔 수 있음).'),
+      h('li', {}, '지역에서 해당 시도(동구청은 광주광역시)를 골라 내려받습니다. 행안부가 매월 새로 올립니다.'),
+      h('li', {}, '내려받은 압축 파일(.zip)을 풉니다. 이 화면은 압축 파일을 읽지 못하니, 안에 든 .txt 파일을 씁니다(구분자 |, 글자 인코딩 CP949·UTF-8 모두 자동 인식, 머리글 없어도 됨).'),
+      h('li', {}, '아래 [파일 선택]으로 .txt 파일을 고르고, 시군구 거르기는 "동구" 그대로 둔 채 [미리보기] → 표본 주소가 맞으면 [이대로 가져오기]. .txt가 여러 개면 하나씩 가져옵니다.'),
+      h('li', {}, '파일이 40MB보다 크거나 여러 개면 명령으로 한 번에 가져옵니다(폴더를 주면 그 안의 .txt를 모두): ', h('code', {}, 'python pc/pc_tool.py import-addr <파일 또는 폴더> --region 동구'), ' (먼저 --preview로 확인).'),
+      h('li', {}, '다시 가져오면 있던 주소는 그대로 두고 새 주소를 더하며, 빠져 있던 행안부 식별 번호(도로명코드·법정동코드)를 채웁니다. 45일이 지나면 오늘 현황에 갱신 안내가 뜹니다.')),
     h('div', { class: 'row' }, file, region, cols, btn('미리보기', prev, 'small')), out, msg);
 }
 
@@ -419,8 +431,8 @@ function externalCard() {
   return h('div', { class: 'card' }, h('h2', {}, '외부 서비스 (주소 검색·도로 이동시간)'),
     h('p', { class: 'muted' }, '사용자 요청으로 더한 기능입니다. 이 PC 서버가 대신 묻고, 브라우저는 외부 서버에 직접 연결하지 않습니다. 이름·연락처는 보내지 않습니다.'),
     h('ul', { class: 'small muted' },
-      h('li', {}, '행안부 도로명주소 API(business.juso.go.kr): 접수 화면 [주소 찾기]에 적은 검색어만 보냅니다. 전화번호 모양 값·신청인 이름이 든 검색어는 보내지 않습니다. 고른 결과의 좌표는 건물 식별 번호로 묻습니다.'),
-      h('li', {}, '카카오모빌리티 길찾기 API: 노선 계산 때 지점 좌표만 보냅니다. 받은 시간은 30일 동안 이 PC에 보관해 다시 묻지 않고, 못 받은 구간은 직선거리로 추정해 화면에 몇 쌍인지 표시합니다.'),
+      h('li', {}, '행안부 도로명주소 API(business.juso.go.kr): 접수 화면 [주소 찾기]에 적은 검색어만 보냅니다. 전화번호 모양 값·신청인 이름이 든 검색어는 보내지 않습니다. 고른 결과의 좌표는 먼저 이 PC의 주소 위치 자료에서 찾고, 없을 때만 좌표 승인키(선택)로 건물 식별 번호를 보내 묻습니다.'),
+      h('li', {}, '카카오모빌리티 길찾기 API: 노선 계산 때 지점 좌표만 보냅니다. 받은 시간은 이 PC에 저장하지 않고 노선을 계산할 때마다 새로 묻습니다. 못 받은 구간은 직선거리로 추정해 화면에 몇 쌍인지 표시합니다.'),
       h('li', {}, '기관망 프록시는 PC 서버를 실행할 때의 HTTPS_PROXY 환경변수를 따릅니다. 검색어는 서버 로그·접속기록에 남지 않습니다(접속기록에는 검색했다는 사실과 건수만).')),
     h('div', { class: 'ftable' }, ...rows.map((r) => r.el), h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '이동시간 계산 방식'), h('div', { class: 'ft-v' }, method))),
     h('div', { class: 'row' }, btn('저장', wrap(async () => {

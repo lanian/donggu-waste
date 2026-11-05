@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 
 from dgpc import external as X, privacy as _pv, area, geo
-from dgpc.addresses import _addr_std
+from dgpc.addresses import _addr_std, match_juso
 from dgpc.config import secret
-from dgpc.core import is_chosung, rows
+from dgpc.core import is_chosung, one, rows
+
+NO_LOCAL = "이 PC 주소 위치 자료에 없는 주소 — 지도에서 지정하세요(주소 위치 자료를 최신으로 바꾸면 찾을 수 있음)"
 
 def _known_names(con) -> list[str]:
     return [r["name"] for r in rows(con, "SELECT DISTINCT name FROM request WHERE pii_purged_at IS NULL AND name IS NOT NULL AND length(name) >= 2")]
@@ -45,19 +47,30 @@ def juso_search(con, q: str, name: str = "") -> dict:
                       "dong": _dong_for_juso(con, it), "emdNm": it["emdNm"], "hemdNm": it["hemdNm"], "bname": it["bdNm"], "ref": it["ref"],
                       "lat": None, "lon": None})
     _pv.record_access(con, "SEARCH", "", len(items), "행안부 주소 검색 (검색어 기록 안 함)")
-    return {"configured": True, "items": items, "total": res["total"], "coord": bool(secret(con, "juso_coord_key"))}
+    return {"configured": True, "items": items, "total": res["total"], "coord": coord_available(con)}
+
+
+def coord_available(con) -> bool:
+    """행안부 검색 결과를 고르면 좌표를 채울 수 있는지: 이 PC 주소 위치 자료가 있거나 좌표 승인키가 있으면."""
+    return bool(one(con, "SELECT 1 AS x FROM addr_point LIMIT 1")) or bool(secret(con, "juso_coord_key"))
 
 
 def juso_coord(con, ref: dict) -> dict:
-    """고른 행안부 검색 결과의 출입구 좌표(WGS84). 보내는 것은 좌표 승인키와 건물 식별 번호뿐."""
+    """고른 행안부 검색 결과의 출입구 좌표(WGS84).
+    1) 이 PC 주소 위치 자료(행안부 위치정보요약DB)에서 먼저 찾는다 — 외부 전송 없음, source 'LOCAL'
+    2) 없고 좌표 승인키가 있을 때만 행안부 좌표제공 API에 묻는다 — 보내는 것은 좌표 승인키와 건물 식별 번호 다섯 개뿐, source 'JUSO'
+    3) 둘 다 안 되면 none + 이유. 접수의 위치 출처(geo_source)는 어느 쪽이든 'ADDR'(주소로 찾은 건물 출입구)."""
+    m = match_juso(con, ref)
+    if m:
+        return {"lat": m["lat"], "lon": m["lon"], "source": "LOCAL", "how": m["how"], "label": m["label"]}
     key = secret(con, "juso_coord_key")
     if not key:
-        return {"none": True, "reason": "좌표 승인키가 없어 위치는 지도에서 지정하세요."}
+        return {"none": True, "reason": NO_LOCAL, "code": "NOT_LOCAL"}
     try:
         lat, lon = X.juso_coord(key, ref)
     except X.ExternalError as e:
         return {"none": True, "reason": str(e), "code": e.code}
-    return {"lat": lat, "lon": lon}
+    return {"lat": lat, "lon": lon, "source": "JUSO"}
 
 
 def addr_search(con, q: str, limit: int = 12) -> list[dict]:
@@ -69,7 +82,7 @@ def addr_search(con, q: str, limit: int = 12) -> list[dict]:
     seen = set()
     def add(kind, cs):
         for c in cs:
-            k = (c["road"], c["main"], c["sub"], c["sigungu"])
+            k = (c["road"], c["main"], c["sub"], c["sigungu"], c.get("underground") or 0)
             if k not in seen and len(found) < limit:
                 seen.add(k); found.append((kind, c))
     pa = geo.parse_address(q)

@@ -36,7 +36,7 @@ from typing import Callable
 import contextlib
 import queue
 
-from . import area as A, backup as BK, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store
+from . import area as A, backup as BK, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UI = ROOT / "pc" / "ui"
@@ -737,8 +737,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @endpoint("GET", "juso-coord", WORK)
     def ep_juso_coord(self, qs):
-        """행안부 검색 결과의 출입구 좌표."""
-        return S.juso_coord(self.c, {k: qs.get(k, "") for k in ("admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno")})
+        """행안부 검색 결과의 출입구 좌표: 이 PC 주소 위치 자료 먼저(외부 전송 없음), 없고 좌표 승인키가 있으면 행안부 좌표 API."""
+        return S.juso_coord(self.c, {k: qs.get(k, "") for k in (*X.REF_RE, *X.REF_LOCAL)})
 
     @endpoint("GET", "privacy", REVIEW)
     def ep_privacy(self, qs):
@@ -1452,7 +1452,7 @@ class Handler(BaseHTTPRequestHandler):
         return S.settings(self.c)
 
     def route_plan(self, d):
-        """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이동시간 캐시·이력 저장만 다시 잠금 안."""
+        """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이력 저장만 다시 잠금 안(카카오 이동시간은 저장하지 않음)."""
         date = d["date"]
         ids = set(d.get("request_ids") or [])
         with LOCK:
@@ -1473,24 +1473,17 @@ class Handler(BaseHTTPRequestHandler):
             ov = S.volume_overrides(c)
         pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
             if st["capacity"]["prefer_dong_crew"] else {}
-        cache = BufferedTravelCache() if method == "KAKAO" else None
-        try:
-            res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
-                               travel_method=method, kakao_key=kakao_key, travel_cache=cache,
-                               service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
-                               volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
-                               max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
-                               unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
-        finally:
-            if cache is not None:
-                cache.close()
+        res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
+                           travel_method=method, kakao_key=kakao_key,
+                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
+                           volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
+                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
+                           unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
-        if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만) + 새로 받은 이동시간 저장
+        if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만). 받은 이동시간은 저장하지 않는다(다음 계산은 다시 묻는다)
             mi = res.get("matrix_info") or {}
-            with LOCK:
-                routing.TravelCache(CON).put_many(cache.pending)
-                with S.tx(CON):
-                    S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "cache": mi.get("cache_hits", 0), "estimated": mi.get("fallback_pairs", 0)})
+            with LOCK, S.tx(CON):
+                S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "estimated": mi.get("fallback_pairs", 0)})
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]),
@@ -1700,27 +1693,6 @@ class Handler(BaseHTTPRequestHandler):
         frames = json.loads(b["frames_json"])
         imgs = [qr_png_data_uri(f, "M")[0] for f in frames]
         self.raw_page(display_html(imgs, b["id"][:8], b["work_date"], b["assign_ver"], n, 3, b["crew"] or "").encode())
-
-
-class BufferedTravelCache(routing.TravelCache):
-    """노선 계산 중(잠금 밖) 쓰는 이동시간 캐시: 읽기는 조회 전용 연결, 새 값은 모아 두었다가 계산 뒤 잠금 안에서 저장."""
-
-    def __init__(self):
-        super().__init__(store.connect(readonly=True))
-        self.pending: dict = {}
-
-    def get_many(self, pairs):
-        got = super().get_many(pairs)
-        return {**got, **{k: v for k, v in self.pending.items() if k in set(pairs)}}
-
-    def put_many(self, vals):
-        self.pending.update(vals or {})
-
-    def close(self):
-        try:
-            self.con.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def dt_now() -> str:

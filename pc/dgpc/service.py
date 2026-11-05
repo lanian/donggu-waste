@@ -45,6 +45,7 @@ from dgpc.auditlog import (
 )
 from dgpc.addresses import (
     set_location, parse_addr_points, import_addr_points, addr_stats, geocode, _addr_std, geocode_missing, _ROAD_RE, _JIBUN_RE,
+    match_juso, ADDR_STALE_DAYS,
     address_warnings, jurisdiction_warnings,
 )
 from dgpc.intake import (
@@ -83,5 +84,5 @@ from dgpc.config import (
     external_settings, _save_external, external_test,
 )
 from dgpc.addrsearch import (
-    _known_names, _dong_for_juso, juso_search, juso_coord, addr_search,
+    _known_names, _dong_for_juso, juso_search, juso_coord, addr_search, coord_available, NO_LOCAL,
 )

@@ -84,7 +84,7 @@ def parse_address(addr: str) -> dict | None:
     hm2 = re.findall(r"([가-힣]+구)\b", a)
     if hm2:
         hint = hm2[0]
-    return {"road": norm_road(road), "main": int(m.group(4)), "sub": int(m.group(5) or 0), "sigungu_hint": hint}
+    return {"road": norm_road(road), "main": int(m.group(4)), "sub": int(m.group(5) or 0), "sigungu_hint": hint, "underground": 1 if m.group(3) else 0}
 
 
 # ------------------------------------------------------------------ 위치정보요약DB 읽기
@@ -97,6 +97,8 @@ HEADER_NAMES = {
     # 선택: 건물명(행안부 '건물명'·'시군구용건물명'), 지번(도로명주소 한글·건물 DB의 지번본번·부번) — 있으면 주소 찾기에 쓴다
     "bname": ("건물명", "시군구용건물명", "건축물대장건물명", "상세건물명"), "jibun_main": ("지번본번", "지번본번(번지)", "번지"),
     "jibun_sub": ("지번부번", "지번부번(호)", "호"), "san": ("산여부",),
+    # 선택: 행안부 검색 결과와 정확히 맞추는 식별 번호 — 도로명코드(12자리)·법정동코드(10자리)·출입구일련번호
+    "road_cd": ("도로명코드", "도로명관리번호"), "bjd_cd": ("법정동코드",), "entr_sn": ("출입구일련번호",),
 }
 _DONG_RE = re.compile(r"[가-힣0-9·]{1,10}(동|읍|면|가)")
 
@@ -163,6 +165,16 @@ def detect_columns(rows: list[list[str]]) -> dict:
     z = cols["sub"] + 2
     if z < width and share(lambda v: bool(re.fullmatch(r"\d{5}", v.strip())), z) > 0.9 and share(lambda v: bool(re.fullmatch(r"[\d.]+", v.strip())), z - 1) < 0.5:
         cols["bname"] = z - 1
+    # 식별 번호(위치정보요약DB: 시군구코드 5 · 출입구일련번호 · 법정동코드 10 · … · 도로명코드 12 · 도로명): 없어도 됨
+    rcd = [i for i in range(road_i) if share(lambda v: bool(re.fullmatch(r"\d{12}", v.strip())), i) > 0.95]
+    if rcd:
+        cols["road_cd"] = rcd[-1]
+    bcd = [i for i in range(road_i) if share(lambda v: bool(re.fullmatch(r"\d{10}", v.strip())), i) > 0.95]
+    if bcd:
+        cols["bjd_cd"] = bcd[0]
+        sgc = [i for i in range(bcd[0]) if share(lambda v: bool(re.fullmatch(r"\d{5}", v.strip())), i) > 0.95]
+        if sgc and bcd[0] - sgc[0] == 2 and share(lambda v: v.strip().isdigit(), sgc[0] + 1) > 0.95:
+            cols["entr_sn"] = sgc[0] + 1  # 시군구코드와 법정동코드 사이의 숫자 열
     # 시군구명: '구/군/시'로 끝나는 짧은 열
     sg = [i for i in range(road_i) if share(lambda v: bool(re.fullmatch(r"[가-힣]{1,6}(구|군|시)(\s[가-힣]+구)?", v.strip())), i) > 0.9]
     if sg:
@@ -189,8 +201,9 @@ def parse_columns_arg(s: str) -> dict:
 
 
 def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
-    """(시군구, 도로명, 본번, 부번, 위도, 경도, 관할행정동, 법정동, 건물명, 지번본번, 지번부번) 를 하나씩 돌려준다.
-    region 이 있으면 시군구명에 그 글자가 든 것만. 없는 열은 빈 문자열(지번은 None)."""
+    """(시군구, 도로명, 본번, 부번, 위도, 경도, 관할행정동, 법정동, 건물명, 지번본번, 지번부번, 지하여부, 도로명코드, 법정동코드, 출입구일련번호)
+    를 하나씩 돌려준다. region 이 있으면 시군구명에 그 글자가 든 것만. 없는 열은 빈 문자열(지번·출입구일련번호는 None, 지하여부는 0).
+    같은 건물(도로명·건물번호·지하여부)에 출입구가 여럿이면 모두 돌려주고, 가져올 때 출입구일련번호가 가장 작은 것 하나만 남긴다."""
     text = decode(raw)
     delim = _sniff_delim(text[:5000])
     reader = csv.reader(io.StringIO(text), delimiter=delim)
@@ -202,8 +215,7 @@ def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
     pts = []
     for r in body:
         try:
-            if cols.get("underground") is not None and r[cols["underground"]].strip() == "1":
-                pass  # 지하 건물도 같은 번호로 저장(동일 키면 지상 우선)
+            ug = 1 if cols.get("underground") is not None and r[cols["underground"]].strip() == "1" else 0
             sg = r[cols["sigungu"]].strip() if cols.get("sigungu") is not None else ""
             if region and region not in sg:
                 continue
@@ -224,7 +236,11 @@ def read_points(raw: bytes, columns: dict | None = None, region: str = ""):
             if cols.get("jibun_main") is not None and r[cols["jibun_main"]].strip().isdigit():
                 jm = int(r[cols["jibun_main"]])
                 js = int(r[cols["jibun_sub"]]) if cols.get("jibun_sub") is not None and r[cols["jibun_sub"]].strip().isdigit() else 0
-            pts.append((sg, road, main, sub, round(lat, 7), round(lon, 7), dh, db, bn, jm, js))
+            rc = r[cols["road_cd"]].strip() if cols.get("road_cd") is not None else ""
+            bc = r[cols["bjd_cd"]].strip() if cols.get("bjd_cd") is not None else ""
+            es = r[cols["entr_sn"]].strip() if cols.get("entr_sn") is not None else ""
+            pts.append((sg, road, main, sub, round(lat, 7), round(lon, 7), dh, db, bn, jm, js, ug,
+                        rc if re.fullmatch(r"\d{12}", rc) else "", bc if re.fullmatch(r"\d{10}", bc) else "", int(es) if es.isdigit() else None))
         except (ValueError, IndexError):
             continue
     return {"columns": cols, "delimiter": delim, "points": pts}

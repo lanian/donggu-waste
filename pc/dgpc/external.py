@@ -152,6 +152,8 @@ def juso_search(key: str, keyword: str, per: int = 10) -> dict:
         ref = {k: str(x.get(k) or "") for k in ("admCd", "rnMgtSn", "udrtYn", "buldMnnm", "buldSlno")}
         ref["udrtYn"] = ref["udrtYn"] or "0"
         ref["buldSlno"] = ref["buldSlno"] or "0"
+        # 이 PC 주소 위치 자료에서 찾을 때만 쓰는 값(도로명·시군구·법정동·지번). 좌표 API에는 위 다섯 값만 보낸다(valid_ref)
+        ref.update({k: str(x.get(k) or "")[:40] for k in REF_LOCAL})
         items.append({"road": x.get("roadAddr") or "", "road_part1": x.get("roadAddrPart1") or x.get("roadAddr") or "", "jibun": x.get("jibunAddr") or "",
                       "bdNm": x.get("bdNm") or "", "zip": x.get("zipNo") or "", "siNm": x.get("siNm") or "", "sggNm": x.get("sggNm") or "",
                       "emdNm": x.get("emdNm") or "", "hemdNm": x.get("hemdNm") or "", "ref": ref})
@@ -163,6 +165,7 @@ def juso_search(key: str, keyword: str, per: int = 10) -> dict:
 
 
 REF_RE = {"admCd": r"\d{10}", "rnMgtSn": r"\d{12}", "udrtYn": r"[01]", "buldMnnm": r"\d{1,5}", "buldSlno": r"\d{1,5}"}
+REF_LOCAL = ("rn", "sggNm", "emdNm", "lnbrMnnm", "lnbrSlno", "mtYn")  # 검색 결과의 도로명·시군구·법정동·지번본번·부번·산여부
 
 
 def valid_ref(ref: dict) -> dict:

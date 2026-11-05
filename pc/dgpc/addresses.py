@@ -2,10 +2,11 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import re
 
 from dgpc import geo
-from dgpc.core import UserError, audit, chosung_of, get_setting, now, one, rows, tx
+from dgpc.core import UserError, audit, chosung_of, get_setting, now, one, rows, set_setting, tx
 
 def set_location(con, rid: str, lat: float, lon: float, source: str = "MANUAL"):
     if not (33 <= float(lat) <= 39 and 124 <= float(lon) <= 132):
@@ -24,6 +25,9 @@ def parse_addr_points(raw: bytes, region: str = "", columns: dict | None = None)
         raise UserError(str(e))
 
 
+ADDR_STALE_DAYS = 45  # 주소 위치 자료가 이보다 오래되면 대시보드·운영 준비 점검에서 갱신 안내(행안부는 매월 갱신)
+
+
 def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None = None, preview: bool = False, parsed: dict | None = None) -> dict:
     res = parsed or parse_addr_points(raw, region, columns)
     pts = res["points"]
@@ -31,26 +35,105 @@ def import_addr_points(con, raw: bytes, region: str = "", columns: dict | None =
         raise UserError("가져올 주소 좌표가 없습니다. 지역 이름(시군구) 거르기나 파일 형식을 확인하세요.")
     info = {"columns": {k: v for k, v in res["columns"].items()}, "delimiter": res["delimiter"], "count": len(pts),
             "sample": [{"sigungu": p[0], "road": p[1], "main": p[2], "sub": p[3], "lat": p[4], "lon": p[5], "dong_h": p[6], "dong_b": p[7], "bname": p[8],
-                        "jibun": (f"{p[9]}" + (f"-{p[10]}" if p[10] else "")) if p[9] else ""} for p in pts[:5]],
-            "has_dong": any(p[6] or p[7] for p in pts[:200]), "has_bname": any(p[8] for p in pts[:2000]), "has_jibun": any(p[9] for p in pts[:2000])}
+                        "jibun": (f"{p[9]}" + (f"-{p[10]}" if p[10] else "")) if p[9] else "", "underground": p[11], "road_cd": p[12]} for p in pts[:5]],
+            "has_dong": any(p[6] or p[7] for p in pts[:200]), "has_bname": any(p[8] for p in pts[:2000]), "has_jibun": any(p[9] for p in pts[:2000]),
+            "has_codes": any(p[12] for p in pts[:2000])}
     if preview:
         return info
+    # 같은 건물에 출입구가 여럿이면 출입구일련번호가 가장 작은 것(없으면 파일 앞쪽) 하나를 대표로 남긴다 — 정렬은 안정 정렬
+    pts = sorted(pts, key=lambda p: p[14] if p[14] is not None else 10 ** 12)
     with tx(con):
-        # 같은 주소가 이미 있으면 좌표는 그대로 두고, 비어 있던 행정동·법정동만 채운다
-        con.executemany("""INSERT INTO addr_point (sigungu, road, main, sub, lat, lon, dong_h, dong_b, bname, jibun_main, jibun_sub, bname_cho)
-            VALUES (?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),?,?,NULLIF(?,''))
-            ON CONFLICT(road, main, sub, sigungu) DO UPDATE SET dong_h=COALESCE(addr_point.dong_h, excluded.dong_h), dong_b=COALESCE(addr_point.dong_b, excluded.dong_b),
+        # 같은 주소가 이미 있으면: 좌표는 출입구일련번호가 더 작은(또는 처음 알게 된) 출입구일 때만 바꾸고, 비어 있던 동·건물명·지번·식별 번호를 채운다
+        con.executemany("""INSERT INTO addr_point (sigungu, road, main, sub, lat, lon, dong_h, dong_b, bname, jibun_main, jibun_sub, underground, road_cd, bjd_cd, entr_sn, bname_cho)
+            VALUES (?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),?,?,?,NULLIF(?,''),NULLIF(?,''),?,NULLIF(?,''))
+            ON CONFLICT(road, main, sub, sigungu, underground) DO UPDATE SET
+            lat=CASE WHEN excluded.entr_sn IS NOT NULL AND (addr_point.entr_sn IS NULL OR excluded.entr_sn < addr_point.entr_sn) THEN excluded.lat ELSE addr_point.lat END,
+            lon=CASE WHEN excluded.entr_sn IS NOT NULL AND (addr_point.entr_sn IS NULL OR excluded.entr_sn < addr_point.entr_sn) THEN excluded.lon ELSE addr_point.lon END,
+            entr_sn=CASE WHEN excluded.entr_sn IS NOT NULL AND (addr_point.entr_sn IS NULL OR excluded.entr_sn < addr_point.entr_sn) THEN excluded.entr_sn ELSE addr_point.entr_sn END,
+            dong_h=COALESCE(addr_point.dong_h, excluded.dong_h), dong_b=COALESCE(addr_point.dong_b, excluded.dong_b),
             bname=COALESCE(addr_point.bname, excluded.bname), bname_cho=COALESCE(addr_point.bname_cho, excluded.bname_cho),
-            jibun_main=COALESCE(addr_point.jibun_main, excluded.jibun_main), jibun_sub=COALESCE(addr_point.jibun_sub, excluded.jibun_sub)""",
+            jibun_main=COALESCE(addr_point.jibun_main, excluded.jibun_main), jibun_sub=COALESCE(addr_point.jibun_sub, excluded.jibun_sub),
+            road_cd=COALESCE(excluded.road_cd, addr_point.road_cd), bjd_cd=COALESCE(excluded.bjd_cd, addr_point.bjd_cd)""",
                         [(*p, chosung_of(re.sub(r"\s+", "", p[8] or ""))) for p in pts])
         audit(con, "address", "import", "IMPORT", {"count": len(pts), "region": region})
-    info["total"] = one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
+        info["total"] = one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
+        set_setting(con, "addr_import", {"at": now(), "count": len(pts), "total": info["total"], "region": region, "codes": info["has_codes"]})
     return info
 
 
 def addr_stats(con) -> dict:
-    return {"count": one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"],
+    """저장된 주소 위치 자료: 건수·시군구·식별 번호가 있는 건수·마지막으로 가져온 때(ADDR_STALE_DAYS 넘으면 stale)."""
+    n = one(con, "SELECT COUNT(*) AS n, COUNT(road_cd) AS c FROM addr_point")
+    last = get_setting(con, "addr_import") or {}
+    age = _age_days(last.get("at"))
+    return {"count": n["n"], "with_codes": n["c"], "imported_at": last.get("at"), "age_days": round(age, 1) if age is not None else None,
+            "stale": bool(n["n"]) and (age is None or age > ADDR_STALE_DAYS), "stale_days": ADDR_STALE_DAYS,
             "sigungu": [r["sigungu"] for r in rows(con, "SELECT DISTINCT sigungu FROM addr_point ORDER BY sigungu LIMIT 20")]}
+
+
+def _age_days(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        t = _dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=_dt.timezone.utc)
+    return (_dt.datetime.now(_dt.timezone.utc) - t).total_seconds() / 86400
+
+
+# ------------------------------------------------------------------ 행안부 검색 결과 → 이 PC 주소 위치 자료 (좌표 API 없이)
+def _int(v) -> int | None:
+    v = str(v if v is not None else "").strip()
+    return int(v) if v.isdigit() else None
+
+
+def match_juso(con, ref: dict) -> dict | None:
+    """행안부 도로명주소 검색 결과(ref) → 이 PC 주소 위치 자료의 한 곳. 외부로 아무것도 보내지 않는다.
+    1) 도로명코드(rnMgtSn 12자리)·지하여부·건물본번·부번 — 정확히 같은 건물
+    2) 도로명(rn, 공백 없앰)·건물본번·부번 — 관할 시군구 안에서만(식별 번호가 없는 예전 자료용)
+    3) 지번: 법정동코드(admCd)·지번본번·부번, 없으면 법정동 이름(emdNm)·번지 — 관할 시군구 안, 산 번지는 빼고
+    여러 곳이면 지상 먼저, 출입구일련번호·시군구·도로명 순으로 첫 곳. 돌려주는 값: {lat, lon, how, label, dong_h, dong_b}"""
+    ref = ref or {}
+    main, sub = _int(ref.get("buldMnnm")), _int(ref.get("buldSlno")) or 0
+    ug = 1 if str(ref.get("udrtYn") or "0").strip() == "1" else 0
+    adm = str(ref.get("admCd") or "").strip()
+    adm = adm if re.fullmatch(r"\d{10}", adm) else ""
+    rn_cd = str(ref.get("rnMgtSn") or "").strip()
+    jm, js = _int(ref.get("lnbrMnnm")), _int(ref.get("lnbrSlno")) or 0
+    san = str(ref.get("mtYn") or "0").strip() == "1"
+    order = "ORDER BY (underground=?) DESC, entr_sn IS NULL, entr_sn, sigungu, road LIMIT 1"
+    # 1) 식별 번호로 정확히: 도로명코드·지하여부·본번·부번
+    if main and re.fullmatch(r"\d{12}", rn_cd):
+        c = one(con, f"SELECT * FROM addr_point WHERE road_cd=? AND underground=? AND main=? AND sub=? {order}", (rn_cd, ug, main, sub, ug))
+        if c:
+            return _match_out(c, "CODE")
+    # 2)·3) 이름으로 찾기: 관할 시군구(설정의 관할 구) 주소만. 식별 번호가 있는 자료는 시군구 코드(법정동코드 앞 5자리)도 맞아야 한다
+    area = (get_setting(con, "jurisdiction") or "").strip()
+    sgg = str(ref.get("sggNm") or "").strip()
+    named = bool(area or sgg) and not (area and sgg and area not in sgg.split())
+    sg_like = f"%{area or sgg}%"
+    same_sgg, sgg_args = ("(bjd_cd IS NULL OR substr(bjd_cd, 1, 5)=?)", (adm[:5],)) if adm else ("1", ())
+    rn = geo.norm_road(ref.get("rn") or "")
+    if named and main and rn:
+        c = one(con, f"SELECT * FROM addr_point WHERE road=? AND main=? AND sub=? AND sigungu LIKE ? AND {same_sgg} {order}",
+                (rn, main, sub, sg_like, *sgg_args, ug))
+        if c:
+            return _match_out(c, "ROAD")
+    if jm and not san:
+        c = one(con, f"SELECT * FROM addr_point WHERE bjd_cd=? AND jibun_main=? AND jibun_sub=? {order}", (adm, jm, js, 0)) if adm else None
+        emd = (ref.get("emdNm") or "").strip()
+        if not c and named and emd:
+            c = one(con, f"SELECT * FROM addr_point WHERE dong_b=? AND jibun_main=? AND jibun_sub=? AND sigungu LIKE ? AND {same_sgg} {order}",
+                    (emd, jm, js, sg_like, *sgg_args, 0))
+        if c:
+            return _match_out(c, "JIBUN")
+    return None
+
+
+def _match_out(c: dict, how: str) -> dict:
+    return {"lat": c["lat"], "lon": c["lon"], "how": how, "label": _addr_std(c), "dong_h": c.get("dong_h") or "", "dong_b": c.get("dong_b") or ""}
 
 
 def geocode(con, address: str) -> dict | None:
@@ -58,16 +141,18 @@ def geocode(con, address: str) -> dict | None:
     pa = geo.parse_address(address)
     if not pa:
         return None
-    cands = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? AND sub=?", (pa["road"], pa["main"], pa["sub"]))
+    ug = pa.get("underground", 0)
+    cands = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? AND sub=? ORDER BY (underground=?) DESC, entr_sn IS NULL, entr_sn",
+                 (pa["road"], pa["main"], pa["sub"], ug))
     exact = True
     if not cands and pa["sub"]:
-        cands, exact = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? ORDER BY sub", (pa["road"], pa["main"])), False
+        cands, exact = rows(con, "SELECT * FROM addr_point WHERE road=? AND main=? ORDER BY sub, (underground=?) DESC", (pa["road"], pa["main"], ug)), False
     if not cands:
         return None
     if len(cands) > 1 and pa["sigungu_hint"]:
         narrowed = [c for c in cands if pa["sigungu_hint"] in (c["sigungu"] or "")]
         cands = narrowed or cands
-    if len({c["sigungu"] for c in cands}) > 1:
+    if len({c["sigungu"] for c in cands}) > 1:  # 같은 시군구의 지상·지하는 모호하지 않음(지하여부가 맞는 것 먼저)
         return {"ambiguous": True, "options": [c["sigungu"] for c in cands]}
     c = cands[0]
     label = f'{c["road"]} {c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
@@ -76,7 +161,7 @@ def geocode(con, address: str) -> dict | None:
 
 def _addr_std(c: dict) -> str:
     """주소 자료 한 줄 → 표준 문자열 '시군구 도로명 본번-부번 (법정동, 건물명)'."""
-    base = f'{c["sigungu"] + " " if c["sigungu"] else ""}{c["road"]} {c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
+    base = f'{c["sigungu"] + " " if c["sigungu"] else ""}{c["road"]} {"지하 " if c.get("underground") else ""}{c["main"]}' + (f'-{c["sub"]}' if c["sub"] else "")
     ref = ", ".join(x for x in (c.get("dong_b") or "", c.get("bname") or "") if x)
     return base + (f" ({ref})" if ref else "")
 
