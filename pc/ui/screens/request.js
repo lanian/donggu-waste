@@ -111,20 +111,21 @@ async function screenRequest(id) {
   const addrQ = h('input', { type: 'search', placeholder: '도로명·지번·건물명·아파트 (초성 가능, 예: ㄱㅅㅇㅍㅌ)', autocomplete: 'off', 'aria-label': '주소 찾기', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': 'addr-sug' });
   const addrSug = h('div', { class: 'results addr-sug', id: 'addr-sug', role: 'listbox', hidden: true });
   let addrT = null;
-  // 행안부 결과(kind '행안부')는 PC 서버가 대신 물어 온 것: 고르면 서버가 좌표 API로 출입구 좌표를 받아 온다(좌표 승인키가 있을 때)
+  // 행안부 결과(kind '행안부')는 PC 서버가 대신 물어 온 것: 고르면 서버가 이 PC 주소 위치 자료에서 출입구 좌표를 먼저 찾고(외부 전송 없음),
+  // 없을 때만 좌표 승인키가 있으면 행안부 좌표 API로 받아 온다. 응답 source: 'LOCAL' | 'JUSO'
   let jusoSeq = 0;
   const pickAddr = wrap(async (x) => {
     const ext = x.kind === '행안부';
-    let lat = x.lat, lon = x.lon, note = '';
+    let lat = x.lat, lon = x.lon, note = '', via = '';
     if (ext) {
       const c = await api('juso-coord?' + new URLSearchParams(x.ref));
       if (c.none) note = c.reason || '좌표를 받지 못했습니다. 지도에서 위치를 지정하세요.';
-      else { lat = c.lat; lon = c.lon; }
+      else { lat = c.lat; lon = c.lon; via = c.source === 'LOCAL' ? ' (위치: 이 PC 주소 위치 자료)' : ' (위치: 행안부 좌표)'; }
     }
     F.address.value = x.address;
     if (lat != null) { F.lat.value = lat; F.lon.value = lon; geoSource = 'ADDR'; }
     if (x.dong && [...F.dong.options].some((o) => o.value === x.dong)) { F.dong.value = x.dong; dongTouched = true; dongMsg.textContent = ext ? '행안부 주소의 행정동으로 정했습니다.' : '주소 자료의 행정동으로 정했습니다.'; dongMsg.className = 'muted small'; }
-    geoMsg.textContent = lat != null ? `${x.kind} 찾기: ${x.address} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.` : `${x.kind} 찾기: ${x.address} — ${note}`;
+    geoMsg.textContent = lat != null ? `${x.kind} 찾기: ${x.address}${via} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.` : `${x.kind} 찾기: ${x.address} — ${note}`;
     if (setPin && lat != null) setPin(lat, lon, true);
     addrSug.hidden = true; addrSug.replaceChildren(); jusoSeq++; addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
     checkDup(); loadCal(); saveDraft(); F.spot_note.focus();

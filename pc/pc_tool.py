@@ -283,7 +283,7 @@ def cmd_vacuum(_):
 
 
 def cmd_import_addr(a):
-    """행안부 도로명주소 위치정보요약DB → 이 PC의 암호화 DB (외부 전송 없음)"""
+    """행안부 도로명주소 위치정보요약DB(압축을 푼 .txt, 폴더면 안의 *.txt 모두) → 이 PC의 암호화 DB (외부 전송 없음)"""
     from pathlib import Path
     from dgpc import geo
     c = con()
@@ -297,7 +297,8 @@ def cmd_import_addr(a):
         except S.UserError as e:
             print(f"{f.name}: {e}")
             continue
-        print(f"{f.name}: 열 배치 {info['columns']} · 구분자 '{info['delimiter']}' · {info['count']:,}건")
+        print(f"{f.name}: 열 배치 {info['columns']} · 구분자 '{info['delimiter']}' · {info['count']:,}건"
+              + (" · 도로명코드 있음(행안부 검색 결과와 정확히 맞춤)" if info.get("has_codes") else " · 도로명코드 없음"))
         for x in info["sample"][:3]:
             print(f"   예) {x['sigungu']} {x['road']} {x['main']}{'-' + str(x['sub']) if x['sub'] else ''} → {x['lat']:.6f}, {x['lon']:.6f}")
         total += info["count"]

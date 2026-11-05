@@ -145,9 +145,14 @@ def start_fake_external() -> int:
             if u.path.startswith("/addrlink/"):
                 FAKE["juso"].append({"path": u.path, "q": q, "headers": dict(self.headers)})
                 if u.path.endswith("addrLinkApi.do"):
-                    return self.reply({"results": {"common": {"errorCode": "0", "errorMessage": "정상", "totalCount": "1"}, "juso": [
+                    return self.reply({"results": {"common": {"errorCode": "0", "errorMessage": "정상", "totalCount": "2"}, "juso": [
                         {"roadAddr": "가상광역시 동구 서남로 1 (가상동)", "roadAddrPart1": "가상광역시 동구 서남로 1", "jibunAddr": "가상광역시 동구 가상동 1-1", "bdNm": "가상청사",
-                         "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상1동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0"}]}})
+                         "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상1동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "1", "buldSlno": "0",
+                         "rn": "서남로", "sggNm": "동구", "lnbrMnnm": "1", "lnbrSlno": "1", "mtYn": "0"},
+                        # 이 PC 주소 위치 자료에 있는 건물(도로명코드로 맞춤): 좌표 승인키 없이도 좌표를 채운다
+                        {"roadAddr": "가상광역시 동구 서남로 7 (가상동)", "roadAddrPart1": "가상광역시 동구 서남로 7", "jibunAddr": "가상광역시 동구 가상동 7", "bdNm": "가상상가",
+                         "zipNo": "61400", "emdNm": "가상동", "hemdNm": "가상1동", "admCd": "2911010800", "rnMgtSn": "291103166047", "udrtYn": "0", "buldMnnm": "7", "buldSlno": "0",
+                         "rn": "서남로", "sggNm": "동구", "lnbrMnnm": "7", "lnbrSlno": "0", "mtYn": "0"}]}})
                 return self.reply({"results": {"common": {"errorCode": "0", "totalCount": "1"}, "juso": [{"entX": f"{ent[0]:.6f}", "entY": f"{ent[1]:.6f}"}]}})
             if u.path == "/v1/directions":
                 FAKE["kakao"].append({"path": u.path, "q": q, "auth": self.headers.get("Authorization"), "body": None})
@@ -679,17 +684,21 @@ def run():
         ok(abs(list(S.volume_overrides(store.connect()).values())[0] - 1.8) < 1e-9, "적재량 보정값 저장 (추정치와 별도)")
         # 주소 위치 자료 가져오기 (가상 위치정보요약DB) → 접수 화면에서 주소로 위치 찾기
         from dgpc import geo
-        def aline(road, main, lat, lon, bname=""):
+        def aline(road, main, lat, lon, bname="", rcd="291104000001"):
             x, y = geo.wgs84_to_utmk(lat, lon)
-            return "|".join(["29110", "1", "2911010100", "가상광역시", "동구", "가상동", "1", road, "0", str(main), "0", bname, "61400", "주택", "0", "가상동", f"{x:.6f}", f"{y:.6f}"])
+            return "|".join(["29110", "1", "2911010100", "가상광역시", "동구", "가상동", rcd, road, "0", str(main), "0", bname, "61400", "주택", "0", "가상동", f"{x:.6f}", f"{y:.6f}"])
         addr_file = WORK / "addr.txt"
         page.goto(URL + "#/settings/addr")
-        addr_file.write_bytes("\n".join([aline("시험로", 9, 35.1472, 126.9251, "가상빌라")] + [aline(f"가상{i}길", i, 35.14 + i * 1e-4, 126.92) for i in range(1, 30)]).encode("cp949"))
+        addr_file.write_bytes("\n".join([aline("시험로", 9, 35.1472, 126.9251, "가상빌라"), aline("서남로", 7, 35.1533, 126.9288, "", "291103166047")]
+                                        + [aline(f"가상{i}길", i, 35.14 + i * 1e-4, 126.92, "", f"2911040{i:05d}") for i in range(1, 30)]).encode("cp949"))
         page.locator(".card", has=page.get_by_role("heading", name="주소 위치 자료")).locator("input[type=file]").set_input_files(str(addr_file))
         page.get_by_role("button", name="미리보기").click()
         expect(page.get_by_text(re.compile("시험로 9 → 35.1472"))).to_be_visible()
         page.get_by_role("button", name="이대로 가져오기").click()
-        expect(page.get_by_text(re.compile("30건 가져옴"))).to_be_visible()
+        expect(page.get_by_text(re.compile("31건 가져옴"))).to_be_visible()
+        expect(page.locator(".addr-stat")).to_contain_text(re.compile(r"31곳 \(동구\) · \d{4}-\d\d-\d\d 가져옴"))
+        ok(page.locator(".addr-steps li").count() >= 5 and "위치정보요약DB" in page.locator(".addr-steps").inner_text() and "import-addr" in page.locator(".addr-steps").inner_text(),
+           "설정 → 주소 위치 자료: 저장 건수·가져온 날짜, 파일 받기·넣기 안내(위치정보요약DB·압축 풀기·import-addr 명령)")
         page.goto(URL + "#/request/new")
         page.get_by_label("배출 주소").fill("가상광역시 동구 시험로 9, 2층")
         page.get_by_role("button", name="주소로 위치 찾기").click()
@@ -820,7 +829,6 @@ def run():
         page.goto(URL + "#/settings/addr")
         xc = page.locator(".card", has=page.get_by_role("heading", name=re.compile("^외부 서비스")))
         xc.get_by_label("주소 검색 승인키").fill("E2EJUSOKEY-123456")
-        xc.get_by_label("좌표 승인키").fill("E2ECOORDKEY-654321")
         xc.get_by_label("카카오모빌리티 REST 키").fill("E2EKAKAOKEY-777777")
         xc.get_by_label("이동시간 계산 방식").select_option("KAKAO")
         xc.get_by_role("button", name="저장", exact=True).click()
@@ -828,6 +836,24 @@ def run():
         boot_txt = page.evaluate("async () => (await fetch('/api/bootstrap', {headers: {'X-DG-CSRF': '1'}})).text()")
         ok("E2EJUSOKEY-123456" not in boot_txt and "E2EKAKAOKEY-777777" not in boot_txt and "••••7777" in boot_txt and xc.get_by_label("주소 검색 승인키").input_value() == ""
            and xc.get_by_label("이동시간 계산 방식").input_value() == "KAKAO", "설정 → 주소·외부 서비스: 승인키·REST 키 저장 후 화면(브라우저)에는 가린 값만, 이동시간 방식 카카오모빌리티")
+        # 좌표 승인키 없이: 행안부 검색 결과를 고르면 이 PC 주소 위치 자료(도로명코드)로 좌표를 채움 — 좌표 API 호출 없음
+        page.goto(URL + "#/request/new")
+        expect(page.locator(".calday").first).to_be_visible()
+        n_coord = len([c for c in FAKE["juso"] if c["path"].endswith("addrCoordApi.do")])
+        page.get_by_label("주소 찾기").fill("서남로 1")
+        jb7 = page.locator(".addr-sug button", has_text="서남로 7")
+        expect(jb7.first).to_be_visible()
+        jb7.first.click()
+        expect(page.get_by_label("배출 주소")).to_have_value(re.compile("서남로 7 \\(가상동, 가상상가\\)"))
+        expect(page.get_by_text(re.compile("위치: 이 PC 주소 위치 자료"))).to_be_visible()
+        ok(abs(float(page.locator("input[readonly]").first.input_value()) - 35.1533) < 1e-5
+           and len([c for c in FAKE["juso"] if c["path"].endswith("addrCoordApi.do")]) == n_coord,
+           "좌표 승인키 없이 행안부 결과를 고르면 이 PC 주소 위치 자료(위치정보요약DB, 도로명코드)로 좌표를 채움 — 좌표 API 호출 없음")
+        page.goto(URL + "#/settings/addr")
+        xc = page.locator(".card", has=page.get_by_role("heading", name=re.compile("^외부 서비스")))
+        xc.get_by_label("좌표 승인키").fill("E2ECOORDKEY-654321")
+        xc.get_by_role("button", name="저장", exact=True).click()
+        expect(xc.get_by_text("저장됨 ••••4321").first).to_be_visible()
         xc.get_by_role("button", name="주소 검색 연결 시험").click()
         expect(xc.get_by_text(re.compile("✓ 주소 검색 정상.*좌표 정상"))).to_be_visible()
         xc.get_by_role("button", name="카카오모빌리티 연결 시험").click()
@@ -835,6 +861,7 @@ def run():
         ok(True, "설정 [연결 시험]: 행안부 주소(검색·좌표)·카카오모빌리티 (개인정보 없는 고정 값)")
         later2 = (dt.date.fromisoformat(today) + dt.timedelta(days=45)).isoformat()
         page.goto(URL + "#/request/new")
+        page.get_by_role("button", name="비우고 새로 쓰기").click()  # 위에서 고른 서남로 7(작성 중) 비우기
         expect(page.locator(".calday").first).to_be_visible()
         quiet(page)
         page.get_by_label("이름").fill("가상주소")

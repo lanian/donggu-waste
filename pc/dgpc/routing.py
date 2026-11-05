@@ -3,8 +3,8 @@
 - 이동시간 행렬(설정 "이동시간 계산 방식"):
   · 직선거리 추정(기본): 직선거리 × 1.4 ÷ 시속 20km, 결과에 "직선거리 추정(도로 아님)"을 표시한다.
   · 로컬 OSRM: 이 PC 안 OSRM(http://127.0.0.1:포트)의 실제 도로 시간.
-  · 카카오모빌리티: 다중 목적지 길찾기 API로 출발지 하나씩 행을 채운다(좌표만 보냄). 결과는 DB(travel_cache)에
-    좌표 소수 5자리 쌍으로 30일 보관해 다시 묻지 않는다. 시간 초과·한도·반경(10km) 밖·실패한 쌍은 그 쌍만 직선거리 추정으로
+  · 카카오모빌리티: 다중 목적지 길찾기 API로 출발지 하나씩 행을 채운다(좌표만 보냄). 받은 시간은 이 PC에 저장하지 않고
+    노선을 계산할 때마다 새로 묻는다. 시간 초과·한도·반경(10km) 밖·실패한 쌍은 그 쌍만 직선거리 추정으로
     채우고 화면에 "도로 시간: 카카오모빌리티 (일부 직선 추정 N쌍)"처럼 몇 쌍을 추정했는지 보인다.
 - 최적화 엔진에는 좌표·작업시간·적재 추정치·시간창·우선순위만 넘긴다. 이름·연락처는 넘기지 않는다.
 - 오늘 반드시 포함(must_today)은 빠질 수 없는 지점, 나머지는 우선순위가 높을수록 빠지기 어렵게(벌점) 한다.
@@ -21,7 +21,6 @@
 """
 from __future__ import annotations
 
-import datetime as dt
 import json
 import math
 import time
@@ -130,61 +129,17 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
     return estimate_matrix(points), "ESTIMATE"
 
 
-# ------------------------------------------------------------------ 카카오모빌리티 이동시간 (캐시 + 쌍별 직선 추정 대체)
-CACHE_DAYS = 30
-
-
+# ------------------------------------------------------------------ 카카오모빌리티 이동시간 (보관 없음 + 쌍별 직선 추정 대체)
 def _ck(p) -> str:
     return f"{p[0]:.5f},{p[1]:.5f}"
 
 
-class TravelCache:
-    """좌표 쌍(소수 5자리) → 자동차 소요 시간(초). 이 PC의 암호화 DB(travel_cache 표)에 30일 보관."""
-
-    def __init__(self, con, days: int = CACHE_DAYS):
-        self.con, self.days = con, days
-
-    def get_many(self, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
-        if not pairs:
-            return {}
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.days)).isoformat(timespec="seconds")
-        want = set(pairs)
-        origins = sorted({a for a, _ in pairs})
-        out = {}
-        for i in range(0, len(origins), 200):
-            chunk = origins[i:i + 200]
-            q = "SELECT origin, dest, seconds FROM travel_cache WHERE fetched_at >= ? AND origin IN (%s)" % ",".join("?" * len(chunk))
-            for o, d, sec in self.con.execute(q, [since, *chunk]).fetchall():
-                if (o, d) in want:
-                    out[(o, d)] = int(sec)
-        return out
-
-    def put_many(self, vals: dict[tuple[str, str], int]):
-        if not vals:
-            return
-        at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.days)).isoformat(timespec="seconds")
-        own = not self.con.in_transaction
-        if own:
-            self.con.execute("BEGIN IMMEDIATE")
-        try:
-            self.con.executemany("INSERT INTO travel_cache (origin, dest, seconds, fetched_at) VALUES (?,?,?,?) "
-                                 "ON CONFLICT(origin, dest) DO UPDATE SET seconds=excluded.seconds, fetched_at=excluded.fetched_at",
-                                 [(o, d, int(s), at) for (o, d), s in vals.items()])
-            self.con.execute("DELETE FROM travel_cache WHERE fetched_at < ?", (since,))  # 30일 지난 것 정리
-            if own:
-                self.con.execute("COMMIT")
-        except Exception:
-            if own:
-                self.con.execute("ROLLBACK")
-            raise
-
-
-def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache | None = None, *, max_calls: int = 300,
+def kakao_matrix(points: list[tuple[float, float]], key: str, *, max_calls: int = 300,
                  deadline_s: float = 30.0, min_interval_s: float = 0.05, timeout_s: float = 5.0) -> tuple[list[list[int]], dict]:
     """N×N 분 단위 행렬. 출발지마다 다중 목적지 API(30곳씩, 반경 10km 안)로 한 행씩 채우고, 반경 밖은 1:1 길찾기로 묻는다.
-    캐시에 있는 쌍은 묻지 않는다. 호출 수·전체 시간 한도를 넘거나 인증 실패·연결 실패가 나면 더 묻지 않고,
-    못 구한 쌍은 직선거리 추정으로 채운다. 돌려주는 info: api_calls, cache_hits, road_pairs, fallback_pairs, error"""
+    받은 시간은 이 계산 안에서만 쓰고 어디에도 저장하지 않는다(다음 계산은 다시 묻는다). 같은 좌표(소수 5자리)는 한 번만 묻는다.
+    호출 수·전체 시간 한도를 넘거나 인증 실패·연결 실패가 나면 더 묻지 않고, 못 구한 쌍은 직선거리 추정으로 채운다.
+    돌려주는 info: api_calls, road_pairs, fallback_pairs, error"""
     uniq: list[str] = []
     pos: dict[str, tuple[float, float]] = {}
     for p in points:
@@ -193,9 +148,8 @@ def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache
             pos[k] = (round(p[0], 5), round(p[1], 5))
             uniq.append(k)
     need = [(a, b) for a in uniq for b in uniq if a != b]
-    secs: dict[tuple[str, str], int] = dict(cache.get_many(need)) if cache else {}
-    info = {"api_calls": 0, "cache_hits": len(secs), "road_pairs": 0, "fallback_pairs": 0, "error": ""}
-    fresh: dict[tuple[str, str], int] = {}
+    secs: dict[tuple[str, str], int] = {}
+    info = {"api_calls": 0, "road_pairs": 0, "fallback_pairs": 0, "error": ""}
     t0, last, stop = time.monotonic(), 0.0, False
 
     def call(fn, *args):
@@ -231,16 +185,11 @@ def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache
             got = call(X.kakao_destinations, key, pos[a], [(n, *pos[b]) for n, b in idx.items()])
             for n, sec in (got or {}).items():
                 if n in idx:
-                    secs[(a, idx[n])] = fresh[(a, idx[n])] = sec
+                    secs[(a, idx[n])] = sec
         for b in far:
             sec = call(X.kakao_direction, key, pos[a], pos[b])
             if sec is not None:
-                secs[(a, b)] = fresh[(a, b)] = sec
-    if cache and fresh:
-        try:
-            cache.put_many(fresh)
-        except Exception:
-            pass
+                secs[(a, b)] = sec
     info["road_pairs"] = sum(1 for p in need if p in secs)
     info["fallback_pairs"] = len(need) - info["road_pairs"]
     mat = []
@@ -261,11 +210,11 @@ def kakao_matrix(points: list[tuple[float, float]], key: str, cache: TravelCache
 METHODS = {"ESTIMATE": "직선거리 추정", "OSRM": "로컬 OSRM", "KAKAO": "카카오모빌리티 API"}
 
 
-def build_matrix(points, osrm_url: str = "", method: str | None = None, kakao_key: str = "", cache: TravelCache | None = None) -> tuple[list[list[int]], str, dict]:
+def build_matrix(points, osrm_url: str = "", method: str | None = None, kakao_key: str = "") -> tuple[list[list[int]], str, dict]:
     """설정의 이동시간 계산 방식대로 행렬을 만든다. 돌려주는 값: (행렬, 출처 'KAKAO'|'OSRM'|'ESTIMATE', 정보)"""
     m = method or ("OSRM" if osrm_url else "ESTIMATE")
     if m == "KAKAO" and kakao_key:
-        mat, info = kakao_matrix(points, kakao_key, cache)
+        mat, info = kakao_matrix(points, kakao_key)
         if info["road_pairs"] == 0 and info["fallback_pairs"] > 0:
             return mat, "ESTIMATE", {**info, "requested": "KAKAO"}
         return mat, "KAKAO", info
@@ -329,7 +278,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
          service_per_item: int = 3, time_limit_s: int = 5, today: str = "", volume_overrides: dict | None = None,
          unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None,
          crew_pref: dict | None = None, pref_penalty: int = 30, travel_method: str | None = None, kakao_key: str = "",
-         travel_cache: TravelCache | None = None, unload_hours: dict | None = None, lunch: dict | None = None,
+         unload_hours: dict | None = None, lunch: dict | None = None,
          base_first: bool = True) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
     crews: id, name, capacity_m3, capacity_kg(0·없음 = 무게 안 따짐), shift_start, shift_end
@@ -382,7 +331,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     end_node = len(points) if use_end else 0
     if use_end:  # 일을 마치고 돌아갈 곳이 출발지와 다를 때 (예: 반입지에서 마감 후 차고지 아닌 곳)
         points.append((float(end_site["lat"]), float(end_site["lon"])))
-    tmat, source, minfo = build_matrix(points, osrm_url, travel_method, kakao_key, travel_cache)
+    tmat, source, minfo = build_matrix(points, osrm_url, travel_method, kakao_key)
     tail = [0] if use_end else []
     service = [0] + [g["service"] for g in groups] + [int(unload_min)] * len(unload_nodes) + tail
     demand = [0] + [int(round(g["volume"] * scale)) for g in groups] + [-max(caps)] * len(unload_nodes) + tail
@@ -538,5 +487,5 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             "summary": day_summary(info, crews, use_unload, max_unloads, brk, use_kg),
             "unload_site": unload_site if use_unload else None, "end_site": end_site if use_end else None,
             "uses_weight": use_kg, "tag_labels": TAG_LABEL,
-            "matrix_info": {k: v for k, v in minfo.items() if k in ("api_calls", "cache_hits", "road_pairs", "fallback_pairs", "requested")},
+            "matrix_info": {k: v for k, v in minfo.items() if k in ("api_calls", "road_pairs", "fallback_pairs", "requested")},
             "matrix_note": matrix_note(source, minfo)}

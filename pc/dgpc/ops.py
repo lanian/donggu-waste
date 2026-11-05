@@ -234,7 +234,13 @@ def ops_status(con) -> dict:
     b = BK.status(con)
     items.append({"key": "backup", "label": "백업", "last_at": b["last_at"], "age_days": round(b["age_hours"] / 24, 1) if b["age_hours"] is not None else None,
                   "stale": b["stale"]})
-    return {"items": items, "warnings": [f"{x['label']}: " + ("기록 없음" if x["last_at"] is None else f"{x['age_days']}일 전") for x in items if x["stale"]]}
+    ast = S.addr_stats(con)
+    addr = {"count": ast["count"], "imported_at": ast["imported_at"], "age_days": ast["age_days"], "stale": ast["stale"], "stale_days": ast["stale_days"]}
+    # 주소 위치 자료가 오래됨(행안부는 매월 갱신): 새 주소는 찾지 못하므로 갱신 안내 (자료가 없으면 운영 준비 점검이 알림)
+    addr_warn = ("주소 위치 자료를 " + (f"{int(ast['age_days'])}일 전에 가져왔습니다" if ast["age_days"] is not None else "가져온 날짜를 모릅니다")
+                 + f"({ast['stale_days']}일 넘음). 새로 생긴 주소는 찾지 못하니 행안부 위치정보요약DB를 새로 받아 가져오세요.") if ast["stale"] else ""
+    return {"items": items, "warnings": [f"{x['label']}: " + ("기록 없음" if x["last_at"] is None else f"{x['age_days']}일 전") for x in items if x["stale"]],
+            "addr": addr, "addr_warning": addr_warn}
 
 
 # ------------------------------------------------------------------ 처리할 일 (대시보드)
@@ -285,8 +291,13 @@ def readiness(con) -> dict:
     add("depot", "차고지 위치(기본값 아님)", S.get_setting(con, "depot", None) is not None, "settings/route")
     add("unload_site", "반입지 위치", S.get_setting(con, "unload_site") is not None, "settings/route")
     add("dongs", "행정동 등록", bool(A.list_dongs(con, active_only=True)), "settings/dongs")
-    addr = S.one(con, "SELECT COUNT(*) AS n FROM addr_point")["n"]
-    add("address", "주소 자료 또는 행안부 주소 승인키", addr > 0 or bool(S.secret(con, "juso_search_key")), "settings/address", f"주소 자료 {addr:,}곳")
+    ast = S.addr_stats(con)
+    addr, key = ast["count"], bool(S.secret(con, "juso_search_key"))
+    # 주소 위치 자료(이 PC)가 있으면 됨: 주소 찾기·행안부 결과의 좌표를 모두 이 PC에서 채운다(좌표 승인키는 선택)
+    note = (f"주소 위치 자료 {addr:,}곳" + (f" · {ast['imported_at'][:10]} 가져옴" if ast["imported_at"] else "")
+            + (f" · {ast['stale_days']}일 넘음, 새 자료로 바꾸세요" if ast["stale"] else "")) if addr else \
+        ("주소 위치 자료 없음 — 행안부 검색은 되지만 위치는 지도에서 지정(좌표 승인키가 있으면 좌표 API)" if key else "주소 위치 자료 없음")
+    add("address", "주소 위치 자료 또는 승인키", addr > 0 or key, "settings/address", note)
     add("backup_key", "자동 백업 키", BK.key_info(con) is not None, "settings/backup")
     fs = S.fee_state(con)
     add("fee", "수수료표 시행일", bool(fs.get("effective_from")), "fee", f"버전 {fs['version_id']} · 시행 {fs.get('effective_from') or '-'}")
@@ -299,7 +310,7 @@ def readiness(con) -> dict:
 
 # ------------------------------------------------------------------ 진단 (관리자)
 DIAG_TABLES = ("request", "request_item", "request_version", "result_event", "result_import", "photo", "payment", "refund_case", "audit_log", "audit_note",
-               "access_log", "assignment_batch", "assignment_stop", "transfer_bundle", "contact_log", "addr_point", "idem", "travel_cache")
+               "access_log", "assignment_batch", "assignment_stop", "transfer_bundle", "contact_log", "addr_point", "idem")
 
 
 def diag(con, state_dir: Path | None = None) -> dict:

@@ -66,6 +66,7 @@
 | `last_backup_at` | `null` | 백업 | backup |  | 마지막 백업 시각(ISO). |
 | `backup_status` | `{}` | 백업 | backup |  | 마지막 자동 백업 결과(성공·파일·오류). |
 | `auto_backup_day` | `null` | 백업 | backup |  | 자동 백업을 마지막으로 한 날(KST, 하루 한 번). |
+| `addr_import` | `null` | 주소 | addresses |  | 주소 위치 자료(행안부 위치정보요약DB) 마지막 가져오기 {at, count, total, region, codes}. 45일 넘으면 갱신 안내. |
 | `login` | `null` | 사용자 | users |  | v0.9 이전 단일 업무 비밀번호(관리자 계정으로 옮긴 뒤 지운다). |
 
 ## 설정 묶음에 계산해 더하는 값 (contribute)

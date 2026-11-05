@@ -93,7 +93,7 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 ## 8. 남은 것·제한 (서버)
 
 - 사진을 별도 암호화 DB 파일(photos.db)로 옮기는 일(16)은 위험이 커서 하지 않았다. 대신: 새 DB는 `auto_vacuum=INCREMENTAL`, 파기·사진 정리 뒤 `PRAGMA incremental_vacuum`, 백업 해시는 조각으로 읽어 계산. 기존 DB를 INCREMENTAL로 바꾸려면 서버를 끄고 `python pc/pc_tool.py vacuum`(큰 DB는 몇 분).
-- 이전 단계(PRAGMA user_version): 1 = v0.12 이하 구조, 2 = v0.13 요약 열·색인, 3 = 접수 열 `reduction_round_unit`(감면액 끝수 단위, 기존 감면 접수는 그때 설정값으로 채움), 4 = 휴대폰 기록 세대(`result_event.gen`, 표 `device_gen`·`result_seq`; 기존 결과 기록의 받은 번호를 세대 `''`로 채움). 기존 DB를 처음 열 때 `state/pre-migration/pc-v{이전}-to-v{새}-….db`로 파일을 복사해 둔다(같은 DB 키로 암호화된 그대로). 사본은 매일 예약 작업이 정리한다(가장 새 1개는 늘 남김, 나머지는 새것부터 3개 안·30일 이내만; 지우면 변경 이력 `backup / pre-migration PURGE`). DB가 프로그램보다 새 버전이면 열지 않는다.
+- 이전 단계(PRAGMA user_version): 1 = v0.12 이하 구조, 2 = v0.13 요약 열·색인, 3 = 접수 열 `reduction_round_unit`(감면액 끝수 단위, 기존 감면 접수는 그때 설정값으로 채움), 4 = 휴대폰 기록 세대(`result_event.gen`, 표 `device_gen`·`result_seq`; 기존 결과 기록의 받은 번호를 세대 `''`로 채움). 5 = `addr_point`에 `underground`(기본 키에 포함)·`road_cd`·`bjd_cd`·`entr_sn`(표를 새로 만들어 옮김), 6 = `travel_cache` 표 삭제(카카오 이동시간을 저장하지 않음). 기존 DB를 처음 열 때 `state/pre-migration/pc-v{이전}-to-v{새}-….db`로 파일을 복사해 둔다(같은 DB 키로 암호화된 그대로). 사본은 매일 예약 작업이 정리한다(가장 새 1개는 늘 남김, 나머지는 새것부터 3개 안·30일 이내만; 지우면 변경 이력 `backup / pre-migration PURGE`). DB가 프로그램보다 새 버전이면 열지 않는다.
 - 접수 일괄 등록(CSV)·대사 파일의 **실제 반영**은 아직 잠금 안에서 읽고 넣는다(미리보기는 잠금 밖). 2,000·5,000행 제한이라 짧다.
 - 마감 확인(`close/approve`) 뒤 자동 파기·자동 백업은 이전처럼 그 요청 안에서 돈다(예약 작업과 별개).
 
@@ -105,3 +105,11 @@ PC 서버(pc/dgpc) 0.13.0에서 바뀐 API와 화면이 해야 할 일. `tests/t
 - `client_req_id`: 새 접수·수납·하차·통화 기록·환불 신청·마감에 보낸다(키별로 화면 밖에 두고 성공하면 지움, 실패 뒤 다시 보내면 같은 값). 모든 작업 단추는 누른 동안 꺼진다(두 번 누름·Ctrl+Enter).
 - 새로 쓰는 API: `pending`(오늘 현황 '밀린 일'·메뉴 숫자), `readiness`(관리자 오늘 현황 맨 위, 모두 ✓이면 숨김), `ops-status`(경고 띠·진단), `diag`(사용자·이력 화면 진단), `assign/current`·`assign/edit`(배정 화면 [현재 배정 불러오기]), `conflicts/bulk`, `imports/recent`·`imports/{id}/confirm`(결과 가져오기 '최근 가져오기'), `requests/{id}/notice`([안내 문구 복사]).
 - 화면 주소에 조건을 붙일 수 있다: `#/requests?quick=OVERDUE|NODATE|FEE…`, `#/close?date=YYYY-MM-DD`, `#/refunds?status=REQUESTED`, `#/results?focus=conflicts` (한 번 반영하고 주소에서 지움).
+
+## 그 뒤 바뀐 것 (주소 위치 자료·카카오 이동시간)
+
+- `GET /api/juso-coord`: 받는 값에 `rn`·`sggNm`·`emdNm`·`lnbrMnnm`·`lnbrSlno`·`mtYn`(행안부 검색 결과 `ref`에 함께 옴)이 더해짐 — 이 PC 주소 위치 자료에서 찾을 때만 쓰고 행안부 좌표 API에는 보내지 않음. 응답에 `source: "LOCAL" | "JUSO"`(LOCAL이면 `how: "CODE" | "ROAD" | "JIBUN"`, `label`). 이 PC 자료에 없고 좌표 승인키도 없으면 `{none: true, code: "NOT_LOCAL", reason: "이 PC 주소 위치 자료에 없는 주소 — …"}`.
+- `GET /api/juso-search`: `coord`는 이 PC 주소 위치 자료가 있거나 좌표 승인키가 있으면 `true`.
+- `GET /api/addr-stats`: `with_codes`(도로명코드가 있는 곳 수)·`imported_at`·`age_days`·`stale`·`stale_days`(45) 추가. `POST /api/addr-import` 미리보기에 `has_codes`, 표본에 `underground`·`road_cd`.
+- `GET /api/ops-status`: `addr`(건수·가져온 때·`stale`)와 `addr_warning`(45일 넘으면 안내 문장, 아니면 빈 문자열).
+- 노선 계산 `matrix_info`에서 `cache_hits`가 빠짐(카카오 이동시간은 저장하지 않고 계산마다 새로 물음).

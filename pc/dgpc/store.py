@@ -29,9 +29,6 @@ KEYRING_SERVICE = "dongu-bulky-waste-pc"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
--- 카카오모빌리티 이동시간 캐시: 좌표(소수 5자리) 쌍 → 자동차 소요 시간(초), 30일 보관. 이름·주소 없음.
-CREATE TABLE IF NOT EXISTS travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL,
-  PRIMARY KEY (origin, dest));
 CREATE TABLE IF NOT EXISTS pc_key (name TEXT PRIMARY KEY, pem BLOB NOT NULL, created_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS device (
@@ -394,8 +391,39 @@ def _m4_device_gen(con):
         WHERE device_seq >= 1""")
 
 
+ADDR_POINT_COLS = ("sigungu", "road", "main", "sub", "lat", "lon", "dong_h", "dong_b", "bname", "bname_cho", "jibun_main", "jibun_sub")
+
+
+def _m5_addr_codes(con):
+    """5단계: 주소 위치 자료에 행안부 식별 번호를 둔다(행안부 검색 결과의 좌표를 좌표 API 없이 이 PC 자료로 찾기).
+    - underground(지하여부 0/1): 같은 도로명·건물번호라도 지상·지하를 따로 둔다(기본 키에 넣으려고 표를 새로 만들어 옮김)
+    - road_cd(도로명코드 12자리)·bjd_cd(법정동코드 10자리)·entr_sn(출입구일련번호): 위치정보요약DB를 다시 가져오면 채워진다
+    기존 자료는 지상(0)·식별 번호 없음으로 옮긴다(좌표·동·건물명·지번 그대로)."""
+    if "underground" in _cols(con, "addr_point"):
+        return
+    con.execute("""CREATE TABLE addr_point_v5 (
+      sigungu TEXT NOT NULL DEFAULT '', road TEXT NOT NULL, main INTEGER NOT NULL, sub INTEGER NOT NULL DEFAULT 0, lat REAL NOT NULL, lon REAL NOT NULL,
+      dong_h TEXT, dong_b TEXT, bname TEXT, bname_cho TEXT, jibun_main INTEGER, jibun_sub INTEGER,
+      underground INTEGER NOT NULL DEFAULT 0, road_cd TEXT, bjd_cd TEXT, entr_sn INTEGER,
+      PRIMARY KEY (road, main, sub, sigungu, underground))""")
+    have = [c for c in ADDR_POINT_COLS if c in _cols(con, "addr_point")]
+    con.execute(f"INSERT INTO addr_point_v5 ({', '.join(have)}) SELECT {', '.join(have)} FROM addr_point")
+    con.execute("DROP TABLE addr_point")
+    con.execute("ALTER TABLE addr_point_v5 RENAME TO addr_point")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_addr_point_rcd ON addr_point(road_cd, main, sub)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_addr_point_bjd ON addr_point(bjd_cd, jibun_main, jibun_sub)")
+
+
+def _m6_drop_travel_cache(con):
+    """6단계: 카카오모빌리티 이동시간을 이 PC에 보관하지 않는다(노선 계산마다 새로 묻는다). 남아 있던 좌표 쌍·시간을 지우고 표도 없앤다."""
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='travel_cache'").fetchone():
+        con.execute("DELETE FROM travel_cache")
+        con.execute("DROP TABLE travel_cache")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
-              (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen)]
+              (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
+              (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache)]
 LATEST = MIGRATIONS[-1][0]
 
 

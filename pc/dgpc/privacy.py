@@ -505,9 +505,6 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
             if done:
                 # 오래된 QR 묶음(암호문)도 정리
                 con.execute("UPDATE transfer_bundle SET frames_json=NULL WHERE work_date < ?", (crit["cutoff"],))
-                # 카카오 이동시간 캐시(주민 좌표 쌍): 30일 넘은 것은 쓰지도 않으므로 지운다(카카오를 끈 뒤에도 남지 않게)
-                old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
-                con.execute("DELETE FROM travel_cache WHERE fetched_at < ?", (old,))
             C.set_setting(con, "last_pii_purge_run", {"at": C.now(), "count": len(done), "trigger": trigger})
         if done:
             C.incremental_vacuum(con)
