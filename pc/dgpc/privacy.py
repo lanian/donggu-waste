@@ -442,13 +442,17 @@ def pseudonymize(con, rid: str, ts: str):
     con.execute("UPDATE contact_log SET content=? WHERE request_id=?", (PURGED, rid))
     con.execute("UPDATE request_version SET reason=? WHERE request_id=? AND reason IS NOT NULL", (PURGED, rid))  # 수정 사유 글
     con.execute("UPDATE audit_note SET note=NULL WHERE request_id=?", (rid,))  # 변경 이력의 사유 글(해시는 남아 사슬 검사는 그대로)
+    con.execute("UPDATE result_event SET resolved_reason=? WHERE request_id=? AND resolved_reason IS NOT NULL", (PURGED, rid))  # 충돌 판단 사유
     for eid, kind, body, status in con.execute("SELECT event_id, kind, body_json, apply_status FROM result_event WHERE request_id=?", (rid,)).fetchall():
         con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (_scrub_event_body(body, kind), eid))
         if status == "CONFLICT" and kind in _REQ_KINDS:  # 처리하지 않은 정정 요청은 값이 지워져 반영할 수 없으므로 정리
             con.execute("UPDATE result_event SET apply_status='REJECTED', resolved_reason=?, resolved_at=? WHERE event_id=?", ("보유기간 경과로 개인정보 파기(미처리 요청)", ts, eid))
     con.execute("UPDATE photo SET data=NULL, lat=NULL, lon=NULL, purged_at=COALESCE(purged_at, ?) WHERE request_id=?", (ts, rid))
-    con.execute("UPDATE payment SET note='' WHERE request_id=?", (rid,))
-    con.execute("UPDATE refund_case SET account_last4=NULL, note='' WHERE request_id=?", (rid,))
+    # 사람이 적은 사유·메모 글. void_reason 은 '취소됨' 표시도 겸하므로(IS NULL = 유효) 비우지 않고 (파기)로 바꾼다
+    con.execute("UPDATE payment SET note='', void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?", (PURGED, rid))
+    con.execute("""UPDATE refund_case SET account_last4=NULL, note='', approve_note=CASE WHEN approve_note IS NULL THEN NULL ELSE ? END,
+        void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?""", (PURGED, PURGED, rid))
+    con.execute("UPDATE item_link SET reason=?, void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?", (PURGED, PURGED, rid))
 
 
 def _purge_orphan_requests(con, cutoff: str) -> int:
@@ -465,6 +469,17 @@ def _purge_orphan_requests(con, cutoff: str) -> int:
                         (_scrub_event_body(body, kind), "보유기간 경과로 개인정보 파기(접수 없는 현장 요청)", ts, eid))
         C.audit(con, "privacy", "orphan-requests", "PURGE_PII", {"count": len(rows_), "cutoff": cutoff})
     return len(rows_)
+
+
+def _purge_old_notes(con, cutoff: str) -> int:
+    """어느 접수에도 묶이지 않은, 사람이 적은 글 중 보유기간 기준일보다 오래된 것을 지운다(트랜잭션은 호출하는 쪽).
+    - 변경 이력 사유 글 중 접수를 알 수 없는 것(가져오기 단위 충돌 일괄 처리 등). 해시는 남아 사슬 검사는 그대로.
+    - 마감 기록의 메모·팀장 확인 메모(그날 주민 이름을 적었을 수 있음). 작업일 기준."""
+    n = con.execute("""UPDATE audit_note SET note=NULL WHERE request_id IS NULL AND note IS NOT NULL
+        AND audit_id IN (SELECT id FROM audit_log WHERE at < ?)""", (_utc_start_of(dt.date.fromisoformat(cutoff)),)).rowcount
+    n += con.execute("""UPDATE day_close_log SET note=CASE WHEN note IS NULL THEN NULL ELSE ?1 END, approve_note=CASE WHEN approve_note IS NULL THEN NULL ELSE ?1 END
+        WHERE work_date < ?2 AND (COALESCE(note, ?1) <> ?1 OR COALESCE(approve_note, ?1) <> ?1)""", (PURGED, cutoff)).rowcount
+    return n
 
 
 def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None, batch: int = 500, progress=None) -> dict:
@@ -502,13 +517,17 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
             repaired = scrub_close_summaries(con)
             if repaired:
                 C.audit(con, "privacy", "close-summary", "PURGE_PII", {"repaired_close_logs": repaired})
+            notes = _purge_old_notes(con, crit["cutoff"])
+            if notes:
+                C.audit(con, "privacy", "notes", "PURGE_PII", {"notes": notes, "cutoff": crit["cutoff"]})
             if done:
                 # 오래된 QR 묶음(암호문)도 정리
                 con.execute("UPDATE transfer_bundle SET frames_json=NULL WHERE work_date < ?", (crit["cutoff"],))
             C.set_setting(con, "last_pii_purge_run", {"at": C.now(), "count": len(done), "trigger": trigger})
         if done:
             C.incremental_vacuum(con)
-    return {"count": len(done), **crit, **({"orphan_requests": orphans} if orphans else {}), **({"repaired_close_logs": repaired} if repaired else {})}
+    return {"count": len(done), **crit, **({"orphan_requests": orphans} if orphans else {}), **({"repaired_close_logs": repaired} if repaired else {}),
+            **({"notes": notes} if notes else {})}
 
 
 def purge_log(con, limit: int = 200) -> list[dict]:

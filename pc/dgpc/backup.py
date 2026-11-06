@@ -200,8 +200,9 @@ def decrypt_to(raw: bytes, pem: bytes, password: str, dest: Path) -> str:
 
 
 # ------------------------------------------------------------------ 백업 만들기
-def _sha(p: Path) -> str:
-    h = hashlib.sha256()
+def _sha(p: Path, prefix: bytes = b"") -> str:
+    """파일(앞에 prefix를 붙인 것으로 보고)의 sha256. 큰 파일도 조각으로 읽는다."""
+    h = hashlib.sha256(prefix)
     with open(p, "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
@@ -248,33 +249,47 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
             dest = d / f"donggu-auto-{stamp}-{n}.dgabk"; n += 1
         tmp = d / f".tmp-{secrets.token_hex(6)}.db"
         secret = secrets.token_urlsafe(32)
+        part = store.part_path(dest)
         try:
             with guard:
                 store.backup_to(con, tmp, secret)
             head = seal_secret(k["pub"], secret.encode())
-            with open(dest, "wb") as out, open(tmp, "rb") as src:
+            sha = _sha(tmp, head)  # 써야 할 내용(머리 + DB)의 해시
+            # 임시 이름으로 쓰고 디스크에 내린 뒤, 다시 읽어 해시가 맞을 때만 정식 이름으로 바꾼다
+            # (디스크가 차서 잘린 파일이 정식 이름으로 남으면 보관 정리가 그날 백업으로 셈해 멀쩡한 백업을 지울 수 있었다)
+            with open(part, "wb") as out, open(tmp, "rb") as src:
                 out.write(head)
                 shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+            if _sha(part) != sha:
+                raise C.UserError("자동 백업 파일을 다시 읽어 보니 내용이 다릅니다(디스크 문제). 백업 폴더의 공간·상태를 확인하세요.")
+            try:
+                os.chmod(part, 0o600)
+            except OSError:
+                pass
+            os.replace(part, dest)
         finally:
-            for f in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
-                if f.exists():
-                    f.unlink()
-        try:
-            os.chmod(dest, 0o600)
-        except OSError:
-            pass
-        sha = _sha(dest)
+            store.discard(tmp)
+            store.discard(part)
         res.update(ok=True, file=dest.name, bytes=dest.stat().st_size, sha256=sha, fpr=k["fpr"])
-        # 두 번째 보관 위치(네트워크 드라이브·USB): 복사 뒤 해시 대조
+        # 두 번째 보관 위치(네트워크 드라이브·USB): 임시 이름으로 복사 → 해시 대조 → 맞으면 정식 이름(틀리면 지움)
         if c["backup_dest2"]:
+            part2 = None
             try:
                 d2 = Path(c["backup_dest2"])
                 d2.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dest, d2 / dest.name)
-                ok2 = _sha(d2 / dest.name) == sha
+                part2 = store.part_path(d2 / dest.name)
+                shutil.copy2(dest, part2)
+                ok2 = _sha(part2) == sha
+                if ok2:
+                    os.replace(part2, d2 / dest.name)
                 res["dest2"] = {"ok": ok2, "path": str(d2), **({} if ok2 else {"error": "복사본 해시가 다릅니다"})}
             except OSError as e:
                 res["dest2"] = {"ok": False, "path": c["backup_dest2"], "error": f"복사 실패({e.__class__.__name__})"}
+            finally:
+                if part2 is not None:
+                    store.discard(part2)
         res["deleted"] = apply_retention(con, c, bdir)
     except C.UserError as e:
         res["error"] = str(e)
@@ -350,6 +365,13 @@ def apply_retention(con, c: dict | None = None, bdir: Path | None = None) -> lis
     for d in [bdir or backup_dir(con)] + ([Path(c["backup_dest2"])] if c["backup_dest2"] else []):
         if not d.exists():
             continue
+        # 쓰다가 프로그램·전원이 멈춰 남은 임시 파일(.part, .tmp-*.db): 하루 지난 것만(지금 쓰는 중일 수 있는 것은 두고)
+        for f in [*d.glob(".donggu-*.part"), *d.glob("..tmp-*.part"), *d.glob(".tmp-*.db")]:
+            try:
+                if time.time() - f.stat().st_mtime > 86400:
+                    store.discard(f)
+            except OSError:
+                pass
         files = sorted([*d.glob("donggu-backup-*.dgbak"), *d.glob("donggu-auto-*.dgabk")])
         for f in plan_retention(files, int(c["backup_keep_daily"]), int(c["backup_keep_monthly"]), int(c["backup_retention_days"])):
             try:

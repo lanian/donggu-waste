@@ -191,6 +191,38 @@ def login_succeeded(username: str):
     FAILS.pop(_fail_key(username), None)
 
 
+FAIL_LOCK = threading.Lock()  # FAILS·IP_FAILS·LOGIN_INFLIGHT 를 함께 보고 고치는 동안
+LOGIN_INFLIGHT: set[str] = set()  # 지금 비밀번호를 확인하는 중인 아이디(·LAN 모드 IP)
+
+
+@contextlib.contextmanager
+def login_attempt(username: str, ip: str | None):
+    """로그인 한 번의 잠금 검사 → 비밀번호 확인 → 결과 기록을 같은 아이디(LAN 모드는 같은 IP도)에 대해 한 번에 하나씩.
+    비밀번호 확인(scrypt)이 끝나기 전에 실패 횟수를 세므로, 이렇게 막지 않으면 동시에 수십 번 보내 잠금 검사를 모두 통과할 수 있었다.
+    같은 아이디로 확인 중이면 세지 않고 바로 거절한다(사람은 동시에 두 번 로그인하지 않음). yield 받은 함수로 결과를 기록한다."""
+    keys = {"u:" + _fail_key(username)} | ({"ip:" + ip} if LAN and ip else set())
+    with FAIL_LOCK:
+        wait = login_blocked(username) or ip_blocked(ip)
+        if wait:
+            raise S.UserError(f"여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")
+        if keys & LOGIN_INFLIGHT:
+            raise S.UserError("같은 아이디로 로그인을 확인하는 중입니다. 잠시 뒤 다시 시도하세요.")
+        LOGIN_INFLIGHT.update(keys)
+
+    def record(good: bool):
+        with FAIL_LOCK:  # 다음 시도가 들어오기 전에(자리를 비우기 전에) 결과를 센다
+            if good:
+                login_succeeded(username)
+            else:
+                login_failed(username)
+                ip_failed(ip)
+    try:
+        yield record
+    finally:
+        with FAIL_LOCK:
+            LOGIN_INFLIGHT.difference_update(keys)
+
+
 # ------------------------------------------------------------------ 역할과 API 경로 표
 # 역할 묶음 (운영 관리자는 모든 경로를 쓴다)
 #  INTAKE(접수 담당자): 접수·배정·전송·결과·충돌·수납·마감 기록
@@ -571,13 +603,12 @@ class Handler(BaseHTTPRequestHandler):
         """로그인: scrypt 확인은 DB 잠금 밖(조회 전용 연결)에서, 마지막 로그인 시각·이력만 잠금 안에서."""
         d = self.json_body()
         ip = login_ip(self.client_address[0])
-        wait = login_blocked(d.get("username") or "") or ip_blocked(ip)
-        if wait:
-            raise S.UserError(f"여러 번 틀렸습니다. {wait}초 뒤 다시 시도하세요.")
-        with read_con() as rc:
-            good = S.verify_login(rc, d.get("username") or "", d.get("password") or "")
-            un = (d.get("username") or "").strip()[:30]
-            known = bool(un and S.one(rc, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)))
+        with login_attempt(d.get("username") or "", ip) as record:
+            with read_con() as rc:
+                good = S.verify_login(rc, d.get("username") or "", d.get("password") or "")
+                un = (d.get("username") or "").strip()[:30]
+                known = bool(un and S.one(rc, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)))
+            record(bool(good))
         with LOCK:
             if good:
                 S.ACTOR.set(good["username"])
@@ -589,10 +620,7 @@ class Handler(BaseHTTPRequestHandler):
                 note_login_fail(un if known else "(없는 아이디)")
             flush_login_fails(CON)
         if not good:
-            login_failed(d.get("username") or "")
-            ip_failed(ip)
             raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
-        login_succeeded(d.get("username") or "")
         return self.login_ok(good)
 
     def idem(self, endpoint: str, fn):
