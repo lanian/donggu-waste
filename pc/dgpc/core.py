@@ -74,7 +74,7 @@ def tx(con):
     """쓰기 트랜잭션. 이미 트랜잭션 안이면 저장점(SAVEPOINT)으로 겹쳐 쓴다(겹친 쪽이 실패하면 그 부분만 되돌림).
     가장 바깥 트랜잭션이 끝나기 직전(COMMIT 전)에 바뀐 접수의 요약 열과 자동 환불 건을 같은 트랜잭션 안에서 맞춘다.
     조회 전용 연결에서는 아무것도 하지 않는다(쓰기는 WRITE_SINK로 넘김)."""
-    if id(con) in _store.READONLY:
+    if _store.is_readonly(con):
         yield
         return
     if con.in_transaction:
@@ -91,7 +91,7 @@ def tx(con):
     con.execute("BEGIN IMMEDIATE")
     try:
         yield
-        if id(con) in _store.DIRTY_TRACKED:
+        if _store.is_dirty_tracked(con):
             flush_dirty(con)
         con.execute("COMMIT")
     except BaseException:
@@ -127,7 +127,7 @@ def flush_dirty(con):
 
 
 def is_readonly(con) -> bool:
-    return id(con) in _store.READONLY
+    return _store.is_readonly(con)
 
 
 # 조회 전용 연결에서 생긴 기록(변경 이력·접속기록)을 쓰기 연결로 넘기는 곳. 서버가 요청마다 정한다: fn(write_con) 을 잠금 안에서 실행.

@@ -12,7 +12,7 @@ import uuid
 from dgpc import store as _store, area, finance, geo
 from dgpc.addresses import address_warnings
 from dgpc.core import (
-    ACTOR, KST, UserError, _after_close, _secs, audit, check_req_ver, close_info, get_setting, is_chosung, norm_addr, norm_phone, now, one,
+    ACTOR, KST, UserError, _after_close, _date_ok, _secs, audit, check_req_ver, close_info, get_setting, is_chosung, norm_addr, norm_phone, now, one,
     rows, safe_csv_writer, today_kst, tx,
 )
 from dgpc.derive import derive, payment_status, prefetch
@@ -68,7 +68,7 @@ def validate(data: dict) -> dict:
         raise UserError("연락처를 확인해 주세요 (0으로 시작하는 9~11자리).")
     if not d["address"]:
         raise UserError("배출 주소를 적어 주세요.")
-    if d["planned_date"] and not re.fullmatch(r"\d{4}-\d\d-\d\d", d["planned_date"]):
+    if d["planned_date"] and not _date_ok(d["planned_date"]):
         raise UserError("수거 예정일 형식이 올바르지 않습니다.")
     for k in ("appt_start", "appt_end"):
         if d[k] and not re.fullmatch(r"\d\d:\d\d", d[k]):
@@ -481,7 +481,7 @@ def _reschedule(con, rid: str, to: str, full: str, code: str):
 
 def reschedule_requests(con, ids, to: str, code: str | None = None, text: str = "") -> dict:
     """예정일 변경(여러 건, 한 트랜잭션). 사유 코드 필수. 다른 날 배정에 들어 있던 건은 배정을 풉니다."""
-    if not re.fullmatch(r"\d{4}-\d\d-\d\d", to or ""):
+    if not _date_ok(to or ""):
         raise UserError("바꿀 수거 예정일을 골라 주세요.")
     code, text, full = _reason(POSTPONE_CODES, code, text, "예정일 변경")
     ids = _ids(con, ids)

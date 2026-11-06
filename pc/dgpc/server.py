@@ -60,6 +60,8 @@ IDLE_S = max(60, int(os.environ.get("DG_SESSION_IDLE_S") or 30 * 60))
 # 세션 절대 만료(조작이 이어져도 로그인 뒤 10시간). 시험에서만 DG_SESSION_ABS_S 로 줄일 수 있다(60초 이상).
 ABS_S = max(60, int(os.environ.get("DG_SESSION_ABS_S") or 10 * 3600))
 MAX_BODY = 40 * 1024 * 1024
+# 화면 창 주소(/bundle/·/print/batch/·/qrtest/)의 짧은 ID: 화면이 UUID 앞 8자리로 만든다. LIKE 패턴(_ %)이 섞이지 않게 형식을 고정
+SHORT_ID_RE = re.compile(r"[0-9a-f]{8}")
 SLOW_MS = 1000  # 이보다 오래 걸린 요청은 WARNING 으로 남긴다(경로 틀·ms만)
 
 LOCK = threading.Lock()
@@ -481,14 +483,19 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get("X-DG-CSRF") != "1":
                     return self.send_json({"error": "잘못된 요청입니다."}, 403)
                 return self.api(method, path[5:], qs)
-            if method == "GET" and path.startswith("/bundle/"):
-                if not self.session():
-                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
-                return self.bundle_page(path[8:])
-            if method == "GET" and path.startswith("/print/batch/"):
+            if method == "GET" and path.startswith(("/bundle/", "/print/batch/", "/qrtest/")):
+                # 화면용 창(목록 QR·배차표·QR 실측): API와 같게 로그인·임시 비밀번호 변경을 확인하고, 주소는 화면이 만드는 8자리 16진수만
                 sess = SESSIONS.get(self.session() or "")
                 if not sess:
                     return self.send_json({"error": "로그인이 필요합니다."}, 401)
+                if sess.get("must_change"):
+                    return self.send_json({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
+                if not SHORT_ID_RE.fullmatch(path.rsplit("/", 1)[1]):
+                    return self.send_json({"error": "없음"}, 404)
+            if method == "GET" and path.startswith("/bundle/"):
+                return self.bundle_page(path[8:])
+            if method == "GET" and path.startswith("/print/batch/"):
+                sess = SESSIONS.get(self.session() or "")
                 S.ACTOR.set(sess["username"])
                 with LOCK:
                     if sess["role"] == "FIELD":
@@ -513,8 +520,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "인쇄 자료가 없거나 시간이 지났습니다. 화면에서 다시 인쇄하세요."}, 404)
                 return self.send_bytes(job["html"].encode(), "text/html; charset=utf-8")
             if method == "GET" and path.startswith("/qrtest/"):
-                if not self.session():
-                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 return self.qrtest_page(path[8:])
             return self.send_json({"error": "없음"}, 404)
         except S.StaleError as e:  # 다른 곳에서 먼저 바뀜(낙관적 동시성) → 409 + 지금 버전
@@ -1475,7 +1480,7 @@ class Handler(BaseHTTPRequestHandler):
             if st["capacity"]["prefer_dong_crew"] else {}
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            travel_method=method, kakao_key=kakao_key,
-                           service_per_item=st["service_min_per_item"], time_limit_s=int(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
+                           service_per_item=st["service_min_per_item"], time_limit_s=routing.clamp_time_limit(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
                            volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
                            unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])

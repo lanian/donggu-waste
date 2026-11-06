@@ -123,7 +123,19 @@ def matrix(points: list[tuple[float, float]], osrm_url: str = "") -> tuple[list[
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as r:
                 data = json.load(r)
             if data.get("code") == "Ok":
-                return [[int(math.ceil((d or 0) / 60)) for d in row] for row in data["durations"]], "OSRM"
+                # 경로가 없는 쌍(null)은 0분이 아니라 직선거리 추정으로 (0분이면 순서 추천이 그쪽으로 몰림)
+                est = None
+                out = []
+                for i, row in enumerate(data["durations"]):
+                    line = []
+                    for j, d in enumerate(row):
+                        if d is None and i != j:
+                            est = est or estimate_matrix(points)
+                            line.append(est[i][j])
+                        else:
+                            line.append(int(math.ceil((d or 0) / 60)))
+                    out.append(line)
+                return out, "OSRM"
         except Exception:
             pass
     return estimate_matrix(points), "ESTIMATE"
@@ -274,6 +286,18 @@ def _break_window(lunch: dict | None):
     return lo, hi, d
 
 
+MAX_TIME_LIMIT_S = 60  # 노선 계산 한 번의 최대 시간(초). 요청 스레드·CPU를 오래 붙잡지 않게
+
+
+def clamp_time_limit(v, default: int = 5) -> int:
+    """화면·API에서 온 계산 시간(초)을 1~MAX_TIME_LIMIT_S 정수로. 숫자가 아니면 기본값."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(MAX_TIME_LIMIT_S, n))
+
+
 def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str = "", service_base: int = 5,
          service_per_item: int = 3, time_limit_s: int = 5, today: str = "", volume_overrides: dict | None = None,
          unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None,
@@ -398,8 +422,11 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                 for node in unload_nodes:
                     dim.CumulVar(mgr.NodeToIndex(node)).SetMin(0)
         if use_unload:
-            for node in unload_nodes:
+            for i, node in enumerate(unload_nodes):
                 model.AddDisjunction([mgr.NodeToIndex(node)], 0)  # 필요할 때만 들른다
+                # 반입지 노드는 팀마다 max_unloads 개씩: 한 팀이 다른 팀 몫까지 써서 '차량당 최대 N회'를 넘지 않게.
+                # (-1 = 들르지 않음. SetAllowedVehiclesForIndex 는 OR-Tools 9.15 파이썬 바인딩에서 목록을 받지 못해 VehicleVar 로 건다)
+                model.VehicleVar(mgr.NodeToIndex(node)).SetValues([-1, i // max_unloads])
         ldim = model.GetDimensionOrDie("Load")
         if base_first:  # 크고 무거운 품목은 적재함이 비어 있을 때 싣는 쪽을 선호 (도착 시 적재량이 기준을 넘으면 벌점)
             ub = int(min(caps) * BASE_FIRST_SHARE)
@@ -420,7 +447,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         params.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION if use_unload or brk
                                           else routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
         params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-        params.time_limit.seconds = time_limit_s
+        params.time_limit.seconds = clamp_time_limit(time_limit_s)
         return model.SolveWithParameters(params), mgr, model, tdim, breaks
 
     has_must = any(g["must"] for g in groups)

@@ -31,6 +31,7 @@ from dgpc import core as C, settings as SR, store
 MAGIC = b"DGAB1"
 CONF_KEYS = ("backup_auto", "backup_time", "backup_dest2", "backup_keep_daily", "backup_keep_monthly", "backup_retention_days")  # 기본값은 settings.py
 _NAME_RE = re.compile(r"donggu-(?:backup|auto)-(\d{8})-(\d{6})(?:-\d+)?\.(dgbak|dgabk)$")
+AUTO_RETRY_AFTER = dt.timedelta(hours=1)  # 자동 백업이 실패하면 이만큼 뒤에 다시 시도
 
 
 def conf(con) -> dict:
@@ -234,7 +235,7 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
         c = conf(con)
         k = key_info(con)
         bdir = backup_dir(con)
-    res = {"at": C.now(), "reason": reason, "ok": False}
+    res = {"at": C.now(), "reason": reason, "ok": False, "fpr": k["fpr"] if k else None}
     try:
         if not k:
             raise C.UserError("백업 키가 없어 자동 백업을 하지 않았습니다. 설정 → 백업에서 백업 키를 만드세요.")
@@ -296,6 +297,17 @@ def due(con, now_kst: dt.datetime | None = None) -> bool:
     t = now_kst or dt.datetime.now(C.KST)
     if C.get_setting(con, "auto_backup_day") == t.date().isoformat():
         return False
+    # 방금 실패했으면(디스크 부족·권한 등) 1시간 뒤에 다시: 스케줄러가 30초마다 전체 내보내기를 되풀이해
+    # 화면을 붙잡고 변경 이력에 실패 행을 하루 수천 건 쌓지 않게
+    # (같은 백업 키로 실패했을 때만: 키가 없어 실패한 뒤 키를 만들었으면 바로 다시 한다)
+    last = C.get_setting(con, "backup_status") or {}
+    if last.get("ok") is False and last.get("at") and last.get("fpr") == (key_info(con) or {}).get("fpr"):
+        try:
+            failed_at = dt.datetime.strptime(last["at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+            if dt.timedelta(0) <= t.astimezone(dt.timezone.utc) - failed_at < AUTO_RETRY_AFTER:
+                return False
+        except (TypeError, ValueError):
+            pass
     return t.strftime("%H:%M") >= c["backup_time"]
 
 

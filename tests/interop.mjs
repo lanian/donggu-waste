@@ -270,6 +270,53 @@ ok(dg.dong === '' && dg.candidates.join() === '계림1동,계림2동' && J.sugge
 await throwsCode(() => J.searchAddress({ key: 'BAD', keyword: '서남로', fetchFn: async () => ({ ok: true, json: async () => ({ results: { common: { errorCode: 'E0001', errorMessage: '승인되지 않은 KEY 입니다.' } } }) }) }), 'E0001', '틀린 승인키');
 await throwsCode(() => J.searchAddress({ key: 'K', keyword: '서남로', fetchFn: async () => { throw new TypeError('Failed to fetch'); } }), 'NETWORK', 'CORS 차단·인터넷 끊김');
 ok(J.cleanKeyword(" 서남로 1 <script>% = [x]") === '서남로 1 script x', '검색어의 특수문자(서버가 거부하는 것) 제거');
+{
+  const split = ['010/1234/5678', '010,1234,5678', '010_1234_5678', '010·1234·5678', '010 / 1234 / 5678'];
+  const addr = ['서남로 12-3', '동구 계림동 1234-5', '필문대로 309 101동 1203호'];
+  ok(split.every((q) => J.phoneLike(J.cleanKeyword(q))) && !addr.some((q) => J.phoneLike(J.cleanKeyword(q))),
+    '검색어 가드: 숫자 사이를 / , _ · 로 나눈 전화번호도 차단, 주소 번지·동호수는 보냄 (PC keyword_guard와 같은 규칙)');
+  const pyGuard = JSON.parse(pyEval(`import json; from dgpc import external as X; print(json.dumps([X.keyword_guard(X.clean_keyword(q)) is not None for q in ${JSON.stringify([...split, ...addr])}]))`));
+  ok(JSON.stringify(pyGuard) === JSON.stringify([...split, ...addr].map((q) => J.phoneLike(J.cleanKeyword(q)))), '검색어 가드: 휴대폰(JS)과 PC(Python) 판정이 같음');
+}
+{
+  // 휴대폰 저장소: 요청 오류(쿼터 초과)는 요청 → 트랜잭션 onerror 로 올라오는데 그때 t.error 는 아직 null 이다(중단 뒤에 채워짐).
+  // 가짜 IndexedDB 로 그 순서를 재현해, 저장 실패가 null 이 아니라 원래 오류로 전달되는지 본다(사진 대기열 유지 판단 isQuota).
+  const quota = Object.assign(new Error('quota'), { name: 'QuotaExceededError' });
+  const prevIdb = globalThis.indexedDB;
+  globalThis.indexedDB = {
+    open() {
+      const r = {};
+      queueMicrotask(() => {
+        r.result = {
+          createObjectStore() {},
+          transaction() {
+            const t = { error: null };
+            t.objectStore = () => ({ put() {
+              const req = { error: quota };
+              queueMicrotask(() => { t.onerror && t.onerror({ target: req }); t.error = quota; t.onabort && t.onabort({ target: t }); });
+              return req;
+            } });
+            return t;
+          },
+        };
+        r.onsuccess();
+      });
+      return r;
+    },
+  };
+  const ST = await import('../web/store.js');
+  let got = 'none';
+  try { await ST.putRaw('k', new Uint8Array(1)); } catch (e) { got = e; }
+  globalThis.indexedDB = prevIdb;
+  ok(got && got.name === 'QuotaExceededError', `휴대폰 저장소: 쿼터 초과 오류를 그대로 전달(null 아님) → 사진 대기열 유지 판단 가능 (${got && got.name})`);
+}
+{
+  // 안전용 백업의 사진: [오늘 자료 정리] 뒤 기록(events)에서 빠졌지만 PC가 아직 회수하지 않은 사진(keptPhotos)도 담는다
+  const stB = { events: [{ kind: 'PHOTO_META', body: { photo_id: 'p1' } }, { kind: 'CONTACT', body: {} }, { kind: 'PHOTO_META', body: { photo_id: 'p2' } }],
+    keptPhotos: [{ photo_id: 'k1' }, { photo_id: 'p2' }] };
+  ok(typeof F.backupPhotoIds === 'function' && JSON.stringify(F.backupPhotoIds(stB)) === '["p1","p2","k1"]' && F.backupPhotoIds({}).length === 0,
+    '휴대폰 백업 사진 목록: 기록의 사진 + 정리 뒤 남긴 미회수 사진, 중복 없이');
+}
 
 // 15) 반입지 좌표 (목록 묶음 "u"의 선택 5·6번째 값) -----------------------------
 const u15 = { ...dj.c, s: dj.c.s.map((x, i) => (i === 0 ? { ...x, u: ['11:00', '가상 반입지', 20, 5.5, 35.13, 126.95] } : i === 1 ? { ...x, u: ['12:00', '반입지', 20, 3] } : x)) };

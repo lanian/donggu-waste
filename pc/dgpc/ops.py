@@ -152,6 +152,14 @@ def job_fn(kind: str, con, lock, read_con_factory=None, **kw):
 
 
 # ------------------------------------------------------------------ 예약 작업 (하루 1회·주 1회)
+def _job_out(job: dict, key: str | None = None):
+    """run_now 로 돌린 작업의 결과. 실패했으면 작업이 남긴 오류 문구를 그대로 기록한다(원인이 KeyError·TypeError 로 바뀌지 않게)."""
+    if job.get("status") != "DONE":
+        return {"error": job.get("error") or "작업 실패"}
+    r = job.get("result")
+    return r[key] if key and isinstance(r, dict) else r
+
+
 def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None) -> dict:
     """서버 예약 작업이 하루 한 번 부른다(시험에서는 직접). 실패해도 다음 일은 계속한다."""
     guard = lock if lock is not None else nullcontext()
@@ -160,8 +168,8 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
     try:
         for name, fn in (("pii_purge", lambda: PV.purge_pii(con, today=today, trigger="SCHEDULE", lock=lock)["count"]),
                          ("photo_purge", lambda: S.purge_photos(con, today=today, lock=lock, trigger="SCHEDULE")["count"]),
-                         ("refund_sync", lambda: JOBS.run_now({"actor": "system", "client": "local", "kind": "refund_sync", "progress": 0},
-                                                              job_fn("refund_sync", con, lock))["result"]),
+                         ("refund_sync", lambda: _job_out(JOBS.run_now({"actor": "system", "client": "local", "kind": "refund_sync", "progress": 0},
+                                                                       job_fn("refund_sync", con, lock)))),
                          ("idem", lambda: _locked(guard, lambda: S.purge_idem(con))),
                          ("access_retention", lambda: _locked(guard, lambda: PV.purge_old_access(con))),
                          ("backup_retention", lambda: len(_locked(guard, lambda: BK.run_retention(con)))),
@@ -175,8 +183,8 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
         last_full = (S.get_setting(con, "last_full_verify") or {}).get("at")
         if weekday == 6 or not last_full or _age_days(last_full) >= 7:  # 일요일 또는 7일 넘게 전체 검사가 없었으면
             try:
-                out["verify_full"] = JOBS.run_now({"actor": "system", "client": "local", "kind": "verify_full", "progress": 0},
-                                                  job_fn("verify_full", con, lock, read_con_factory))["result"]["ok"]
+                out["verify_full"] = _job_out(JOBS.run_now({"actor": "system", "client": "local", "kind": "verify_full", "progress": 0},
+                                                           job_fn("verify_full", con, lock, read_con_factory)), "ok")
             except Exception as e:  # noqa: BLE001
                 out["verify_full"] = {"error": e.__class__.__name__}
         with guard:

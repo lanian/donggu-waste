@@ -184,5 +184,7 @@ export const isKnownDong = (dong, known = []) => !sq(dong) || [...known.map(sq),
 // 검색어 안전장치(PC pc/dgpc/external.py keyword_guard와 같은 규칙): 전화번호 모양·숫자 8자리 이상이면 보내지 않는다
 const PHONE_RE = /(?<!\d)0\d{1,2}[-\s.]?\d{3,4}[-\s.]?\d{4}(?!\d)/;
 const LONG_DIGITS = /\d[\d\s.-]{7,}\d/;
-export function phoneLike(q) { return PHONE_RE.test(q || '') || LONG_DIGITS.test(q || ''); }
+// 숫자 사이에 글자 아닌 기호(/ , _ · 공백 등)가 3개까지 끼어도 이어서 8자리 이상이면 번호로 본다 (010/1234/5678 같은 우회 막기)
+const SPLIT_DIGITS = /\d(?:[^0-9A-Za-z가-힣]{0,3}\d){7,}/;
+export function phoneLike(q) { const s = q || ''; return PHONE_RE.test(s) || LONG_DIGITS.test(s) || SPLIT_DIGITS.test(s); }
 

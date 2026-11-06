@@ -221,6 +221,22 @@ def db_key(create: bool = False) -> str:
     return getpass.getpass("DB 비밀번호: ")
 
 
+class _Connection(dbapi.Connection):
+    """업무 DB 연결. 조회 전용·요약 열 추적 여부를 연결 객체에 직접 표시한다.
+    (예전에는 id(con) 집합으로 기억했는데, 버린 조회 전용 연결의 메모리 주소를 새 쓰기 연결이 다시 받으면
+    쓰기 연결이 조회 전용으로 오인돼 기록이 막혔다.)"""
+    dg_readonly = False
+    dg_dirty_tracked = False
+
+
+def is_readonly(con) -> bool:
+    return getattr(con, "dg_readonly", False)
+
+
+def is_dirty_tracked(con) -> bool:
+    return getattr(con, "dg_dirty_tracked", False)
+
+
 def connect(create: bool = False, readonly: bool = False):
     """업무 DB 열기. readonly=True: 화면 조회 전용 연결(쓰기 금지 PRAGMA query_only, 이전 단계 실행 안 함)."""
     if not ENCRYPTED and os.environ.get("DG_ALLOW_PLAIN_DB") != "1":
@@ -231,7 +247,7 @@ def connect(create: bool = False, readonly: bool = False):
         sys.exit("PC 자료가 없습니다. 먼저 'python pc_tool.py init'을 실행하세요.")
     d.mkdir(parents=True, exist_ok=True)
     is_new = not path.exists()
-    con = dbapi.connect(str(path), check_same_thread=False, isolation_level=None)
+    con = dbapi.connect(str(path), check_same_thread=False, isolation_level=None, factory=_Connection)
     if ENCRYPTED:
         global _PROMPTED_KEY
         key = db_key(create=is_new)
@@ -245,7 +261,7 @@ def connect(create: bool = False, readonly: bool = False):
     con.execute("PRAGMA busy_timeout = 10000")
     if readonly:
         con.execute("PRAGMA query_only = ON")
-        READONLY.add(id(con))
+        con.dg_readonly = True
         return con
     con.execute("PRAGMA foreign_keys = ON")
     if is_new:  # 새 DB: 사진·개인정보 파기 뒤 빈 공간을 조금씩 돌려줄 수 있게(PRAGMA incremental_vacuum)
@@ -263,8 +279,6 @@ def connect(create: bool = False, readonly: bool = False):
 # ------------------------------------------------------------------ 이전 단계 (PRAGMA user_version)
 # 단계마다 BEGIN IMMEDIATE 한 트랜잭션(구조 변경 + 기존 자료 채우기)으로 실행한다. 중간에 멈추면 그 단계 전체가 되돌려지고
 # 다음에 열 때 그 단계부터 다시 한다. DB가 이 프로그램보다 새 버전이면 열지 않는다(옛 프로그램으로 새 DB를 망치지 않게).
-READONLY: set[int] = set()        # 조회 전용 연결(id)
-DIRTY_TRACKED: set[int] = set()   # 요약 열 갱신 대상을 모으는 임시 트리거가 있는 연결(id)
 _TEST_FAIL_STEP: int | None = None  # 시험용: 이 단계의 끝(기록 직전)에서 일부러 실패
 
 
@@ -554,7 +568,7 @@ _DIRTY_SQL.append("CREATE TEMP TRIGGER IF NOT EXISTS dg_refund_paid AFTER UPDATE
 def install_dirty_tracking(con):
     for st in _DIRTY_SQL:
         con.execute(st)
-    DIRTY_TRACKED.add(id(con))
+    con.dg_dirty_tracked = True
 
 
 def _cols(con, table) -> set[str]:

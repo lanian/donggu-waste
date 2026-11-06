@@ -2716,6 +2716,186 @@ def v13_refactor():
     ok(gen == [0, 0, 0, 0], f"만든 파일이 원본과 같음: fees-data.js·labels-data.js·docs/settings.md·docs/routes.md {gen}")
 
 
+def review_fixes():
+    """전체 검토 반영: 팀 미연결 수거팀의 마감 요약 범위, 검색어 가드의 구분자 우회, 일정 변경으로 풀린 접수가 옛 목록에 남음,
+    재방문 중 지난 결과로 상태 되돌림, 없는 날짜, 하차 횟수(차량별), 예약 작업 실패 기록, 자동 백업 재시도 간격,
+    임시 비밀번호 상태의 배차표·묶음 화면, 배차표 주소 형식."""
+    print("\n— 전체 검토 반영 —")
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+    from dgpc import backup as BK, external as X, ops as OPS, server as SV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-rv-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    # 조회 전용 연결을 열었다 버린 뒤 새로 연 쓰기 연결이(같은 메모리 주소를 다시 받아도) 조회 전용으로 오인되지 않음
+    bad = 0
+    for _ in range(200):
+        store.connect(readonly=True).close()
+        wc = store.connect()
+        try:
+            with S.tx(wc):
+                S.audit(wc, "test", "-", "PING", {})
+        except RuntimeError:
+            bad += 1
+        wc.close()
+    ok(bad == 0 and store.is_readonly(store.connect(readonly=True)) and not store.is_readonly(con),
+       f"조회 전용 표시는 연결 객체 종류로 (id 재사용으로 쓰기 연결이 막히지 않음, 막힌 횟수 {bad})")
+    today = S.today_kst()
+    tomorrow =(dt.date.fromisoformat(today) + dt.timedelta(days=1)).isoformat()
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    base = {"phone": "010-0000-9400", "address": "가상시 동구 예시로 14", "planned_date": today, "lat": 35.15, "lon": 126.92}
+    ph = Phone(S.registration_text(con))
+    dev = S.register_device(con, ph.code(), "검토폰", confirm=True)["device_id"]
+    c1 = S.save_crew(con, {"name": "검토1팀", "device_id": dev})
+    mk = lambda name, **kw: S.create_request(con, {**base, "name": name, "items": [{"fee_rate_id": chair["id"], "qty": 1}], **kw})["id"]
+    ra, rb = mk("검토가"), mk("검토나", phone="010-0000-9401")
+
+    def user_error(fn):
+        try:
+            fn()
+        except S.UserError:
+            return True
+        except Exception:  # noqa: BLE001 — 업무 오류가 아닌 예외(→ 화면 500)는 실패로 본다
+            return False
+        return False
+
+    # 없는 날짜: 형식만 맞는 2/30 은 업무 오류로 거부(500 아님)
+    ok(user_error(lambda: mk("없는날", planned_date="2026-02-30")), "없는 날짜(2026-02-30) 접수 → 업무 오류(500 아님)")
+    ok(user_error(lambda: S.reschedule_requests(con, [ra], "2026-02-30", "RESIDENT")), "예정일 변경도 없는 날짜는 업무 오류")
+
+    # 검색어 가드: 숫자 사이 구분자(/ , _ ·)로 전화번호를 나눠도 외부 주소 검색에 보내지 않음
+    for q in ("010/1234/5678", "010,1234,5678", "010_1234_5678", "010·1234·5678", "010 / 1234 / 5678"):
+        ok(X.keyword_guard(X.clean_keyword(q)) is not None, f"검색어 가드: '{q}' 차단")
+    for q in ("서남로 12-3", "동구 계림동 1234-5", "필문대로 309 101동 1203호"):
+        ok(X.keyword_guard(X.clean_keyword(q)) is None, f"검색어 가드: 주소 '{q}'는 보냄")
+
+    # 다른 날로 옮겨 배정이 풀린 접수는 그날 목록 재전송·배차표에 실리지 않음
+    bid = S.confirm_plan(con, today, {c1: [{"request_id": ra}, {"request_id": rb}]})[0]["batch_id"]
+    S.reschedule_requests(con, [rb], tomorrow, "RESIDENT")
+    _, pl, _ = ph.receive(S.make_bundle(con, bid)["frames"])
+    ok([s["request_id"] for s in pl["stops"]] == [ra], "일정 변경으로 배정이 풀린 접수는 그날 목록 재전송에 없음")
+    ok("검토나" not in json.dumps(S.dispatch_sheet(con, bid), ensure_ascii=False), "배차표에도 없음")
+
+    # 재방문 배정 중 도착 기록만 먼저 와도 지난 결과(미수거)로 되돌아가 배정이 풀리지 않음
+    sa = pl["stops"][0]
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": today, "events": [ph.ev(sa, "ATTEMPT", {"outcome": "NOT_COLLECTED"})]}, P.TYPE_RESULT))
+    ok(S.get_request(con, ra)["status"] == "NOT_COLLECTED", "1차 방문: 미수거")
+    b2 = S.confirm_plan(con, tomorrow, {c1: [{"request_id": ra}]})[0]["batch_id"]
+    _, pl2, _ = ph.receive(S.make_bundle(con, b2)["frames"])
+    sa2 = pl2["stops"][0]
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": tomorrow, "events": [ph.ev(sa2, "ARRIVE", {})]}, P.TYPE_RESULT))
+    st2 = S.get_request(con, ra)["status"]
+    act = S.one(con, "SELECT batch_id FROM active_assignment WHERE request_id=?", (ra,))
+    ok(st2 in ("ASSIGNED", "IN_PROGRESS") and act and act["batch_id"] == b2, f"재방문 중 도착 기록만 와도 배정 유지 ({st2})")
+    S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": tomorrow, "events": [ph.ev(sa2, "ATTEMPT", {"outcome": "DONE"})]}, P.TYPE_RESULT))
+    ok(S.get_request(con, ra)["status"] == "DONE" and not S.one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (ra,)),
+       "재방문 결과가 오면 그 결과로 바뀌고 배정 풀림")
+
+    # 팀이 연결되지 않은 수거팀 계정(범위 = 빈 문자열)은 마감 요약에서 아무 접수도 못 봄
+    mk("검토다", phone="010-0000-9402")
+    s0 = S.day_summary(con, today, "")
+    ok(not s0["by_status"] and "검토" not in json.dumps(s0, ensure_ascii=False), "팀 미연결 수거팀: 마감 요약에 다른 팀 접수·이름 없음")
+
+    # 하차(반입지) 횟수는 차량마다 따로: 한 팀이 다른 팀 몫까지 쓰지 않음
+    many = [{"id": f"h{i}", "lat": 35.14 + 0.004 * i, "lon": 126.92 + 0.003 * i, "items": [{"name": "장롱", "spec": "", "qty": 1, "fee_rate_id": "X"}]} for i in range(5)]
+    two = [{"id": "a", "name": "가팀", "capacity_m3": 6, "shift_start": "09:00", "shift_end": "17:00"},
+           {"id": "b", "name": "나팀", "capacity_m3": 6, "shift_start": "09:00", "shift_end": "09:05"}]
+    res = routing.plan(many, two, {"lat": 35.1462, "lon": 126.9233}, time_limit_s=2, volume_overrides={"X": 4},
+                       unload_site={"lat": 35.16, "lon": 126.95, "label": "가상 반입지"}, max_unloads=1)
+    ok(all(rt["unloads"] <= 1 for rt in res["routes"]), f"하차 최대 1회는 차량마다: {[(rt['crew_id'], rt['unloads']) for rt in res['routes']]}")
+    t0 = time.time()
+    routing.plan(many[:1], two[:1], {"lat": 35.1462, "lon": 126.9233}, time_limit_s=-5)
+    ok(time.time() - t0 < 30, "계산 시간 음수 → 1초 이상으로 고쳐 계산(오류 없음)")
+    ok(routing.clamp_time_limit(10 ** 6) == routing.MAX_TIME_LIMIT_S and routing.clamp_time_limit("x") == 5, "계산 시간 상한·형식 정리")
+
+    # 로컬 OSRM이 경로 없음(null)을 준 쌍은 0분이 아니라 직선거리 추정으로
+    class FakeOsrm:
+        def open(self, url, timeout=10):
+            import io as _io
+            return _io.BytesIO(json.dumps({"code": "Ok", "durations": [[0, None], [600, 0]]}).encode())
+    real_bo = routing.urllib.request.build_opener
+    routing.urllib.request.build_opener = lambda *a, **kw: FakeOsrm()
+    try:
+        pts = [(35.14, 126.92), (35.18, 126.96)]
+        m, src = routing.matrix(pts, "http://127.0.0.1:5000")
+    finally:
+        routing.urllib.request.build_opener = real_bo
+    ok(src == "OSRM" and m[1][0] == 10 and m[0][1] == routing.estimate_matrix(pts)[0][1] > 0, f"OSRM 경로 없음(null) → 직선 추정 {m[0][1]}분 (0분 아님)")
+
+    # 예약 작업: 작업이 실패하면 결과에 오류로 남김("None" 아님)
+    real_job_fn = OPS.job_fn
+
+    def failing(kind, *a, **kw):
+        if kind == "refund_sync":
+            def f(job):
+                raise RuntimeError("가상 실패")
+            return f
+        return real_job_fn(kind, *a, **kw)
+    OPS.job_fn = failing
+    try:
+        out = OPS.daily_tasks(con)
+    finally:
+        OPS.job_fn = real_job_fn
+    ok(isinstance(out["refund_sync"], dict) and "RuntimeError" in str(out["refund_sync"].get("error")),
+       f"예약 작업 실패는 실제 원인과 함께 기록(KeyError 로 바뀌지 않음): {out['refund_sync']}")
+
+    # 자동 백업이 방금 실패했으면 30초마다 다시 하지 않음(1시간 뒤 재시도)
+    BK.generate_key(con, "backup-key-pass-rv1")
+    fpr = BK.key_info(con)["fpr"]
+    with S.tx(con):
+        BK.save_settings(con, {"backup_time": "00:00"})
+        S.set_setting(con, "backup_status", {"at": S.now(), "reason": "SCHEDULE", "ok": False, "error": "가상 실패", "fpr": fpr})
+    ok(not BK.due(con), "자동 백업 실패(같은 백업 키) 직후에는 다시 실행하지 않음")
+    with S.tx(con):
+        S.set_setting(con, "backup_status", {"at": S.now(), "reason": "SCHEDULE", "ok": False, "error": "키 없음", "fpr": None})
+    ok(BK.due(con), "키가 없어 실패한 뒤 키를 만들었으면 바로 다시 실행 대상")
+    with S.tx(con):
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        S.set_setting(con, "backup_status", {"at": old, "reason": "SCHEDULE", "ok": False, "error": "가상 실패", "fpr": fpr})
+    ok(BK.due(con), "실패 1시간 뒤에는 다시 실행 대상")
+
+    # 서버: 임시 비밀번호 상태에서는 배차표·목록 QR·QR 실측 화면도 막음, 배차표 주소는 8자리 16진수만
+    S.create_user(con, "tmp_rv", "임시담당", "INTAKE", "temp-pass-rv01", must_change=True)
+    S.create_user(con, "crew_rv", "가상팀원", "FIELD", "field-pass-rv1", crew_id=c1)
+    bun = S.make_bundle(con, b2)
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+    SV.CON, SV.PORT, SV.LAN = con, port, None
+    while not SV.RPOOL.empty():  # 앞 시험(v13)의 DB에 열린 조회 전용 연결을 비운다(이 시험은 새 DB)
+        SV.RPOOL.get_nowait().close()
+    srv = SV.Server(("127.0.0.1", port), SV.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def http(method, path, body=None, cookie=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode() if body is not None else None, method=method,
+                                     headers={"X-DG-CSRF": "1", "Content-Type": "application/json", **({"Cookie": cookie} if cookie else {})})
+        try:
+            r = opener.open(req, timeout=20)
+            return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def login(u, pw):
+        st_, hd, _ = http("POST", "/api/login", {"username": u, "password": pw})
+        return re.search(r"dg_s=[^;]+", hd.get("Set-Cookie") or "").group(0) if st_ == 200 else None
+    try:
+        tmp, crew = login("tmp_rv", "temp-pass-rv01"), login("crew_rv", "field-pass-rv1")
+        ok(tmp and crew, "임시 비밀번호 계정·수거팀 계정 로그인")
+        for path in (f"/print/batch/{b2[:8]}", f"/bundle/{bun['bundle_id'][:8]}", "/qrtest/abcdef12"):
+            st_, _, body = http("GET", path, cookie=tmp)
+            ok(st_ == 403 and "비밀번호" in body.decode("utf-8", "replace"), f"임시 비밀번호 상태: {path.split('/')[1]} 화면 막음 ({st_})")
+        ok(http("GET", f"/print/batch/{b2[:8]}", cookie=crew)[0] == 200, "수거팀: 자기 팀 배차표는 열림")
+        for bad in ("________", "%25", "zzzzzzzz"):
+            ok(http("GET", f"/print/batch/{bad}", cookie=crew)[0] == 404, f"배차표 주소가 8자리 16진수가 아니면 없음(404): {bad}")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -2727,4 +2907,5 @@ if __name__ == "__main__":
     v12_review()
     v13()
     v13_refactor()
+    review_fixes()
     print(f"\n통과 {passed}개 (구조 정리 포함)")

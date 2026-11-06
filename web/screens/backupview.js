@@ -9,7 +9,8 @@ async function screenBackup() {
   const BSTEPS = ['비밀번호 정하기', '파일 만들기', '안전한 곳에 보관'];
   let flow = flowSteps(BSTEPS, ui.backupDone ? 2 : 0);
   ui.backupDone = false;
-  const photoIds = st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body.photo_id);
+  // 정리 뒤 남긴 미회수 사진(keptPhotos)도 담는다: 빠뜨리면 휴대폰을 잃었을 때 그 사진은 복구할 수 없다
+  const photoIds = F.backupPhotoIds(st);
   const msg = h('p', { class: 'msg' });
   const pw1 = h('input', { type: 'password', placeholder: '백업 비밀번호 (12자 이상)', class: 'search', autocomplete: 'new-password' });
   const pw2 = h('input', { type: 'password', placeholder: '한 번 더', class: 'search', autocomplete: 'new-password' });
