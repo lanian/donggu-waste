@@ -102,6 +102,9 @@ KEY_RE = re.compile(r"^[A-Za-z0-9+/=_\-.]{8,200}$")
 # ------------------------------------------------------------------ 검색어 안전장치
 _PHONE_RE = re.compile(r"(?<!\d)0\d{1,2}[-\s.]?\d{3,4}[-\s.]?\d{4}(?!\d)")
 _LONG_DIGITS = re.compile(r"\d[\d\s.-]{7,}\d")  # 숫자 8자리 이상(번호 일부·주민번호 등)
+# 숫자 사이에 글자 아닌 기호(/ , _ · 공백 등)가 3개까지 끼어도 이어서 8자리 이상이면 번호로 본다 (010/1234/5678 같은 우회 막기).
+# 주소의 '101동 1203호'처럼 한글이 끼면 끊긴다. web/juso.js SPLIT_DIGITS 와 같은 규칙.
+_SPLIT_DIGITS = re.compile(r"\d(?:[^0-9A-Za-z가-힣]{0,3}\d){7,}")
 
 
 def clean_keyword(q: str) -> str:
@@ -112,7 +115,7 @@ def clean_keyword(q: str) -> str:
 def keyword_guard(q: str, name: str = "", known_names=()) -> str | None:
     """보내면 안 되는 검색어면 이유 문구, 괜찮으면 None."""
     k = q or ""
-    if _PHONE_RE.search(k) or len(re.sub(r"\D", "", k)) >= 8 and _LONG_DIGITS.search(k):
+    if _PHONE_RE.search(k) or len(re.sub(r"\D", "", k)) >= 8 and (_LONG_DIGITS.search(k) or _SPLIT_DIGITS.search(k)):
         return "검색어에 전화번호 같은 숫자가 있어 외부 주소 검색에 보내지 않았습니다. 주소 낱말만 적어 주세요."
     ks = re.sub(r"\s+", "", k)
     n = re.sub(r"\s+", "", name or "")

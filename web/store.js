@@ -30,7 +30,9 @@ async function tx(mode, fn) {
     const t = db.transaction('kv', mode);
     const out = fn(t.objectStore('kv'));
     t.oncomplete = () => res(out && 'result' in out ? out.result : undefined);
-    t.onerror = () => rej(t.error);
+    // 요청 오류(쿼터 초과 등)가 올라올 때 t.error 는 아직 null 이다(중단 뒤에 채워짐) → 요청의 오류를 먼저 본다.
+    // null 로 거절하면 화면이 저장 공간 부족을 알아보지 못해 사진을 대기열에서 버린다.
+    t.onerror = (ev) => rej((ev && ev.target && ev.target.error) || t.error || new Error('저장 실패'));
     t.onabort = () => rej(t.error || new Error('저장 실패'));
   });
 }

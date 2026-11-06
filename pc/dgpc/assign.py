@@ -11,7 +11,7 @@ import uuid
 import dgproto as P
 from dgpc import privacy as _pv
 from dgpc.core import KST, StaleError, UserError, _chunks, _date_ok, _int_clamp, _num, audit, get_setting, now, one, rows, today_kst, tx
-from dgpc.derive import derive, request_round_unit
+from dgpc.derive import FINAL, derive, request_round_unit
 from dgpc.devices import list_crews, pc_key
 from dgpc.fees import FEE_ROWS, fee_table_for_phone, volume_overrides
 
@@ -223,8 +223,15 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
     if us and us.get("lat") is not None:
         for u_ in unload_by.values():
             u_.setdefault("lat", us["lat"]); u_.setdefault("lon", us["lon"])
-    for s in rows(con, "SELECT request_id, seq, eta FROM assignment_stop WHERE batch_id=? ORDER BY seq", (batch_id,)):
+    # 지금 이 배정에 묶인 접수 + 이 배정에서 최종 결과가 나와 배정이 풀린 접수만 싣는다.
+    # 일정 변경·다른 팀 배정으로 풀린 접수(지난 배정 기록만 남은 것)는 다시 보내지 않는다(옛 목록으로 엉뚱한 날 수거 방지).
+    for s in rows(con, """SELECT s.request_id, s.seq, s.eta, a.batch_id AS active_batch FROM assignment_stop s
+            LEFT JOIN active_assignment a ON a.request_id=s.request_id WHERE s.batch_id=? ORDER BY s.seq""", (batch_id,)):
         r = one(con, "SELECT * FROM request WHERE id=?", (s["request_id"],))
+        if s["active_batch"] != batch_id and not (s["active_batch"] is None and r["status"] in FINAL):
+            if unload_by.get(r["id"]) and stops:  # 빠진 지점 뒤의 하차는 앞 지점 뒤로 옮긴다
+                stops[-1]["unload_after"] = unload_by[r["id"]]
+            continue
         if r["status"] == "CANCELLED":
             if unload_by.get(r["id"]) and stops:  # 취소된 지점 뒤의 하차는 앞 지점 뒤로 옮긴다
                 stops[-1]["unload_after"] = unload_by[r["id"]]

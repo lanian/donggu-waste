@@ -19,14 +19,17 @@ from dgpc.devices import _open_from_device
 from dgpc.fees import fee_rows, fee_state
 from dgpc.intake import CANCEL_CODES, _cancel, _insert_item, _insert_request, _reason, _resolve_dong, _snapshot, build_items, validate
 
-def _refresh_status(con, rid):
-    """현장 결과에 따라 업무 상태를 갱신한다. 최종 결과가 나오면 활성 배정을 풀어 재배정할 수 있게 한다."""
+def _refresh_status(con, rid, new_attempt: bool = True):
+    """현장 결과에 따라 업무 상태를 갱신한다. 최종 결과가 나오면 활성 배정을 풀어 재배정할 수 있게 한다.
+    new_attempt=False: 이번에 들어온 기록에 수거 결과(ATTEMPT)가 없음. 재방문으로 다시 배정된 접수라면 지난 방문의 결과로
+    되돌리지 않는다(도착·연락 기록만 먼저 와도 배정이 풀리고 '미수거'로 돌아가던 문제)."""
     r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not r or r["status"] == "CANCELLED":
         return
     st = derive(con, r)
     new = r["status"]
-    if st["outcome"] in FINAL:
+    stale_outcome = not new_attempt and bool(one(con, "SELECT 1 AS x FROM active_assignment WHERE request_id=?", (rid,)))
+    if st["outcome"] in FINAL and not stale_outcome:
         new = st["outcome"]
     elif st["has_field_records"]:
         new = "IN_PROGRESS"
@@ -75,7 +78,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
     crew = one(con, "SELECT id FROM crew WHERE device_id=?", (dev_id,))
     imp = str(uuid.uuid4())
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}
-    touched = set()
+    touched, attempted = set(), set()  # attempted: 이번 파일에서 수거 결과(ATTEMPT)가 반영된 접수
     with tx(con):
         con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,?)",
                     (imp, channel, dev_id, sha, now(), release))
@@ -196,6 +199,8 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 counts["photos_expected"] += 1
             if not reason:
                 touched.add(ev["request_id"])
+                if ev["kind"] == "ATTEMPT":
+                    attempted.add(ev["request_id"])
                 if ev["kind"] == "REVISIT_APPT":
                     _apply_revisit(con, ev["request_id"], ev.get("body", {}))
         for ev in payload.get("events", []):
@@ -223,7 +228,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 except Exception:  # noqa: BLE001
                     counts["failed"] = counts.get("failed", 0) + 1
         for rid in touched:
-            _refresh_status(con, rid)
+            _refresh_status(con, rid, new_attempt=rid in attempted)
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}

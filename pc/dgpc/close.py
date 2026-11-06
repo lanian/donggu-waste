@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 import uuid
 
 from dgpc import backup as _bk, privacy as _pv, area
 from dgpc.assign import list_unloads
-from dgpc.core import ACTOR, KST, LABELS, UserError, _secs, audit, close_info, now, one, rows, today_kst, tx
+from dgpc.core import ACTOR, KST, LABELS, UserError, _date_ok, _secs, audit, close_info, now, one, rows, today_kst, tx
 from dgpc.derive import derive, payment_core, payment_status, prefetch
 from dgpc.devices import crew_request_ids
 from dgpc.intake import _snapshot
@@ -65,8 +64,10 @@ def crews_without_result(con, work_date: str) -> list[dict]:
 
 
 def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
+    """crew_id: None = 전체(사무실), 문자열 = 그 팀 범위. 빈 문자열(팀이 연결되지 않은 수거팀 계정)은 아무 접수도 보이지 않는다."""
+    scoped = crew_id is not None
     reqs = rows(con, "SELECT * FROM request WHERE planned_date=?", (work_date,))
-    if crew_id:
+    if scoped:
         mine = crew_request_ids(con, crew_id)
         reqs = [r for r in reqs if r["id"] in mine]
     by_status: dict[str, int] = {}
@@ -106,7 +107,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,)) if x["request_id"] in ids]
     conflicts = [c for c in list_conflicts(con) if c["request_id"] in ids]
     unconfirmed = rows(con, """SELECT t.id, t.work_date, t.assign_ver FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id
-        WHERE t.work_date=? AND t.receipt_confirmed_at IS NULL""" + (" AND b.crew_id=?" if crew_id else ""), (work_date, crew_id) if crew_id else (work_date,))
+        WHERE t.work_date=? AND t.receipt_confirmed_at IS NULL""" + (" AND b.crew_id=?" if scoped else ""), (work_date, crew_id) if scoped else (work_date,))
     unpaid = []
     for r in reqs:
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD", "CANCELLED"):
@@ -114,7 +115,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
             if ps["status"] in ("UNPAID", "UNDERPAID", "OVERPAID_REVIEW", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING", "REFUND_NEEDED", "OVERREFUNDED_REVIEW"):
                 unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
                                "levied": ps["levied"], "paid": ps["paid"]})
-    if not crew_id:  # 예정일이 없거나 다른 날인 접수라도 이날 취소했고 환불할 돈이 남았으면 함께 본다
+    if not scoped:  # 예정일이 없거나 다른 날인 접수라도 이날 취소했고 환불할 돈이 남았으면 함께 본다
         d0 = dt.datetime.fromisoformat(work_date).replace(tzinfo=KST).astimezone(dt.timezone.utc)
         rng = (d0.strftime("%Y-%m-%dT%H:%M:%SZ"), (d0 + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         for r in rows(con, """SELECT * FROM request WHERE status='CANCELLED' AND cancelled_at>=? AND cancelled_at<? AND COALESCE(planned_date,'')!=?
@@ -123,7 +124,7 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
             if ps["status"] == "REFUND_NEEDED":
                 unpaid.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": ps["status"], "calculated": ps["calculated"],
                                "levied": ps["levied"], "paid": ps["paid"]})
-    unloads = [u for u in list_unloads(con, work_date) if not crew_id or u["crew_id"] == crew_id]
+    unloads = [u for u in list_unloads(con, work_date) if not scoped or u["crew_id"] == crew_id]
     # 동별 현황 (오늘 건수·완료·미처리·한도 대비)
     dongs = []
     by_dong: dict[str, list] = {}
@@ -146,24 +147,24 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     for c in closes:
         c["carried"] = len(json.loads(c.pop("carried_json") or "[]"))
     cap = area.capacity_settings(con)
-    crews_nr = [c for c in crews_without_result(con, work_date) if not crew_id or c["crew_id"] == crew_id]
+    crews_nr = [c for c in crews_without_result(con, work_date) if not scoped or c["crew_id"] == crew_id]
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
             "crews_no_result": crews_nr,
             "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
             "field_intakes": len(field_intakes(con)),
             "payments": unpaid, "unloads": unloads, "sticker_issues": sticker_issues, "fee_refused": fee_refused, "no_evidence": no_evidence,
             "unload_total": {"volume_m3": round(sum(u["volume_m3"] or 0 for u in unloads), 2), "weight_kg": round(sum(u["weight_kg"] or 0 for u in unloads), 1)},
-            "carry": [] if crew_id else carry_candidates(con, work_date), "dongs": dongs,
+            "carry": [] if scoped else carry_candidates(con, work_date), "dongs": dongs,
             "capacity": {"limit": cap["daily_count"], "booked": sum(1 for r in reqs if r["status"] != "CANCELLED")},
             "working": area.working_reason(con, work_date),
-            "post_close_edits": [] if crew_id else _post_close_edits(con, work_date),
+            "post_close_edits": [] if scoped else _post_close_edits(con, work_date),
             "closes": closes, "closed": closes[-1] if closes else None}
 
 
 def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
     """마감 기록(담당자). 끝나지 않은 건은 다음 업무일로 예정일을 옮기고(마감 이월), 기록은 회차로 쌓는다(덮어쓰지 않음).
     팀장(검토자)이 approve_close 로 확인한다."""
-    if not re.fullmatch(r"\d{4}-\d\d-\d\d", work_date or ""):
+    if not _date_ok(work_date or ""):
         raise UserError("마감할 날짜를 골라 주세요.")
     if work_date > today_kst():  # 미래 날짜를 마감하면 배정이 풀리고 예정일이 옮겨진다
         raise UserError("아직 오지 않은 날은 마감할 수 없습니다.")

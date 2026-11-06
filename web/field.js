@@ -241,11 +241,16 @@ function releaseBy(st, rel) {
   for (const x of st.exports || []) if (!x.confirmed && x.to <= st.releasedSeq) { x.confirmed = true; x.via = 'list'; }
   return (st.events || []).filter((e) => e.seq > before && e.seq <= st.releasedSeq).length;
 }
+/** 이 휴대폰이 가진 사진 ID: 기록(events)의 사진 + [오늘 자료 정리] 뒤에도 PC 회수 전이라 남겨 둔 사진(keptPhotos). 중복 없이, 처음 나온 순서. */
+export function backupPhotoIds(st) {
+  const ids = [...(st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => e.body && e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)];
+  return [...new Set(ids.filter(Boolean))];
+}
 /** 목록에 실려 온 rel을 적용한다. 돌려주는 값: { events: 새로 반영된 기록 수, photos: 새로 회수 확인된 사진 수 } 또는 null(rel 없음). */
 export function applyRelease(st, rel) {
   if (!rel || !Number.isInteger(rel.seq) || rel.seq < 0) return null;
   const events = releaseBy(st, rel);
-  const known = new Set([...(st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => e.body && e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)]);
+  const known = new Set(backupPhotoIds(st));
   const had = new Set(st.recoveredPhotos || []);
   const add = (rel.ph || []).filter((id) => known.has(id) && !had.has(id));
   if (add.length) st.recoveredPhotos = [...had, ...add];
