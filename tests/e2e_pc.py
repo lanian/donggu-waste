@@ -1121,7 +1121,12 @@ def run():
             page.get_by_role("button", name="배차표 인쇄").first.click()
         pr = pp.value
         pr.wait_for_load_state()
-        ok(pr.locator("tbody tr").count() >= 2 and "파쇄" in pr.locator(".warn").inner_text() and pr.locator("#print").is_visible(), "인쇄용 배차표: 순서·신청인·품목, 파쇄 안내")
+        # 가상둘은 위 일일 마감에서 다음 업무일로 이월(배정 풀림) → 오늘 배정 기록에는 남아 있어도 배차표·목록 재전송에는 싣지 않는다
+        moved = S.one(store.connect(), "SELECT planned_date FROM request WHERE name='가상둘'")["planned_date"]
+        pbody = pr.locator("tbody").inner_text()
+        ok(pr.locator("tbody tr").count() >= 1 and "가상하나" in pbody and "가상둘" not in pbody and moved != today
+           and "파쇄" in pr.locator(".warn").inner_text() and pr.locator("#print").is_visible(),
+           f"인쇄용 배차표: 순서·신청인·품목, 파쇄 안내 — 마감 이월로 {moved}에 옮겨 간 접수(가상둘)는 빠짐")
         pr.screenshot(path=SHOTS / "pc_14_print.png", full_page=True)
         pr.close()
 
