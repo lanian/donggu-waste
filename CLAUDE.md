@@ -82,4 +82,4 @@ PC ◀──암호화 결과 파일 .dgr(업무 메일) · 사진 파일 .dgp(�
 
 ## CI
 
-`.github/workflows/ci.yml`: 버전 검사 → Linux 단위·로직(vendor `cmp` 대조, `check_generated.py`, `npm test`, `test_pc.py`) → e2e 2종. Windows·macOS PC 시험은 참고용. main push·`v*` 태그에서 시험 통과 시 `web/`만 Pages 배포. `*.md`·`docs/`만 바뀌면 건너뜀.
+`.github/workflows/ci.yml`: 버전 검사 → Linux 단위·로직(vendor `cmp` 대조, `check_generated.py`, `npm test`, `test_pc.py`) → e2e 2종. Windows·macOS PC 시험은 참고용. main push·`v*` 태그에서 시험 통과 시 `web/`만 Pages 배포. `*.md`·`docs/`만 바뀌면 건너뜀(생성 문서 `docs/settings.md`·`docs/routes.md`는 예외로 시험).
