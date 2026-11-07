@@ -3060,6 +3060,86 @@ def review_p2():
         srv.server_close()
 
 
+def review_p3():
+    """검토 3순위: 대사 파일의 모르는 납부방법, 접수에서 빠진 품목 줄의 수거 결과, 복원 전 DB 사본 보관."""
+    print("\n— 검토 3순위 —")
+    import datetime as _dt
+    from dgpc import finance as FN, ops as OPS
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-p3-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    day = "2026-11-10"
+    base = {"address": "가상시 동구 예시로 31", "planned_date": day, "lat": 35.15, "lon": 126.92}
+
+    # 1) 대사: 모르는 납부방법은 '가상계좌'로 바꿔 적지 않고 '기타'로 기록 + 미리보기 경고 + 원문은 메모에
+    ra = S.create_request(con, {**base, "name": "대사가상", "phone": "010-0000-9601", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    rb = S.create_request(con, {**base, "name": "대사가상둘", "phone": "010-0000-9602", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    rc = S.create_request(con, {**base, "name": "대사가상셋", "phone": "010-0000-9603", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    lv = {k: S.one(con, "SELECT levy_no FROM request WHERE id=?", (v["id"],))["levy_no"] for k, v in (("a", ra), ("b", rb), ("c", rc))}
+    raw = ("부과번호,금액,납부일,영수번호,납부방법\n" + f"{lv['a']},{chair['price']},2026-11-06,P3-1,간편결제\n"
+           f"{lv['b']},{chair['price']},2026-11-06,P3-2,\n{lv['c']},{chair['price']},2026-11-06,P3-3,현장 카드\n").encode()
+    pv = FN.import_recon(con, raw, preview=True)
+    rows_ = {x["line"]: x for x in pv["rows"]}
+    ok(all(x["status"] == "MATCH" for x in rows_.values()) and "간편결제" in rows_[2]["note"] and "기타" in rows_[2]["note"]
+       and not rows_[3]["note"] and not rows_[4]["note"],
+       "대사 미리보기: 모르는 납부방법은 일치 행에도 '기타로 기록' 경고(빈 칸·아는 방법은 경고 없음)")
+    FN.import_recon(con, raw, preview=False)
+    pm = {r["request_id"]: r for r in S.rows(con, "SELECT request_id, method, note FROM payment WHERE source='대사'")}
+    ok(pm[ra["id"]]["method"] == "기타" and "간편결제" in pm[ra["id"]]["note"], "모르는 납부방법 → '기타'로 기록, 파일의 원래 글은 메모에")
+    ok(pm[rb["id"]]["method"] == "가상계좌" and pm[rc["id"]]["method"] == "현장 카드", "납부방법 칸이 비면 가상계좌(세외수입 기본), 아는 방법은 그대로")
+
+    # 2) 접수 수정으로 빠진 품목 줄의 수거 결과: 그냥 '반영'(실제로는 아무 일 없음)이 아니라 충돌함으로
+    ph = Phone(S.registration_text(con))
+    dev = S.register_device(con, ph.code(), "3순위폰", confirm=True)["device_id"]
+    cid = S.save_crew(con, {"name": "3순위 시험팀", "device_id": dev})
+    sofa = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["id"] != chair["id"])
+    r2 = S.create_request(con, {**base, "name": "줄가상", "phone": "010-0000-9604",
+                                "items": [{"fee_rate_id": chair["id"], "qty": 1}, {"fee_rate_id": sofa["id"], "qty": 1}]})
+    bt = S.confirm_plan(con, day, {cid: [{"request_id": r2["id"], "eta": "09:00"}]})[0]
+    payload, _ = S.build_daylist(con, bt["batch_id"])
+    st0 = payload["stops"][0]
+    keep_l, gone_l = st0["items"][0]["line_id"], st0["items"][1]["line_id"]
+    S.update_request(con, r2["id"], {**base, "req_ver": RV(con, r2["id"]), "name": "줄가상", "phone": "010-0000-9604",
+                                     "items": [{"line_id": keep_l, "fee_rate_id": chair["id"], "qty": 1}]}, "주민 요청: 품목 하나 취소")
+    new_l = str(uuid.uuid4())
+    evs = [ph.ev(st0, "ITEM_RESULT", {"line_id": keep_l, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": gone_l, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": "없는-줄", "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "FIELD_ITEM_ADD", {"line_id": new_l, "fee_rate_id": chair["id"], "qty": 1}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": new_l, "line_kind": "FIELD", "qty_confirmed": 1, "qty_collected": 1, "reason": ""})]
+    imp = S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": evs}, P.TYPE_RESULT))
+    stt = {e["event_id"]: e for e in S.rows(con, "SELECT event_id, apply_status, conflict_reason FROM result_event WHERE import_id=?", (imp["import_id"],))}
+    ok(stt[evs[0]["event_id"]]["apply_status"] == "APPLIED" and stt[evs[3]["event_id"]]["apply_status"] == "APPLIED"
+       and stt[evs[4]["event_id"]]["apply_status"] == "APPLIED", "있는 품목 줄·같은 파일에서 현장 추가한 줄의 결과는 그대로 반영")
+    ok(stt[evs[1]["event_id"]]["apply_status"] == "CONFLICT" and "빠진 품목" in (stt[evs[1]["event_id"]]["conflict_reason"] or "")
+       and stt[evs[2]["event_id"]]["apply_status"] == "CONFLICT" and "없는 품목" in (stt[evs[2]["event_id"]]["conflict_reason"] or ""),
+       "접수 수정으로 빠진 품목 줄·접수에 없는 줄의 수거 결과 → 충돌함(이유 표시)")
+    raises(lambda: S.resolve_conflict(con, evs[1]["event_id"], "APPLY", "현장 확인"), "품목", "빠진 품목 줄의 결과는 반영 불가(아무 일 없이 '반영됨'이 되지 않게) — 거부하거나 접수를 고침")
+    S.resolve_conflict(con, evs[1]["event_id"], "REJECT", "주민이 취소한 품목")
+    ok(S.one(con, "SELECT apply_status FROM result_event WHERE event_id=?", (evs[1]["event_id"],))["apply_status"] == "REJECTED", "거부는 됨")
+
+    # 3) 복원 전 DB 사본(state/pc.db.before-restore-*, 개인정보 포함): 업데이트 사전 사본과 같은 규칙(가장 새 1개 늘, 나머지 3개 안·30일 이내)
+    sd = store.state_dir()
+    mk = lambda days: (sd / f"pc.db.before-restore-{(_dt.datetime.now() - _dt.timedelta(days=days)).strftime('%Y%m%d-%H%M%S')}")
+    made = [mk(d_) for d_ in (1, 2, 3, 5, 40)]
+    for f in made:
+        f.write_bytes(b"x" * 10)
+    Path(str(made[-1]) + "-wal").write_bytes(b"w")
+    dr = OPS.daily_tasks(con, None, None)
+    left = sorted(f.name for f in sd.iterdir() if "before-restore" in f.name)
+    ok(dr.get("restore_copy_retention") == 2 and left == sorted(f.name for f in made[:3]) and (sd / "pc.db").exists()
+       and S.one(con, "SELECT 1 AS x FROM audit_log WHERE entity_id='before-restore' AND action='PURGE'"),
+       "매일 예약 작업: 복원 전 사본 4번째·30일 넘은 것(곁 파일 -wal 포함) 삭제, 새것 3개·업무 DB는 그대로, 변경 이력")
+    for f in made[:3]:
+        f.unlink()
+    a, b = mk(50), mk(60)
+    a.write_bytes(b"x"); b.write_bytes(b"x")
+    ok(store.restore_copy_retention() == [b.name] and a.exists(), "30일 넘은 사본만 있어도 가장 새 1개는 남김")
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -3073,4 +3153,5 @@ if __name__ == "__main__":
     v13_refactor()
     review_fixes()
     review_p2()
+    review_p3()
     print(f"\n통과 {passed}개 (구조 정리 포함)")

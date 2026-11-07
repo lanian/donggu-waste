@@ -199,6 +199,14 @@ def recon_template() -> bytes:
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
+def _recon_method(method: str) -> str:
+    """대사 파일의 납부방법 → 수납 기록의 방법. 빈 칸은 세외수입 기본인 가상계좌, 목록에 없는 글은 '기타'
+    (가상계좌로 바꿔 적으면 방법별 세입 합계가 틀어진다. 원래 글은 수납 메모에 남긴다)."""
+    if not method:
+        return "가상계좌"
+    return method if method in PAY.PAY_METHODS else "기타"
+
+
 def parse_recon(con, raw: bytes) -> dict:
     text = geo.decode(raw)
     rd = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
@@ -250,7 +258,7 @@ def parse_recon(con, raw: bytes) -> dict:
         elif ps["levied"] is None:
             row.update(status="AMOUNT_PENDING", note="부과 금액 미확정(금액 확인 대기 품목)")
         elif ps["levied"] - ps["paid"] == amount:
-            row.update(status="MATCH", note="")
+            row.update(status="MATCH", note=f"납부방법 '{method}'은(는) 목록에 없어 '기타'로 기록" if _recon_method(method) == "기타" else "")
         else:
             row.update(status="AMOUNT_DIFF", note=f"남은 부과 금액 {ps['levied'] - ps['paid']:,}원 ≠ 납부 {amount:,}원")
         out.append(row)
@@ -274,9 +282,10 @@ def import_recon(con, raw: bytes, preview: bool = True) -> dict:
     with C.tx(con):
         for x in matched:
             pid = str(uuid.uuid4())
-            method = x["method"] if x["method"] in PAY.PAY_METHODS else "가상계좌"
+            method = _recon_method(x["method"])
+            note = f"대사 파일의 납부방법: {x['method']}" if method != x["method"] and x["method"] else ""
             con.execute("""INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, receipt_ref, source)
-                VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], "", C.now(), x["ref"] or None))
+                VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], note, C.now(), x["ref"] or None))
             C.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사"})
         iid = str(uuid.uuid4())
         con.execute("INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json) VALUES (?,?,?,?,?,?,?)",

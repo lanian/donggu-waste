@@ -185,6 +185,8 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                     newer = b0 and one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (crew["id"], b0["work_date"]))
                     if newer and (newer["v"] or 0) > ev["assign_ver"]:
                         reason = f"새 목록(갱신본 {newer['v']})에서 빠진 접수의 옛 목록 결과"
+            if not reason and ev["kind"] == "ITEM_RESULT":
+                reason = _missing_line(con, ev["request_id"], ev["body"].get("line_id"))
             if ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 충돌함에 들어가는 것도 정리해서 저장(반영할 때 다시 정리)
                 _sanitize_item_event(con, ev["kind"], ev["body"])
             status = "CONFLICT" if reason else "APPLIED"
@@ -246,6 +248,19 @@ def _photo_meta(con, rid: str, b: dict, dev_id: str):
     con.execute("INSERT OR IGNORE INTO photo (photo_id, request_id, phase, sha256, bytes, device_id, line_id, taken_at, lat, lon, acc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (b.get("photo_id"), rid, b.get("phase"), b.get("sha256"), b.get("bytes"), dev_id, b.get("line_id"),
                  (b.get("taken_at") or b.get("file_ts") or None), _num(b.get("lat")), _num(b.get("lon")), _num(b.get("acc"))))
+
+
+def _missing_line(con, rid: str, line_id) -> str | None:
+    """수거 결과(ITEM_RESULT)가 가리키는 품목 줄이 지금 접수에 없으면 충돌 이유, 있으면 None.
+    있는 줄 = 지워지지 않은 접수 품목 또는 이미 반영된 현장 추가 품목. 없는 줄의 결과를 '반영'으로 두면 계산에서는 조용히 빠져
+    사무실이 모르고 지나가므로(예: 목록을 보낸 뒤 접수를 고쳐 품목을 뺌) 충돌함에서 확인하게 한다."""
+    if line_id and (one(con, "SELECT 1 AS x FROM request_item WHERE line_id=? AND request_id=? AND removed=0", (line_id, rid))
+                    or one(con, """SELECT 1 AS x FROM result_event WHERE request_id=? AND kind='FIELD_ITEM_ADD' AND apply_status='APPLIED'
+                        AND json_extract(body_json, '$.line_id')=?""", (rid, line_id))):
+        return None
+    if line_id and one(con, "SELECT 1 AS x FROM request_item WHERE line_id=? AND request_id=? AND removed=1", (line_id, rid)):
+        return "접수 수정으로 빠진 품목의 수거 결과"
+    return "접수에 없는 품목 줄의 수거 결과"
 
 
 def _sanitize_item_event(con, kind: str, b: dict):
@@ -316,6 +331,10 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         body = {}
     if not isinstance(body, dict):
         body = {}
+    if action == "APPLY" and e["kind"] == "ITEM_RESULT" and e["request_id"]:
+        miss = _missing_line(con, e["request_id"], body.get("line_id"))
+        if miss:  # 반영해도 계산에 들어갈 줄이 없다: '반영됨'으로 보이기만 하고 아무 일도 없으므로 막는다
+            raise UserError(f"{miss}라 반영할 수 없습니다. 거부한 뒤, 실제로 수거했으면 접수 품목을 고치세요.")
     with tx(con):
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
