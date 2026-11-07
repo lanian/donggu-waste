@@ -790,6 +790,19 @@ def open_backup(src: Path, passphrase: str):
     return bcon, n
 
 
+def _key_opens(path: Path, key: str) -> bool:
+    """이 키로 그 DB 파일을 열 수 있는지(표 목록만 읽어 봄, 쓰지 않음)."""
+    c = dbapi.connect(str(path), check_same_thread=False)
+    try:
+        c.execute("PRAGMA key = " + _quote(key))
+        c.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return True
+    except Exception:  # noqa: BLE001 — 틀린 키: 'file is not a database'
+        return False
+    finally:
+        c.close()
+
+
 def restore_from(src: Path, passphrase: str) -> dict:
     """백업 파일을 현재 DB 키로 다시 암호화해 업무 DB로 되돌린다. 기존 DB는 지우지 않고 옆에 보관한다.
 
@@ -805,6 +818,10 @@ def restore_from(src: Path, passphrase: str) -> dict:
         if f.exists():
             f.unlink()
     key = db_key(create=not cur.exists()) if ENCRYPTED else None
+    if ENCRYPTED and cur.exists() and not _key_opens(cur, key):
+        # 키 저장소 없이 손으로 넣은 DB 키가 틀리면, 그 키로 다시 암호화해 바꿔 넣은 DB는 다음부터 열리지 않는다
+        bcon.close()
+        raise ValueError("DB 키(비밀번호)가 지금 업무 DB와 맞지 않습니다. 복원하지 않았습니다. 키를 확인한 뒤 다시 하세요.")
     if ENCRYPTED:
         bcon.execute(f"ATTACH DATABASE {_quote(str(tmp))} AS cur KEY {_quote(key)}")
         bcon.execute("SELECT sqlcipher_export('cur')")

@@ -276,7 +276,7 @@ const ACTION = { CREATE: '등록', UPDATE: '수정', CANCEL: '취소', LOCATION:
   ACTIVE: '사용', DEACTIVATE: '중지', IMPORT: '가져오기', RESOLVE: '충돌 처리', VOID: '정정', CLOSE: '마감', RECEIPT: '수신 확인', BACKUP: '백업', RESTORE: '복원', PURGE: '사진 정리',
   CONFIRM: '배정 확정', PRINT: '배차표 인쇄', DISPLAY: 'QR 표시', SAVE: '저장', REGISTER: '휴대폰 등록', STATUS: '상태 변경', RESOLVE_APPLY: '충돌 반영', RESOLVE_REJECT: '충돌 거부',
   APPROVE: '승인', REJECT: '반려', DRAFT: '개정안 작성', RESULT: '결과 반영', SOLO: '단독 자료 옮김', EXPORT: '내보내기', LINK_SIMILAR: '유사 품목 적용', UNLINK_SIMILAR: '유사 품목 해제',
-  REVISIT_APPT: '재방문 약속', ADD: '추가', CREW: '팀 연결', OVERRIDE: '보정값', PAY: '납부', REFUND: '환불',
+  REVISIT_APPT: '재방문 약속', ADD: '추가', CREW: '팀 연결', OVERRIDE: '보정값', PAY: '납부', REFUND: '환불', REFUND_PAY: '지급',
   CARRY: '마감 이월', RESCHEDULE: '예정일 변경', SET_DONG: '동 지정', DELETE: '삭제', PRINT_RECEIPT: '접수증 출력', PRINT_LABEL: '배출 표지 출력', KEYGEN: '백업 키 생성',
   AUTO_BACKUP: '자동 백업', PURGE_PII: '개인정보 파기', CHECK: '접속기록 점검', VERIFY: '무결성 검사', RECON: '대사 반영', REQUEST: '환불 신청', REDUCTION: '감면 적용', REDUCTION_CLEAR: '감면 해제' };
 // 변경 이력 대상 이름 (서버 service.AUDIT_ENTITIES 와 같음; 화면은 bootstrap 값을 우선)
