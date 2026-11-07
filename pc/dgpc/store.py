@@ -708,21 +708,42 @@ def backup_to(con, dest: Path, passphrase: str) -> Path:
         raise ValueError("같은 이름의 백업 파일이 이미 있습니다.")
     dest.parent.mkdir(parents=True, exist_ok=True)
     con.execute("PRAGMA wal_checkpoint(FULL)")
-    if ENCRYPTED:
-        con.execute(f"ATTACH DATABASE {_quote(str(dest))} AS bk KEY {_quote(passphrase)}")
-        try:
-            con.execute("SELECT sqlcipher_export('bk')")
-        finally:
-            con.execute("DETACH DATABASE bk")
-    else:  # 개발용 평문 모드
-        out = dbapi.connect(str(dest))
-        con.backup(out)
-        out.close()
+    # 임시 이름으로 다 쓴 뒤에만 정식 이름으로 바꾼다: 도중에 실패한 반쪽 파일이 백업 목록·보관 정리에 끼지 않게
+    part = part_path(dest)
     try:
-        os.chmod(dest, 0o600)
-    except OSError:
-        pass
+        if ENCRYPTED:
+            con.execute(f"ATTACH DATABASE {_quote(str(part))} AS bk KEY {_quote(passphrase)}")
+            try:
+                con.execute("SELECT sqlcipher_export('bk')")
+            finally:
+                con.execute("DETACH DATABASE bk")
+        else:  # 개발용 평문 모드
+            out = dbapi.connect(str(part))
+            con.backup(out)
+            out.close()
+        try:
+            os.chmod(part, 0o600)
+        except OSError:
+            pass
+        os.replace(part, dest)
+    finally:
+        discard(part)
     return dest
+
+
+def part_path(dest: Path) -> Path:
+    """쓰는 중인 파일의 임시 이름(같은 폴더, 점으로 시작 → 백업 목록·보관 정리의 이름 형식에 걸리지 않음)."""
+    dest = Path(dest)
+    return dest.with_name(f".{dest.name}.{secrets.token_hex(4)}.part")
+
+
+def discard(p: Path):
+    """임시 파일과 SQLite 곁 파일(-wal·-shm·-journal)을 조용히 지운다."""
+    for f in (Path(p), *(Path(str(p) + ext) for ext in ("-wal", "-shm", "-journal"))):
+        try:
+            f.unlink()
+        except OSError:  # 없거나(정상) 지울 수 없음(다음 정리 때 다시)
+            pass
 
 
 def open_backup(src: Path, passphrase: str):

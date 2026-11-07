@@ -1131,7 +1131,7 @@ def v11():
     tl = TrackLock()
     real_sha = BK._sha
     held_during_hash = []
-    BK._sha = lambda p_: (held_during_hash.append(tl.held), real_sha(p_))[1]
+    BK._sha = lambda *a_: (held_during_hash.append(tl.held), real_sha(*a_))[1]
     ab0 = BK.make_auto(con, "TEST-LOCK", lock=tl)
     BK._sha = real_sha
     ok(ab0["ok"] and tl.n == 3 and held_during_hash and not any(held_during_hash),
@@ -2896,6 +2896,170 @@ def review_fixes():
         srv.server_close()
 
 
+def review_p2():
+    """검토 2순위: 보유기간 파기가 자유 서술 칸(수납·환불·단가 연결 취소 사유, 충돌 판단 사유, 접수 없는 변경 이력 사유, 마감 메모)도 지움."""
+    print("\n— 검토 2순위 —")
+    from dgpc import privacy as PV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-p2-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    rid = S.create_request(con, {"name": "파기가상", "phone": "010-0000-9500", "address": "가상시 동구 예시로 15", "planned_date": S.today_kst(),
+                                 "items": [{"fee_rate_id": chair["id"], "qty": 1}]})["id"]
+    secret = "가상비밀 010-0000-9599"
+    old = "2020-01-05T00:00:00Z"
+    with S.tx(con):
+        con.execute("INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, void_reason, voided_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ("p2-pay", rid, "PAY", 1000, "가상계좌", "2020-01-02", "", old, secret, old))
+        con.execute("INSERT INTO refund_case (id, request_id, cause, amount, status, created_at, approve_note, void_reason) VALUES (?,?,?,?,?,?,?,?)",
+                    ("p2-ref", rid, "MANUAL", 1000, "VOID", old, secret, secret))
+        con.execute("""INSERT INTO item_link (id, request_id, line_id, fee_rate_id, fee_version_id, unit_price, reason, confirmed_by, actor, at, void_reason, voided_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", ("p2-link", rid, "l1", chair["id"], "v", 1000, secret, "팀장", "admin", old, secret, old))
+        con.execute("INSERT INTO result_import (id, channel, package_sha256, device_id, imported_at) VALUES (?,?,?,?,?)", ("p2-imp", "MAIL", "p2sha", "dev", old))
+        con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, kind, body_json, apply_status, resolved_reason, resolved_at, device_ts)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", ("p2-ev", "p2-imp", "dev", 1, rid, 1, "ARRIVE", "{}", "REJECTED", secret, old, old))
+        # 가져오기 단위 일괄 처리: 변경 이력의 사유 글이 어느 접수에도 묶이지 않음(request_id NULL)
+        S.audit(con, "event", "p2-imp", "RESOLVE_BULK_REJECT", {"reason": secret, "count": 1, "by": "import"})
+        S.audit(con, "event", "p2-imp-new", "RESOLVE_BULK_REJECT", {"reason": "최근 " + secret, "count": 1, "by": "import"})
+        con.execute("UPDATE audit_log SET at=? WHERE entity_id='p2-imp'", (old,))
+        prev = S.get_setting(con, "audit_chain_anchor") or ""  # 시각을 바꾸면 해시가 달라지므로 사슬을 다시 만든다(시험용)
+        for a in S.rows(con, "SELECT * FROM audit_log WHERE hash IS NOT NULL ORDER BY id"):
+            h = S.chain_hash(prev, S._audit_fields(a))
+            con.execute("UPDATE audit_log SET prev_hash=?, hash=? WHERE id=?", (prev, h, a["id"]))
+            prev = h
+        con.execute("""INSERT INTO day_close_log (id, work_date, seq, closed_at, summary_json, note, status, approve_note) VALUES (?,?,?,?,?,?,?,?)""",
+                    ("p2-close", "2020-01-02", 1, old, "{}", secret, "APPROVED", secret))
+        con.execute("UPDATE request SET status='DONE', completed_at=? WHERE id=?", (old, rid))
+    pr = PV.purge_pii(con)
+    ok(pr["count"] == 1, "파기 대상 1건")
+
+    def leftovers():
+        q = [("payment", "void_reason", "id='p2-pay'"), ("refund_case", "approve_note", "id='p2-ref'"), ("refund_case", "void_reason", "id='p2-ref'"),
+             ("item_link", "reason", "id='p2-link'"), ("item_link", "void_reason", "id='p2-link'"), ("result_event", "resolved_reason", "event_id='p2-ev'"),
+             ("day_close_log", "note", "id='p2-close'"), ("day_close_log", "approve_note", "id='p2-close'"),
+             ("audit_note", "note", "audit_id IN (SELECT id FROM audit_log WHERE entity_id='p2-imp')")]
+        return [f"{t}.{c}" for t, c, w in q if "가상비밀" in str((S.one(con, f"SELECT {c} AS v FROM {t} WHERE {w}") or {}).get("v"))]
+    left = leftovers()
+    ok(not left, f"보유기간 파기: 자유 서술 칸에 남은 개인정보 없음 (남은 칸 {left})")
+    ok(S.one(con, "SELECT void_reason FROM payment WHERE id='p2-pay'")["void_reason"] and S.one(con, "SELECT void_reason FROM item_link WHERE id='p2-link'")["void_reason"],
+       "취소 표시(void_reason 있음)는 남김 — 취소된 수납·단가 연결이 되살아나지 않음")
+    newer = S.one(con, "SELECT n.note FROM audit_note n JOIN audit_log a ON a.id=n.audit_id WHERE a.entity_id='p2-imp-new'")
+    ok(newer and "가상비밀" in newer["note"] and PV.verify_audit(con)["ok"], "보유기간 안의 사유 글은 그대로, 변경 이력 사슬 검사 정상")
+
+    # 백업 원자적 쓰기: 쓰다가 멈춘(디스크 가득 등) 반쪽 파일이 정식 이름으로 남아 보관 정리에서 멀쩡한 백업을 밀어내지 않음
+    from dgpc import backup as BK
+    import shutil as _sh
+    BK.generate_key(con, "backup-key-pass-p2a")
+    good = BK.make_auto(con, "TEST")
+    bdir = BK.backup_dir(con)
+    names = lambda d: sorted(p.name for p in Path(d).iterdir()) if Path(d).exists() else []
+    real_cfo = BK.shutil.copyfileobj
+
+    def half(src, dst, *a, **kw):
+        dst.write(src.read(1000))
+        raise OSError(28, "No space left on device")
+    BK.shutil.copyfileobj = half
+    try:
+        bad = BK.make_auto(con, "TEST")
+    finally:
+        BK.shutil.copyfileobj = real_cfo
+    ok(good["ok"] and not bad["ok"] and names(bdir) == [good["file"]], f"자동 백업이 도중에 실패하면 반쪽 파일·임시 파일을 남기지 않음 ({names(bdir)})")
+    # 두 번째 보관 위치에 잘린 사본: 정식 이름으로 남기지 않음
+    d2 = Path(tempfile.mkdtemp(prefix="dg-p2-d2-"))
+    with S.tx(con):
+        S.set_setting(con, "backup_dest2", str(d2))
+    real_c2 = BK.shutil.copy2
+
+    def trunc(a, b, *x, **kw):
+        Path(b).write_bytes(Path(a).read_bytes()[:500])
+    BK.shutil.copy2 = trunc
+    try:
+        r2 = BK.make_auto(con, "TEST")
+    finally:
+        BK.shutil.copy2 = real_c2
+    ok(r2["ok"] and r2["dest2"]["ok"] is False and names(d2) == [], f"두 번째 위치 사본이 잘리면 실패로 알리고 잘린 파일은 지움 ({names(d2)})")
+    r3 = BK.make_auto(con, "TEST")
+    ok(r3["ok"] and r3["dest2"]["ok"] and names(d2) == [r3["file"]], "두 번째 위치 정상 복사")
+    # 수동 백업: 내보내기 도중 실패해도 정식 이름의 파일이 생기지 않음
+    before = names(bdir)
+
+    class Boom:
+        def __init__(self, c):
+            self.c = c
+
+        def execute(self, sql, *a):
+            r = self.c.execute(sql, *a)
+            if "sqlcipher_export" in sql or "DETACH" in sql:
+                raise OSError(28, "No space left on device")
+            return r
+    try:
+        store.backup_to(Boom(con), bdir / "donggu-backup-20991231-000000.dgbak", "manual-pass-p2-0001")
+    except OSError:
+        pass
+    try:
+        con.execute("DETACH DATABASE bk")
+    except Exception:  # noqa: BLE001 — 이미 떼어졌으면 그만
+        pass
+    ok(names(bdir) == before, f"수동 백업 내보내기가 실패하면 파일을 남기지 않음 ({sorted(set(names(bdir)) - set(before))})")
+    # 전원이 꺼져 남은 임시 파일: 하루 지난 것은 보관 정리 때 지우고, 쓰는 중일 수 있는 새 것은 그대로
+    stale, fresh = bdir / ".donggu-auto-x.dgabk.ab12cd34.part", d2 / ".donggu-auto-y.dgabk.ef56ab78.part"
+    stale.write_bytes(b"x"); fresh.write_bytes(b"y")
+    os.utime(stale, (time.time() - 2 * 86400,) * 2)
+    BK.apply_retention(con)
+    ok(not stale.exists() and fresh.exists(), "하루 지난 임시(.part) 파일은 보관 정리 때 지움, 새 것은 남김")
+
+    # 로그인 잠금: 동시에 여러 번 보내도(비밀번호 확인이 끝나기 전 잠금 검사를 모두 통과) 5번 넘게 비밀번호를 맞혀 볼 수 없음
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+    from dgpc import server as SV
+    S.create_user(con, "race_p2", "가상경쟁", "INTAKE", "race-pass-p2-01")
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+    SV.CON, SV.PORT, SV.LAN = con, port, None
+    SV.FAILS.clear(); SV.IP_FAILS.clear()
+    while not SV.RPOOL.empty():
+        SV.RPOOL.get_nowait().close()
+    srv = SV.Server(("127.0.0.1", port), SV.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def post_login(pw):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/login", data=json.dumps({"username": "race_p2", "password": pw}).encode(), method="POST",
+                                     headers={"X-DG-CSRF": "1", "Content-Type": "application/json"})
+        try:
+            return opener.open(req, timeout=30).status
+        except urllib.error.HTTPError as e:
+            return e.code
+    real_vl, calls = SV.S.verify_login, []
+
+    def slow_vl(*a, **kw):
+        calls.append(1)
+        time.sleep(0.4)  # 비밀번호 확인(scrypt)이 오래 걸리는 동안 다른 요청이 들어오게
+        return real_vl(*a, **kw)
+    SV.S.verify_login = slow_vl
+    try:
+        gate = threading.Barrier(12)
+        res_ = []
+
+        def shot(i):
+            gate.wait()
+            res_.append(post_login(f"wrong-pass-{i:04d}"))
+        ts_ = [threading.Thread(target=shot, args=(i,)) for i in range(12)]
+        [t.start() for t in ts_]
+        [t.join() for t in ts_]
+        ok(len(calls) < 5 and all(c_ == 400 for c_ in res_), f"동시 로그인 12번: 비밀번호 확인까지 간 것 {len(calls)}번(5번 미만), 모두 거절")
+        SV.FAILS.clear()
+        SV.S.verify_login = real_vl
+        ok(post_login("race-pass-p2-01") == 200, "동시 시도가 끝난 뒤 맞는 비밀번호는 로그인")
+    finally:
+        SV.S.verify_login = real_vl
+        srv.shutdown()
+        srv.server_close()
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -2908,4 +3072,5 @@ if __name__ == "__main__":
     v13()
     v13_refactor()
     review_fixes()
+    review_p2()
     print(f"\n통과 {passed}개 (구조 정리 포함)")

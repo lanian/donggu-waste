@@ -10,10 +10,12 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths-ignore: ['**.md', 'docs/**']   # 태그 push 에는 경로 거르기가 적용되지 않는다
+    # 문서만 바뀌면 건너뛴다. 단 생성 문서(docs/settings.md·routes.md)는 시험이 원본과 대조하므로(check_generated) 손으로 고쳐도 시험한다.
+    # 순서가 중요: 뒤의 규칙이 앞을 덮는다. 태그 push 에는 경로 거르기가 적용되지 않는다.
+    paths: ['**', '!**.md', '!docs/**', 'docs/settings.md', 'docs/routes.md']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**']
+    paths: ['**', '!**.md', '!docs/**', 'docs/settings.md', 'docs/routes.md']
   workflow_dispatch:
 
 permissions:
