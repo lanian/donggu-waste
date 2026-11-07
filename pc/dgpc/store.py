@@ -474,15 +474,15 @@ def pre_migration_dir(d: Path | None = None) -> Path:
     return (d or state_dir()) / "pre-migration"
 
 
-def _pre_copies(d: Path | None = None) -> list[tuple[float, Path]]:
-    """사전 사본 목록 (만든 시각(초), 경로), 새것부터. 시각은 파일 이름(만든 때, 이 PC 시각) — copy2 가 원본 DB의 수정 시각을 옮기므로 파일 시각은 쓰지 않음."""
+def _dated_copies(folder: Path, pattern: re.Pattern) -> list[tuple[float, Path]]:
+    """이름에 만든 시각이 든 DB 사본 목록 (만든 시각(초), 경로), 새것부터. 시각은 파일 이름(만든 때, 이 PC 시각) —
+    copy2·rename 은 원본 DB의 수정 시각을 그대로 두므로 파일 시각은 쓰지 않음."""
     import datetime as _dt
-    pd = pre_migration_dir(d)
     out = []
-    if not pd.is_dir():
+    if not folder.is_dir():
         return out
-    for f in pd.iterdir():
-        m = _PRE_RE.match(f.name)
+    for f in folder.iterdir():
+        m = pattern.match(f.name)
         if not m or not f.is_file():
             continue
         try:
@@ -491,6 +491,33 @@ def _pre_copies(d: Path | None = None) -> list[tuple[float, Path]]:
             t = f.stat().st_mtime
         out.append((t, f))
     return sorted(out, key=lambda x: (x[0], x[1].name), reverse=True)
+
+
+def _pre_copies(d: Path | None = None) -> list[tuple[float, Path]]:
+    return _dated_copies(pre_migration_dir(d), _PRE_RE)
+
+
+def _apply_copy_rule(copies: list[tuple[float, Path]], now: float | None) -> list[str]:
+    """사본 보관 규칙: 가장 새 것은 늘 남기고, 나머지는 새것부터 PRE_MIGRATION_KEEP 개 안·PRE_MIGRATION_DAYS 일 이내만. 지운 이름 목록.
+    SQLite 곁 파일(-wal·-shm)도 함께 지운다."""
+    import time as _time
+    now = _time.time() if now is None else now
+    gone = []
+    for i, (t, f) in enumerate(copies):
+        if i == 0:
+            continue
+        if i >= PRE_MIGRATION_KEEP or now - t > PRE_MIGRATION_DAYS * 86400:
+            try:
+                f.unlink()
+                gone.append(f.name)
+            except OSError:
+                continue
+            for ext in ("-wal", "-shm"):
+                try:
+                    Path(str(f) + ext).unlink()
+                except OSError:
+                    pass
+    return gone
 
 
 def pre_migration_info(d: Path | None = None) -> dict:
@@ -502,19 +529,16 @@ def pre_migration_info(d: Path | None = None) -> dict:
 
 def pre_migration_retention(d: Path | None = None, now: float | None = None) -> list[str]:
     """보관 규칙을 벗어난 사전 사본을 지운다(가장 새 것은 늘 남김). 지운 파일 이름 목록."""
-    import time as _time
-    now = _time.time() if now is None else now
-    gone = []
-    for i, (t, f) in enumerate(_pre_copies(d)):
-        if i == 0:
-            continue
-        if i >= PRE_MIGRATION_KEEP or now - t > PRE_MIGRATION_DAYS * 86400:
-            try:
-                f.unlink()
-                gone.append(f.name)
-            except OSError:
-                pass
-    return gone
+    return _apply_copy_rule(_pre_copies(d), now)
+
+
+# 복원 전 DB 사본(state/pc.db.before-restore-*): 업데이트 사전 사본과 같은 개인정보 든 DB 사본이므로 같은 규칙으로 정리한다.
+_RESTORE_RE = re.compile(r"^pc\.db\.before-restore-(\d{8}-\d{6})(?:-\d+)?$")
+
+
+def restore_copy_retention(d: Path | None = None, now: float | None = None) -> list[str]:
+    """보관 규칙을 벗어난 복원 전 사본(곁 파일 포함)을 지운다(가장 새 것은 늘 남김). 지운 파일 이름 목록."""
+    return _apply_copy_rule(_dated_copies(d or state_dir(), _RESTORE_RE), now)
 
 
 def run_migrations(con, path: Path | None = None) -> list[int]:
@@ -792,7 +816,10 @@ def restore_from(src: Path, passphrase: str) -> dict:
     bcon.close()
     kept = None
     if cur.exists():
-        kept = d / f"pc.db.before-restore-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        stamp = _dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+        kept, k = d / f"pc.db.before-restore-{stamp}", 1
+        while kept.exists():  # 같은 초에 두 번 복원(보관 정리는 '-n' 이름도 같은 사본으로 본다)
+            kept, k = d / f"pc.db.before-restore-{stamp}-{k}", k + 1
         cur.rename(kept)
         for ext in ("-wal", "-shm"):
             side = Path(str(cur) + ext)

@@ -174,6 +174,7 @@ def daily_tasks(con, lock=None, read_con_factory=None, today: str | None = None)
                          ("access_retention", lambda: _locked(guard, lambda: PV.purge_old_access(con))),
                          ("backup_retention", lambda: len(_locked(guard, lambda: BK.run_retention(con)))),
                          ("pre_migration_retention", lambda: _pre_migration_retention(con, guard)),
+                         ("restore_copy_retention", lambda: _restore_copy_retention(con, guard)),
                          ("verify_quick", lambda: _verify_quick(con, lock, read_con_factory))):
             try:
                 out[name] = fn()
@@ -204,6 +205,17 @@ def _pre_migration_retention(con, guard, state_dir: Path | None = None, now: flo
             with S.tx(con):
                 S.audit(con, "backup", "pre-migration", "PURGE", {"count": len(gone), "files": ",".join(gone)[:500],
                                                                   "keep": store.PRE_MIGRATION_KEEP, "days": store.PRE_MIGRATION_DAYS})
+    return len(gone)
+
+
+def _restore_copy_retention(con, guard, state_dir: Path | None = None, now: float | None = None) -> int:
+    """복원 때 옆에 남긴 이전 업무 DB(state/pc.db.before-restore-*, 개인정보 포함)에 사전 사본과 같은 보관 규칙 적용. 지운 개수."""
+    gone = store.restore_copy_retention(state_dir, now=now)
+    if gone:
+        with guard:
+            with S.tx(con):
+                S.audit(con, "backup", "before-restore", "PURGE", {"count": len(gone), "files": ",".join(gone)[:500],
+                                                                   "keep": store.PRE_MIGRATION_KEEP, "days": store.PRE_MIGRATION_DAYS})
     return len(gone)
 
 
