@@ -286,7 +286,8 @@ def import_recon(con, raw: bytes, preview: bool = True) -> dict:
             note = f"대사 파일의 납부방법: {x['method']}" if method != x["method"] and x["method"] else ""
             con.execute("""INSERT INTO payment (id, request_id, kind, amount, method, paid_on, note, recorded_at, receipt_ref, source)
                 VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], note, C.now(), x["ref"] or None))
-            C.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사"})
+            C.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사",
+                                                 **C._after_close(con, x["request_id"])})
         iid = str(uuid.uuid4())
         con.execute("INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json) VALUES (?,?,?,?,?,?,?)",
                     (iid, sha, C.now(), C.ACTOR.get(), res["total"], len(matched), json.dumps(res["counts"], ensure_ascii=False)))
@@ -470,7 +471,8 @@ def pay_refund(con, cid: str, data: dict) -> dict:
                     (pid, c["request_id"], "REFUND", c["amount"], method, paid_on, "환불 결재 지급", C.now()))
         con.execute("""UPDATE refund_case SET status='PAID', paid_on=?, pay_method=?, account_checked=?, account_last4=?, paid_by=?, paid_at=?, payment_id=? WHERE id=?""",
                     (paid_on, method, 1 if checked else 0, last4 or None, C.ACTOR.get(), C.now(), pid, cid))
-        C.audit(con, "refund", cid, "PAY", {"request": c["request_id"], "amount": c["amount"], "method": method, "account_checked": checked})
+        C.audit(con, "refund", cid, "PAY", {"request": c["request_id"], "amount": c["amount"], "method": method, "account_checked": checked,
+                                            **C._after_close(con, c["request_id"])})  # 마감한 날 접수면 마감 화면 '마감 후 수정'에
     return D.payment_status(con, c["request_id"])
 
 

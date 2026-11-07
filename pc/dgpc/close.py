@@ -41,15 +41,18 @@ def _carry(con, c: dict, work_date: str):
 
 
 def _post_close_edits(con, work_date: str) -> list[dict]:
-    """마감한 뒤 그날 접수·수납을 고친 기록(변경 이력의 '마감 후 수정' 표시)."""
+    """마감한 뒤 그날 접수·수납·환불 지급을 고친 기록(변경 이력의 '마감 후 수정' 표시)."""
     out = []
     for a in rows(con, """SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log
-            WHERE after_close=? AND entity IN ('request','payment') ORDER BY id""", (work_date,)):
+            WHERE after_close=? AND entity IN ('request','payment','refund') ORDER BY id""", (work_date,)):
         d = json.loads(a["detail"] or "{}")
         rid = a["entity_id"] if a["entity"] == "request" else d.get("request")
         rq = one(con, "SELECT receipt_no FROM request WHERE id=?", (rid,)) if rid else None
-        out.append({"at": a["at"], "actor": a["actor"], "entity": a["entity"], "action": a["action"], "request_id": rid,
-                    "receipt_no": rq["receipt_no"] if rq else "", "reason": d.get("reason") or ""})
+        out.append({"at": a["at"], "actor": a["actor"], "entity": a["entity"], "request_id": rid, "receipt_no": rq["receipt_no"] if rq else "",
+                    # 환불의 PAY 는 '지급'(수납의 '납부'와 다름). 대사 반영은 사유 대신 출처를 보인다
+                    "action": "REFUND_PAY" if a["entity"] == "refund" and a["action"] == "PAY" else a["action"],
+                    "reason": d.get("reason") or (f"{d['amount']:,}원" if a["entity"] == "refund" and isinstance(d.get("amount"), int) else "")
+                    or (f"출처 {d['source']}" if d.get("source") else "")})
     return out
 
 

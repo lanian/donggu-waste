@@ -193,7 +193,11 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
         old_items = {i["line_id"]: i for i in rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))}
         new_ids = {i["line_id"] for i in items}
         for lid in locked:
-            if lid in old_items and (lid not in new_ids or next(i for i in items if i["line_id"] == lid)["qty"] != old_items[lid]["qty"]):
+            if lid not in old_items:
+                continue
+            nw = next((i for i in items if i["line_id"] == lid), None)
+            # 수량·삭제뿐 아니라 품목(수수료표 행·이름)도: 수거한 뒤 같은 줄의 단가가 다른 품목 것으로 바뀌지 않게
+            if nw is None or nw["qty"] != old_items[lid]["qty"] or nw["fee_rate_id"] != old_items[lid]["fee_rate_id"]                     or (not nw["fee_rate_id"] and nw["name"] != old_items[lid]["name"]):
                 raise UserError(f"현장 결과가 있는 품목({old_items[lid]['name']})은 바꾸거나 지울 수 없습니다.")
         flag = _after_close(con, rid)
         con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
@@ -215,8 +219,11 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
                     # 이미 받은 품목은 접수 때 단가·수수료표 버전을 그대로 둔다(그 뒤 개정으로 바뀌지 않음). 수량만 바뀌면 같은 단가로 다시 셈
                     con.execute("UPDATE request_item SET qty=?, amount=? WHERE line_id=?", (it["qty"], o["unit_price"] * it["qty"], it["line_id"]))
                 else:
-                    con.execute("UPDATE request_item SET qty=?, amount=?, unit_price=?, price_status=?, fee_version_id=? WHERE line_id=?",
-                                (it["qty"], it["amount"], it["unit_price"], it["price_status"], it["fee_version_id"], it["line_id"]))
+                    # 품목을 바꾼 경우도 있으므로 이름·규격·단위까지 새 품목으로(전에는 단가만 바뀌고 이름은 옛 품목으로 남았다)
+                    con.execute("""UPDATE request_item SET qty=?, amount=?, unit_price=?, price_status=?, fee_version_id=?, fee_rate_id=?, name=?, spec=?,
+                        unit=?, unit_label=? WHERE line_id=?""",
+                                (it["qty"], it["amount"], it["unit_price"], it["price_status"], it["fee_version_id"], it["fee_rate_id"], it["name"],
+                                 it["spec"], it["unit"], it["unit_label"], it["line_id"]))
             else:
                 _insert_item(con, rid, it)
         released = False
