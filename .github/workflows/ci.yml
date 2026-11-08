@@ -92,6 +92,8 @@ jobs:
           - test_review_followup_ui
           - test_dong_work_ui
           - test_dong_work_e2e
+          - test_pc_item_picker
+          - test_pc_item_picker_flow
           - test_workflow
           - test_pc_startup
           - test_reports_labels_api

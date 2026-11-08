@@ -1,7 +1,7 @@
 // 서비스 워커: 앱 파일을 저장해 오프라인으로 실행하고, 바탕 지도 조각을 크기 한도 안에서 보관한다. 업무 자료는 다루지 않는다.
 // 주소 검색(business.juso.go.kr) 응답은 저장하지 않는다(다른 출처 요청은 아래에서 그대로 통과).
 // 새 버전은 자동 적용하지 않고, 앱 화면의 [업데이트]를 눌러야 바뀐다.
-const VERSION = '0.14.0';
+const VERSION = '0.14.1';
 const CACHE = 'dg-app-' + VERSION;
 const FILES = ['./', './index.html', './style.css', './app.js', './proto.js', './store.js', './fees.js', './fees-data.js', './labels-data.js', './load.js', './backup.js', './map.js',
   './field.js', './bio.js', './nav.js', './juso.js', './core.js', './widgets.js',

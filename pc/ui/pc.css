@@ -227,6 +227,65 @@ td.code { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .results button:hover { background: var(--hover); }
 .results button.on { background: var(--navy-tint); box-shadow: inset 4px 0 0 var(--navy-2); }
 .results .p { color: var(--muted); margin-left: 8px; } .results .w { color: var(--warn); margin-left: 8px; font-size: 0.8571rem; }
+
+/* 전화·동별 접수: 물건명 → 규격 → 수량을 같은 영역에서 선택한다. */
+.waste-picker { min-width: 0; color: var(--ink); }
+.waste-picker .wp-search { margin: 0 0 10px; }
+.waste-picker .wp-search input { flex: 1; min-width: 0; width: 100%; min-height: 42px; font-size: 1rem; }
+.waste-picker .wp-categories { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.waste-picker .wp-category { min-height: 34px; padding: 5px 10px; font-size: .83rem; border-radius: 6px; background: var(--surface); }
+.waste-picker .wp-category[aria-pressed="true"] { background: var(--navy-tint); border-color: var(--navy-2); color: var(--ink); font-weight: 700; }
+.waste-picker .wp-browser { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.waste-picker .wp-browser-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 12px; background: var(--th-bg); border-bottom: 1px solid var(--line-2); }
+.waste-picker .wp-heading { flex: 1; margin: 0; font-size: .84rem; font-weight: 600; line-height: 1.5; min-width: 150px; }
+.waste-picker .wp-browser-head button { font-size: .78rem; }
+.waste-picker .wp-catalog { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(9rem, 100%), 1fr)); gap: 7px; padding: 9px; max-height: 270px; overflow: auto; }
+.waste-picker .wp-object { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 5px; min-width: 0; min-height: 64px; padding: 9px 11px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.waste-picker .wp-object:hover { background: var(--hover); border-color: var(--navy-2); }
+.waste-picker .wp-object strong { font-size: .9rem; line-height: 1.4; overflow-wrap: anywhere; }
+.waste-picker .wp-object-meta { font-size: .75rem; font-weight: 400; color: var(--muted); }
+.waste-picker .wp-specs { margin: 0; border: 0; border-radius: 0; max-height: 260px; }
+.waste-picker .wp-specs button { display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 10px 12px; }
+.waste-picker .wp-spec-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
+.waste-picker .wp-spec-copy strong { font-size: .88rem; }
+.waste-picker .wp-spec-copy > span { font-size: .84rem; line-height: 1.5; }
+.waste-picker .wp-price { display: flex; align-items: flex-end; flex-direction: column; gap: 5px; flex-shrink: 0; }
+.waste-picker .wp-price .p { margin: 0; font-weight: 700; color: var(--ink); font-size: .85rem; }
+.waste-picker .wp-price small { color: var(--muted); font-size: .72rem; }
+.waste-picker .wp-specs button.on .wp-price small { color: var(--info); font-weight: 700; }
+.waste-picker .wp-selected { padding: 12px; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--th-bg); scroll-margin-top: calc(var(--top-h) + 16px); scroll-margin-bottom: 110px; }
+.waste-picker .wp-selected.has-choice { border-color: var(--navy-2); background: var(--navy-tint); }
+.waste-picker .wp-choice { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.waste-picker .wp-choice strong { font-size: .94rem; }
+.waste-picker .wp-choice > span { font-size: .82rem; line-height: 1.5; color: var(--muted); }
+.waste-picker .wp-add-row { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
+.waste-picker .wp-quantity { display: flex; flex-direction: column; gap: 4px; margin: 0; font-size: .78rem; font-weight: 600; }
+.waste-picker .wp-stepper { display: flex; align-items: stretch; }
+.waste-picker .wp-stepper button { width: 34px; min-height: 38px; border-radius: 5px 0 0 5px; padding: 0; font-size: 1.1rem; }
+.waste-picker .wp-stepper button:last-child { border-radius: 0 5px 5px 0; }
+.waste-picker .wp-stepper input { width: 60px; min-width: 0; min-height: 38px; text-align: center; border-radius: 0; border-left: 0; border-right: 0; padding: 5px; }
+.waste-picker .wp-amount { display: flex; flex: 1; flex-direction: column; gap: 4px; align-self: center; min-width: 90px; }
+.waste-picker .wp-amount small { font-size: .72rem; color: var(--muted); }
+.waste-picker .wp-subtotal { font-size: 1rem; font-variant-numeric: tabular-nums; }
+.waste-picker .wp-add-row > button { min-height: 40px; }
+.waste-picker .wp-message { margin: 8px 0 0; color: var(--bad); font-size: .82rem; }
+.waste-picker .wp-status { margin: 8px 0 0; color: var(--ok-fg); font-size: .83rem; line-height: 1.5; }
+.waste-picker .wp-message:empty, .waste-picker .wp-status:empty { display: none; }
+.waste-picker .wp-help { margin: 8px 0 12px; color: var(--muted); font-size: .76rem; line-height: 1.6; }
+.waste-picker .wp-free { border-top: 1px solid var(--line-2); padding-top: 8px; }
+.waste-picker .wp-free-fields { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 0; }
+.waste-picker .wp-free-fields > input:first-child { flex: 1 1 180px; min-width: 0; }
+.waste-picker .wp-free-fields input[type=number] { width: 70px; min-width: 0; }
+.waste-picker .wp-source { margin-top: 8px; color: var(--muted); font-size: .75rem; }
+.waste-picker .wp-source summary { cursor: pointer; }
+.waste-picker [hidden] { display: none !important; }
+@media (max-width: 700px) {
+  .waste-picker .wp-category { min-height: 40px; }
+  .waste-picker .wp-specs button { gap: 8px; }
+  .waste-picker .wp-price { max-width: 48%; flex-shrink: 1; text-align: right; }
+  .waste-picker .wp-add-row > button { flex: 1 1 100%; min-height: 42px; }
+  .waste-picker .wp-free-fields > button { flex: 1 1 100%; }
+}
 details.free { margin: 6px 0; } details.free summary { cursor: pointer; color: var(--muted); font-size: 0.8929rem; font-weight: 600; padding: 4px 0; }
 /* 이름-값 목록: 표처럼 */
 dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0; margin: 0 0 10px; border-top: 2px solid var(--navy); border-left: 1px solid var(--grid-line); font-size: 0.9286rem; }

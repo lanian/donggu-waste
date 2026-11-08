@@ -188,6 +188,7 @@ def form_regressions(browser, url):
         dlg.get_by_role('button', name='주소로 위치 찾기', exact=True).click()
         expect(dlg.get_by_label('위도', exact=True)).to_have_value('35.145')
         dlg.get_by_label('품목명·규격 검색', exact=True).fill('의자')
+        dlg.locator('.results button').first.click()  # 여러 규격은 먼저 명시적으로 선택한다.
         dlg.get_by_label('품목명·규격 검색', exact=True).press('Enter')
         expect(dlg.locator('.dw-item-row')).to_have_count(1)
         expect(dlg.locator(':scope > .msg')).to_have_text('')
@@ -304,6 +305,7 @@ def duplicate_scope_regressions(browser, url):
         dlg.get_by_label('배출 주소', exact=True).fill('가상로 10')
         dlg.get_by_label('접수 행정동', exact=True).select_option('d2')
         dlg.get_by_label('품목명·규격 검색', exact=True).fill('의자')
+        dlg.locator('.results button').first.click()  # 여러 규격은 먼저 명시적으로 선택한다.
         dlg.get_by_label('품목명·규격 검색', exact=True).press('Enter')
         page.evaluate("window.__duplicateDongs=['d1','d2']")
         dlg.get_by_role('button', name='접수 저장', exact=True).click()

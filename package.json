@@ -13,9 +13,10 @@
     "test:workflow": "python3 tests/test_workflow.py && python3 tests/test_mobile_cleanup.py",
     "test:startup": "python3 tests/test_pc_startup.py",
     "test:design": "python3 tests/test_pc_design.py",
-    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_pc.py && python3 tests/test_review_ui.py && python3 tests/test_review_followup_ui.py && python3 tests/test_dong_work_ui.py && python3 tests/test_dong_work_e2e.py && python3 tests/test_reports_labels_api.py && python3 tests/test_reports_labels_ui.py && python3 tests/test_pc_report_presentation.py && python3 tests/test_reports_labels_e2e.py && npm run test:workflow && npm run test:startup",
+    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_pc.py && python3 tests/test_review_ui.py && python3 tests/test_review_followup_ui.py && python3 tests/test_dong_work_ui.py && python3 tests/test_dong_work_e2e.py && python3 tests/test_pc_item_picker.py && python3 tests/test_pc_item_picker_flow.py && python3 tests/test_reports_labels_api.py && python3 tests/test_reports_labels_ui.py && python3 tests/test_pc_report_presentation.py && python3 tests/test_reports_labels_e2e.py && npm run test:workflow && npm run test:startup",
     "test:all": "npm run check:version && npm test && npm run test:pc && npm run test:desktop && npm run test:e2e",
-    "test:dongs": "python3 tests/test_dong_work.py && python3 tests/test_dong_work_ui.py && python3 tests/test_dong_work_e2e.py"
+    "test:dongs": "python3 tests/test_dong_work.py && python3 tests/test_dong_work_ui.py && python3 tests/test_dong_work_e2e.py",
+    "test:items": "python3 tests/test_pc_item_picker.py && python3 tests/test_pc_item_picker_flow.py"
   },
   "devDependencies": {
     "jsqr": "1.4.0",

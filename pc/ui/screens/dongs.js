@@ -202,8 +202,6 @@ async function screenDongs() {
     if (picker) {
       const query = picker.querySelector('input[type=search]');
       query.setAttribute('aria-label', '품목명·규격 검색');
-      // 공통 picker의 추가 단추는 실제 행 선택 후 활성화된다. Enter도 같은 선택 경로를 거친다.
-      query.addEventListener('keydown', (e) => { if (e.key === 'Enter' && query.value && !picker.querySelector('.results button.on')) picker.querySelector('.results button')?.click(); }, true);
     }
     form = h('div', { class: 'dong-workspace dw-form', 'data-dong-owner': identity, oninput: remember, onchange: remember },
       h('p', { class: 'dw-form-context' }, `${isNew ? '새 접수' : request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, request ? statusChip(request.status) : null),

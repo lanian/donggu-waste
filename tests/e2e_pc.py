@@ -314,7 +314,7 @@ def run():
                 page.get_by_label("방문 약속 시작").fill(appt[0]); page.get_by_label("방문 약속 끝").fill(appt[1])
             page.get_by_placeholder(re.compile("품목명·규격")).fill(query)
             page.locator(".results button").first.click()
-            page.locator(".row", has=page.get_by_placeholder(re.compile("품목명·규격"))).locator("input[type=number]").fill(str(qty))
+            page.locator(".waste-picker").get_by_label("추가 수량", exact=True).fill(str(qty))
             page.get_by_role("button", name="품목 추가", exact=True).click()
             if click_map:
                 canvas = page.locator(".mapbox canvas")

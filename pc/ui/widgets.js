@@ -5,45 +5,158 @@ import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
 import { FEES, api, btn, grid, h, kst, liveMaps, toast } from './core.js';
 
+let pickerSequence = 0;
 function itemPicker(onAdd, { usagePath = 'fee-usage' } = {}) {
-  const st = { q: '', sel: null, qty: 1 };
-  const q = h('input', { type: 'search', placeholder: '품목명·규격 검색 (예: 3인용 소파, 장롱, 2인용 매트리스)', style: 'flex:1' });
-  const list = h('div', { class: 'results' });
-  const qty = h('input', { type: 'number', min: 1, value: 1, style: 'width:80px' });
+  const maxQty = 9999, quantityId = `item-picker-qty-${++pickerSequence}`;
+  const st = { q: '', category: 'quick', group: null, sel: null };
+  const q = h('input', { type: 'search', placeholder: '품목명·규격 검색 (예: 소파, 장농, ㅈㄹ)', 'aria-label': '품목명·규격 검색', autocomplete: 'off' });
+  const heading = h('p', { class: 'wp-heading' }), catalog = h('div', { class: 'wp-catalog' });
+  const list = h('div', { class: 'results wp-specs', 'aria-label': '물건 규격' });
+  const qty = h('input', { id: quantityId, type: 'number', min: 1, max: maxQty, step: 1, value: 1, inputmode: 'numeric', 'aria-label': '추가 수량' });
   const add = btn('품목 추가', null, 'primary', { disabled: true });
-  let usage = [];
-  if (usagePath) api(usagePath).then((u) => { usage = u; draw(); }).catch(() => {});
-  const draw = () => {
-    const quick = !st.q;
-    const rows = quick ? usage.map((id) => FEES().rows.find((r) => r.id === id)).filter(Boolean) : searchFees(FEES(), st.q).slice(0, 40);
-    list.replaceChildren(...rows.map((r) => btn(h('span', {}, `${r.name} ${r.spec}`, h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
-      r.status === 'REVIEW' ? h('span', { class: 'w' }, '규격 확인 필요 → 금액 확인 대기') : null), () => { st.sel = r.id; draw(); }, st.sel === r.id ? 'on' : '')));
-    list.style.display = rows.length ? '' : 'none';
-    if (quick && rows.length) list.prepend(h('p', { class: 'muted', style: 'margin:4px 8px' }, '자주 쓰는 품목'));
-    add.disabled = !st.sel;
-  };
-  q.addEventListener('input', () => { st.q = q.value; st.sel = null; draw(); }); // 검색어가 바뀌면 선택 해제
-  // 키보드로만: Enter = 고른 행(없으면 첫 결과) 추가, ↓ = 결과로 이동, 수량 칸에서 Enter = 추가
+  const selectedCopy = h('div', { class: 'wp-choice' }), subtotal = h('strong', { class: 'wp-subtotal' });
+  const message = h('p', { class: 'wp-message', role: 'alert' }), status = h('p', { class: 'wp-status', role: 'status' });
+  let usage = [], root;
+  const key = (r) => JSON.stringify([r.category, r.name]);
+  const validQty = (input) => Number.isInteger(+input.value) && +input.value > 0 && +input.value <= maxQty;
+  const confirmed = (r) => r.status === 'CONFIRMED' && r.price != null;
+  const minus = btn('−', () => step(-1), '', { 'aria-label': '수량 줄이기' });
+  const plus = btn('+', () => step(1), '', { 'aria-label': '수량 늘리기' });
+  const selected = h('section', { class: 'wp-selected', 'aria-label': '선택한 물건' }, selectedCopy,
+    h('div', { class: 'wp-add-row' }, h('div', { class: 'wp-quantity' }, h('label', { for: quantityId }, '수량'), h('span', { class: 'wp-stepper' }, minus, qty, plus)),
+      h('div', { class: 'wp-amount' }, h('small', {}, '이 품목 금액'), subtotal), add), message);
+  const back = btn('← 다른 물건 선택', () => { st.group = null; st.sel = null; draw(); q.focus(); }, 'small');
+  const categories = [['quick', '빠른 선택'], ['all', '전체'], ...[...new Set(FEES().rows.map((r) => r.category))].map((c) => [c, c])];
+  const categoryButtons = categories.map(([value, label]) => btn(label, () => {
+    st.category = value; st.group = null; st.sel = null; st.q = ''; q.value = ''; status.textContent = ''; draw();
+  }, 'wp-category', { 'aria-pressed': value === st.category ? 'true' : 'false' }));
+
+  function groups() {
+    const map = new Map();
+    for (const r of FEES().rows) { const k = key(r); if (!map.has(k)) map.set(k, []); map.get(k).push(r); }
+    return map;
+  }
+  function showChoice() {
+    const row = FEES().rows.find((r) => r.id === st.sel);
+    add.disabled = !row; qty.disabled = !row; plus.disabled = !row || +qty.value >= maxQty; minus.disabled = !row || !Number.isInteger(+qty.value) || +qty.value <= 1;
+    selected.classList.toggle('has-choice', !!row);
+    if (!row) {
+      selectedCopy.replaceChildren(h('strong', {}, '규격을 선택하세요'), h('span', {}, '물건과 규격을 확인한 뒤 수량을 정해 추가합니다.'));
+      subtotal.textContent = '—';
+      return;
+    }
+    selectedCopy.replaceChildren(h('strong', {}, row.name), h('span', {}, `${row.spec || '단일 규격'} · ${confirmed(row) ? won(row.price) : '금액 확인 대기'} / ${row.unit_label}`));
+    subtotal.textContent = !validQty(qty) ? '수량 확인' : confirmed(row) ? won(row.price * +qty.value) : '금액 확인 대기';
+  }
+  function choose(row) {
+    st.sel = row.id; draw(); qty.focus({ preventScroll: true }); selected.scrollIntoView({ block: 'nearest' });
+  }
+  function draw() {
+    categoryButtons.forEach((button, i) => button.setAttribute('aria-pressed', String(categories[i][0] === st.category)));
+    message.textContent = ''; qty.removeAttribute('aria-invalid');
+    const allGroups = groups();
+    const rows = st.q ? searchFees(FEES(), st.q) : st.group ? allGroups.get(st.group) || [] : [];
+    if (st.sel && !rows.some((r) => r.id === st.sel)) st.sel = null;
+    const browsing = !st.q && !st.group;
+    catalog.hidden = !browsing; list.hidden = browsing || !rows.length; back.hidden = !st.group;
+    if (browsing) {
+      let keys = [...allGroups.keys()].filter((k) => st.category === 'all' || st.category === 'quick' || allGroups.get(k)[0].category === st.category);
+      const examples = new Map(['소파', '장롱', '매트리스', '의자', '책상', '냉장고', '세탁기', '식탁']
+        .flatMap((name) => searchFees(FEES(), name).slice(0, 1).map((row) => [key(row), row.spec])));
+      if (st.category === 'quick') {
+        const popular = usage.map((id) => FEES().rows.find((r) => r.id === id)).filter(Boolean).map(key);
+        keys = [...new Set([...popular, ...examples.keys(), ...keys])].slice(0, 8);
+      }
+      heading.textContent = st.category === 'quick' ? '물건을 고르면 규격을 비교할 수 있습니다' : `${st.category === 'all' ? '전체 분류' : st.category} · 물건 ${keys.length}종`;
+      catalog.replaceChildren(...keys.map((k) => {
+        const variants = allGroups.get(k), first = variants[0], prices = variants.filter(confirmed).map((r) => r.price);
+        const price = !prices.length ? '금액 확인 대기' : Math.min(...prices) === Math.max(...prices) ? won(prices[0]) : `${won(Math.min(...prices))} ~ ${won(Math.max(...prices))}`;
+        return btn(h('strong', {}, first.name), () => {
+          st.group = k; st.sel = variants.length === 1 ? first.id : null; draw();
+          if (variants.length === 1) { qty.focus(); } else { list.querySelector('button')?.focus(); }
+        }, 'wp-object', { 'aria-label': `${first.name} · 규격 ${variants.length}개`, title: `${variants.length}개 규격 · ${price}` });
+      }));
+      [...catalog.children].forEach((button, i) => {
+        const variants = allGroups.get(keys[i]);
+        const example = examples.get(keys[i]) || variants[0].spec;
+        button.append(h('span', { class: 'wp-object-meta' }, example ? `${example} 등 · ` : '', `규격 ${variants.length}개`, variants.some((r) => !confirmed(r)) ? ' · 확인 대기 포함' : ''));
+      });
+    } else {
+      heading.textContent = st.q ? (rows.length ? `검색 결과 · 규격 ${rows.length}개` : '맞는 물건이 없습니다. 다른 이름으로 찾거나 아래에서 확인 대기로 추가하세요.')
+        : `${rows[0]?.name || ''} · 규격 ${rows.length}개 중 선택`;
+    }
+    list.replaceChildren(...rows.map((r) => btn(h('span', { class: 'wp-spec-copy' }, h('strong', {}, r.name), h('span', {}, r.spec || '단일 규격')),
+      () => choose(r), st.sel === r.id ? 'on' : '', { 'data-fee-id': r.id, 'aria-pressed': String(st.sel === r.id) })));
+    [...list.children].forEach((button, i) => button.append(h('span', { class: 'wp-price' },
+      h('span', { class: 'p' }, `${confirmed(rows[i]) ? won(rows[i].price) : '금액 확인 대기'} / ${rows[i].unit_label}`),
+      h('small', {}, st.sel === rows[i].id ? '✓ 선택됨' : confirmed(rows[i]) ? '선택' : '규격 확인 필요'))));
+    showChoice();
+  }
+  function step(delta) {
+    qty.value = Math.min(maxQty, Math.max(1, (Number.isInteger(+qty.value) ? +qty.value : 1) + delta));
+    qty.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  function checkQuantity(input) {
+    if (validQty(input)) return true;
+    input.setAttribute('aria-invalid', 'true'); message.textContent = `수량은 1~${maxQty} 사이의 정수로 입력하세요.`; input.focus();
+    return false;
+  }
+  function finished(name, count, unit, pending = false) {
+    st.sel = null; st.group = null; st.q = ''; q.value = ''; qty.value = 1;
+    if (st.category === 'all') st.category = 'quick';
+    draw(); status.textContent = `${name} ${count}${unit} 추가했습니다.${pending ? ' 금액은 확인 대기입니다.' : ''}`;
+  }
+  q.addEventListener('input', () => {
+    st.q = q.value.trim(); st.group = null; st.category = 'all';
+    const rows = searchFees(FEES(), st.q); st.sel = rows.length === 1 ? rows[0].id : null;
+    status.textContent = ''; draw();
+  });
   q.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { const b = list.querySelector('button'); if (b) { e.preventDefault(); b.focus(); } }
-    else if (e.key === 'Enter' && st.q) { e.preventDefault(); if (!st.sel) { const first = searchFees(FEES(), st.q)[0]; if (first) st.sel = first.id; } if (st.sel) add.click(); }
+    if (e.isComposing || e.keyCode === 229 || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'ArrowDown' || e.key === 'Enter' && !st.sel) {
+      const button = list.querySelector('button') || catalog.querySelector('button');
+      if (button) { e.preventDefault(); button.focus(); }
+    } else if (e.key === 'Enter' && st.sel) { e.preventDefault(); add.click(); }
   });
   list.addEventListener('keydown', (e) => {
-    const bs = [...list.querySelectorAll('button')], i = bs.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown' && i >= 0 && bs[i + 1]) { e.preventDefault(); bs[i + 1].focus(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? bs[i - 1] : q).focus(); }
+    const buttons = [...list.querySelectorAll('button')], i = buttons.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' && i >= 0 && buttons[i + 1]) { e.preventDefault(); buttons[i + 1].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? buttons[i - 1] : q).focus(); }
   });
-  qty.addEventListener('keydown', (e) => { if (e.key === 'Enter' && st.sel) { e.preventDefault(); add.click(); } });
-  add.addEventListener('click', () => { const r = FEES().rows.find((x) => x.id === st.sel); if (!r) return; onAdd({ fee_rate_id: r.id, qty: Math.max(1, +qty.value || 1), _row: r }); st.sel = null; q.value = ''; st.q = ''; qty.value = 1; draw(); });
+  qty.addEventListener('input', () => { qty.removeAttribute('aria-invalid'); message.textContent = ''; showChoice(); });
+  qty.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && !e.ctrlKey && !e.metaKey && !e.altKey && st.sel) { e.preventDefault(); add.click(); } });
+  add.addEventListener('click', () => {
+    const row = FEES().rows.find((r) => r.id === st.sel);
+    if (!row || !checkQuantity(qty)) return;
+    const count = +qty.value;
+    onAdd({ fee_rate_id: row.id, qty: count, _row: row });
+    finished(`${row.name} ${row.spec}`, count, row.unit_label, !confirmed(row)); q.focus();
+  });
   const fname = h('input', { placeholder: '목록에 없는 품목 이름' });
-  const funit = h('select', {}, ...[['EA', '개'], ['PIECE', '쪽'], ['SET', '세트'], ['L20', '20ℓ당']].map(([v, t]) => h('option', { value: v }, t)));
-  const fqty = h('input', { type: 'number', min: 1, value: 1, style: 'width:80px' });
-  const fadd = btn('확인 대기로 추가', () => { if (!fname.value.trim()) return toast('품목 이름을 적어 주세요', true); onAdd({ name: fname.value.trim(), unit: funit.value, unit_label: funit.selectedOptions[0].textContent, qty: Math.max(1, +fqty.value || 1) }); fname.value = ''; });
+  const funit = h('select', { 'aria-label': '확인 대기 부과 단위' }, ...[['EA', '개'], ['PIECE', '쪽'], ['SET', '세트'], ['L20', '20ℓ당']].map(([v, t]) => h('option', { value: v }, t)));
+  const fqty = h('input', { type: 'number', min: 1, max: maxQty, step: 1, value: 1, 'aria-label': '확인 대기 수량' });
+  const fadd = btn('확인 대기로 추가', () => {
+    if (!fname.value.trim()) { toast('품목 이름을 적어 주세요', true); fname.focus(); return; }
+    if (!checkQuantity(fqty)) return;
+    const name = fname.value.trim(), count = +fqty.value, unit = funit.selectedOptions[0].textContent;
+    onAdd({ name, unit: funit.value, unit_label: unit, qty: count });
+    fname.value = ''; fqty.value = 1; finished(name, count, unit, true); fname.focus();
+  });
+  fqty.addEventListener('input', () => { fqty.removeAttribute('aria-invalid'); message.textContent = ''; });
+  root = h('section', { class: 'waste-picker', 'aria-label': '버릴 물건 선택' },
+    h('div', { class: 'wp-search row' }, q), h('div', { class: 'wp-categories', 'aria-label': '물건 분류' }, ...categoryButtons),
+    h('div', { class: 'wp-browser' }, h('div', { class: 'wp-browser-head' }, heading, back), catalog, list), selected, status,
+    h('p', { class: 'wp-help' }, '개·쪽·20ℓ 등 부과 단위를 확인하세요. 규격이 여러 개면 고른 뒤 추가합니다.'),
+    h('details', { class: 'free wp-free' }, h('summary', {}, '목록에 없는 품목 넣기 (금액 확인 대기)'),
+      h('div', { class: 'wp-free-fields' }, fname, funit, fqty, fadd)),
+    h('details', { class: 'wp-source' }, h('summary', {}, '수수료표·확인 대기 안내'),
+      h('p', { class: 'muted small' }, `${BUILTIN_FEES.label} (${FEES().version_id}) · 표에 없는 품목은 0원이 아니라 금액 확인 대기로 남습니다. 유사 품목 적용은 담당자가 확인해 정합니다.`)));
   draw();
-  return h('div', {}, h('div', { class: 'row' }, q, qty, add), list,
-    h('p', { class: 'small muted' }, '찾은 뒤 Enter로 바로 추가, ↓로 결과 고르기'),
-    h('details', { class: 'free' }, h('summary', {}, '목록에 없는 품목 넣기 (금액 확인 대기)'), h('div', { class: 'row' }, fname, funit, fqty, fadd)),
-    h('p', { class: 'muted' }, `수수료표: ${BUILTIN_FEES.label} (${FEES().version_id}) · 표에 없는 품목은 0원이 아니라 금액 확인 대기로 남습니다. 유사 품목 적용은 담당자가 확인해 정합니다.`));
+  if (usagePath) api(usagePath).then((value) => {
+    usage = Array.isArray(value) ? value : [];
+    if (st.category === 'quick' && !st.q && !st.group && !root.contains(document.activeElement)) draw();
+  }).catch(() => {});
+  return root;
 }
 
 // ------------------------------------------------------------ 지도 도우미
