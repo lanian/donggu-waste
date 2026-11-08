@@ -2025,7 +2025,7 @@ def v13():
     m4.execute("CREATE TABLE travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY (origin, dest))")
     m4.execute("INSERT INTO travel_cache VALUES ('35.15000,126.92000','35.15100,126.92100',120,'2026-11-01T00:00:00+00:00')")
     old_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
-    ok(store.run_migrations(m4) == [5, 6, 7], "4단계 DB → 5·6·7단계 실행")
+    ok(store.run_migrations(m4) == [5, 6, 7, 8], "4단계 DB → 5·6·7·8단계 실행")
     a4 = m4.execute("SELECT sigungu, road, main, lat, dong_h, bname, jibun_main, underground, road_cd, bjd_cd, entr_sn FROM addr_point").fetchall()
     new_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
     ok(a4 == [("동구", "옛로", 3, 35.15, "가상1동", "옛빌라", 12, 0, None, None, None)] and "underground" in new_pk and "underground" not in old_pk
