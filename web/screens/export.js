@@ -4,11 +4,13 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
-import { addrRoute, ask, btn, commit, emptyState, errMsg, flowSteps, footBar, go, h, render, setSt, smsTemplates, st, toast, todayKST, ui, unsent } from '../core.js';
+import { addrRoute, ask, btn, commit, emptyState, errMsg, flowSteps, footBar, go, h, render, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
 import { APP_VERSION } from '../app.js';
 
 async function screenExport() {
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
+  const targetState = st, targetList = st.daylist, targetHash = location.hash;
+  let view, cleaning = false;
   const pending = unsent();
   const photoMetas = st.events.filter((e) => e.kind === 'PHOTO_META');
   const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
@@ -119,13 +121,54 @@ async function screenExport() {
   }, 'big');
 
   const allConfirmed = !unsent().length && st.exports.every((x) => x.confirmed);
+  const cleanupCurrent = () => view?.isConnected && location.hash === targetHash && st === targetState && st.daylist === targetList;
+  const cleanupReady = () => st === targetState && st.daylist === targetList && !!targetList && S.isUnlocked()
+    && !writesPending() && !S.hasPendingSecure('state') && !unsent().length && st.exports.every((x) => x.confirmed);
+  const cleanupBlocked = () => { toast('저장 중인 사진이나 새 기록이 있습니다. PC 반영을 확인한 뒤 다시 정리해 주세요.', 'bad'); render(); };
   const cleanup = btn('오늘 자료 정리', async () => {
-    if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
-    for (const p of allPhotos) if (recovered.has(p.photo_id)) await S.delSecureBytes('ph:' + p.photo_id);
-    const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff'].map((k) => [k, st[k]]));
-    setSt({ ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, gen: st.gen, gens: st.gens, genRestored: st.genRestored, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] });
-    await commit(); toast('정리했습니다'); go('#/home');
-  }, 'ghost', { disabled: !allConfirmed || !st.daylist });
+    if (cleaning || !cleanupCurrent()) return;
+    if (!cleanupReady()) return cleanupBlocked();
+    cleaning = true; cleanup.disabled = true;
+    const seq = st.seq;
+    // 확인창·사진 삭제를 기다리는 동안 생긴 기록이나 새 업무를 이전 화면의 확인으로 지우지 않는다.
+    const unchanged = () => {
+      if (!cleanupCurrent()) return false;
+      if (st.seq !== seq || !cleanupReady()) { cleanupBlocked(); return false; }
+      return true;
+    };
+    try {
+      if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
+      for (const p of allPhotos) if (recovered.has(p.photo_id)) {
+        if (!unchanged()) return;
+        await S.delSecureBytes('ph:' + p.photo_id);
+      }
+      if (!unchanged()) return;
+      const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff'].map((k) => [k, st[k]]));
+      const cleared = { ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, gen: st.gen, gens: st.gens, genRestored: st.genRestored, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
+      setSt(cleared);
+      const saved = await commit();
+      if (!view.isConnected || location.hash !== targetHash || st !== cleared || st.seq !== seq || !S.isUnlocked()) return;
+      if (!saved) { toast('정리 상태를 저장하지 못했습니다. 앱을 닫지 말고 저장 실패 안내를 확인해 주세요.', 'bad'); render(); return; }
+      toast('정리했습니다'); go('#/home');
+    } finally {
+      cleaning = false;
+      if (cleanupCurrent()) syncCleanup();
+    }
+  }, 'ghost', { disabled: !cleanupReady() });
+  const cleanupHint = h('p', { class: 'small' });
+  const syncCleanup = () => {
+    cleanup.disabled = cleaning || !cleanupReady();
+    cleanupHint.textContent = unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
+      : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.' : '';
+    cleanupHint.hidden = !cleanupHint.textContent;
+  };
+  const watchCleanupRecovery = () => {
+    if (!cleanupCurrent()) return;
+    syncCleanup();
+    // 저장 문제로 대기 중인 화면에서만 재확인한다. 복구되거나 화면을 떠나면 멈춘다.
+    if (writesPending() || S.hasPendingSecure('state')) setTimeout(watchCleanupRecovery, 250);
+  };
+  syncCleanup();
 
   const waitingCode = st.exports.some((x) => !x.confirmed);
   const sentPhotos = new Set((st.photoExports || []).flatMap((x) => x.ids));
@@ -142,16 +185,17 @@ async function screenExport() {
     pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'notice' },
       `이번 파일에는 현장 접수·정정 요청 ${pending.filter((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION').length}건의 이름·연락처·주소가 들어갑니다(PC가 원본을 만들거나 고치려면 필요). PC 전용 암호화는 같으며, 업무 메일이나 PC 화면 카메라로만 보내세요.`) : null,
     showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg);
-  return h('main', { class: 'with-dock' },
+  view = h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '결과 보내기')),
     flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], cur),
     waitingCode ? codeCard : null, sendCard, waitingCode ? null : codeCard,
     h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '3'), `사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`),
       h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다. PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣거나, PC가 사진을 가져온 뒤 만든 새 목록을 받으면 회수가 확인됩니다.'),
       makePhotos, pmsg, codeBox('PHOTO', pcode), pcodeMsg, pconfirm),
-    h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '5'), '정리'), cleanup,
-      allConfirmed ? null : h('p', { class: 'small' }, '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.')),
+    h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '5'), '정리'), cleanup, cleanupHint),
     footBar(make));
+  setTimeout(watchCleanupRecovery, 0);
+  return view;
 }
 // 결과 반영 코드를 넣은 뒤(또는 새 목록의 반영 정보): 결과가 끝났고(완료·일부·미수거) 그 기록이 모두 PC에 반영된 곳의 개인정보를 지운다.
 // 수량·결과 같은 기록은 사진 회수까지 남긴다. 보류·처리 전인 곳은 그대로 둔다.

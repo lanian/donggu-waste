@@ -68,6 +68,7 @@ jobs:
       - run: npm test
       - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)
       - run: python tests/test_review_server.py   # 백업 구조 버전 보존·로그인 중 계정 변경 경쟁
+      - run: python tests/test_pc_session_revocation.py   # 지연 저장·가져오기·작업 등록의 세션 취소
       - run: python tests/test_pc_reports.py
       - run: python tests/test_pc_labels.py
       - run: python tests/test_pc_labels_migration.py
@@ -79,7 +80,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [e2e, e2e_pc, test_review_ui, test_workflow, test_pc_startup, test_reports_labels_api, test_reports_labels_ui, test_reports_labels_e2e]  # 화면·복구·보고서·번호표·첫 로딩 회귀
+        # 화면·복구·보고서·번호표·작업 정리·첫 로딩 회귀
+        suite:
+          - e2e
+          - e2e_pc
+          - test_review_ui
+          - test_workflow
+          - test_pc_startup
+          - test_reports_labels_api
+          - test_reports_labels_ui
+          - test_pc_report_presentation
+          - test_reports_labels_e2e
+          - test_mobile_cleanup
     steps:
       - uses: actions/checkout@v7
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
@@ -141,6 +153,7 @@ jobs:
         run: |
           python tests/test_pc.py
           python tests/test_review_server.py
+          python tests/test_pc_session_revocation.py
           python tests/test_pc_launcher.py
           python tests/test_desktop_paths.py
           python tests/test_desktop_lifecycle.py

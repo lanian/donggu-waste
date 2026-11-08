@@ -69,12 +69,39 @@ def fetch(port):
         return json.load(response)
 
 
-def stop_created_server(pid):
-    # 이 시험 실행기가 직접 반환한 서버 PID만 정리한다. 다른 포트의 서버는 건드리지 않는다.
-    stopped = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                             capture_output=True, timeout=15)
-    if stopped.returncode:
-        raise AssertionError(f"시험 서버 종료 실패: PID {pid}")
+def stop_created_server(pid, listener_pid):
+    import ctypes
+    from ctypes import wintypes
+
+    # 실행기가 반환한 두 PID만 추적한다. 핸들을 먼저 열어 종료 대기 중 PID 재사용을 피한다.
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD]
+    kernel.WaitForMultipleObjects.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    process_ids = tuple(dict.fromkeys((pid, listener_pid)))
+    handles = []
+    try:
+        for process_id in process_ids:
+            handle = kernel.OpenProcess(0x00100000, False, process_id)  # SYNCHRONIZE
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.append(handle)
+        # taskkill 성공 뒤에도 venv 실행기의 실제 Python 자식이 잠시 살아 DB를 잡을 수 있다.
+        stopped = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                 capture_output=True, timeout=15)
+        if stopped.returncode:
+            raise AssertionError(f"시험 서버 종료 실패: PID {pid}")
+        array = (wintypes.HANDLE * len(handles))(*handles)
+        result = kernel.WaitForMultipleObjects(len(handles), array, True, 15000)
+        if result == 0xFFFFFFFF:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not 0 <= result < len(handles):
+            raise AssertionError(f"시험 서버 종료 완료 대기 실패: PID {process_ids}, 결과 {result}")
+    finally:
+        for handle in handles:
+            kernel.CloseHandle(handle)
 
 
 class OtherApp(BaseHTTPRequestHandler):
@@ -100,7 +127,7 @@ def main():
         alias = temporary / "repository with spaces"
         subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(ROOT)],
                        check=True, capture_output=True)
-        pid = None
+        pid = listener_pid = None
         try:
             state, port = temporary / "state with spaces", free_port()
             started = ready(launch(alias, state, port))
@@ -121,8 +148,8 @@ def main():
             ok(fetch(port)["setup_needed"], "재실행이 관리자 계정을 만들지 않음")
             original = (state / "pc.db").read_bytes()
             # 잘못된 키는 기존 자료를 초기화하거나 덮어쓰면 안 된다.
-            stop_created_server(pid)
-            pid = None
+            stop_created_server(pid, listener_pid)
+            pid = listener_pid = None
             failed = launch(alias, state, port, env={"DG_DB_KEY": "wrong-launcher-test-key"})
             ok(failed.returncode != 0 and "DGPC_READY " not in failed.stdout,
                "DB 키 오류를 성공으로 보고하지 않음")
@@ -158,13 +185,14 @@ def main():
                     result = ready(attempt.result(timeout=90))
                     if result["status"] == "started":
                         pid = result["started_process_id"]
+                        listener_pid = result["process_id"]
                     launches.append(result)
             ok({result["status"] for result in launches} == {"started", "existing"}
                and len({result["process_id"] for result in launches}) == 1,
                "첫 실행 두 개가 동시에 시작되어도 한 번 초기화하고 서버 하나만 실행")
         finally:
             if pid is not None:
-                stop_created_server(pid)
+                stop_created_server(pid, listener_pid)
             # junction은 링크 자체만 제거한다. 원본 저장소는 삭제하지 않는다.
             os.rmdir(alias)
     print(f"OK: PC 실행기 {PASSED}개 확인")

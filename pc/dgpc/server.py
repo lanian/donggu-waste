@@ -653,9 +653,13 @@ class Handler(BaseHTTPRequestHandler):
         key = d.get("client_req_id") if isinstance(d, dict) else None
         return S.idempotent(self.c, self.user["username"], endpoint, key, fn)
 
-    def job(self, kind: str, **kw) -> dict:
-        jid = OPS.JOBS.submit(kind, OPS.job_fn(kind, CON, LOCK, lambda: store.connect(readonly=True), **kw), self.user["username"],
-                              self.client_address[0] if LAN else "local")
+    def job(self, kind: str, **kw) -> dict | Raw:
+        with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            jid = OPS.JOBS.submit(kind, OPS.job_fn(kind, CON, LOCK, lambda: store.connect(readonly=True), **kw), self.user["username"],
+                                  self.client_address[0] if LAN else "local")
         return {"job_id": jid, "status": "QUEUED", "kind": kind}
 
     def login_ok(self, u):
@@ -667,7 +671,22 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- API 처리 함수 (경로 표: endpoint)
     # 처리 함수는 fn(self, qs, *경로 마디) → dict/list(JSON 200) | Raw(파일·상태 코드) | None(이미 보냄).
     # self.c: read → 조회 전용 연결, write → 쓰기 연결(잠금 안), none → None(함수가 read_con()/LOCK 을 스스로).
+    def _write_session_error(self) -> Raw | None:
+        """실제 반영 직전 LOCK 안에서 현재 세션·권한을 다시 확인한다. 응답은 호출자가 잠금 밖에서 보낸다."""
+        sess = SESSIONS.get(self.session() or "")
+        self.user = sess
+        S.ACTOR.set(sess["username"] if sess else "system")
+        r = self._dispatch_route
+        if not sess:
+            return json_status({"error": "로그인이 필요합니다.", "login": True}, 401)
+        if sess["role"] not in r.roles:
+            return json_status({"error": "이 작업은 권한이 없습니다."}, 403)
+        if sess.get("must_change") and not r.must_change_ok:
+            return json_status({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
+        return None
+
     def dispatch(self, r: Route, params: tuple, qs: dict):
+        self._dispatch_route = r
         if r.lock == "read":
             # 조회는 DB 잠금 없이 조회 전용 연결(WAL)로. 접속기록·이력은 잠금 안에서 쓰기 연결로 넘어간다.
             try:
@@ -687,9 +706,11 @@ class Handler(BaseHTTPRequestHandler):
             # 잠금을 붙잡아 다른 사람의 저장이 모두 멈추지 않게
             self.body()
             with LOCK:
-                self.c = CON
-                out = r.fn(self, qs, *params)
-                self.log_access(r, out, qs, params)
+                out = self._write_session_error()
+                if out is None:
+                    self.c = CON
+                    out = r.fn(self, qs, *params)
+                    self.log_access(r, out, qs, params)
             return self.send_out(out)
         return self.reply(r, r.fn(self, qs, *params), qs, params)
 
@@ -1118,6 +1139,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
             prep = S.prepare_result(rc, body) if kind == "result" else S.prepare_photos(rc, body)
         with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            if self.crew_scope() is not None and S.device_crew(CON, body) != self.crew_scope():
+                raise S.UserError("내 팀에 연결된 휴대폰의 파일만 가져올 수 있습니다.")
             if kind == "result":
                 return S.import_result(CON, body, "QR" if qs.get("channel") == "QR" else "MAIL", prepared=prep)
             return S.import_photos(CON, body, prepared=prep)
@@ -1142,25 +1168,36 @@ class Handler(BaseHTTPRequestHandler):
             with read_con() as rc:
                 return S.import_solo(rc, body, pw, qs.get("crew") or None, preview=True, opened=opened)
         with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
             return S.import_solo(CON, body, pw, qs.get("crew") or None, opened=opened)
 
     @endpoint("POST", "requests/import", WORK, lock="none")
     def ep_requests_import(self, qs):
         """접수 CSV 일괄 등록(preview=1 은 조회 전용 연결에서 미리보기)."""
+        body = self.body()
         if qs.get("preview") == "1":
             with read_con() as rc:
-                return S.import_requests(rc, self.body(), preview=True)
+                return S.import_requests(rc, body, preview=True)
         with LOCK:
-            return S.import_requests(CON, self.body(), preview=False, skip_duplicates=qs.get("skip_dup") == "1")
+            error = self._write_session_error()
+            if error:
+                return error
+            return S.import_requests(CON, body, preview=False, skip_duplicates=qs.get("skip_dup") == "1")
 
     @endpoint("POST", "recon", WORK, lock="none")
     def ep_recon(self, qs):
         """세외수입 납부 자료 대사(preview=1 은 미리보기)."""
+        body = self.body()
         if qs.get("preview") == "1":
             with read_con() as rc:
-                return FN.import_recon(rc, self.body(), preview=True)
+                return FN.import_recon(rc, body, preview=True)
         with LOCK:
-            return FN.import_recon(CON, self.body(), preview=False)
+            error = self._write_session_error()
+            if error:
+                return error
+            return FN.import_recon(CON, body, preview=False)
 
     @endpoint("POST", "addr-import", ADMIN, lock="none")
     def ep_addr_import(self, qs):
@@ -1172,6 +1209,9 @@ class Handler(BaseHTTPRequestHandler):
             with read_con() as rc:
                 return S.import_addr_points(rc, body, qs.get("region", ""), cols, preview=True, parsed=parsed)
         with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
             return S.import_addr_points(CON, body, qs.get("region", ""), cols, parsed=parsed)
 
     @endpoint("POST", "external/test", ADMIN, lock="none")
