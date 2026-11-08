@@ -1,7 +1,7 @@
 // PC 화면: 배정·노선
 import * as M from '/web/map.js';
 import * as NAV from '/web/nav.js';
-import { api, boot, btn, chip, clearMaps, confirmDlg, go, grid, h, isStale, md, post, reasonDlg, searchbox, statusChip, toast, wrap } from '../core.js';
+import { api, boot, btn, chip, clearMaps, confirmDlg, go, grid, h, isStale, md, post, reasonDlg, routeEpoch, searchbox, statusChip, toast, wrap } from '../core.js';
 import { mapIn } from '../widgets.js';
 
 // 품목별 취급 표시(적재 기준표): 사람·장비가 더 필요한 것은 주의, 싣는 방법은 안내
@@ -26,57 +26,80 @@ function kakaoLink(q, n) {
   return h('a', { class: 'small maplink', href: NAV.navUrls('kakao', { lat: q.lat, lon: q.lon, label }).fallback, target: '_blank', rel: 'noopener noreferrer',
     title: `카카오맵에서 ${label}까지 길찾기 (좌표만 전달)`, 'aria-label': `${label} 카카오맵 길찾기` }, ' 카카오맵');
 }
+let dispatchViewSeq = 0;
 async function screenDispatch() {
+  const myView = ++dispatchViewSeq, myRoute = routeEpoch, myHash = location.hash;
+  let view, requestSeq = 0;
   const s = (screenDispatch.s ||= { date: boot.today, crews: new Set(), seen: new Set(), plan: null });
   const date = h('input', { type: 'date', id: 'dp-date', value: s.date });
   const crews = boot.crews.filter((c) => c.active);
   crews.forEach((c) => { if (!s.seen.has(c.id)) { s.seen.add(c.id); s.crews.add(c.id); } });  // 새로 만든 팀은 자동으로 포함
+  const selectedCrews = () => [...s.crews].filter((id) => crews.some((c) => c.id === id));
+  const crewKey = (ids = []) => JSON.stringify([...ids].sort());
+  const current = () => view?.isConnected && myView === dispatchViewSeq && myRoute === routeEpoch && location.hash === myHash;
+  const beginRequest = () => ({ seq: ++requestSeq, date: date.value, crewIds: selectedCrews() });
+  const requestCurrent = (request) => current() && request.seq === requestSeq && request.date === date.value && crewKey(request.crewIds) === crewKey(selectedCrews());
   const calcBtn = btn('노선 계산', null, 'primary');
   const crewHint = h('span', { class: 'muted small' });
   const syncCalc = () => { const none = ![...s.crews].some((id) => crews.some((c) => c.id === id)); calcBtn.disabled = none; crewHint.textContent = none ? '팀을 하나 이상 고르세요.' : ''; };
-  const crewBox = h('div', { class: 'row crewpick' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); syncCalc(); } }),
+  const crewBox = h('div', { class: 'row crewpick' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); requestSeq++; s.edit = null; syncCalc(); draw(); } }),
     `${c.name} (${c.capacity_m3}m³${c.capacity_kg ? ` · ${Number(c.capacity_kg).toLocaleString()}kg` : ''}, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
   const msg = h('p', { class: 'msg' });
   const planMsg = h('p', { class: 'msg' });
   const out = h('div');
   const calc = wrap(async () => {
-    s.date = date.value; calcBtn.disabled = true;
+    if (!current()) return;
+    const request = beginRequest();
+    s.date = request.date; calcBtn.disabled = true;
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '노선을 계산하는 중입니다 (몇 초 걸립니다)'));
     let res;
-    try { res = await post('route', { date: s.date, crew_ids: [...s.crews].filter((id) => crews.some((c) => c.id === id)) }); } finally { syncCalc(); }
+    try { res = await post('route', { date: request.date, crew_ids: request.crewIds }); }
+    catch (error) { if (requestCurrent(request)) throw error; return; }
+    finally { if (current()) syncCalc(); }
+    if (!requestCurrent(request)) return;
     s.edit = null;
-    s.plan = { date: s.date, res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
+    s.plan = { date: request.date, crewIds: request.crewIds, res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
       lunch: r.lunch, capacity_m3: r.capacity_m3, capacity_kg: r.capacity_kg, end_load_m3: r.end_load_m3, end_load_kg: r.end_load_kg })),
       unassigned: res.unassigned.map((u) => ({ ...u })) };
     draw();
   }, msg);
-  calcBtn.addEventListener('click', calc); syncCalc();
+  calcBtn.addEventListener('click', async (event) => { await calc(event); if (current()) syncCalc(); }); syncCalc();
   // 날짜를 바꾸면 이전 계산 결과는 그 날짜 것이므로 확정하지 못하게(다시 계산하거나 현재 배정을 불러오게)
-  date.addEventListener('change', () => { s.date = date.value; if (s.edit) { s.edit = null; } draw(); });
+  date.addEventListener('change', () => { requestSeq++; s.date = date.value; if (s.edit) { s.edit = null; } draw(); });
   // ---- 확정된 배정 부분 수정 (다시 계산하지 않음): 넣기·빼기·순서·팀 옮기기. 고친 팀마다 새 갱신본 → 그 팀 목록 다시 보내기
   const loadCurrent = wrap(async () => {
-    s.date = date.value; s.plan = null;
+    if (!current()) return;
+    const request = beginRequest();
+    s.date = request.date; s.plan = null;
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '확정된 배정을 불러오는 중입니다'));
-    const [cur, bs, cand] = await Promise.all([api('assign/current?date=' + s.date), api('batches?date=' + s.date),
-      api('requests?' + new URLSearchParams({ date_field: 'planned', date_from: s.date, date_to: s.date, status: '', quick: 'UNASSIGNED', size: 200, page: 1 }))]);
+    let cur, bs, cand;
+    try {
+      [cur, bs, cand] = await Promise.all([api('assign/current?date=' + request.date), api('batches?date=' + request.date),
+        api('requests?' + new URLSearchParams({ date_field: 'planned', date_from: request.date, date_to: request.date, status: '', quick: 'UNASSIGNED', size: 200, page: 1 }))]);
+    } catch (error) { if (requestCurrent(request)) throw error; return; }
+    if (!requestCurrent(request)) return;
     const names = {}, received = {}, sent = {};
     bs.filter((b) => b.status === 'ACTIVE').forEach((b) => { b.stops.forEach((x) => { names[x.request_id] = x; }); sent[b.crew_id] = !!b.bundles[0]; received[b.crew_id] = !!(b.bundles[0] && b.bundles[0].receipt_confirmed_at); });
-    s.edit = { date: s.date, cur, names, received, sent, cand: cand.rows, reason: (s.edit && s.edit.reason) || '' };
+    s.edit = { date: request.date, cur, names, received, sent, cand: cand.rows, reason: (s.edit && s.edit.reason) || '' };
     drawEdit();
   }, msg);
   const drawEdit = () => {
     clearMaps();
     const E = s.edit;
+    const editSeq = requestSeq;
+    const editCurrent = () => current() && s.edit === E && E.date === date.value && editSeq === requestSeq;
     const vers = Object.fromEntries(E.cur.map((b) => [b.crew_id, b.assign_ver]));
     const crewName = (cid) => (crews.find((c) => c.id === cid) || boot.crews.find((c) => c.id === cid) || { name: cid }).name;
     const editMsg = h('p', { class: 'msg', 'aria-live': 'polite' });
     const staleBox = h('div');
     const why = h('input', { placeholder: '수정 사유 (선택, 예: 주민 요청으로 추가)', value: E.reason, class: 'w-l', 'aria-label': '배정 수정 사유', oninput: (e) => { E.reason = e.target.value; } });
     const op = (body, touched) => wrap(async () => {
+      if (!editCurrent()) return;
       const assign_ver = Object.fromEntries(touched.map((c) => [c, vers[c] ?? 0]));
       let r;
       try { r = await post('assign/edit', { date: E.date, assign_ver, reason: why.value, ...body }); }
       catch (e) {
+        if (!editCurrent()) return;
         if (isStale(e)) {
           staleBox.replaceChildren(h('div', { class: 'notice bad', role: 'alert' }, h('strong', {}, '배정이 다른 곳에서 바뀌었습니다. '), `${e.data && e.data.crew_id ? crewName(e.data.crew_id) + ' 배정이 ' : ''}다른 화면이나 다른 담당자가 먼저 고쳤습니다. 고치지 않았습니다. `,
             btn('다시 불러오기', loadCurrent, 'small primary')));
@@ -84,6 +107,7 @@ async function screenDispatch() {
         }
         throw e;
       }
+      if (!editCurrent()) return;
       toast(`고쳤습니다. ${r.resend_needed.map(crewName).join(', ')} 목록을 휴대폰에 다시 보내야 합니다 ([목록 전송]에서 QR 표시).`);
       await loadCurrent();
     }, editMsg);
@@ -173,26 +197,34 @@ async function screenDispatch() {
         h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi }, o.crew_name))))));
     const mapBox = h('div', { class: 'mapbox' });
     const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
-    const planStale = p.date !== date.value;
+    const crewStale = crewKey(p.crewIds) !== crewKey(selectedCrews());
+    const planStale = p.date !== date.value || crewStale;
+    const planCurrent = () => current() && s.plan === p && p.date === date.value && crewKey(p.crewIds) === crewKey(selectedCrews());
     const confirmBtn = btn('배정 확정', wrap(async () => {
+      if (!current() || s.plan !== p) return;
       if (p.date !== date.value) throw new Error(`이 결과는 ${md(p.date)} 계산 결과입니다. 날짜를 바꿨으면 [노선 계산]을 다시 하세요.`);
+      if (crewKey(p.crewIds) !== crewKey(selectedCrews())) throw new Error('수거팀 선택이 바뀌었습니다. [노선 계산]을 다시 하세요.');
       if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }
       // 이미 휴대폰에 보낸(받은) 배정을 다시 확정하면 새 갱신본 → 수거팀이 QR을 다시 받아야 한다
       const bs = await api('batches?date=' + p.date);
+      if (!planCurrent()) return;
       const got = bs.filter((b) => b.status === 'ACTIVE' && b.bundles[0] && b.bundles[0].receipt_confirmed_at), shown = bs.filter((b) => b.status === 'ACTIVE' && b.bundles[0] && !b.bundles[0].receipt_confirmed_at);
       if ((got.length || shown.length) && !(await confirmDlg('수거팀이 QR을 다시 받아야 합니다',
         `${[...got, ...shown].map((b) => b.crew_name).join(', ')}에 ${md(p.date)} 목록을 이미 ${got.length ? '보냈고 휴대폰이 받았습니다' : 'QR로 표시했습니다'}. 다시 확정하면 새 갱신본이 생겨 [목록 전송]에서 QR을 다시 보여 줘야 하고, 수거팀은 새 목록을 받아야 합니다. 한두 건만 바꾸려면 [현재 배정 불러오기]가 낫습니다.`, { ok: '다시 확정' }))) return;
+      if (!planCurrent()) return;
       const overs = p.routes.filter((rt) => rt.overAt != null);
       if (overs.length && !(await confirmDlg('적재 초과', `${overs.map((rt) => `${rt.crew_name} ${rt.overAt + 1}번부터`).join(', ')} 누적 적재(추정)가 차량 용량을 넘습니다. 그대로 확정할까요? (추정치이므로 현장에서 반입지를 더 들를 수 있습니다)`, { ok: '그대로 확정' }))) return;
+      if (!planCurrent()) return;
       const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
       const res = await post('assign', { date: p.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
+      if (!planCurrent()) return;
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go(`#/send?date=${p.date}`);
     }, planMsg), 'primary', { disabled: planStale });
     const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
     const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
     const note = p.res.matrix_source === 'KAKAO' ? p.res.matrix_note : `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`;
-    out.replaceChildren(planStale ? h('div', { class: 'notice bad plan-stale', role: 'alert' }, h('strong', {}, `${md(p.date)} 계산 결과입니다. `), `수거일을 ${md(date.value)}로 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하거나 날짜를 되돌리세요.`) : null,
+    out.replaceChildren(planStale ? h('div', { class: 'notice bad plan-stale', role: 'alert' }, h('strong', {}, `${md(p.date)} 계산 결과입니다. `), crewStale ? '수거팀 선택을 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하세요.' : `수거일을 ${md(date.value)}로 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하거나 날짜를 되돌리세요.`) : null,
       h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       daySummaryCard(p.res),
       h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
@@ -223,13 +255,14 @@ async function screenDispatch() {
     }, 0);
   };
   draw();
-  return h('div', { class: 'dispatch' }, h('h1', {}, '배정·노선'),
+  view = h('div', { class: 'dispatch' }, h('h1', {}, '배정·노선'),
     h('div', { class: 'card searchbox', role: 'group', 'aria-label': '조회조건' },
       h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'dp-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
         h('span', { class: 'cond-l' }, '수거팀'), h('div', { class: 'cond-v wide' }, crewBox)),
       h('div', { class: 'cond-btns' }, calcBtn, ['ADMIN', 'INTAKE'].includes(boot.me.role) ? btn('현재 배정 불러오기', loadCurrent, '', { title: '이미 확정한 배정에서 한두 건만 넣기·빼기·순서·팀 옮기기 (다시 계산하지 않음)' }) : null),
       crews.length ? null : h('p', { class: 'err' }, '설정에서 수거팀을 먼저 만드세요.'), msg),
     out);
+  return view;
 }
 
 // 다른 날로 미루기: 날짜 직접 또는 가장 빠른 가능일(동 수거 요일·한도·휴무일 반영) + 사유 코드

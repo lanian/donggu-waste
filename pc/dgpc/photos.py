@@ -10,7 +10,7 @@ import uuid
 from contextlib import nullcontext
 
 from dgpc.core import KST, UserError, audit, get_setting, incremental_vacuum, now, one, rows, set_setting, today_kst, tx
-from dgpc.devices import _open_from_device
+from dgpc.devices import _open_from_device, _require_active_device
 
 TYPE_PHOTOS = 4
 
@@ -46,6 +46,7 @@ def import_photos(con, data: bytes, prepared: dict | None = None) -> dict:
     counts = {"recovered": 0, "already": 0, "hash_mismatch": 0, "unexpected": 0}
     pid = str(uuid.uuid4())
     with tx(con):
+        _require_active_device(con, dev_id)
         for p in prep["photos"]:
             if not p["ok"]:
                 counts["hash_mismatch"] += 1

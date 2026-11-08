@@ -342,6 +342,7 @@ def _scrub_event_body(raw: str, kind: str | None = None) -> str:
     except ValueError:
         return "{}"
     if isinstance(b, dict) and kind in _REQ_KINDS:
+        b.pop("reason", None)  # 정정 요청의 자유 사유에도 주민 개인정보가 들어갈 수 있다.
         return json.dumps(R._strip_request_pii(kind, b), ensure_ascii=False)
     if isinstance(b, dict):
         for k in _PII_EVENT_KEYS:
@@ -428,12 +429,14 @@ def scrub_close_summaries(con, ids=None) -> int:
 
 def pseudonymize(con, rid: str, ts: str):
     """접수 한 건의 개인정보를 가명 처리(트랜잭션은 호출하는 쪽)."""
-    con.execute("""UPDATE request SET name=?, phone=?, address=?, spot_note='', memo='', lat=NULL, lon=NULL, geo_source=NULL,
-        cancel_reason=CASE WHEN cancel_reason IS NULL THEN NULL ELSE ? END, pii_purged_at=? WHERE id=?""", (PURGED, PURGED_PHONE, PURGED, PURGED, ts, rid))
+    con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note='', memo='', lat=NULL, lon=NULL, geo_source=NULL,
+        cancel_reason=CASE WHEN cancel_reason IS NULL THEN NULL ELSE ? END, pii_purged_at=COALESCE(pii_purged_at, ?) WHERE id=?""", (PURGED, PURGED_PHONE, PURGED, PURGED, ts, rid))
     for ver, snap in con.execute("SELECT req_ver, snapshot_json FROM request_version WHERE request_id=?", (rid,)).fetchall():
         try:
             d = json.loads(snap)
         except ValueError:
+            d = {}
+        if not isinstance(d, dict):
             d = {}
         for k in _PII_SNAPSHOT_KEYS:
             d.pop(k, None)
@@ -453,6 +456,36 @@ def pseudonymize(con, rid: str, ts: str):
     con.execute("""UPDATE refund_case SET account_last4=NULL, note='', approve_note=CASE WHEN approve_note IS NULL THEN NULL ELSE ? END,
         void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?""", (PURGED, PURGED, rid))
     con.execute("UPDATE item_link SET reason=?, void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?", (PURGED, PURGED, rid))
+
+
+def _pii_repair_candidates(con, ids=None) -> list[dict]:
+    """이미 파기된 접수 중 재유입·누락된 민감 값만 고른다. 깨끗한 행은 버전·감사를 다시 쓰지 않는다."""
+    extra = " AND r.id IN (SELECT value FROM json_each(?5))" if ids is not None else ""
+    args = [PURGED, PURGED_PHONE, json.dumps(_PII_SNAPSHOT_KEYS), json.dumps(_PII_EVENT_KEYS)]
+    if ids is not None:
+        args.append(json.dumps(list(ids)))
+    return C.rows(con, """SELECT r.id, r.pii_purged_at FROM request r WHERE r.pii_purged_at IS NOT NULL AND (
+        r.name NOT IN (?1,'(정리됨)','') OR r.phone NOT IN (?2,'') OR r.address NOT IN (?1,'(정리됨)','')
+        OR COALESCE(r.spot_note,'')<>'' OR COALESCE(r.memo,'')<>'' OR r.lat IS NOT NULL OR r.lon IS NOT NULL
+        OR COALESCE(r.cancel_reason,?1)<>?1
+        OR EXISTS (SELECT 1 FROM contact_log c WHERE c.request_id=r.id AND c.content IS NOT ?1)
+        OR EXISTS (SELECT 1 FROM audit_note n WHERE n.request_id=r.id AND n.note IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM request_version v WHERE v.request_id=r.id AND (COALESCE(v.reason,?1)<>?1
+            OR NOT json_valid(v.snapshot_json)
+            OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(v.snapshot_json) THEN v.snapshot_json ELSE '{}' END) j
+                       WHERE j.key IN (SELECT value FROM json_each(?3)))))
+        OR EXISTS (SELECT 1 FROM photo p WHERE p.request_id=r.id AND
+            (p.data IS NOT NULL OR p.lat IS NOT NULL OR p.lon IS NOT NULL OR p.purged_at IS NULL))
+        OR EXISTS (SELECT 1 FROM payment p WHERE p.request_id=r.id AND (COALESCE(p.note,'')<>'' OR COALESCE(p.void_reason,?1)<>?1))
+        OR EXISTS (SELECT 1 FROM refund_case f WHERE f.request_id=r.id AND (f.account_last4 IS NOT NULL OR COALESCE(f.note,'')<>''
+            OR COALESCE(f.approve_note,?1)<>?1 OR COALESCE(f.void_reason,?1)<>?1))
+        OR EXISTS (SELECT 1 FROM item_link l WHERE l.request_id=r.id AND (COALESCE(l.reason,?1)<>?1 OR COALESCE(l.void_reason,?1)<>?1))
+        OR EXISTS (SELECT 1 FROM result_event e, json_each(CASE WHEN json_valid(e.body_json) THEN e.body_json ELSE '{}' END) j
+            WHERE e.request_id=r.id AND ((j.key IN (SELECT value FROM json_each(?4)) AND j.value IS NOT NULL AND j.value<>'')
+                OR (e.kind IN ('FIELD_INTAKE','CORRECTION') AND (j.key IN ('name','phone','address','spot_note','memo')
+                    OR (j.key='reason' AND COALESCE(j.value,'')<>'') OR (j.key='fields' AND j.type='object')
+                    OR (j.key='items' AND j.type='array')))))
+        )""" + extra, args)
 
 
 def _purge_orphan_requests(con, cutoff: str) -> int:
@@ -512,6 +545,20 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
         if progress:
             progress(len(done), len(ids))
     with guard:
+        repair_ids = [r["id"] for r in _pii_repair_candidates(con)]
+    repaired_requests = 0
+    for i in range(0, len(repair_ids), batch):
+        with guard:
+            pending = _pii_repair_candidates(con, repair_ids[i:i + batch])
+            if not pending:
+                continue
+            with C.tx(con):
+                for request in pending:
+                    pseudonymize(con, request["id"], request["pii_purged_at"])
+                scrub_close_summaries(con, [r["id"] for r in pending])
+                C.audit(con, "privacy", "purged-reentry", "PURGE_PII", {"repaired_requests": len(pending)})
+            repaired_requests += len(pending)
+    with guard:
         with C.tx(con):
             # 복구: 이미 파기됐는데 마감 기록 요약에 이름·연락처·주소가 남은 것(예전 버전에서 파기 도중 멈춘 경우 등)을 매번 찾아 지운다
             repaired = scrub_close_summaries(con)
@@ -527,7 +574,7 @@ def purge_pii(con, today: str | None = None, trigger: str = "MANUAL", lock=None,
         if done:
             C.incremental_vacuum(con)
     return {"count": len(done), **crit, **({"orphan_requests": orphans} if orphans else {}), **({"repaired_close_logs": repaired} if repaired else {}),
-            **({"notes": notes} if notes else {})}
+            **({"repaired_requests": repaired_requests} if repaired_requests else {}), **({"notes": notes} if notes else {})}
 
 
 def purge_log(con, limit: int = 200) -> list[dict]:

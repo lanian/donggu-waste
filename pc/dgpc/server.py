@@ -1894,26 +1894,26 @@ def dt_now() -> str:
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # Windows의 SO_REUSEADDR는 듣고 있는 포트에도 다른 서버를 바인딩할 수 있다.
+    # CLI·서비스·실행 앱 모두 같은 주소에서 서로 다른 DB를 제공하지 않게 한다.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def verify_request(self, request, client_address):  # LAN 모드: 허용 대역 밖 PC는 연결 자체를 끊는다
         return not LAN or ip_allowed(client_address[0], LAN["nets"])
 
 
 class DesktopServer(Server):
-    # Windows의 SO_REUSEADDR는 이미 듣는 포트에도 두 번째 서버를 바인딩할 수 있다.
-    # 실행 앱이 시작한 서버는 해당 포트를 독점해 다른 서버의 응답을 자기 것으로 오인하지 않는다.
-    allow_reuse_address = os.name != "nt"
     connection_timeout = 10  # 로컬 브라우저의 idle·미완성 헤더/본문이 정상 종료를 무한히 막지 않게 한다.
 
     def get_request(self):
         request, address = super().get_request()
         request.settimeout(self.connection_timeout)
         return request, address
-
-    def server_bind(self):
-        if os.name == "nt":
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
 
 
 def cleanup_sessions() -> int:

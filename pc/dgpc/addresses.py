@@ -6,12 +6,13 @@ import datetime as _dt
 import re
 
 from dgpc import geo
-from dgpc.core import UserError, audit, chosung_of, get_setting, now, one, rows, set_setting, tx
+from dgpc.core import UserError, audit, chosung_of, get_setting, now, one, require_request_pii_writable, rows, set_setting, tx
 
 def set_location(con, rid: str, lat: float, lon: float, source: str = "MANUAL"):
     if not (33 <= float(lat) <= 39 and 124 <= float(lon) <= 132):
         raise UserError("좌표가 국내 범위를 벗어났습니다.")
     with tx(con):
+        require_request_pii_writable(con, rid)
         con.execute("UPDATE request SET lat=?, lon=?, geo_source=?, updated_at=? WHERE id=?", (float(lat), float(lon), source, now(), rid))
         audit(con, "request", rid, "LOCATION", {"source": source})
 

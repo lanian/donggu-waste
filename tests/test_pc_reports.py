@@ -111,6 +111,41 @@ class ReportsTest(unittest.TestCase):
         tables = [row[0] for row in self.con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
         return {name: sorted(self.con.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall(), key=repr) for name in tables}
 
+    def test_processing_days_use_actual_kst_completion_for_every_basis(self):
+        self.con.execute("SAVEPOINT report_lead_days")
+        try:
+            self.con.execute("UPDATE request SET completed_at='2026-11-10T15:00:00Z' WHERE id='done'")
+            periods = (("planned", "2026-11-07"), ("received", "2026-11-06"), ("completed", "2026-11-11"))
+            for basis, date in periods:
+                with self.subTest(basis=basis):
+                    self.assertEqual(R.stats(self.con, date, date, basis)["totals"]["lead_days_avg"], 5)
+            self.assertEqual(self.daily()["totals"]["lead_days_avg"], 5)
+            self.assertEqual(self.monthly()["totals"]["lead_days_avg"], 5)
+            pilot = R.pilot_report(self.con, "2026-11-06", "2026-11-06")
+            self.assertEqual(next(row["pilot"] for row in pilot["rows"] if row["key"] == "lead_days"), 5)
+        finally:
+            self.con.execute("ROLLBACK TO report_lead_days")
+            self.con.execute("RELEASE report_lead_days")
+
+    def test_processing_days_do_not_use_planned_date_when_completion_is_missing(self):
+        self.con.execute("SAVEPOINT report_missing_completion")
+        try:
+            self.con.execute("UPDATE request SET completed_at=NULL WHERE id='done'")
+            self.assertIsNone(self.daily()["totals"]["lead_days_avg"])
+        finally:
+            self.con.execute("ROLLBACK TO report_missing_completion")
+            self.con.execute("RELEASE report_missing_completion")
+
+    def test_processing_days_include_completed_requests_without_a_planned_date(self):
+        self.con.execute("SAVEPOINT report_missing_plan")
+        try:
+            self.con.execute("UPDATE request SET planned_date=NULL WHERE id='done'")
+            report = R.stats(self.con, "2026-11-06", "2026-11-06", "received")
+            self.assertEqual(report["totals"]["lead_days_avg"], 1)
+        finally:
+            self.con.execute("ROLLBACK TO report_missing_plan")
+            self.con.execute("RELEASE report_missing_plan")
+
     def test_daily_reuses_stats_and_explains_current_cumulative_values(self):
         report = self.daily()
         self.assertEqual(report["kind"], "daily")

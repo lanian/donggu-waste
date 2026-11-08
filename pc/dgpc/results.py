@@ -15,7 +15,7 @@ import dgproto as P
 from dgpc import store as _store, area
 from dgpc.core import ACTOR, UserError, _after_close, _date_ok, _int_clamp, _num, _sane_ts, audit, norm_phone, now, one, rows, today_kst, tx
 from dgpc.derive import FINAL, derive
-from dgpc.devices import _open_from_device
+from dgpc.devices import _open_from_device, _require_active_device
 from dgpc.fees import fee_rows, fee_state
 from dgpc.intake import CANCEL_CODES, _cancel, _insert_item, _insert_request, _reason, _resolve_dong, _snapshot, build_items, validate
 
@@ -81,6 +81,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}
     touched, attempted, located = set(), set(), set()  # 이번 파일에서 결과(ATTEMPT)·위치(LOCATION_FIX)가 실제 반영된 접수
     with tx(con):
+        _require_active_device(con, dev_id)
         con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,?)",
                     (imp, channel, dev_id, sha, now(), release))
         # 휴대폰 기록 세대(v0.13, 백업 복원마다 새 세대): 결과 파일 머리 "gens" = [[세대, 그 세대 첫 번호], …] (없으면 받은 가장 작은 번호)

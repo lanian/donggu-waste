@@ -165,7 +165,7 @@ def shortcut_metadata(root):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="dg desktop app ") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         if os.name == "nt":
             shortcut_metadata(root)
         ok(default_state_dir({"DG_STATE": str(root / "explicit")}) == root / "explicit",

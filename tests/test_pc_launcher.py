@@ -118,12 +118,92 @@ class OtherApp(BaseHTTPRequestHandler):
         pass
 
 
+class AssetApp(OtherApp):
+    server_version = "dgpc"
+    sys_version = ""
+
+    def do_GET(self):
+        self.server.requests.append(self.path)
+        status, mime, body, headers = self.server.assets.get(self.path, (404, "text/plain", b"missing", {}))
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def startup_asset_guard(repo, temporary):
+    title = "<title>동구 대형폐기물 PC 업무</title>"
+    defaults = {
+        "/api/state": (200, "application/json", b'{"setup_needed":true,"logged_in":false}', {}),
+        "/": (200, "text/html; charset=utf-8", (title + '<script src="/start.js" defer></script>').encode(), {}),
+        "/start.js": (200, "text/javascript", b"import './pc.js';", {}),
+        "/pc.js": (200, "application/javascript; charset=utf-8", b"import './core.js';", {}),
+        "/core.js": (200, "text/javascript", b"export const ready = true;", {}),
+    }
+    with ThreadingHTTPServer(("127.0.0.1", 0), AssetApp) as server, \
+            ThreadingHTTPServer(("127.0.0.1", 0), AssetApp) as external:
+        server.assets, server.requests = dict(defaults), []
+        external.assets, external.requests = {}, []
+        threads = [threading.Thread(target=item.serve_forever, daemon=True) for item in (server, external)]
+        for thread in threads:
+            thread.start()
+        try:
+            state = temporary / "asset check must not initialize"
+            valid = ready(launch(repo, state, server.server_port))
+            ok(valid["status"] == "existing", "실제 진입 자산을 제공하는 기존 서버를 재사용")
+            for assets, label in (
+                ({**defaults, "/start.js": (404, "text/plain", b"missing", {})}, "요구한 진입 파일 404"),
+                ({**defaults, "/start.js": (200, "text/html", b"<html>fallback</html>", {})}, "진입 파일 대신 HTML"),
+                ({**defaults, "/start.js": (200, "text/javascript", b" \r\n\t", {})}, "빈 JavaScript"),
+                ({**defaults, "/pc.js": (404, "text/plain", b"missing", {})}, "필수 pc.js 404"),
+                ({**defaults, "/core.js": (404, "text/plain", b"missing", {})}, "필수 core.js 404"),
+                ({**defaults, "/": (200, "text/html; charset=utf-8", title.encode(), {})}, "진입 script 없는 HTML"),
+                ({**defaults, "/": (200, "text/html; charset=utf-8", (title + '<script src=" "></script>').encode(), {})}, "빈 script src"),
+                ({**defaults, "/": (200, "text/html; charset=utf-8", (title + '<!-- <script src="/pc.js"></script> -->').encode(), {})}, "주석 안의 script"),
+                ({**defaults, "/": (200, "text/html; charset=utf-8", (title + '<script>const ignored = "<script src=pc.js></script>";</script>').encode(), {})}, "inline 본문 안의 script 문자열"),
+                ({**defaults, "/": (200, "text/html; charset=utf-8", (title + '<div data-note="<script src=pc.js></script>"></div>').encode(), {})}, "다른 HTML 속성 안의 script 문자열"),
+            ):
+                server.assets = assets
+                result = launch(repo, state, server.server_port)
+                ok(result.returncode != 0 and "DGPC_READY " not in result.stdout, label + "를 준비 완료로 오인하지 않음")
+            outside = f"http://127.0.0.1:{external.server_port}/outside.js"
+            for assets, label in (
+                ({**defaults, "/": (200, "text/html; charset=utf-8", (title + f'<script src="{outside}"></script>').encode(), {})}, "외부 출처 script"),
+                ({**defaults, "/start.js": (302, "text/javascript", b"redirect", {"Location": outside})}, "진입 파일 redirect"),
+            ):
+                server.assets = assets
+                result = launch(repo, state, server.server_port)
+                ok(result.returncode != 0 and "DGPC_READY " not in result.stdout and not external.requests,
+                   label + "를 요청하거나 준비 완료로 오인하지 않음")
+            server.assets = {**defaults, "/": (200, "text/html; charset=utf-8", (title + "<script src=pc.js></script>").encode(), {})}
+            del server.assets["/start.js"]
+            legacy = ready(launch(repo, state, server.server_port))
+            ok(legacy["status"] == "existing", "기존 pc.js 진입 HTML도 실제 자산이 있으면 재사용")
+            server.assets = {**defaults, "/": (200, "text/html; charset=utf-8", (title + "<script src=pc.js>/* entry at EOF */").encode(), {})}
+            unclosed = ready(launch(repo, state, server.server_port))
+            ok(unclosed["status"] == "existing", "문서 끝의 닫히지 않은 외부 script도 실제 진입 자산으로 검사")
+            server.assets = {**defaults, "/": (200, "text/html; charset=utf-8", (title + "<script " + "a" * 512).encode(), {})}
+            malformed = launch(repo, state, server.server_port)
+            ok(malformed.returncode != 0 and "DGPC_READY " not in malformed.stdout,
+               "닫히지 않은 긴 태그를 준비 완료로 오인하거나 파싱 중 멈추지 않음")
+            ok(not state.exists() and server.fileno() >= 0, "불량 자산 확인 중 새 자료 폴더 생성·기존 서버 종료 없음")
+        finally:
+            for item in (server, external):
+                item.shutdown()
+            for thread in threads:
+                thread.join(timeout=5)
+
+
 def main():
     if os.name != "nt":
         print("SKIP: Windows 실행기 시험")
         return
     with tempfile.TemporaryDirectory(prefix="donggu launcher test ") as directory:
         temporary = Path(directory)
+        startup_asset_guard(ROOT, temporary)
         alias = temporary / "repository with spaces"
         subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(ROOT)],
                        check=True, capture_output=True)

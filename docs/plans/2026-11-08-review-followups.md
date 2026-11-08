@@ -1,0 +1,113 @@
+# 후속 신뢰성 개선 구현 계획
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** 전체 점검의 결함 7건과 Windows·macOS 참고 시험 실패를 재현·수정하고 회귀와 배포본으로 검증한다.
+
+**Architecture:** 기존 API·전송·DB 자료 구조를 유지한다. 실제 쓰기 직전의 현재 파기·기기 상태 확인, 요청 대상에 묶인 화면 응답·초안 저장, 공통 서버 포트 소유 규칙과 실제 진입 파일 확인을 보완한다. OS 시험은 제품 경로 계약과 실제 종료 동작을 검증하며 임의 재시도나 시간 제한 증가로 실패를 숨기지 않는다.
+
+**Tech Stack:** Python 3.12 / SQLCipher / HTTP / Windows PowerShell 5.1 / ES modules / Playwright Chromium / Node 22.
+
+## 작업 범위와 보호
+
+- 기준은 `main`의 `6ca594d`. 작업은 별도 `fix/review-followups-20261108` 워크트리에서 진행한다.
+- 사용자 DB·계정·키링·기존 서버를 사용하거나 변경하지 않는다. 가상 자료와 임시 `DG_STATE`·`DG_OUT`·고정 시험 키·null keyring을 사용한다.
+- 기관 지정 서식과 KT 공식 앱 호출 규격은 기존 보류·미확인 상태를 유지한다. 기존 `AGENTS.md`는 수정하지 않는다.
+- 각 작업은 먼저 실패를 확인하고 최소 수정 후 같은 시험의 통과를 남긴다. 정상 동작·취소·중복·오류·화면 이탈도 확인한다.
+- 서로 다른 담당자는 지정 파일만 수정한다. 커밋·버전·npm/CI 연결·통합·배포는 root만 수행한다.
+
+## Task 1: 파기된 개인정보의 PC 재유입 차단
+
+**Files:** `pc/dgpc/privacy.py`, `pc/dgpc/intake.py`, `pc/dgpc/addresses.py`, 필요한 공통 쓰기 검사 helper, `tests/test_privacy_write_guards.py`.
+
+1. 실제 SQLCipher/HTTP에서 오래된 DONE 편집 → 개인정보 파기 → 기존 버전 저장, 연락 기록 추가·좌표 변경이 허용되는 실패를 재현한다.
+2. 민감 정보 쓰기는 파기 상태를 현재 트랜잭션 안에서 확인하고 거부한다. 파기는 열린 편집 버전을 무효화한다.
+3. 이미 파기 표시가 있는데 민감 값이 남은 가상 자료의 재정리 경로를 검증한다. 원래 파기 정보·수납·배출표·업무 식별자와 감사 사슬은 보존한다.
+4. 같은 시험과 기존 개인정보·접수 회귀를 실행한다. 정상 미파기 접수의 저장·연락·위치는 계속 성공해야 한다.
+
+## Task 2: 검증 후 기기 중지의 가져오기 반영 차단
+
+**Files:** `pc/dgpc/devices.py`, `pc/dgpc/results.py`, `pc/dgpc/photos.py`, `tests/test_pc_device_revocation.py`.
+
+1. 실제 결과·사진을 준비한 뒤 기기를 LOST/STOPPED로 바꾸는 대조 실패를 작성한다.
+2. 복호·서명 검증은 잠금 밖에 유지하고, 새 자료 반영 직전에 현재 기기 상태·지문 확인 상태를 다시 검사한다.
+3. 정상 기기·중복 파일·사용자 세션 취소·팀 연결 변경의 기존 의미를 유지한다.
+
+## Task 3: 배정 화면의 날짜·선택·화면 경합 보호
+
+**Files:** `pc/ui/screens/dispatch.js`, `tests/test_review_followup_ui.py`.
+
+1. 노선 계산과 현재 배정 조회를 각각 지연하고 날짜를 바꾸면 옛 결과가 새 날짜로 표시·확정되는 실패를 재현한다.
+2. 요청 시 날짜·팀 선택·요청 순서·화면 수명을 고정한다. 조건이 바뀐 늦은 응답은 현재 화면·공유 상태에 반영하지 않는다.
+3. 정상 계산·현재 배정 불러오기·부분 수정·날짜 불일치 안내와 재시도는 유지한다.
+
+## Task 4: 모바일 접수 초안 저장 수명 보호
+
+**Files:** `web/screens/intake.js`, `tests/test_review_followup_ui.py`.
+
+1. 입력 후 600ms 안에 삭제·잠금·양식 전환·저장을 수행하는 실패를 실제 PIN/IndexedDB에서 재현한다.
+2. 폐기한 양식의 지연 저장을 취소하거나 원래 상태·양식 세대에 묶어 무효화한다. 잠긴 상태에 쓰지 않는다.
+3. 유효한 초안의 저장·복구와 기존 접수·수정·중복 확인은 유지한다.
+
+## Task 5: Windows 공통 서버 포트 독점
+
+**Files:** root 소유 `pc/dgpc/server.py`, `tests/test_pc_server_bind.py`.
+
+1. Windows 기본 Server/CLI의 같은 포트 중복 바인딩 성공을 실패 시험으로 남긴다.
+2. Windows 독점 바인딩을 공통 Server에 적용하고 DesktopServer의 접속 제한·정상 종료는 유지한다. 다른 OS의 기존 재사용 정책도 유지한다.
+3. 실제 임시 DB 두 개의 CLI 대조에서 두 번째 서버가 준비 완료로 오인되지 않고 첫 서버와 DB가 유지됨을 확인한다.
+
+## Task 6: CMD 준비 검사의 실제 진입 파일 확인
+
+**Files:** `tools/start_pc.ps1`, `tests/test_pc_launcher.py`.
+
+1. API·제목만 정상이고 실제 진입 JS가 없는 기존 서버가 준비 완료로 표시되는 실패를 재현한다.
+2. GUI의 계약처럼 실제 HTML 진입 파일의 상태·JS MIME·내용과 서버 정체성을 검사한다.
+3. 정상·호환 서버 재사용, 다른 서버 거부, 폴더·포트·정상 종료 동작은 유지한다. 기존 서버를 임의 종료하지 않는다.
+
+## Task 7: 실제 완료일 기준 평균 처리 일수
+
+**Files:** root 소유 `pc/dgpc/reports.py`, `tests/test_pc_reports.py`.
+
+1. 접수 11/6·예정 11/7·완료 11/11인 DONE 접수에서 통계 1일/실제 5일 불일치를 재현한다.
+2. 실제 한국시간 완료일과 접수일 차이를 사용한다. 완료일 없는 자료에는 예정일을 실제 완료일처럼 대입하지 않는다.
+3. 일일·월보 집계 기준과 누적 수량·금액·납부일·작업일 의미는 유지한다.
+
+## Task 8: Windows 참고 시험의 경로 계약
+
+**Files:** `tests/test_desktop_app.py`와 같은 원시 임시 경로를 비교하는 관련 시험.
+
+1. 비정규 임시 경로 별칭으로 명시 DG_STATE 비교의 실패를 먼저 확인한다.
+2. fixture 기준 경로를 정규화하고, 명시 경로 우선·자료 이동 금지·비밀 미노출 검증은 유지한다.
+3. 앱 회귀 전체와 원격 Windows EXE 빌드·실행·보관 결과를 확인한다.
+
+## Task 9: macOS 실제 종료 대기의 원인 확인
+
+**Files:** `tests/test_desktop_lifecycle.py`, 원인에 필요한 좁은 제품 파일은 root와 소유 범위를 먼저 맞춘다.
+
+1. 20초 자식 시간 초과에 진행 단계·스레드 스택·소유 프로세스 상태를 남긴다. 키·업무 DB 내용은 출력하지 않는다.
+2. 원격 macOS에서 원인을 확인한다. 같은 메커니즘의 결정적 실패를 만든 뒤 최소 수정한다.
+3. 진행 작업 완료 대기·미완성 연결 제한·정상 종료·DB 보존을 모두 유지하며 시간 제한만 늘리지 않는다.
+
+## 통합·검증 순서
+
+1. 각 담당의 RED/GREEN과 독립 사양·코드 검토를 확인한다. root는 9개 항목별 결과표를 유지한다.
+2. 새 시험을 npm과 CI의 적절한 필수/OS 실행 경로에 포함한다. 버전은 PC·PWA·서비스 워커를 함께 갱신한다.
+3. `tools/check_generated.py`, `tools/check_version.py`, 변경 영역의 기존 시험과 `npm run test:all`을 실행한다. 실행 전후 소스 해시를 비교한다.
+4. 작업 브랜치의 수동 CI는 필수·Windows·macOS를 모두 확인하며 main 배포는 수행하지 않는다.
+5. Windows 배포본을 새 버전 폴더에 만들고 실제 EXE의 기본·보고서·배출표 검증과 manifest·자료 혼입 검사를 실행한다.
+6. 검증이 끝난 결과를 커밋·원격 반영하고, 사용자에게 7개 결함과 2개 OS 시험 각각의 해결·검증·남은 한계를 구분해 보고한다.
+
+## 1차 수정 검증 기록
+
+| 항목 | RED | GREEN·증거 |
+| --- | --- | --- |
+| 개인정보·기기 취소 | 같은 신규 11개를 기준 본선에서 실행해 14실패·오류 0 | 수정본 11개·기존 개인정보 13확인·세션 취소 19개 통과. `D:/Temp/dg-followup-backend-a8f1b30c` |
+| 배정·모바일 초안 | 19개 중 14실패·오류 0 | 19개 통과, 21.531초. `D:/Temp/dg-followup-ui-green-final-llt81pds` |
+| 공통 서버 소유 | 기본 Server의 중복 bind에서 OSError가 발생하지 않아 실패 | 소켓 회귀 3개 통과. 실제 임시 CLI/DB 두 개에서 두 번째 실행 exit 1·첫 DB 유지·종료 후 다른 DB 실행 성공. `D:/Temp/dg-review-followups-eaaa6ff950d342239357c4ce169252a0/cli-port/report.json` |
+| 평균 처리 일수 | 새 3개 시험에서 6실패 | 보고서 전체 12개 통과. 완료일 누락·예정일 누락·KST 경계·3가지 집계 기준 포함 |
+| CMD 준비 검사 | 진입 404·파서·EOF 사례에서 실패 확인 | 자산 20확인·전체 실제 실행 39확인 통과, 32.688초. `D:/Temp/dg-launcher-os-followup-952a5750fe7044b0bc57fb86b0037a01` |
+| Windows 앱 경로 | 비정규 임시 경로에서 기존 명시 DG_STATE 비교 실패 | 실제 앱 49확인 통과. 같은 C 증거 폴더의 `app-alias-green.json` |
+| macOS 종료 | 기준 CI의 실제 종료 자식 20초 초과 | 원인 미확정. 시간 제한 유지·10초 스레드 dump·단계 로그 계측. 원격 macOS 실행 필요 |
+
+각 담당의 최종 시험 동안 지정 소스 해시는 동일했다. 가상 API 브라우저 증거와 실제 SQLCipher/CLI 증거는 구분한다. 위 결과는 전체 통합·네이티브 macOS·배포본 검증의 완료를 의미하지 않는다.

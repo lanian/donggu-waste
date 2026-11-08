@@ -37,7 +37,43 @@ function Test-AppReady {
         $state = $api.Content | ConvertFrom-Json
         if ($state.setup_needed -isnot [bool] -or $state.logged_in -isnot [bool]) { return $false }
         $page = Invoke-WebRequest -UseBasicParsing -Uri "$Url/" -TimeoutSec 1 -MaximumRedirection 0
-        return $page.StatusCode -eq 200 -and $page.Content.Contains('<title>동구 대형폐기물 PC 업무</title>')
+        if ($page.StatusCode -ne 200 -or -not $page.Content.Contains('<title>동구 대형폐기물 PC 업무</title>')) { return $false }
+        $scriptPattern = @'
+(?is)<!--.*?(?:-->|\z)|<script\b(?<attrs>(?:[^>'"]|"[^"]*"|'[^']*')*)>.*?(?:</script\s*>|\z)|<(?:[^>'"]|"[^"]*"|'[^']*')*>
+'@
+        $attributePattern = @'
+(?is)(?<name>[^\s=/"'<>]+)\s*=\s*(?:"(?<double>[^"]*)"|'(?<single>[^']*)'|(?<bare>[^\s"'=<>]+))
+'@
+        $sources = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($tag in [regex]::Matches($page.Content, $scriptPattern)) {
+            if (-not $tag.Groups['attrs'].Success) { continue }
+            foreach ($attribute in [regex]::Matches($tag.Groups['attrs'].Value, $attributePattern)) {
+                if ($attribute.Groups['name'].Value -ieq 'src') {
+                    $source = if ($attribute.Groups['double'].Success) { $attribute.Groups['double'].Value } elseif ($attribute.Groups['single'].Success) { $attribute.Groups['single'].Value } else { $attribute.Groups['bare'].Value }
+                    $source = [System.Net.WebUtility]::HtmlDecode($source).Trim()
+                    if (-not $source) { return $false }
+                    $sources.Add($source)
+                    break
+                }
+            }
+        }
+        if ($sources.Count -eq 0) { return $false }
+        $sources.Add('pc.js')
+        $sources.Add('core.js')
+        $baseUri = [Uri]$Url
+        $resources = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($source in $sources) {
+            $assetUri = [Uri]::new($baseUri, $source)
+            if ($assetUri.Scheme -ne $baseUri.Scheme -or $assetUri.Host -ne $baseUri.Host -or $assetUri.Port -ne $baseUri.Port -or $assetUri.UserInfo) { return $false }
+            [void]$resources.Add($assetUri.AbsoluteUri)
+        }
+        foreach ($resource in $resources) {
+            $asset = Invoke-WebRequest -UseBasicParsing -Uri $resource -TimeoutSec 1 -MaximumRedirection 0
+            $mime = ($asset.Headers['Content-Type'] -split ';', 2)[0].Trim().ToLowerInvariant()
+            $body = if ($asset.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($asset.Content) } else { [string]$asset.Content }
+            if ($asset.StatusCode -ne 200 -or $mime -notin @('text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript') -or [string]::IsNullOrWhiteSpace($body)) { return $false }
+        }
+        return $true
     } catch { return $false }
 }
 

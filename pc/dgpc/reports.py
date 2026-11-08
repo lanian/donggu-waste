@@ -211,8 +211,9 @@ def stats(con, start: str, end: str, basis: str = "planned") -> dict:
             if l["price"] is not None:
                 c_["amount"] += l["price"] * l["qty_confirmed"]
         rd_ = _kst_date(r["received_at"])
-        if rd_ and r["status"] == "DONE" and r["planned_date"]:
-            leads.append((dt.date.fromisoformat(r["planned_date"]) - dt.date.fromisoformat(rd_)).days)
+        completed = _kst_date(r.get("completed_at"))
+        if rd_ and r["status"] == "DONE" and completed:
+            leads.append((dt.date.fromisoformat(completed) - dt.date.fromisoformat(rd_)).days)
         a = {"name": crew_of[r["id"]]} if r["id"] in crew_of else None
         if a:
             c = crews.setdefault(a["name"], {"crew": a["name"], "assigned": 0, "done": 0, "partial_or_not": 0})

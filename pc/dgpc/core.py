@@ -253,6 +253,15 @@ def _after_close(con, rid: str) -> dict:
 STALE_MSG = "다른 곳에서 바뀌었습니다. 다시 열어 확인하세요"
 
 
+def require_request_pii_writable(con, rid: str):
+    """민감 정보 쓰기 직전, 같은 트랜잭션에서 현재 파기 상태를 확인한다."""
+    cur = one(con, "SELECT pii_purged_at FROM request WHERE id=?", (rid,))
+    if not cur:
+        raise UserError("접수를 찾을 수 없습니다.")
+    if cur["pii_purged_at"]:
+        raise UserError("개인정보가 파기된 접수에는 개인정보·연락 기록·위치를 다시 저장할 수 없습니다.")
+
+
 def check_req_ver(con, rid: str, base, required: bool = True):
     """화면이 열었을 때의 접수 버전(req_ver)과 지금 버전이 같은지(트랜잭션 안에서 부른다). 다르면 StaleError(서버는 409)."""
     cur = one(con, "SELECT req_ver FROM request WHERE id=?", (rid,))

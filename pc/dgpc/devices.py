@@ -135,12 +135,8 @@ def list_crews(con):
 
 
 # ------------------------------------------------------------------ 결과 가져오기·충돌
-def _open_from_device(con, data: bytes, expect_type: int):
-    try:
-        head = P.Header.unpack(data)
-    except P.ProtocolError:
-        raise UserError("휴대폰 결과 파일 형식이 아닙니다.")
-    dev_id = str(uuid.UUID(bytes=head.device_id))
+def _require_active_device(con, dev_id: str) -> dict:
+    """새 자료 반영 때도 현재 기기의 사용·지문 확인 상태를 다시 검사한다."""
     dev = one(con, "SELECT * FROM device WHERE id=?", (dev_id,))
     if not dev:
         raise UserError("등록되지 않은 휴대폰의 파일입니다. 반영하지 않았습니다.")
@@ -148,6 +144,16 @@ def _open_from_device(con, data: bytes, expect_type: int):
         raise UserError(f"휴대폰 상태가 {dev['status']}입니다. 분실·중지 기기의 파일은 반영하지 않습니다.")
     if not dev["confirmed_at"]:
         raise UserError("지문 확인 전인 휴대폰의 파일입니다. 설정 → 기기에서 지문을 확인한 뒤 다시 가져오세요.")
+    return dev
+
+
+def _open_from_device(con, data: bytes, expect_type: int):
+    try:
+        head = P.Header.unpack(data)
+    except P.ProtocolError:
+        raise UserError("휴대폰 결과 파일 형식이 아닙니다.")
+    dev_id = str(uuid.UUID(bytes=head.device_id))
+    dev = _require_active_device(con, dev_id)
     try:
         head, payload, release = P.open_envelope(data, P.pub_from_raw(dev["sign_pub"]), pc_key(con, "kex"))
     except P.ProtocolError as e:

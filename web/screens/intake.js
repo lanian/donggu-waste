@@ -3,11 +3,40 @@ import * as J from '../juso.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, addrRoute, allStops, btn, commit, digits, dongOf, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, st, stepper, toast, todayKST, ui, withWorker } from '../core.js';
+import { isUnlocked } from '../store.js';
+import { addEvent, addrRoute, allStops, btn, commit, digits, dongOf, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, st, stepFlush, stepper, toast, todayKST, ui, withWorker } from '../core.js';
 import { pickScreen } from '../widgets.js';
 
 // PC 연결 방식 휴대폰에서 받는 접수의 경로(PC 접수 경로와 같은 이름)
 const FIELD_CHANNELS = ['현장', '전화', '방문'];
+// 같은 양식을 다시 그려도 저장 예약은 하나다. 잠금 전 기존 flush 경계에서 초안을 저장한다.
+const draftSaves = new WeakMap();
+function draftFor(form, state) {
+  const previous = draftSaves.get(form);
+  if (previous?.state === state) return previous;
+  previous?.cancel();
+  const key = Symbol('intake-draft');
+  let timer = null, pending = false;
+  const cancel = () => {
+    clearTimeout(timer); timer = null; pending = false; stepFlush.delete(key);
+    if (draftSaves.get(form) === draft) draftSaves.delete(form);
+  };
+  const flush = () => {
+    if (!pending) return;
+    cancel();
+    if (st !== state || ui.form !== form || !isUnlocked()) return;
+    const { pick, dupAck, addrAck, reason, id: _i, lat, lon, dongCands, picking, ...data } = form;
+    state.intakeDraft = { ...data, addrLat: lat, addrLon: lon };
+    return commit();
+  };
+  const schedule = () => {
+    if (st !== state || ui.form !== form || !isUnlocked()) return;
+    draftSaves.get(form)?.cancel(); pending = true; draftSaves.set(form, draft);
+    stepFlush.set(key, flush); timer = setTimeout(flush, 600);
+  };
+  const draft = { state, cancel, flush, schedule };
+  return draft;
+}
 function screenIntake(id) {
   // PC 연결 방식: 새 현장 접수만(PC 원본은 고치지 않음 — 바꿀 내용은 지점 화면의 [정정 요청])
   const onField = !isSolo();
@@ -26,8 +55,10 @@ function screenIntake(id) {
       pick: { q: '', sel: null, qty: 1 } };
   }
   const f = ui.form;
-  let draftTimer = null;
-  const saveDraft = () => { if (editing) return; clearTimeout(draftTimer); draftTimer = setTimeout(() => { const { pick, dupAck, addrAck, reason, id: _i, lat, lon, dongCands, picking, ...d } = f; st.intakeDraft = { ...d, addrLat: lat, addrLon: lon }; commit(); }, 600); };
+  const ownerState = st;
+  const currentForm = () => st === ownerState && ui.form === f && isUnlocked();
+  const draft = editing ? null : draftFor(f, ownerState);
+  const saveDraft = () => draft?.schedule();
   if (f.picking) return pickScreen({ items: f.items, state: f.pick, table, locked, onChange: saveDraft,
     onDone: () => { f.picking = false; render(); setTimeout(() => { const el = document.getElementById('intake-items'); if (el) el.scrollIntoView({ block: 'start' }); }, 0); } });
   const field = (key, label, attrs = {}) => {
@@ -86,6 +117,7 @@ function screenIntake(id) {
   const dupBox = h('div', {});
   const saveLabel = fieldEdit ? '고친 내용 저장' : editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록';
   const save = btn(saveLabel, async () => {
+    if (!currentForm()) return;
     const phone = digits(f.phone);
     if (!f.name.trim()) return (msg.textContent = '이름을 적어 주세요.');
     if (!/^0\d{8,10}$/.test(phone)) return (msg.textContent = '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
@@ -113,6 +145,7 @@ function screenIntake(id) {
         return;
       }
     }
+    draft?.cancel();
     const now = new Date().toISOString();
     const dong = (f.dong || '').trim().slice(0, 20);
     if (dong) st.recentDongs = [dong, ...(st.recentDongs || []).filter((x) => x !== dong)].slice(0, 12);
@@ -127,7 +160,7 @@ function screenIntake(id) {
       if (moved) { for (const k of ['lat', 'lon', 'geo_source']) { delete editing[k]; delete body0[k]; } }
       fieldEdit.ev.body = { ...body0, ...withWorker({}), channel: ch, ...data,
         items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) };
-      await commit(); ui.form = null; toast('접수를 고쳤습니다(보내기 전)'); go(`#/stop/${id}`);
+      await commit(); if (!currentForm()) return; ui.form = null; toast('접수를 고쳤습니다(보내기 전)'); go(`#/stop/${id}`);
       return;
     }
     if (onField) {
@@ -142,6 +175,7 @@ function screenIntake(id) {
       st.fieldStops = [...(st.fieldStops || []), fstop]; st.intakeDraft = null;
       await addEvent(fstop, 'FIELD_INTAKE', { temp_no: temp, channel: ch, ...data,
         items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) });
+      if (!currentForm()) return;
       ui.form = null; toast(`${temp} ${ch} 접수를 저장했습니다. 결과 보내기 때 PC로 갑니다`);
       // 지금 그 자리에서 받은 현장 접수는 바로 처리할 수 있게 그 지점으로, 전화·방문 접수는 목록으로
       go(ch === '현장' && data.planned_date === pcWorkDate() ? `#/stop/${fstop.request_id}` : '#/home');
@@ -153,24 +187,24 @@ function screenIntake(id) {
       const moved = editing.planned_date !== data.planned_date;
       Object.assign(editing, data, { req_ver: editing.req_ver + 1, versions, updated_at: now });
       if (moved) editing.seq = nextSeq(data.planned_date, editing.request_id);
-      await commit(); ui.form = null; toast('수정했습니다'); go(`#/stop/${id}`);
+      await commit(); if (!currentForm()) return; ui.form = null; toast('수정했습니다'); go(`#/stop/${id}`);
     } else {
       const rd = todayKST();
       const n = (st.receiptCounter[rd] || 0) + 1; st.receiptCounter[rd] = n;
       const req = { request_id: crypto.randomUUID(), receipt_no: `DG-${rd.replace(/-/g, '')}-${String(n).padStart(4, '0')}`, req_ver: 1, assign_ver: 1,
         ...data, seq: nextSeq(data.planned_date), status: 'ACTIVE', received_at: now, updated_at: now, versions: [] };
       st.requests.push(req); st.intakeDraft = null;
-      await commit(); ui.form = null; toast(`${req.receipt_no} 등록했습니다`); go('#/home');
+      await commit(); if (!currentForm()) return; ui.form = null; toast(`${req.receipt_no} 등록했습니다`); go('#/home');
     }
   }, 'primary huge');
   const view = h('main', {},
-    h('header', { class: 'bar' }, btn('← 취소', () => { ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
+    h('header', { class: 'bar' }, btn('← 취소', async () => { await draft?.flush(); if (!currentForm()) return; ui.form = null; go(editing ? `#/stop/${id}` : '#/home'); }, 'ghost'), h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
     onField && !registeredNow ? h('section', { class: 'card notice warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
       btn('기기 등록', () => go('#/register'), 'ghost')) : null,
     onField ? h('section', { class: 'card notice' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
       h('p', { class: 'small' }, '금액은 PC 수수료표로 다시 계산됩니다. 표에 없는 품목은 "확인 대기"로 갑니다. 이미 목록에 있는 집의 품목이 늘었으면 새로 받지 말고 그 지점에서 [품목 추가]를 하세요.')) : null,
     !editing && st.intakeDraft ? h('p', { class: 'small' }, '작성 중이던 내용을 불러왔습니다. ',
-      btn('지우고 새로 쓰기', async () => { st.intakeDraft = null; await commit(); ui.form = null; render(); }, 'ghost')) : null,
+      btn('지우고 새로 쓰기', async () => { draft?.cancel(); if (!currentForm()) return; ownerState.intakeDraft = null; await commit(); if (!currentForm()) return; ui.form = null; render(); }, 'ghost')) : null,
     h('section', { class: 'card' },
       onField ? h('div', {}, h('div', { class: 'fld-label' }, '접수 경로'),
         h('div', { class: 'grid3', role: 'group', 'aria-label': '접수 경로' }, ...FIELD_CHANNELS.map((c) =>

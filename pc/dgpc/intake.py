@@ -13,7 +13,7 @@ from dgpc import store as _store, area, finance, geo
 from dgpc.addresses import address_warnings
 from dgpc.core import (
     ACTOR, KST, UserError, _after_close, _date_ok, _secs, audit, check_req_ver, close_info, get_setting, is_chosung, norm_addr, norm_phone, now, one,
-    rows, safe_csv_writer, today_kst, tx,
+    require_request_pii_writable, rows, safe_csv_writer, today_kst, tx,
 )
 from dgpc.derive import derive, payment_status, prefetch
 from dgpc.fees import FEE_ROWS, FEE_TABLE, fee_rows, fee_state
@@ -184,6 +184,7 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
     d = validate({"channel": cur["channel"], **data})
     items = build_items(data["items"], con)
     with tx(con):
+        require_request_pii_writable(con, rid)
         check_req_ver(con, rid, data.get("req_ver"))
         cur = one(con, "SELECT * FROM request WHERE id=?", (rid,))
         if cur["status"] == "CANCELLED":
@@ -448,6 +449,7 @@ def add_contact(con, rid: str, data: dict) -> str:
         raise UserError("일시 형식이 올바르지 않습니다.")
     cid = str(uuid.uuid4())
     with tx(con):
+        require_request_pii_writable(con, rid)
         con.execute("INSERT INTO contact_log (id, request_id, at, kind, content, actor, recorded_at) VALUES (?,?,?,?,?,?,?)",
                     (cid, rid, at.replace(" ", "T"), kind, content[:1000], ACTOR.get(), now()))
         audit(con, "contact", cid, "ADD", {"request": rid, "kind": kind})  # 내용은 이력에 넣지 않는다(개인정보가 섞일 수 있음)
