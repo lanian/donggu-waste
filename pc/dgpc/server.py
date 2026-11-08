@@ -383,6 +383,17 @@ def ip_allowed(ip: str, nets) -> bool:
 class Handler(BaseHTTPRequestHandler):
     server_version = "dgpc"
     sys_version = ""
+    # 소켓 읽기·쓰기 한 번마다 시간 제한(초). 보내다 멈춘 접속·응답을 받지 않는 접속이 작업 스레드를 끝없이 붙잡지 않게
+    # (한 번의 읽기·쓰기 기준이라 큰 파일도 조금씩이라도 오가면 끊기지 않는다. 쉬는 keep-alive 연결은 이 시간 뒤 닫힘)
+    timeout = 60
+
+    def setup(self):
+        # 서버가 접속에 이미 더 짧은 시간 제한을 걸었으면(실행 앱 DesktopServer: 빨리 끝내기 위한 짧은 제한) 그것을 지킨다.
+        # StreamRequestHandler.setup 은 위 timeout 으로 덮어쓰므로 미리 읽어 두었다가 둘 중 짧은 쪽으로 다시 건다.
+        pre = self.request.gettimeout()
+        super().setup()
+        if pre is not None and (self.timeout is None or pre < self.timeout):
+            self.connection.settimeout(pre)
 
     def log_message(self, fmt, *args):  # 콘솔 접근 로그는 남기지 않는다(파일 로그는 route()에서 ID를 가려 남김)
         pass
@@ -445,7 +456,9 @@ class Handler(BaseHTTPRequestHandler):
             raise S.UserError("요청 길이가 올바르지 않습니다.")
         if n > MAX_BODY:
             raise S.UserError("파일이 너무 큽니다.")
-        return self.rfile.read(n) if n else b""
+        if getattr(self, "body_cache", None) is None:
+            self.body_cache = self.rfile.read(n) if n else b""
+        return self.body_cache
 
     def json_body(self) -> dict:
         if getattr(self, "json_body_cache", None) is not None:
@@ -493,6 +506,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self, method):
         self.json_body_cache = None
+        self.body_cache = None
         self.user = None
         self.c = None
         S.ACTOR.set("system")
@@ -530,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.bundle_page(path[8:])
             if method == "GET" and path.startswith("/print/batch/"):
                 sess = SESSIONS.get(self.session() or "")
+                if not sess:  # 위에서 확인한 사이에 로그아웃·만료 정리로 사라짐
+                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
                 S.ACTOR.set(sess["username"])
                 with LOCK:
                     if sess["role"] == "FIELD":
@@ -589,7 +605,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "logout" and method == "POST":
             SESSIONS.pop(tok, None)
             return self.send_json({"ok": True}, extra={"Set-Cookie": "dg_s=; Max-Age=0" + self.cookie_flags()})
-        sess = SESSIONS[tok]
+        sess = SESSIONS.get(tok)
+        if not sess:  # session() 확인과 이 사이에 다른 요청(로그아웃·비밀번호 재설정·만료 정리)이 지움
+            return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
         r, params = match(method, p)
         if not allowed(sess["role"], method, p):
             return self.send_json({"error": "이 작업은 권한이 없습니다."}, 403)
@@ -661,14 +679,26 @@ class Handler(BaseHTTPRequestHandler):
                     raise
             with LOCK:
                 self.c = CON
-                return self.reply(r, r.fn(self, qs, *params), qs, params)
+                out = r.fn(self, qs, *params)
+                self.log_access(r, out, qs, params)
+            return self.send_out(out)
         if r.lock == "write":
+            # 요청 본문은 DB 잠금을 잡기 전에 다 읽고, 응답은 잠금을 놓은 뒤 보낸다: 느리거나 멈춘 접속 하나가
+            # 잠금을 붙잡아 다른 사람의 저장이 모두 멈추지 않게
+            self.body()
             with LOCK:
                 self.c = CON
-                return self.reply(r, r.fn(self, qs, *params), qs, params)
+                out = r.fn(self, qs, *params)
+                self.log_access(r, out, qs, params)
+            return self.send_out(out)
         return self.reply(r, r.fn(self, qs, *params), qs, params)
 
     def reply(self, r: Route, out, qs: dict, params: tuple):
+        self.log_access(r, out, qs, params)
+        return self.send_out(out)
+
+    def log_access(self, r: Route, out, qs: dict, params: tuple):
+        """접속기록(있으면). 쓰기 경로에서는 잠금 안에서 부른다."""
         if r.access_fn is not None:
             rec = r.access_fn(self, out, qs, *params)
             if rec:
@@ -677,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     with read_con() as rc:
                         PV.record_access(rc, r.access, *rec)
+
+    def send_out(self, out):
         if out is None:
             return None
         if isinstance(out, Raw):
@@ -1503,7 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
     def ep_user_crew(self, qs, uid):
         """수거팀 계정의 팀 연결(열린 세션에도 바로 반영)."""
         S.set_user_crew(self.c, uid, self.json_body().get("crew_id") or None)
-        for v in SESSIONS.values():
+        for v in list(SESSIONS.values()):  # 다른 요청이 로그인·로그아웃하는 동안에도 깨지지 않게 복사본으로
             if v["user_id"] == uid:
                 v["crew_id"] = self.json_body().get("crew_id") or None
         return {"ok": True}
@@ -1513,7 +1545,7 @@ class Handler(BaseHTTPRequestHandler):
         """사용자 사용·중지(중지하면 세션 끊음)."""
         S.set_user_active(self.c, uid, bool(self.json_body().get("active")), self.user["user_id"])
         if not self.json_body_cache.get("active"):
-            for k in [k for k, v in SESSIONS.items() if v["user_id"] == uid]:
+            for k in [k for k, v in list(SESSIONS.items()) if v["user_id"] == uid]:
                 SESSIONS.pop(k, None)
         return {"ok": True}
 
@@ -1521,7 +1553,7 @@ class Handler(BaseHTTPRequestHandler):
     def ep_user_password(self, qs, uid):
         """임시 비밀번호 다시 정하기(세션 끊음)."""
         S.set_password(self.c, uid, self.json_body().get("password", ""), must_change=True)
-        for k in [k for k, v in SESSIONS.items() if v["user_id"] == uid]:
+        for k in [k for k, v in list(SESSIONS.items()) if v["user_id"] == uid]:
             SESSIONS.pop(k, None)
         return {"ok": True}
 
@@ -1847,10 +1879,10 @@ class DesktopServer(Server):
 def cleanup_sessions() -> int:
     """만료된 세션(무조작·절대 만료)과 지난 인쇄 자료를 메모리에서 지운다."""
     now_ = time.time()
-    gone = [k for k, v in SESSIONS.items() if v["exp"] < now_ or now_ - v.get("created", 0) > ABS_S]
+    gone = [k for k, v in list(SESSIONS.items()) if v["exp"] < now_ or now_ - v.get("created", 0) > ABS_S]  # 복사본으로(로그인과 동시에 돌아도 깨지지 않게)
     for k in gone:
         SESSIONS.pop(k, None)
-    for k in [k for k, v in PRINTS.items() if v["exp"] < now_]:
+    for k in [k for k, v in list(PRINTS.items()) if v["exp"] < now_]:
         PRINTS.pop(k, None)
     return len(gone)
 

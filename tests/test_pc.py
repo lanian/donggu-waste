@@ -3223,6 +3223,221 @@ def review_round3():
     con.close()
 
 
+def review_p3():
+    """검토 3순위: 대사 파일의 모르는 납부방법, 접수에서 빠진 품목 줄의 수거 결과, 복원 전 DB 사본 보관."""
+    print("\n— 검토 3순위 —")
+    import datetime as _dt
+    from dgpc import finance as FN, ops as OPS
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-p3-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    day = "2026-11-10"
+    base = {"address": "가상시 동구 예시로 31", "planned_date": day, "lat": 35.15, "lon": 126.92}
+
+    # 1) 대사: 모르는 납부방법은 '가상계좌'로 바꿔 적지 않고 '기타'로 기록 + 미리보기 경고 + 원문은 메모에
+    ra = S.create_request(con, {**base, "name": "대사가상", "phone": "010-0000-9601", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    rb = S.create_request(con, {**base, "name": "대사가상둘", "phone": "010-0000-9602", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    rc = S.create_request(con, {**base, "name": "대사가상셋", "phone": "010-0000-9603", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    lv = {k: S.one(con, "SELECT levy_no FROM request WHERE id=?", (v["id"],))["levy_no"] for k, v in (("a", ra), ("b", rb), ("c", rc))}
+    raw = ("부과번호,금액,납부일,영수번호,납부방법\n" + f"{lv['a']},{chair['price']},2026-11-06,P3-1,간편결제\n"
+           f"{lv['b']},{chair['price']},2026-11-06,P3-2,\n{lv['c']},{chair['price']},2026-11-06,P3-3,현장 카드\n").encode()
+    pv = FN.import_recon(con, raw, preview=True)
+    rows_ = {x["line"]: x for x in pv["rows"]}
+    ok(all(x["status"] == "MATCH" for x in rows_.values()) and "간편결제" in rows_[2]["note"] and "기타" in rows_[2]["note"]
+       and not rows_[3]["note"] and not rows_[4]["note"],
+       "대사 미리보기: 모르는 납부방법은 일치 행에도 '기타로 기록' 경고(빈 칸·아는 방법은 경고 없음)")
+    FN.import_recon(con, raw, preview=False)
+    pm = {r["request_id"]: r for r in S.rows(con, "SELECT request_id, method, note FROM payment WHERE source='대사'")}
+    ok(pm[ra["id"]]["method"] == "기타" and "간편결제" in pm[ra["id"]]["note"], "모르는 납부방법 → '기타'로 기록, 파일의 원래 글은 메모에")
+    ok(pm[rb["id"]]["method"] == "가상계좌" and pm[rc["id"]]["method"] == "현장 카드", "납부방법 칸이 비면 가상계좌(세외수입 기본), 아는 방법은 그대로")
+
+    # 2) 접수 수정으로 빠진 품목 줄의 수거 결과: 그냥 '반영'(실제로는 아무 일 없음)이 아니라 충돌함으로
+    ph = Phone(S.registration_text(con))
+    dev = S.register_device(con, ph.code(), "3순위폰", confirm=True)["device_id"]
+    cid = S.save_crew(con, {"name": "3순위 시험팀", "device_id": dev})
+    sofa = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["id"] != chair["id"])
+    r2 = S.create_request(con, {**base, "name": "줄가상", "phone": "010-0000-9604",
+                                "items": [{"fee_rate_id": chair["id"], "qty": 1}, {"fee_rate_id": sofa["id"], "qty": 1}]})
+    bt = S.confirm_plan(con, day, {cid: [{"request_id": r2["id"], "eta": "09:00"}]})[0]
+    payload, _ = S.build_daylist(con, bt["batch_id"])
+    st0 = payload["stops"][0]
+    keep_l, gone_l = st0["items"][0]["line_id"], st0["items"][1]["line_id"]
+    S.update_request(con, r2["id"], {**base, "req_ver": RV(con, r2["id"]), "name": "줄가상", "phone": "010-0000-9604",
+                                     "items": [{"line_id": keep_l, "fee_rate_id": chair["id"], "qty": 1}]}, "주민 요청: 품목 하나 취소")
+    new_l = str(uuid.uuid4())
+    evs = [ph.ev(st0, "ITEM_RESULT", {"line_id": keep_l, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": gone_l, "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": "없는-줄", "line_kind": "RECEIVED", "qty_confirmed": 1, "qty_collected": 1, "reason": ""}),
+           ph.ev(st0, "FIELD_ITEM_ADD", {"line_id": new_l, "fee_rate_id": chair["id"], "qty": 1}),
+           ph.ev(st0, "ITEM_RESULT", {"line_id": new_l, "line_kind": "FIELD", "qty_confirmed": 1, "qty_collected": 1, "reason": ""})]
+    imp = S.import_result(con, ph.seal({"schema": "dg.result/1", "work_date": day, "events": evs}, P.TYPE_RESULT))
+    stt = {e["event_id"]: e for e in S.rows(con, "SELECT event_id, apply_status, conflict_reason FROM result_event WHERE import_id=?", (imp["import_id"],))}
+    ok(stt[evs[0]["event_id"]]["apply_status"] == "APPLIED" and stt[evs[3]["event_id"]]["apply_status"] == "APPLIED"
+       and stt[evs[4]["event_id"]]["apply_status"] == "APPLIED", "있는 품목 줄·같은 파일에서 현장 추가한 줄의 결과는 그대로 반영")
+    ok(stt[evs[1]["event_id"]]["apply_status"] == "CONFLICT" and "빠진 품목" in (stt[evs[1]["event_id"]]["conflict_reason"] or "")
+       and stt[evs[2]["event_id"]]["apply_status"] == "CONFLICT" and "없는 품목" in (stt[evs[2]["event_id"]]["conflict_reason"] or ""),
+       "접수 수정으로 빠진 품목 줄·접수에 없는 줄의 수거 결과 → 충돌함(이유 표시)")
+    raises(lambda: S.resolve_conflict(con, evs[1]["event_id"], "APPLY", "현장 확인"), "품목", "빠진 품목 줄의 결과는 반영 불가(아무 일 없이 '반영됨'이 되지 않게) — 거부하거나 접수를 고침")
+    S.resolve_conflict(con, evs[1]["event_id"], "REJECT", "주민이 취소한 품목")
+    ok(S.one(con, "SELECT apply_status FROM result_event WHERE event_id=?", (evs[1]["event_id"],))["apply_status"] == "REJECTED", "거부는 됨")
+
+    # 3) 복원 전 DB 사본(state/pc.db.before-restore-*, 개인정보 포함): 업데이트 사전 사본과 같은 규칙(가장 새 1개 늘, 나머지 3개 안·30일 이내)
+    sd = store.state_dir()
+    mk = lambda days: (sd / f"pc.db.before-restore-{(_dt.datetime.now() - _dt.timedelta(days=days)).strftime('%Y%m%d-%H%M%S')}")
+    made = [mk(d_) for d_ in (1, 2, 3, 5, 40)]
+    for f in made:
+        f.write_bytes(b"x" * 10)
+    Path(str(made[-1]) + "-wal").write_bytes(b"w")
+    dr = OPS.daily_tasks(con, None, None)
+    left = sorted(f.name for f in sd.iterdir() if "before-restore" in f.name)
+    ok(dr.get("restore_copy_retention") == 2 and left == sorted(f.name for f in made[:3]) and (sd / "pc.db").exists()
+       and S.one(con, "SELECT 1 AS x FROM audit_log WHERE entity_id='before-restore' AND action='PURGE'"),
+       "매일 예약 작업: 복원 전 사본 4번째·30일 넘은 것(곁 파일 -wal 포함) 삭제, 새것 3개·업무 DB는 그대로, 변경 이력")
+    for f in made[:3]:
+        f.unlink()
+    a, b = mk(50), mk(60)
+    a.write_bytes(b"x"); b.write_bytes(b"x")
+    ok(store.restore_copy_retention() == [b.name] and a.exists(), "30일 넘은 사본만 있어도 가장 새 1개는 남김")
+
+
+def review_p4():
+    """검토 4순위: 마감 뒤 환불 지급·대사 표시, 잠긴 품목 바꿔치기, 세션 경쟁, 복원 DB 키 확인, 느린 접속이 DB 잠금을 붙잡지 않음."""
+    print("\n— 검토 4순위 —")
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+    from dgpc import close as CL, finance as FN, server as SV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-p4-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    fee = {r["name"] + "|" + r["spec"]: r for r in S.FEE_TABLE["rows"]}
+    chair = fee["의자|고정식 의자"]
+    other = next(r for r in S.FEE_TABLE["rows"] if r["status"] == "CONFIRMED" and r["id"] != chair["id"] and r["price"] != chair["price"])
+    day = "2026-10-05"
+    base = {"address": "가상시 동구 예시로 41", "planned_date": day}
+
+    # 1) 마감한 날 접수의 환불 지급·세입 대사 반영도 '마감 후 수정'으로 표시(수납 기록과 같게)
+    rr = S.create_request(con, {**base, "name": "마감가상", "phone": "010-0000-9701", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    rv = S.create_request(con, {**base, "name": "마감대사", "phone": "010-0000-9702", "items": [{"fee_rate_id": chair["id"], "qty": 1}]})
+    S.add_payment(con, rr["id"], {"amount": chair["price"], "method": "가상계좌", "paid_on": day})
+    S.cancel_request(con, rr["id"], "", "RESIDENT")
+    with S.tx(con):
+        con.execute("INSERT INTO day_close_log (id, work_date, seq, closed_at, summary_json, note, status) VALUES (?,?,?,?,?,?,?)",
+                    ("p4-close", day, 1, S.now(), "{}", "", "RECORDED"))
+    case = next(x for x in FN.list_refunds(con, "OPEN")["rows"] if x["request_id"] == rr["id"])
+    S.ACTOR.set("kim")
+    FN.request_refund(con, {"case_id": case["id"], "note": "주민 요청"})
+    S.ACTOR.set("boss")
+    FN.approve_refund(con, case["id"], True, "확인")
+    S.ACTOR.set("kim")
+    FN.pay_refund(con, case["id"], {"method": "계좌 이체", "account_checked": True, "paid_on": "2026-10-07"})
+    lvv = S.one(con, "SELECT levy_no FROM request WHERE id=?", (rv["id"],))["levy_no"]
+    FN.import_recon(con, (f"부과번호,금액,납부일,영수번호\n{lvv},{chair['price']},2026-10-07,P4-1\n").encode(), preview=False)
+    S.ACTOR.set("admin")
+    pce = {(e["entity"], e["request_id"]) for e in CL._post_close_edits(con, day)}
+    ok(("refund", rr["id"]) in pce and ("payment", rv["id"]) in pce,
+       f"마감한 날 접수의 환불 지급·세입 대사 반영도 마감 화면의 '마감 후 수정'에 나옴 {sorted(e for e, _ in pce)}")
+
+    # 2) 현장 결과가 있는 품목 줄은 수량·삭제뿐 아니라 품목(수수료표 행)도 바꿀 수 없음. 잠기지 않은 줄은 바꾸면 이름·단가가 함께 바뀜
+    day2 = S.today_kst()
+    addr2 = {"address": "가상시 동구 예시로 42", "planned_date": day2, "name": "잠금가상", "phone": "010-0000-9703"}
+    rl = S.create_request(con, {**addr2, "items": [{"fee_rate_id": chair["id"], "qty": 1}, {"fee_rate_id": chair["id"], "qty": 2}]})
+    l_lock, l_free = [i["line_id"] for i in S.get_request(con, rl["id"])["items"]]
+    with S.tx(con):
+        con.execute("INSERT INTO result_import (id, channel, package_sha256, device_id, imported_at) VALUES (?,?,?,?,?)", ("p4-imp", "MAIL", "p4sha", "dev", S.now()))
+        con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, kind, body_json, apply_status, device_ts)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""", ("p4-ev", "p4-imp", "dev", 1, rl["id"], 1, "ITEM_RESULT",
+                                                         json.dumps({"line_id": l_lock, "qty_confirmed": 1, "qty_collected": 1}), "APPLIED", S.now()))
+
+    def upd(items):
+        return S.update_request(con, rl["id"], {**addr2, "req_ver": RV(con, rl["id"]), "items": items}, "품목 정정(가상)")
+    raises(lambda: upd([{"line_id": l_lock, "fee_rate_id": other["id"], "qty": 1}, {"line_id": l_free, "fee_rate_id": chair["id"], "qty": 2}]),
+           "바꾸거나 지울 수 없습니다", "현장 결과가 있는 품목 줄의 품목(수수료표 행) 바꾸기 거부(수거한 뒤 단가가 바뀌지 않게)")
+    upd([{"line_id": l_lock, "fee_rate_id": chair["id"], "qty": 1}, {"line_id": l_free, "fee_rate_id": other["id"], "qty": 2}])
+    fr = S.one(con, "SELECT * FROM request_item WHERE line_id=?", (l_free,))
+    ok(fr["fee_rate_id"] == other["id"] and fr["name"] == other["name"] and fr["spec"] == other["spec"] and fr["amount"] == other["price"] * 2,
+       "잠기지 않은 줄의 품목을 바꾸면 수수료표 행·이름·규격·금액이 함께 바뀜(이름은 옛 품목, 단가는 새 품목이 되지 않게)")
+
+    # 3) 복원: DB 키가 지금 업무 DB와 맞지 않으면(키 저장소 없이 손으로 잘못 입력) 바꿔 넣지 않고 멈춤
+    st_p4 = os.environ["DG_STATE"]
+    bk = Path(st_p4) / "p4.dgbak"
+    store.backup_to(con, bk, "p4-backup-pass-0001")
+    con.close()
+    db = Path(st_p4) / "pc.db"
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    real_key = os.environ["DG_DB_KEY"]
+    os.environ["DG_DB_KEY"] = "wrong-key-typed-by-hand"
+    try:
+        store.restore_from(bk, "p4-backup-pass-0001")
+        msg_ = "(멈추지 않음)"
+    except ValueError as e:  # 복원 함수는 ValueError 로 알리고, 명령(pc_tool restore)이 그 글을 보여 주고 끝낸다
+        msg_ = str(e)
+    finally:
+        os.environ["DG_DB_KEY"] = real_key
+    ok("DB 키" in msg_, f"복원: 지금 업무 DB를 열 수 없는 DB 키면 멈춤(틀린 키로 다시 암호화해 바꿔 넣지 않음) → {msg_}")
+    ok(hashlib.sha256(db.read_bytes()).hexdigest() == before and not list(Path(st_p4).glob("pc.db.before-restore-*"))
+       and not list(Path(st_p4).glob("pc.db.restoring*")), "멈춘 복원은 업무 DB를 그대로 두고 사본·임시 파일도 남기지 않음")
+    ok(store.restore_from(bk, "p4-backup-pass-0001")["requests"] >= 3, "맞는 키면 복원됨")
+    con = store.connect()
+
+    # 4) 서버: 세션이 사라진 사이(로그아웃·만료 정리) 요청은 500이 아니라 401, 느린 접속이 DB 잠금을 붙잡지 않음
+    S.ACTOR.set("admin")
+    S.create_user(con, "slow_p4", "가상느림", "INTAKE", "slow-pass-p4-01")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    SV.CON, SV.PORT, SV.LAN = con, port, None
+    SV.FAILS.clear()
+    SV.IP_FAILS.clear()
+    while not SV.RPOOL.empty():
+        SV.RPOOL.get_nowait().close()
+    srv = SV.Server(("127.0.0.1", port), SV.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def http(method, path, body=None, cookie=None, timeout=10):
+        hd = {"X-DG-CSRF": "1", "Content-Type": "application/json", **({"Cookie": cookie} if cookie else {})}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/{path}", data=None if body is None else json.dumps(body).encode(), method=method, headers=hd)
+        try:
+            with opener.open(req, timeout=timeout) as r_:
+                return r_.status, r_.headers.get("Set-Cookie") or ""
+        except urllib.error.HTTPError as e:
+            return e.code, ""
+    raw_sock = None
+    try:
+        code, sc = http("POST", "login", {"username": "slow_p4", "password": "slow-pass-p4-01"})
+        cookie = sc.split(";")[0]
+        ok(code == 200 and cookie.startswith("dg_s="), "로그인")
+        real_session = SV.Handler.session
+        SV.Handler.session = lambda self_: "ghost-token-p4"  # 확인한 뒤 바로 사라진 세션
+        try:
+            ok(http("GET", "bootstrap", cookie=cookie)[0] == 401, "세션 확인 직후 세션이 사라져도 500이 아니라 401(로그인 필요)")
+        finally:
+            SV.Handler.session = real_session
+        ok(bool(SV.Handler.timeout) and SV.Handler.timeout <= 120, "접속마다 소켓 시간 제한(멈춘 접속이 끝없이 붙잡지 않음)")
+        raw_sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        raw_sock.sendall((f"POST /api/prefs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\nX-DG-CSRF: 1\r\n"
+                          "Content-Type: application/json\r\nContent-Length: 60\r\n\r\n{\"theme\":").encode())  # 본문을 다 보내지 않고 멈춤
+        time.sleep(0.5)
+        t0 = time.time()
+        try:
+            code2 = http("POST", "prefs", {"theme": "dark"}, cookie=cookie, timeout=6)[0]
+        except OSError:
+            code2 = "시간 초과"
+        ok(code2 == 200 and time.time() - t0 < 4, f"본문을 보내다 멈춘 접속이 있어도 다른 저장은 바로 됨(본문은 DB 잠금 밖에서 읽음) → {code2}")
+    finally:
+        if raw_sock:
+            raw_sock.close()
+        srv.shutdown()
+        srv.server_close()
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -3237,4 +3452,6 @@ if __name__ == "__main__":
     review_fixes()
     review_p2()
     review_round3()
+    review_p3()
+    review_p4()
     print(f"\n통과 {passed}개 (구조 정리 포함)")
