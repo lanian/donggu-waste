@@ -460,10 +460,25 @@ def _m7_numbered_labels(con):
     con.execute("CREATE INDEX ix_numbered_label_event ON numbered_label_event(number_key, id)")
 
 
+def _m8_dong_users(con):
+    """담당 동 계정: 기존 계정의 모든 열·암호·설정을 그대로 보존한다."""
+    sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='app_user'").fetchone()[0]
+    if "'DONG'" not in sql:
+        con.execute(sql.replace("app_user", "app_user_dong_v8", 1).replace("'LEAD'", "'LEAD','DONG'", 1))
+        cols = ",".join('"' + r[1] + '"' for r in con.execute("PRAGMA table_info(app_user)").fetchall())
+        con.execute(f"INSERT INTO app_user_dong_v8 ({cols}) SELECT {cols} FROM app_user")
+        con.execute("DROP TABLE app_user")
+        con.execute("ALTER TABLE app_user_dong_v8 RENAME TO app_user")
+    con.execute("""CREATE TABLE IF NOT EXISTS app_user_dong (
+        user_id TEXT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+        dong_id TEXT NOT NULL REFERENCES dong(id), PRIMARY KEY(user_id, dong_id))""")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_app_user_dong ON app_user_dong(dong_id)")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
-              (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels)]
+              (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels), (8, "담당 동 계정과 권한 연결", _m8_dong_users)]
 LATEST = MIGRATIONS[-1][0]
 
 

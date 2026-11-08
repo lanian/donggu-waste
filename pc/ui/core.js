@@ -240,7 +240,7 @@ async function download(path, filename, opts = {}) {
 let dlgSeq = 0;
 const dlgStack = [];
 // extra: [{ label, value, cls }] — 확인·취소 말고 다른 답(누르면 value로 닫힘). sticky: 화면을 옮겨도 닫지 않음(다시 로그인)
-function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false } = {}) {
+function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false, enterSubmit = true } = {}) {
   return new Promise((resolve) => {
     const id = `dlg${++dlgSeq}`;
     const prev = document.activeElement;
@@ -261,7 +261,7 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
         if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); }
         else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
         else if (i < 0) { e.preventDefault(); f[0].focus(); }
-      } else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && box.contains(e.target) && !['checkbox', 'file'].includes(e.target.type)) { e.preventDefault(); okB.click(); }
+      } else if (enterSubmit && e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && box.contains(e.target) && !['checkbox', 'file'].includes(e.target.type)) { e.preventDefault(); okB.click(); }
     };
     let closed = false;
     const close = (v) => { if (closed) return; closed = true; back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };

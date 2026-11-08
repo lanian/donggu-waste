@@ -5,14 +5,14 @@ import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
 import { FEES, api, btn, grid, h, kst, liveMaps, toast } from './core.js';
 
-function itemPicker(onAdd) {
+function itemPicker(onAdd, { usagePath = 'fee-usage' } = {}) {
   const st = { q: '', sel: null, qty: 1 };
   const q = h('input', { type: 'search', placeholder: '품목명·규격 검색 (예: 3인용 소파, 장롱, 2인용 매트리스)', style: 'flex:1' });
   const list = h('div', { class: 'results' });
   const qty = h('input', { type: 'number', min: 1, value: 1, style: 'width:80px' });
   const add = btn('품목 추가', null, 'primary', { disabled: true });
   let usage = [];
-  api('fee-usage').then((u) => { usage = u; draw(); }).catch(() => {});
+  if (usagePath) api(usagePath).then((u) => { usage = u; draw(); }).catch(() => {});
   const draw = () => {
     const quick = !st.q;
     const rows = quick ? usage.map((id) => FEES().rows.find((r) => r.id === id)).filter(Boolean) : searchFees(FEES(), st.q).slice(0, 40);

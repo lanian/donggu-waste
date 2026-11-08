@@ -30,7 +30,7 @@ class LabelMigrationTests(unittest.TestCase):
             con.close()
 
     def test_fresh_database(self):
-        self.assertEqual(store.LATEST, 7)
+        self.assertEqual(store.LATEST, 8)
         con = store.connect(create=True)
         try:
             self.assertEqual(con.execute("SELECT count(*) FROM numbered_label").fetchone()[0], 0)
@@ -43,7 +43,7 @@ class LabelMigrationTests(unittest.TestCase):
         self.old_database()
         con = store.connect()
         try:
-            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 7)
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 8)
             self.assertEqual(con.execute("SELECT value FROM meta WHERE key='label_migration_fixture'").fetchone()[0], "preserve")
             self.assertEqual(con.execute("SELECT count(*) FROM numbered_label").fetchone()[0], 0)
         finally:

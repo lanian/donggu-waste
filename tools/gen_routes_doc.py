@@ -17,7 +17,7 @@ os.environ.setdefault("DG_STATE", tempfile.mkdtemp(prefix="dg-doc-"))  # 서버 
 from dgpc import server as SV  # noqa: E402
 
 OUT = ROOT / "docs" / "routes.md"
-ROLES = (("ADMIN", "관리자"), ("INTAKE", "접수"), ("FIELD", "수거팀"), ("LEAD", "팀장"))
+ROLES = (("ADMIN", "관리자"), ("INTAKE", "접수"), ("FIELD", "수거팀"), ("LEAD", "팀장"), ("DONG", "지정 동"))
 PUBLIC = (("GET", "state", "설정 필요 여부·로그인 여부"), ("POST", "setup", "첫 관리자 만들기(사용자가 없을 때만)"),
           ("POST", "login", "로그인(아이디별·PC별 실패 잠금)"), ("POST", "logout", "로그아웃(세션만 있으면)"))
 
@@ -31,7 +31,7 @@ def render() -> str:
              "- **접속기록**: 경로에서 남기는 접속기록 동작(건수·메모만). 내보내기·인쇄·배차표·주소 검색은 업무 함수 안에서 남긴다.",
              "- 경로 표에 없는 주소: 관리자, 또는 같은 방법·같은 첫 마디의 경로를 쓸 수 있는 역할은 404, 그 밖은 403.",
              "- 새 경로 추가: `server.py` 의 `Handler` 안에 `@endpoint(방법, 경로, 역할 묶음, lock=…, access=…)` 처리 함수 하나 → 이 문서를 다시 만든다.",
-             "  역할 묶음: " + ", ".join(f"`{n}`={'·'.join(sorted(getattr(SV, n)))}" for n in ("ALL", "VIEW", "WORK", "CREW", "REVIEW", "ADMIN")) + ".",
+             "  역할 묶음: " + ", ".join(f"`{n}`={'·'.join(sorted(getattr(SV, n)))}" for n in ("ALL", "VIEW", "WORK", "CREW", "REVIEW", "ADMIN", "SELF")) + ".",
              "", "## 로그인 전", "", "| 방법 | 경로 | 설명 |", "|---|---|---|"]
     lines += [f"| {m} | `{p}` | {d} |" for m, p, d in PUBLIC]
     for method in ("GET", "POST"):

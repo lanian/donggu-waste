@@ -64,7 +64,7 @@ def main():
                 else:
                     raise AssertionError("배포 서버 준비 시간 초과")
                 assert initial == {"setup_needed": True, "logged_in": False}
-                for path in ("", "start.js", "pc.js", "core.js", "screens/home.js", "screens/reports.js", "screens/numbered_labels.js", "pc.css", "doc.css",
+                for path in ("", "start.js", "pc.js", "core.js", "screens/home.js", "screens/dongs.js", "screens/reports.js", "screens/numbered_labels.js", "pc.css", "doc.css",
                              "fonts/PretendardGOV-Regular.subset.woff2", "web/proto.js", "web/fees-data.js",
                              "web/labels-data.js", "web/vendor/maplibre/maplibre-gl.mjs"):
                     with opener.open(url + path, timeout=10) as response:

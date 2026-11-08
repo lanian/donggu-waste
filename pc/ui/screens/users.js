@@ -13,13 +13,13 @@ function screenMe() {
       h('label', { class: 'f' }, '현재 비밀번호', old), h('label', { class: 'f' }, '새 비밀번호 (10자 이상)', pw), h('label', { class: 'f' }, '새 비밀번호 확인', pw2),
       btn('비밀번호 바꾸기', wrap(async () => {
         if (pw.value !== pw2.value) throw new Error('두 번 입력한 비밀번호가 다릅니다.');
-        await post('password', { old: old.value, password: pw.value }); toast('바꿨습니다'); setBoot(null); go('#/requests'); render();
+        await post('password', { old: old.value, password: pw.value }); toast('바꿨습니다'); const next = me.role === 'DONG' ? '#/dongs' : '#/requests'; setBoot(null); go(next); render();
       }, msg), 'primary'), msg),
     h('div', { class: 'card', style: 'max-width:460px' }, h('h2', {}, '화면 설정'), h('p', { class: 'muted small' }, '테마와 글자 크기는 계정마다 저장되어 다른 PC에서 로그인해도 같게 보입니다. 지도와 인쇄물은 항상 밝게 표시합니다.'), prefsControls()));
 }
 
 // ------------------------------------------------------------ 사용자·변경 이력 (운영 관리자)
-const ROLE = { ADMIN: '운영 관리자', INTAKE: '접수 담당자', FIELD: '수거팀', LEAD: '팀장(검토자)' };
+const ROLE = { ADMIN: '운영 관리자', INTAKE: '접수 담당자', DONG: '동 담당자(지정 동)', FIELD: '수거팀', LEAD: '팀장(검토자)' };
 const KEY = { crew: '팀', date: '날짜', ver: '갱신본', n: '건수', count: '건수', reason: '사유', role: '역할', username: '아이디', status: '상태', source: '출처', adjusted: '조정',
   rev_no: '개정', effective_from: '시행일', rows: '행', price: '단가', fee_rate_id: '품목', confirmed_by: '확인자', file: '파일', bytes: '크기', start: '시작', end: '끝', amount: '금액',
   kind: '구분', method: '방법', applied: '반영', conflict: '충돌', skipped_duplicate: '중복', stops: '지점', open_items: '미처리', retention_days: '보관 일수', line: '품목 행',
@@ -29,17 +29,34 @@ async function screenUsers() {
   const msg = h('p', { class: 'msg' });
   const users = await api('users');
   const F = { username: h('input', { placeholder: '아이디 (영문)' }), display_name: h('input', { placeholder: '이름' }),
-    role: h('select', {}, ...Object.entries(ROLE).map(([k, t]) => h('option', { value: k, selected: k === 'INTAKE' }, t))),
+    role: h('select', { 'aria-label': '새 계정 역할' }, ...Object.entries(ROLE).map(([k, t]) => h('option', { value: k, selected: k === 'INTAKE' }, t))),
     crew: h('select', { hidden: true }, h('option', { value: '' }, '(팀 선택)'), ...boot.crews.map((c) => h('option', { value: c.id }, c.name))), password: h('input', { type: 'password', placeholder: '임시 비밀번호 (10자 이상)', autocomplete: 'new-password' }) };
-  F.role.addEventListener('change', () => { F.crew.hidden = F.role.value !== 'FIELD'; });
+  const dongs = boot.dongs || [];
+  const dongChoices = (selected = [], prefix = '새 계정') => dongs.map((d) => h('label', { class: 'row' }, h('input', { type: 'checkbox', value: d.id, checked: selected.includes(d.id), disabled: !d.active && !selected.includes(d.id), 'aria-label': `${prefix} 담당 동 ${d.name}` }), `${d.name}${d.active ? '' : ' (중지)'}`));
+  const newDongs = h('fieldset', { class: 'dong-workspace dw-user-dongs', hidden: true }, h('legend', {}, '담당 동 (여러 개 선택 가능)'), ...dongChoices());
+  F.role.addEventListener('change', () => { F.crew.hidden = F.role.value !== 'FIELD'; newDongs.hidden = F.role.value !== 'DONG'; });
+  const dongSel = (u) => {
+    const checks = h('div', { class: 'dw-dong-checks' }, ...dongChoices(u.dong_ids || [], u.username));
+    const note = h('p', { class: 'msg', role: 'status' });
+    const label = () => (u.dong_ids || []).length ? `${(u.dong_ids || []).map((id) => dongs.find((d) => d.id === id)?.name || '미등록 동').join(', ')} · 지정 범위 수정` : '담당 동 없음 · 접근 불가';
+    const summary = h('summary', {}, label());
+    const save = btn('담당 동 저장', async () => {
+      const ids = [...checks.querySelectorAll('input:checked')].map((x) => x.value);
+      if (!ids.length && u.active) { note.textContent = '사용 중인 동 담당자는 담당 동을 하나 이상 선택하세요.'; return; }
+      save.disabled = true; note.textContent = '';
+      try { await post(`users/${u.id}/dongs`, { dong_ids: ids }); u.dong_ids = ids; summary.textContent = label(); note.textContent = '담당 동을 저장했습니다. 새 권한은 다음 요청부터 적용됩니다.'; }
+      catch (e) { note.textContent = e.message; } finally { save.disabled = false; }
+    }, 'small');
+    return h('details', { class: 'dong-workspace dw-user-dongs' }, summary, checks, save, note);
+  };
   const crewSel = (u) => {
     const sel = h('select', { class: 'small', 'aria-label': `${u.username} 수거팀` }, h('option', { value: '' }, '(팀 없음 — 아무것도 안 보임)'), ...boot.crews.map((c) => h('option', { value: c.id, selected: c.id === u.crew_id }, c.name)));
     sel.addEventListener('change', wrap(async () => { await post(`users/${u.id}/crew`, { crew_id: sel.value }); toast('팀을 연결했습니다'); }));
     return sel;
   };
-  const utable = h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['아이디', '이름', '역할', '팀', '상태', '마지막 로그인', ''].map((t) => h('th', {}, t)))),
+  const utable = h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['아이디', '이름', '역할', '업무 범위 / 팀', '상태', '마지막 로그인', ''].map((t) => h('th', {}, t)))),
     h('tbody', {}, ...users.map((u) => h('tr', {}, h('td', {}, u.username), h('td', {}, u.display_name), h('td', {}, ROLE[u.role]),
-      h('td', {}, u.role === 'FIELD' ? crewSel(u) : h('span', { class: 'muted' }, '전체')),
+      h('td', {}, u.role === 'FIELD' ? crewSel(u) : u.role === 'DONG' ? dongSel(u) : h('span', { class: 'muted' }, '전체 동')),
       h('td', {}, u.active ? (u.must_change ? chip('임시 비밀번호', 'warn') : chip('사용', 'ok')) : chip('중지', 'bad')),
       h('td', {}, u.last_login_at ? kst(u.last_login_at) : '—'),
       h('td', {}, btn(u.active ? '중지' : '다시 사용', wrap(async () => { await post(`users/${u.id}/active`, { active: !u.active }); render(); }, msg), 'small'), ' ',
@@ -73,8 +90,8 @@ async function screenUsers() {
   return h('div', {}, pagehead(admin ? '사용자·변경 이력' : '변경 이력', h('a', { href: '#/access', class: 'small' }, '개인정보 접속기록 →')),
     admin ? h('div', { class: 'card' }, h('h2', {}, '사용자'), h('div', { class: 'tablewrap' }, utable),
       h('div', { class: 'row', style: 'margin-top:12px' }, F.username, F.display_name, F.role, F.crew, F.password,
-        btn('사용자 추가', wrap(async () => { if (F.role.value === 'FIELD' && !F.crew.value) throw new Error('수거팀 계정은 팀을 골라 주세요.'); await post('users', { username: F.username.value, display_name: F.display_name.value, role: F.role.value, password: F.password.value, crew_id: F.crew.value }); toast('추가했습니다. 첫 로그인 때 비밀번호를 바꾸게 됩니다.'); render(); }, msg), 'primary')),
-      h('p', { class: 'muted' }, '접수 담당자: 접수·배정·전송·결과·수납·마감 기록. 팀장(검토자): 모든 화면 조회·변경 이력·마감 확인(사용자·설정 관리와 업무 변경은 못 함). 수거팀: 연결한 팀에 배정된 접수만 조회, 그 팀 휴대폰의 결과·사진 가져오기, 그 팀 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg) : null,
+        btn('사용자 추가', wrap(async () => { if (F.role.value === 'FIELD' && !F.crew.value) throw new Error('수거팀 계정은 팀을 골라 주세요.'); const dongIds = [...newDongs.querySelectorAll('input:checked')].map((x) => x.value); if (F.role.value === 'DONG' && !dongIds.length) throw new Error('동 담당자 계정은 담당 동을 하나 이상 선택하세요.'); await post('users', { username: F.username.value, display_name: F.display_name.value, role: F.role.value, password: F.password.value, crew_id: F.crew.value, ...(F.role.value === 'DONG' ? { dong_ids: dongIds } : {}) }); toast('추가했습니다. 첫 로그인 때 비밀번호를 바꾸게 됩니다.'); render(); }, msg), 'primary')), newDongs,
+      h('p', { class: 'muted' }, '접수 담당자: 전체 동의 접수·배정·전송·결과·수납·마감 기록. 동 담당자: 지정한 동에서만 현황·접수·배정 업무. 팀장(검토자): 전체 동 조회·변경 이력·마감 확인(사용자·설정 관리와 업무 변경은 못 함). 수거팀: 연결한 팀에 배정된 접수만 조회, 그 팀 휴대폰의 결과·사진 가져오기, 그 팀 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg) : null,
     h('div', { class: 'card' }, h('h2', {}, '변경 이력'), h('div', { class: 'row' }, '기간', fFrom, '~', fTo, fEntity, fActor, btn('새로 고침', load, 'small'), info, h('span', { class: 'grow' }),
       btn('CSV 내보내기', wrap(async () => { await download(`audit.csv?${qs()}`, `동구-변경이력-${fFrom.value || '처음'}_${fTo.value || '끝'}.csv`); toast('내려받았습니다 (내보낸 기록이 이력에 남습니다)'); }), 'small')),
       h('div', { class: 'tablewrap tall' }, h('table', { class: 'audit grid' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '번호', '내용'].map((t) => h('th', {}, t)))), tbody)), pager,

@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.request
@@ -14,6 +15,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "pc"))
+from dgpc import __version__  # noqa: E402
 PASSED = 0
 
 
@@ -134,10 +137,10 @@ class AssetApp(OtherApp):
         self.wfile.write(body)
 
 
-def startup_asset_guard(repo, temporary):
+def startup_asset_guard(repo, temporary, *, versions=("0.13.11", None)):
     title = "<title>동구 대형폐기물 PC 업무</title>"
     defaults = {
-        "/api/state": (200, "application/json", b'{"setup_needed":true,"logged_in":false}', {}),
+        "/api/state": (200, "application/json", b'{"setup_needed":true,"logged_in":false}', {"X-DG-Version": __version__}),
         "/": (200, "text/html; charset=utf-8", (title + '<script src="/start.js" defer></script>').encode(), {}),
         "/start.js": (200, "text/javascript", b"import './pc.js';", {}),
         "/pc.js": (200, "application/javascript; charset=utf-8", b"import './core.js';", {}),
@@ -152,8 +155,17 @@ def startup_asset_guard(repo, temporary):
             thread.start()
         try:
             state = temporary / "asset check must not initialize"
-            valid = ready(launch(repo, state, server.server_port))
-            ok(valid["status"] == "existing", "실제 진입 자산을 제공하는 기존 서버를 재사용")
+            valid = ready(launch(repo, state, server.server_port, env={"PYTHONHOME": str(temporary / "no interpreter resources")}))
+            ok(valid["status"] == "existing", "Python 실행 없이 현재 버전·실제 진입 자산을 제공하는 기존 서버 재사용")
+            for version in versions:
+                headers = {"X-DG-Version": version} if version is not None else {}
+                server.assets = {**defaults, "/api/state": (*defaults["/api/state"][:3], headers)}
+                result = launch(repo, state, server.server_port, env={"PYTHONHOME": str(temporary / "no interpreter resources")})
+                label = "구버전" if version else "버전 정보 없는"
+                ok(result.returncode != 0 and "DGPC_READY " not in result.stdout
+                   and "동구 PC 서버" in result.stdout and "버전" in result.stdout and "다시" in result.stdout,
+                   label + " API·정상 자산도 버전 불일치로 구분하고 재시작 안내")
+                ok(not state.exists() and server.fileno() >= 0, label + " 서버 진단 중 새 자료 생성·기존 서버 종료 없음")
             for assets, label in (
                 ({**defaults, "/start.js": (404, "text/plain", b"missing", {})}, "요구한 진입 파일 404"),
                 ({**defaults, "/start.js": (200, "text/html", b"<html>fallback</html>", {})}, "진입 파일 대신 HTML"),

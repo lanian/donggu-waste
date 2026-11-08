@@ -29,13 +29,26 @@ function Test-PortOpen {
     } catch { return $false } finally { $client.Dispose() }
 }
 
+function Get-ExpectedVersion {
+    $source = Get-Content -LiteralPath (Join-Path $Repo 'pc\dgpc\__init__.py') -Raw -Encoding UTF8
+    $match = [regex]::Match($source, '(?m)^__version__\s*=\s*["''](?<version>[^"''\r\n]+)["'']\s*$')
+    if (-not $match.Success) { throw '실행기의 버전 정보를 확인하지 못했습니다. 프로그램 파일을 확인하세요.' }
+    return $match.Groups['version'].Value
+}
+
 function Test-AppReady {
+    $script:AppHealth = 'unrecognized'
     try {
         $api = Invoke-WebRequest -UseBasicParsing -Uri "$Url/api/state" `
             -Headers @{'X-DG-CSRF' = '1'} -TimeoutSec 1 -MaximumRedirection 0
         if ($api.StatusCode -ne 200 -or $api.Headers['Server'].Trim() -ne 'dgpc') { return $false }
         $state = $api.Content | ConvertFrom-Json
         if ($state.setup_needed -isnot [bool] -or $state.logged_in -isnot [bool]) { return $false }
+        if ([string]$api.Headers['X-DG-Version'] -cne $ExpectedVersion) {
+            $script:AppHealth = 'version_mismatch'
+            return $false
+        }
+        $script:AppHealth = 'assets_unavailable'
         $page = Invoke-WebRequest -UseBasicParsing -Uri "$Url/" -TimeoutSec 1 -MaximumRedirection 0
         if ($page.StatusCode -ne 200 -or -not $page.Content.Contains('<title>동구 대형폐기물 PC 업무</title>')) { return $false }
         $scriptPattern = @'
@@ -73,6 +86,7 @@ function Test-AppReady {
             $body = if ($asset.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($asset.Content) } else { [string]$asset.Content }
             if ($asset.StatusCode -ne 200 -or $mime -notin @('text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript') -or [string]::IsNullOrWhiteSpace($body)) { return $false }
         }
+        $script:AppHealth = 'ready'
         return $true
     } catch { return $false }
 }
@@ -110,10 +124,14 @@ Push-Location -LiteralPath $Repo
 try {
     try { $Locked = $Mutex.WaitOne(60000) } catch [System.Threading.AbandonedMutexException] { $Locked = $true }
     if (-not $Locked) { throw '다른 실행기가 PC를 준비 중입니다. 잠시 후 다시 실행하세요.' }
+    $ExpectedVersion = Get-ExpectedVersion
 
     # 포트 충돌은 자료 초기화·의존성 설치보다 먼저 확인한다.
     if (Test-PortOpen) {
         if (-not (Test-AppReady)) {
+            if ($script:AppHealth -eq 'version_mismatch') {
+                throw "실행 중인 동구 PC 서버의 버전이 이 실행기($ExpectedVersion)와 다르거나 확인되지 않습니다. 기존 서버를 해당 실행 앱에서 종료한 뒤 다시 실행하세요. 기존 서버는 종료하지 않았고 새 서버도 시작하지 않았습니다."
+            }
             throw "포트 $Port 를 다른 프로그램이 사용 중이거나 PC 서버가 아직 준비되지 않았습니다. 해당 프로그램을 종료하지 않았습니다. 잠시 후 재실행하거나 Donggu-PC.cmd -Port 8766을 사용하세요."
         }
         Show-Ready 'existing'

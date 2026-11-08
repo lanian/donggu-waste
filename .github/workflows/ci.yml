@@ -72,6 +72,7 @@ jobs:
       - run: python tests/test_privacy_write_guards.py
       - run: python tests/test_pc_device_revocation.py
       - run: python tests/test_pc_server_bind.py
+      - run: python tests/test_dong_work.py
       - run: python tests/test_pc_reports.py
       - run: python tests/test_pc_labels.py
       - run: python tests/test_pc_labels_migration.py
@@ -89,6 +90,8 @@ jobs:
           - e2e_pc
           - test_review_ui
           - test_review_followup_ui
+          - test_dong_work_ui
+          - test_dong_work_e2e
           - test_workflow
           - test_pc_startup
           - test_reports_labels_api
@@ -161,6 +164,7 @@ jobs:
           python tests/test_privacy_write_guards.py
           python tests/test_pc_device_revocation.py
           python tests/test_pc_server_bind.py
+          python tests/test_dong_work.py
           python tests/test_pc_launcher.py
           python tests/test_desktop_paths.py
           python tests/test_desktop_lifecycle.py

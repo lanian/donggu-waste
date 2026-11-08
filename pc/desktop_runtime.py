@@ -15,6 +15,8 @@ import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
 
+from dgpc import __version__
+
 APP_TITLE = "동구 PC 실행 앱"
 SOURCE = Path(__file__).resolve().parent
 
@@ -108,16 +110,19 @@ def _origin(url):
 
 
 def _app_health(url):
-    """API 정체성과 HTML이 요구하는 실제 진입 파일을 함께 확인한다. 다른 출처로는 요청하지 않는다."""
+    """API 정체성·현재 버전·실제 진입 파일을 확인한다. 다른 출처로는 요청하지 않는다."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         request = urllib.request.Request(url + "api/state", headers={"X-DG-CSRF": "1"})
         with opener.open(request, timeout=1) as response:
             if response.status != 200 or response.headers.get("Server", "").strip() != "dgpc":
                 return "unrecognized"
+            version = response.headers.get("X-DG-Version")
             state = json.load(response)
         if not all(isinstance(state.get(key), bool) for key in ("setup_needed", "logged_in")):
             return "unrecognized"
+        if version != __version__:
+            return "version_mismatch"
     except (OSError, ValueError, AttributeError):
         return "unrecognized"
     try:
@@ -191,6 +196,8 @@ class DesktopController:
                 progress("existing")
                 return self.status
             self.status = "error"
+            if health == "version_mismatch":
+                raise DesktopError(f"실행 중인 동구 PC 서버의 버전이 이 실행 앱({__version__})과 다르거나 확인되지 않습니다. 기존 서버를 해당 실행 앱에서 종료한 뒤 다시 실행하세요. 기존 서버는 종료하지 않았고 새 서버도 시작하지 않았습니다.")
             if health == "assets_unavailable":
                 raise DesktopError("서버는 실행 중이나 업무 화면 파일을 제공하지 못합니다. 기존 서버를 종료한 뒤 다시 시도하세요. 기존 서버는 종료하지 않았고 새 서버도 시작하지 않았습니다.")
             raise DesktopError(f"포트 {self.port}를 다른 프로그램이 사용 중이거나 동구 서버가 준비되지 않았습니다. 해당 프로그램은 종료하지 않았습니다.")

@@ -2010,8 +2010,8 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6, 7] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
-       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 7, "다시 열면 멈춘 단계부터 다시 실행(2~7단계)")
+    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6, 7, 8] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 8, "다시 열면 멈춘 단계부터 다시 실행(2~8단계)")
     # 5단계(주소 위치 자료 식별 번호)·6단계(카카오 이동시간 보관 중단): 4단계까지의 DB에 옛 자료를 넣고 올린다
     m4 = sqlcipher3.connect(str(mp.parent / "m4.db"), isolation_level=None)
     m4.execute("PRAGMA key = 'test-db-key-not-for-production'")

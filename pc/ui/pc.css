@@ -1213,3 +1213,103 @@ table.conflicts tr.grp .row { gap: 6px; align-items: center; }
     .intake-form .intake-actionbar > button.primary { padding: 10px 17px; }
   }
 }
+
+/* 동별 업무: 날짜·동·주동작을 한 줄에 두고 현황에서 접수로 이어지는 작업대. */
+.dong-workspace { min-width: 0; }
+.dong-workspace .dw-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 14px 24px; margin: 0 0 18px; }
+.dong-workspace .dw-eyebrow { display: block; color: var(--link); font-size: .72rem; font-weight: 800; letter-spacing: .08em; margin-bottom: 5px; }
+.dong-workspace .dw-heading h1 { margin: 0; letter-spacing: -.04em; }
+.dong-workspace .dw-scope { margin: 8px 0 0; color: var(--muted); font-size: .83rem; line-height: 1.6; }
+.dong-workspace .dw-actions { display: flex; flex-wrap: wrap; gap: 8px; align-self: center; }
+.dong-workspace .dw-actions button { min-height: 40px; padding-inline: 16px; white-space: nowrap; }
+.dong-workspace .dw-actions button:first-child { margin-right: 6px; }
+.dong-workspace .dw-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 16px 18px; border: 1px solid var(--line-2); background: var(--surface); border-radius: 10px; }
+.dong-workspace .dw-filters label.f { min-width: 150px; gap: 6px; }
+.dong-workspace .dw-filters label.f input, .dong-workspace .dw-filters label.f select { min-height: 38px; width: 100%; }
+.dong-workspace .dw-filters .dw-search { flex: 1; min-width: 190px; }
+.dong-workspace .dw-filters > button { min-height: 38px; }
+.dong-workspace .dw-teams { display: flex; flex-wrap: wrap; gap: 9px 18px; align-items: center; margin: 12px 2px 18px; color: var(--muted); font-size: .83rem; }
+.dong-workspace .dw-teams:empty { display: none; }
+.dong-workspace .dw-label { font-weight: 700; color: var(--th-ink); }
+.dong-workspace .dw-teams label { display: inline-flex; gap: 7px; align-items: center; min-height: 28px; }
+.dong-workspace .dw-message:not(:empty) { margin-bottom: 14px; }
+.dong-workspace .dw-message .notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; line-height: 1.65; }
+.dong-workspace .dw-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+.dong-workspace .dw-metric { min-width: 0; text-align: left; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; padding: 13px 16px; box-shadow: none; color: var(--ink); }
+.dong-workspace .dw-metric > span { display: flex; flex-direction: column; }
+.dong-workspace .dw-metric small { color: var(--muted); font-size: .68rem; font-weight: 500; }
+.dong-workspace .dw-metric-label { font-size: .86rem; font-weight: 700; margin-top: 7px; }
+.dong-workspace .dw-metric strong { font-size: 1.85rem; line-height: 1.2; letter-spacing: -.05em; font-variant-numeric: tabular-nums; margin-top: 8px; }
+.dong-workspace .dw-metric.on { background: var(--navy-tint); border-color: var(--navy-2); color: var(--navy-ink); }
+.dong-workspace .dw-metric:nth-child(5), .dong-workspace .dw-metric:nth-child(6) { border-top: 3px solid var(--notice-line); }
+.dong-workspace .dw-table-card, .dong-workspace .dw-list, .dong-workspace .dw-routes:not(:empty) { border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface); overflow: hidden; margin-bottom: 18px; }
+.dong-workspace .dw-section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 15px 18px; }
+.dong-workspace .dw-section-head h2, .dong-workspace .dw-section-head h3 { margin: 0; font-size: 1rem; letter-spacing: -.025em; }
+.dong-workspace .dw-section-head p { margin: 5px 0 0; }
+.dong-workspace table { margin: 0; }
+.dong-workspace .dw-summary { min-width: 620px; }
+.dong-workspace .dw-summary th:not(:first-child), .dong-workspace .dw-summary td { text-align: right; }
+.dong-workspace .dw-summary th small { display: block; font-size: .64rem; font-weight: 500; color: var(--muted); margin-top: 3px; }
+.dong-workspace .dw-count, .dong-workspace .dw-dong-link, .dong-workspace .dw-receipt { background: transparent; border: 0; box-shadow: none; color: var(--link); font-weight: 700; padding: 6px 8px; }
+.dong-workspace .dw-count { min-width: 38px; font-size: .95rem; font-variant-numeric: tabular-nums; }
+.dong-workspace .dw-count:hover, .dong-workspace .dw-dong-link:hover, .dong-workspace .dw-receipt:hover { background: var(--hover); text-decoration: underline; }
+.dong-workspace .dw-requests { min-width: 690px; }
+.dong-workspace .dw-requests td { padding: 12px 15px; vertical-align: top; }
+.dong-workspace .dw-requests td > span, .dong-workspace .dw-requests td > small { display: block; }
+.dong-workspace .dw-requests td > small { color: var(--muted); font-size: .78rem; margin-top: 4px; max-width: 30em; overflow-wrap: anywhere; }
+.dong-workspace .dw-requests .chip { display: inline-block; margin: 3px 0 0 7px; }
+.dong-workspace .dw-receipt { display: block; padding: 0; text-align: left; }
+.dong-workspace .dw-idle { padding: 18px; margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.75; }
+.dong-workspace .pager { padding: 10px 16px; margin: 0; border-top: 1px solid var(--line-2); }
+.dong-workspace .dw-routes > p:not(.dw-idle) { padding-inline: 18px; }
+.dong-workspace .dw-route { padding: 12px 18px; border-top: 1px solid var(--line-2); }
+.dong-workspace .dw-route h3 { margin: 0 0 8px; font-size: .93rem; }
+.dong-workspace .dw-route ol { margin: 0; padding-left: 25px; }
+.dong-workspace .dw-route li { padding: 7px 0; font-size: .86rem; }
+.dong-workspace .dw-route time { color: var(--link); font-variant-numeric: tabular-nums; display: inline-block; min-width: 55px; }
+.dong-workspace .dw-route li > span { display: inline-block; vertical-align: top; }
+.dong-workspace .dw-route small { display: block; color: var(--muted); margin-top: 4px; }
+.dong-workspace.dw-form { padding: 0; }
+.dlg:has(.dong-workspace.dw-form) { display: flex; flex-direction: column; overflow: hidden; max-height: calc(100dvh - 32px); }
+.dlg:has(.dong-workspace.dw-form) > h2, .dlg:has(.dong-workspace.dw-form) > .msg, .dlg:has(.dong-workspace.dw-form) > .dlg-btns { flex: 0 0 auto; }
+.dlg:has(.dong-workspace.dw-form) > .dlg-b { overflow-y: auto; min-height: 0; overscroll-behavior: contain; padding-right: 5px; }
+.dlg:has(.dong-workspace.dw-form) > .dlg-btns { flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--line-2); }
+.dong-workspace .dw-position { padding: 10px 12px; margin-bottom: 14px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; }
+.dong-workspace .dw-position details > summary { font-size: .8rem; color: var(--link); cursor: pointer; }
+.dong-workspace .dw-position .dw-form-grid { margin-top: 10px; margin-bottom: 0; }
+.dong-workspace .dw-form-context { padding: 10px 12px; margin: 0 0 14px; background: var(--navy-tint); color: var(--navy-ink); border-radius: 6px; font-size: .86rem; }
+.dong-workspace .dw-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; margin-bottom: 12px; }
+.dong-workspace .dw-form-grid .f:nth-child(3), .dong-workspace .dw-form-grid .f:nth-child(4) { grid-column: 1 / -1; }
+.dong-workspace.dw-form textarea { width: 100%; min-height: 65px; }
+.dong-workspace.dw-form .dw-section-head { padding: 18px 0 10px; }
+.dong-workspace .dw-item-row { display: flex; align-items: center; gap: 10px; border-block-end: 1px solid var(--line-2); padding: 9px 0; font-size: .9rem; }
+.dong-workspace .dw-item-row > span:first-child { flex: 1; min-width: 0; }
+.dong-workspace .dw-item-row small { display: block; color: var(--muted); margin-top: 3px; }
+.dong-workspace .dw-item-row input { width: 65px; }
+.dong-workspace .dw-total { color: var(--link); font-variant-numeric: tabular-nums; }
+.dong-workspace.dw-user-dongs { padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 6px; margin-top: 10px; font-size: .85rem; }
+.dong-workspace.dw-user-dongs:not([hidden]) { display: block; }
+.dong-workspace.dw-user-dongs .row { display: inline-flex; margin: 6px 12px 6px 0; }
+.dong-workspace.dw-user-dongs .msg { max-width: 30em; }
+@media (max-width: 1100px) {
+  .dong-workspace .dw-metrics { gap: 7px; }
+  .dong-workspace .dw-metric { padding: 11px 10px; }
+  .dong-workspace .dw-metric strong { font-size: 1.65rem; }
+}
+@media (max-width: 700px) {
+  .dong-workspace .dw-heading { margin-bottom: 12px; }
+  .dong-workspace .dw-actions { width: 100%; gap: 6px; }
+  .dong-workspace .dw-actions button { flex: 1; min-height: 40px; padding-inline: 9px; }
+  .dong-workspace .dw-actions button:first-child { margin-right: 0; }
+  .dong-workspace .dw-filters { padding: 12px; gap: 10px; }
+  .dong-workspace .dw-filters label.f { flex: 1; min-width: 115px; }
+  .dong-workspace .dw-filters label.dw-search { flex: 1 1 100%; }
+  .dong-workspace .dw-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dong-workspace .dw-metric-label { font-size: .8rem; }
+  .dong-workspace .dw-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .dong-workspace .dw-form-grid .f { grid-column: 1; }
+  .dong-workspace .dw-section-head { padding: 13px 12px; }
+  .dong-workspace .dw-section-head > select { max-width: 100%; }
+  .dong-workspace .dw-item-row { gap: 6px; flex-wrap: wrap; }
+  .dong-workspace .dw-item-row > span:first-child { flex-basis: 100%; }
+}

@@ -11,7 +11,7 @@ import uuid
 
 from dgpc.core import UserError, audit, get_setting, now, one, rows, tx
 
-ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀", "LEAD": "팀장(검토자)"}
+ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀", "LEAD": "팀장(검토자)", "DONG": "동 담당자"}
 
 
 def _pw_hash(pw: str, salt: bytes) -> str:
@@ -37,7 +37,8 @@ def migrate_legacy_login(con):
             con.execute("DELETE FROM meta WHERE key='login'")
 
 
-def create_user(con, username: str, display_name: str, role: str, password: str, must_change: bool = False, crew_id: str | None = None) -> str:
+def create_user(con, username: str, display_name: str, role: str, password: str, must_change: bool = False, crew_id: str | None = None,
+                dong_ids: list[str] | None = None) -> str:
     username = (username or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9._-]{3,30}", username):
         raise UserError("아이디는 영문 소문자·숫자·.-_ 3~30자로 정해 주세요.")
@@ -50,13 +51,15 @@ def create_user(con, username: str, display_name: str, role: str, password: str,
         raise UserError("이미 있는 아이디입니다.")
     if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
         raise UserError("없는 수거팀입니다.")
+    dongs = _validated_dongs(con, dong_ids, required=True) if role == "DONG" else []
     salt = _secrets.token_bytes(16)
     uid = str(uuid.uuid4())
     with tx(con):
         con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, must_change, created_at, crew_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (uid, username, display_name.strip(), role, salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, now(),
                      crew_id if role == "FIELD" else None))
-        audit(con, "user", uid, "CREATE", {"username": username, "role": role})
+        con.executemany("INSERT INTO app_user_dong (user_id,dong_id) VALUES (?,?)", [(uid, did) for did in dongs])
+        audit(con, "user", uid, "CREATE", {"username": username, "role": role, **({"dong_ids": dongs} if role == "DONG" else {})})
     return uid
 
 
@@ -130,8 +133,14 @@ def save_prefs(con, uid: str, data: dict) -> dict:
 
 
 def list_users(con) -> list[dict]:
-    return rows(con, """SELECT u.id, u.username, u.display_name, u.role, u.active, u.must_change, u.created_at, u.last_login_at, u.crew_id, c.name AS crew_name
+    out = rows(con, """SELECT u.id, u.username, u.display_name, u.role, u.active, u.must_change, u.created_at, u.last_login_at, u.crew_id, c.name AS crew_name
         FROM app_user u LEFT JOIN crew c ON c.id=u.crew_id ORDER BY u.created_at""")
+    mappings = {}
+    for link in rows(con, "SELECT user_id,dong_id FROM app_user_dong ORDER BY dong_id"):
+        mappings.setdefault(link["user_id"], []).append(link["dong_id"])
+    for u in out:
+        u["dong_ids"] = mappings.get(u["id"], [])
+    return out
 
 
 def set_user_active(con, uid: str, active: bool, me: str):
@@ -142,6 +151,8 @@ def set_user_active(con, uid: str, active: bool, me: str):
         raise UserError("사용자를 찾을 수 없습니다.")
     if not active and u["role"] == "ADMIN" and one(con, "SELECT COUNT(*) AS n FROM app_user WHERE role='ADMIN' AND active=1")["n"] <= 1:
         raise UserError("마지막 운영 관리자는 중지할 수 없습니다.")
+    if active and u["role"] == "DONG" and not user_dong_ids(con, uid):
+        raise UserError("동 담당자는 한 개 이상의 담당 동을 지정한 뒤 사용하세요.")
     with tx(con):
         con.execute("UPDATE app_user SET active=? WHERE id=?", (1 if active else 0, uid))
         audit(con, "user", uid, "ACTIVE" if active else "DEACTIVATE", None)
@@ -173,3 +184,33 @@ def set_user_crew(con, uid: str, crew_id: str | None):
     with tx(con):
         con.execute("UPDATE app_user SET crew_id=? WHERE id=?", (crew_id or None, uid))
         audit(con, "user", uid, "CREW", {"crew_id": crew_id})
+
+
+def user_dong_ids(con, uid: str) -> list[str]:
+    return [r["dong_id"] for r in rows(con, "SELECT dong_id FROM app_user_dong WHERE user_id=? ORDER BY dong_id", (uid,))]
+
+
+def _validated_dongs(con, dong_ids, *, required: bool) -> list[str]:
+    if dong_ids is None:
+        dong_ids = []
+    if not isinstance(dong_ids, list) or any(not isinstance(did, str) for did in dong_ids):
+        raise UserError("담당 동을 목록에서 골라 주세요.")
+    ids = sorted(set(dong_ids))
+    if required and not ids:
+        raise UserError("동 담당자는 한 개 이상의 담당 동을 지정하세요.")
+    for did in ids:
+        if not one(con, "SELECT 1 AS x FROM dong WHERE id=?", (did,)):
+            raise UserError("등록된 행정동을 골라 주세요.")
+    return ids
+
+
+def set_user_dongs(con, uid: str, dong_ids):
+    u = one(con, "SELECT role,active FROM app_user WHERE id=?", (uid,))
+    if not u or u["role"] != "DONG":
+        raise UserError("동 담당자 계정의 담당 동만 변경할 수 있습니다.")
+    ids = _validated_dongs(con, dong_ids, required=bool(u["active"]))
+    with tx(con):
+        old = user_dong_ids(con, uid)
+        con.execute("DELETE FROM app_user_dong WHERE user_id=?", (uid,))
+        con.executemany("INSERT INTO app_user_dong (user_id,dong_id) VALUES (?,?)", [(uid, did) for did in ids])
+        audit(con, "user", uid, "DONG_SCOPE", {"from_dong_ids": old, "dong_ids": ids})

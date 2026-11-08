@@ -53,7 +53,7 @@ async function startPc() {
 
   // 방문한 화면만 읽는다. 통계·설정 등의 연결을 기다리느라 로그인까지 막히지 않게 한다.
   const screenImports = {
-    access: () => import('./screens/access.js'), close: () => import('./screens/close.js'), dispatch: () => import('./screens/dispatch.js'),
+    access: () => import('./screens/access.js'), close: () => import('./screens/close.js'), dispatch: () => import('./screens/dispatch.js'), dongs: () => import('./screens/dongs.js'),
     fees: () => import('./screens/fees.js'), help: () => import('./screens/help.js'), home: () => import('./screens/home.js'),
     login: () => import('./screens/login.js'), pilot: () => import('./screens/pilot.js'), qrtest: () => import('./screens/qrtest.js'),
     refunds: () => import('./screens/refunds.js'), request: () => import('./screens/request.js'), requests: () => import('./screens/requests.js'),
@@ -61,7 +61,7 @@ async function startPc() {
     reports: () => import('./screens/reports.js'), labels: () => import('./screens/numbered_labels.js'),
     settings: () => import('./screens/settings.js'), stats: () => import('./screens/stats.js'), users: () => import('./screens/users.js'),
   };
-  const screenExports = { reports: 'screenReports', labels: 'screenNumberedLabels', access: 'screenAccess', close: 'screenClose', dispatch: 'screenDispatch', fees: 'screenFees', help: 'screenHelp',
+  const screenExports = { dongs: 'screenDongs', reports: 'screenReports', labels: 'screenNumberedLabels', access: 'screenAccess', close: 'screenClose', dispatch: 'screenDispatch', fees: 'screenFees', help: 'screenHelp',
     home: 'screenHome', pilot: 'screenPilot', qrtest: 'screenQrTest', refunds: 'screenRefunds', request: 'screenRequest', requests: 'screenRequests',
     results: 'screenResults', revenue: 'screenRevenue', send: 'screenSend', settings: 'screenSettings', stats: 'screenStats', users: 'screenUsers', me: 'screenMe' };
   const screenModules = new Map(), screenLoads = new Map();
@@ -97,6 +97,9 @@ async function startPc() {
     let view;
     try {
       if (!core.boot) {
+        // 재인증을 취소해 로그인으로 돌아갈 때 주민 양식과 메모리 초안을 즉시 비운다.
+        // 같은 계정의 [로그인하고 계속] 경로는 boot를 유지하므로 작성 내용을 보존한다.
+        screenModules.get('dongs')?.resetDongs();
         startupPhase('session');
         const st = await api('state', { timeoutMs: 10000 });
         if (my !== renderSeq) return;
@@ -120,14 +123,16 @@ async function startPc() {
         const role = core.boot.me.role;
         applyPrefs(core.boot.me.prefs);
         // 역할별 메뉴 (서버도 같은 기준으로 막는다)
-        const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['labels', '배출표 관리', 'ADMIN INTAKE LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
+        const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['dongs', '동별 관리', 'ADMIN INTAKE LEAD DONG'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['labels', '배출표 관리', 'ADMIN INTAKE LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
           ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD LEAD'], ['revenue', '세입·대사', 'ADMIN INTAKE LEAD'], ['refunds', '환불', 'ADMIN INTAKE LEAD'],
           ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['stats', '통계·보고서', 'ADMIN INTAKE LEAD'], ['reports', '작업일지·월보', 'ADMIN INTAKE LEAD'], ['pilot', '시범 운영 비교', 'ADMIN INTAKE LEAD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD LEAD'], ['settings', '설정', 'ADMIN'],
           ['users', role === 'ADMIN' ? '사용자·이력' : '변경 이력', 'ADMIN LEAD'], ['access', '접속기록', 'ADMIN LEAD']];
         const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
-        let cur = route || 'home';
+        const defaultRoute = role === 'DONG' ? 'dongs' : 'home';
+        let cur = route || defaultRoute;
         if (core.boot.me.must_change) cur = 'me';
-        if (!['request', 'me', 'help'].includes(cur) && !nav.some(([k]) => k === cur)) cur = 'home';
+        if (role === 'DONG' && !['dongs', 'me'].includes(cur)) cur = defaultRoute;
+        if (!['request', 'me', 'help'].includes(cur) && !nav.some(([k]) => k === cur)) cur = defaultRoute;
         startupPhase('screen');
         const module = await loadScreen(cur);
         if (my !== renderSeq || !core.boot) return;
@@ -150,9 +155,10 @@ async function startPc() {
         const content = await screen(...(['request', 'settings'].includes(cur) ? [arg] : []));
         const active = cur === 'request' ? 'requests' : cur;
         // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
-        const GROUPS = [['업무 현황', ['home']], ['접수 업무', ['requests', 'labels']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'reports', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
+        const GROUPS = [['업무 현황', ['home', 'dongs']], ['접수 업무', ['requests', 'labels']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'reports', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
         const ICON = {
           home: 'M3 10.5 12 3l9 7.5M5 9v11h5v-6h4v6h5V9',
+          dongs: 'M3 21h18M5 21V7l7-4v18M12 9h7v12M8 8h1M8 12h1M8 16h1M15 12h1M15 16h1',
           requests: 'M14 3H5v18h14V8l-5-5v5h5M8 12h8M8 16h5',
           labels: 'M3 6h18v12H3zM8 6v12M12 10h5M12 14h5',
           reports: 'M5 3h14v18H5zM8 7h8M8 11h8M8 15h5',
@@ -187,7 +193,7 @@ async function startPc() {
         const crumbs = [group ? group[0] : '개인', ...(cur === 'request' ? [navLabel.requests] : []), pageName, ...(subName ? [subName] : [])];
         const d = new Date(core.boot.today + 'T00:00:00');
         const dayTxt = isNaN(d) ? core.boot.today : `${core.boot.today.replace(/-/g, '.')} (${'일월화수목금토'[d.getDay()]})`;
-        const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); setBoot(null); screenModules.get('request')?.resetIntake(); stopSessionTimer(); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
+        const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); screenModules.get('dongs')?.resetDongs(); setBoot(null); screenModules.get('request')?.resetIntake(); stopSessionTimer(); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
         const navOpen = render.navOpen || false;
         const toggleNav = () => { render.navOpen = !render.navOpen; const sh = $app.querySelector('.shell'); sh.classList.toggle('nav-open', render.navOpen); sh.querySelector('.menu-btn').setAttribute('aria-expanded', render.navOpen ? 'true' : 'false'); };
         const railBtn = () => { render.rail = !render.rail; try { localStorage.setItem('dg-rail', render.rail ? '1' : ''); } catch {} $app.querySelector('.shell').classList.toggle('rail', render.rail); };
@@ -195,11 +201,11 @@ async function startPc() {
         view = h('div', { class: 'shell' + (navOpen ? ' nav-open' : '') + (render.rail ? ' rail' : '') },
           h('header', { class: 'topbar' },
             h('button', { type: 'button', class: 'menu-btn', 'aria-label': '메뉴 열기·닫기', 'aria-expanded': navOpen ? 'true' : 'false', 'aria-controls': 'side-nav', onclick: toggleNav }, navIcon('menu')),
-            h('a', { class: 'brand', href: '#/home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '동'), h('span', { class: 'bt' }, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, `접수·배차·수거 업무 (PC)${core.boot.version ? ' · v' + core.boot.version : ''}`))),
+            h('a', { class: 'brand', href: '#/' + defaultRoute }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '동'), h('span', { class: 'bt' }, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, `접수·배차·수거 업무 (PC)${core.boot.version ? ' · v' + core.boot.version : ''}`))),
             h('span', { class: 'grow' }),
             h('span', { class: 'tb-date' }, h('span', { class: 'sr-only' }, '업무 기준일 '), dayTxt),
             prefsControls(),
-            h('a', { href: '#/help', class: 'tb-help' + (cur === 'help' ? ' on' : ''), title: '오늘 할 일 순서와 예외 처리' }, '도움말'),
+            role !== 'DONG' ? h('a', { href: '#/help', class: 'tb-help' + (cur === 'help' ? ' on' : ''), title: '오늘 할 일 순서와 예외 처리' }, '도움말') : null,
             h('a', { href: '#/me', class: 'who' + (active === 'me' ? ' on' : ''), title: '내 계정' }, h('span', { class: 'who-avatar', 'aria-hidden': 'true' }, String(core.boot.me.display_name || '').trim().slice(0, 1)), h('span', { class: 'who-copy' }, h('b', {}, core.boot.me.display_name), h('small', {}, core.boot.me.role_label))),
             h('a', { href: '#', class: 'tb-logout', onclick: logout }, '로그아웃')),
           h('nav', { class: 'side', id: 'side-nav', 'aria-label': '업무 메뉴' },
@@ -226,7 +232,7 @@ async function startPc() {
     const prevHash = render.lastHash; render.lastHash = location.hash;
     $app.replaceChildren(view);
     if (!card?.isConnected) finish();
-    if (core.boot) {
+    if (core.boot && core.boot.me.role !== 'DONG') {
       const home = screenModules.get('home');
       if (home) { home.paintBadges(); home.refreshBadges(); }
       else loadScreen('home').then((loaded) => { if (core.boot && my === renderSeq) { loaded.paintBadges(); loaded.refreshBadges(); } }).catch(() => {});

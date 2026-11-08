@@ -37,7 +37,7 @@ from typing import Callable
 import contextlib
 import queue
 
-from . import area as A, backup as BK, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
+from . import area as A, backup as BK, dong_work as DW, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
 from . import numbered_labels as NL, operation_print as OP, reports as RP
 
@@ -237,6 +237,7 @@ WORK = frozenset({"ADMIN", "INTAKE"})             # 업무 변경
 CREW = frozenset({"ADMIN", "INTAKE", "FIELD"})    # 현장 결과·하차·QR 실측
 REVIEW = frozenset({"ADMIN", "LEAD"})             # 검토·결재·이력·개인정보 점검
 ADMIN = frozenset({"ADMIN"})
+SELF = ALL | {"DONG"}  # 자기 정보만 명시적으로 허용. 기존 전역 역할 집합은 확대하지 않는다.
 LOCKS = {"read": "조회 전용 연결(잠금 없음, 쓰기 필요 시 잠금 잡고 다시)", "write": "DB 잠금 + 쓰기 연결", "none": "처리 함수가 스스로(잠금 밖 검증·계산, 반영만 잠금)"}
 
 
@@ -408,6 +409,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(length))
+        self.send_header("X-DG-Version", __import__("dgpc").__version__)
         self.send_header("Content-Security-Policy", CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -483,7 +485,18 @@ class Handler(BaseHTTPRequestHandler):
     def me(self) -> dict:
         u = self.user
         return {"username": u["username"], "display_name": u["display_name"], "role": u["role"], "role_label": S.ROLES[u["role"]], "crew_id": u.get("crew_id"),
-                "must_change": bool(u.get("must_change")), "prefs": S.user_prefs(self.c, u["user_id"])}
+                "must_change": bool(u.get("must_change")), "prefs": S.user_prefs(self.c, u["user_id"]),
+                "dong_ids": U.user_dong_ids(self.c, u["user_id"]) if u["role"] == "DONG" else []}
+
+    def _refresh_session(self, token, con):
+        """세션 토큰은 유지하고 현재 DB의 계정 사용·역할을 읽는다. 자료 범위는 전용 서비스가 매번 검사한다."""
+        sess = SESSIONS.get(token or "")
+        current = S.one(con, "SELECT username,display_name,role,active,must_change,crew_id FROM app_user WHERE id=?", (sess["user_id"],)) if sess else None
+        if not current or not current["active"]:
+            SESSIONS.pop(token, None)
+            return None
+        sess.update({k: current[k] for k in ("username", "display_name", "role", "must_change", "crew_id")})
+        return sess
 
     # ---------------------------------------------------------- 진입점
     def do_GET(self):
@@ -532,6 +545,16 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get("X-DG-CSRF") != "1":
                     return self.send_json({"error": "잘못된 요청입니다."}, 403)
                 return self.api(method, path[5:], qs)
+            if method == "GET" and path.startswith(("/bundle/", "/print/", "/qrtest/")):
+                token = self.session()
+                with read_con() as rc:
+                    sess = self._refresh_session(token, rc)
+                if not sess:
+                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
+                if sess["role"] not in ALL:
+                    return self.send_json({"error": "이 출력 작업은 권한이 없습니다."}, 403)
+                if sess.get("must_change"):
+                    return self.send_json({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
             if method == "GET" and path.startswith(("/bundle/", "/print/batch/", "/qrtest/")):
                 # 화면용 창(목록 QR·배차표·QR 실측): API와 같게 로그인·임시 비밀번호 변경을 확인하고, 주소는 화면이 만드는 8자리 16진수만
                 sess = SESSIONS.get(self.session() or "")
@@ -575,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "없음"}, 404)
         except S.StaleError as e:  # 다른 곳에서 먼저 바뀜(낙관적 동시성) → 409 + 지금 버전
             return self.send_json({"error": str(e), "stale": True, **e.info}, 409)
+        except DW.ScopeError as e:
+            return self.send_json({"error": str(e)}, 403)
         except S.UserError as e:
             return self.send_json({"error": str(e)}, 400)
         except Exception:  # 오류 내용에 개인정보가 섞일 수 있어 화면에는 일반 문구만, 로그에는 전화·주소 모양 값을 가린 추적 기록
@@ -610,6 +635,12 @@ class Handler(BaseHTTPRequestHandler):
         if not sess:  # session() 확인과 이 사이에 다른 요청(로그아웃·비밀번호 재설정·만료 정리)이 지움
             return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
         r, params = match(method, p)
+        if not allowed(sess["role"], method, p):
+            return self.send_json({"error": "이 작업은 권한이 없습니다."}, 403)
+        with read_con() as rc:
+            sess = self._refresh_session(tok, rc)
+        if not sess:
+            return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
         if not allowed(sess["role"], method, p):
             return self.send_json({"error": "이 작업은 권한이 없습니다."}, 403)
         if sess.get("must_change") and not (r is not None and r.must_change_ok):
@@ -684,6 +715,15 @@ class Handler(BaseHTTPRequestHandler):
             return json_status({"error": "이 작업은 권한이 없습니다."}, 403)
         if sess.get("must_change") and not r.must_change_ok:
             return json_status({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
+        sess = self._refresh_session(self.session(), CON)
+        self.user = sess
+        S.ACTOR.set(sess["username"] if sess else "system")
+        if not sess:
+            return json_status({"error": "로그인이 필요합니다.", "login": True}, 401)
+        if sess["role"] not in r.roles:
+            return json_status({"error": "이 작업은 권한이 없습니다."}, 403)
+        if sess.get("must_change") and not r.must_change_ok:
+            return json_status({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
         return None
 
     def dispatch(self, r: Route, params: tuple, qs: dict):
@@ -740,16 +780,105 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(out)
 
     # ---- 조회 (GET)
-    @endpoint("GET", "bootstrap", ALL, must_change_ok=True)
+    @endpoint("GET", "bootstrap", SELF, lock="write", must_change_ok=True)
     def ep_bootstrap(self, qs):
         """화면 시작 자료: 설정·팀·기기·오늘·나·수수료표·동·코드 목록."""
         c = self.c
+        if self.user["role"] == "DONG":
+            u = DW.actor(c, self.user)
+            return {"settings": DW.safe_settings(c), "crews": DW.safe_crews(c), "devices": [], "today": S.today_kst(), "me": self.me(),
+                    "fee": S.fee_table_for_phone(c), "dongs": DW.safe_dongs(c, u), "channels": S.CHANNELS,
+                    "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES, "contact_kinds": S.CONTACT_KINDS,
+                    "session_idle_s": IDLE_S, "roles": {"DONG": S.ROLES["DONG"]}, "audit_entities": {}, "addr_count": 0,
+                    "version": __import__("dgpc").__version__, "quick_filters": [], "reduction_round_units": list(S.ROUND_UNITS), "api": 13}
         return {"settings": S.settings(c), "crews": S.list_crews(c), "devices": S.list_devices(c),
                 "today": S.today_kst(), "me": self.me(), "fee": S.fee_table_for_phone(c),
                 "dongs": A.list_dongs(c), "channels": S.CHANNELS, "cancel_codes": S.CANCEL_CODES, "postpone_codes": S.POSTPONE_CODES,
                 "contact_kinds": S.CONTACT_KINDS, "session_idle_s": IDLE_S, "roles": S.ROLES, "audit_entities": S.AUDIT_ENTITIES,
                 "addr_count": S.addr_stats(c)["count"], "version": __import__("dgpc").__version__,
                 "quick_filters": list(S.QUICK), "reduction_round_units": list(S.ROUND_UNITS), "api": 13}
+
+    # 동별 조회는 현재 범위 확인과 원문 읽기를 같은 짧은 잠금으로 묶는다.
+    # 기존 조회 전용 autocommit 연결에서 검사 뒤 동 이관·권한 변경이 끼어드는 것을 막는다.
+    @endpoint("GET", "dong-work", DW.READ_ROLES, lock="write")
+    def ep_dong_work(self, qs):
+        """현재 허용된 동의 기준일 현황과 안전한 배정 정보."""
+        return DW.overview(self.c, self.user, qs.get("date"), qs.get("dong") or "all")
+
+    @endpoint("GET", "dong-work/requests", DW.READ_ROLES, lock="write",
+              access=("LIST", lambda h, out, qs: ("", len(out["rows"]), "동별 접수 목록")))
+    def ep_dong_work_requests(self, qs):
+        """현재 범위·기준일·처리 종류로 50건씩 접수 조회."""
+        return DW.search(self.c, self.user, qs)
+
+    @endpoint("GET", "dong-work/requests/{id}", DW.READ_ROLES, lock="write",
+              access=("VIEW", lambda h, out, qs, rid: (rid, 1, "동별 접수 상세")))
+    def ep_dong_work_request(self, qs, rid):
+        """다른 동 접수의 원문을 포함하지 않는 상세 권한 검사."""
+        return DW.detail(self.c, self.user, rid)
+
+    @endpoint("GET", "dong-work/duplicates", DW.READ_ROLES, lock="write",
+              access=("SEARCH", lambda h, out, qs: ("", len(out), "동별 중복 후보") if out else None))
+    def ep_dong_work_duplicates(self, qs):
+        """허용 범위 안의 접수만 중복 후보로 제공."""
+        return DW.duplicates(self.c, self.user, qs)
+
+    @endpoint("GET", "dong-work/geocode", DW.READ_ROLES, lock="write")
+    def ep_dong_work_geocode(self, qs):
+        """선택 동을 검사한 뒤 공개 주소 자료의 위치 찾기(외부 호출 없음)."""
+        return DW.geocode(self.c, self.user, qs)
+
+    @endpoint("GET", "dong-work/assignments", DW.READ_ROLES, lock="write")
+    def ep_dong_work_assignments(self, qs):
+        """선택 범위의 배정만 표시하고 혼합 배정은 shared로 안내."""
+        return DW.assignments(self.c, self.user, qs.get("date"), qs.get("dong") or "all")
+
+    @endpoint("GET", "dong-work/summary.csv", DW.READ_ROLES, lock="write")
+    def ep_dong_work_summary_csv(self, qs):
+        """주민 정보 없는 동별 현황 CSV."""
+        return csv_file(DW.summary_csv(self.c, self.user, qs.get("date"), qs.get("dong") or "all"), "dong-summary.csv")
+
+    @endpoint("POST", "dong-work/requests", DW.WRITE_ROLES)
+    def ep_dong_work_create(self, qs):
+        """현재 담당 동으로 접수 등록(멱등 재시도도 최신 범위 검사)."""
+        return DW.create(self.c, self.user, self.json_body())
+
+    @endpoint("POST", "dong-work/requests/{id}", DW.WRITE_ROLES)
+    def ep_dong_work_update(self, qs, rid):
+        """원래 동과 이동할 동을 모두 검사한 접수 수정."""
+        return DW.update(self.c, self.user, rid, self.json_body())
+
+    @endpoint("POST", "dong-work/requests/{id}/cancel", DW.WRITE_ROLES)
+    def ep_dong_work_cancel(self, qs, rid):
+        """담당 접수만 버전·사유 코드 계약으로 취소."""
+        return DW.cancel(self.c, self.user, rid, self.json_body())
+
+    @endpoint("POST", "dong-work/route", DW.WRITE_ROLES, lock="none")
+    def ep_dong_work_route(self, qs):
+        """준비만 잠금, 노선 계산은 잠금 밖, 반환 직전 최신 범위 재검사."""
+        data = self.json_body()
+        with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            prepared = DW.prepare_route(CON, self.user, data)
+        result = DW.calculate(prepared)
+        with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            DW.validate_route_result(CON, self.user, prepared)
+            if prepared["method"] == "KAKAO":
+                mi = result.get("matrix_info") or {}
+                with S.tx(CON):
+                    S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "estimated": mi.get("fallback_pairs", 0)})
+            PV.record_access(CON, "LIST", "", len(result["requests"]), "동별 노선 계산")
+        return result
+
+    @endpoint("POST", "dong-work/assign", DW.WRITE_ROLES)
+    def ep_dong_work_assign(self, qs):
+        """최신 계정·동·예정일·계산 기준·혼합 배정을 검사한 명시적 확정."""
+        return DW.assign(self.c, self.user, self.json_body())
 
     @endpoint("GET", "calendar", VIEW)
     def ep_calendar(self, qs):
@@ -1014,7 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"state": S.fee_state(self.c), "review_rows": S.review_rows(), "revisions": S.list_fee_revisions(self.c),
                 "source": {"label": S.FEE_TABLE["label"], "checked_on": S.FEE_TABLE["source_checked_on"], "rows": len(S.FEE_ROWS)}}
 
-    @endpoint("GET", "me", ALL, must_change_ok=True)
+    @endpoint("GET", "me", SELF, lock="write", must_change_ok=True)
     def ep_me(self, qs):
         """나(사용자·역할·화면 설정)."""
         return self.me()
@@ -1570,7 +1699,13 @@ class Handler(BaseHTTPRequestHandler):
         """사용자 만들기(임시 비밀번호)."""
         d = self.json_body()
         return {"id": S.create_user(self.c, d.get("username", ""), d.get("display_name", ""), d.get("role", ""),
-                                    d.get("password", ""), must_change=True, crew_id=d.get("crew_id") or None)}
+                                    d.get("password", ""), must_change=True, crew_id=d.get("crew_id") or None, dong_ids=d.get("dong_ids"))}
+
+    @endpoint("POST", "users/{id}/dongs", ADMIN)
+    def ep_user_dongs(self, qs, uid):
+        """동 담당자 계정의 한 개·여러 담당 동 지정(기존 세션에도 즉시 적용)."""
+        U.set_user_dongs(self.c, uid, self.json_body().get("dong_ids"))
+        return {"ok": True}
 
     @endpoint("POST", "users/{id}/crew", ADMIN)
     def ep_user_crew(self, qs, uid):
@@ -1626,12 +1761,12 @@ class Handler(BaseHTTPRequestHandler):
         d = self.json_body()
         return S.verify_backup(self.c, d.get("name", ""), d.get("passphrase", ""))
 
-    @endpoint("POST", "prefs", ALL, must_change_ok=True)
+    @endpoint("POST", "prefs", SELF, must_change_ok=True)
     def ep_prefs(self, qs):
         """본인 화면 설정(테마·글자 크기)."""
         return S.save_prefs(self.c, self.user["user_id"], self.json_body())
 
-    @endpoint("POST", "password", ALL, must_change_ok=True)
+    @endpoint("POST", "password", SELF, must_change_ok=True)
     def ep_password(self, qs):
         """본인 비밀번호 변경."""
         d = self.json_body()

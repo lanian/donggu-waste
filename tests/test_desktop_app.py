@@ -18,6 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pc"))
 from desktop_runtime import DesktopController, DesktopError, app_ready, create_shortcut, default_state_dir, resolve_db_key  # noqa: E402
+from dgpc import __version__  # noqa: E402
 
 PASSED = 0
 KEY = "desktop-test-key-not-for-production"
@@ -92,11 +93,11 @@ class FixtureHTTPServer(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
-def startup_asset_guard(root):
+def startup_asset_guard(root, *, versions=("0.13.11", None)):
     """실제 로컬 HTTP만 사용해 구버전 서버의 새 진입 파일 누락을 재현한다."""
     title = "<title>동구 대형폐기물 PC 업무</title>"
     defaults = {
-        "/api/state": (200, "application/json", b'{"setup_needed":true,"logged_in":false}', {}),
+        "/api/state": (200, "application/json", b'{"setup_needed":true,"logged_in":false}', {"X-DG-Version": __version__}),
         "/": (200, "text/html; charset=utf-8", (title + '<script src="/start.js" defer></script>').encode(), {}),
         "/start.js": (200, "text/javascript", b"import('./pc.js');", {}),
         "/pc.js": (200, "text/javascript", b"import './core.js';", {}),
@@ -113,6 +114,23 @@ def startup_asset_guard(root):
         url = f"http://127.0.0.1:{http.server_port}/"
         try:
             ok(app_ready(url), "동일 출처 진입 파일·pc.js·core.js가 실제 제공될 때만 준비 완료")
+            for version in versions:
+                headers = {"X-DG-Version": version} if version is not None else {}
+                http.assets = {**defaults, "/api/state": (*defaults["/api/state"][:3], headers)}
+                label = "구버전" if version else "버전 정보 없는"
+                ok(not app_ready(url), label + " API와 정상 자산을 현재 앱 준비 완료로 오인하지 않음")
+                selected = root / ("version mismatch " + str(version))
+                controller = DesktopController(selected, http.server_port)
+                message = ""
+                try:
+                    controller.start(lambda new: (_ for _ in ()).throw(AssertionError("버전 불일치에서 키 요청")))
+                except DesktopError as error:
+                    message = str(error)
+                ok("동구 PC 서버" in message and "버전" in message and "다시" in message
+                   and controller.status == "error" and not controller.owned and not selected.exists()
+                   and http.fileno() >= 0, label + " 서버를 구분해 재시작 안내하며 기존 서버·선택 폴더 보존")
+            http.assets = {**defaults, "/": (200, "text/html", (title + '<script src="pc.js"></script>').encode(), {})}
+            ok(app_ready(url), "현재 버전이면 기존 pc.js 진입 HTML도 실제 자산을 확인해 허용")
             for content, label in (
                 ((404, "text/plain", b"missing", {}), "HTML은 새 진입을 요구하지만 start.js 404인 기존 서버 거부"),
                 ((200, "text/html", b"<html>fallback</html>", {}), "진입 파일 대신 HTML을 반환하는 서버 거부"),
@@ -198,7 +216,10 @@ def main():
                    "진짜 키 요청·자식 시작·준비 순서대로 비밀 없는 진행 단계 제공")
                 ok(result == "ready" and controller.owned and controller.child.poll() is None,
                    "콘솔 없는 pythonw 자식 준비" if interpreter else "실제 앱 자식 준비·소유권 확인")
-                ok(b'"setup_needed": true' in get(controller.url), "실제 PC API 준비 뒤 성공 보고")
+                ok(json.loads(get(controller.url)) == {"setup_needed": True, "logged_in": False}, "실제 PC API 준비 뒤 기존 state 본문 계약 유지")
+                request = urllib.request.Request(controller.url + "api/state", headers={"X-DG-CSRF": "1"})
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    ok(response.headers.get("X-DG-Version") == __version__, "실제 업무 서버가 현재 버전을 API 헤더로 제공")
                 ok(b"import('./pc.js')" in get(controller.url, "start.js"), "실제 PC 첫 화면 자산 제공")
                 ok((state / "pc.db").read_bytes()[:16] != b"SQLite format 3\x00", "실제 SQLCipher DB만 생성")
                 other = DesktopController(root / "unused selected directory", controller.port)

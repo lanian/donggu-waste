@@ -190,6 +190,8 @@ def delete_dong(con, did: str):
     d = C.one(con, "SELECT * FROM dong WHERE id=?", (did,))
     if not d:
         raise C.UserError("동을 찾을 수 없습니다.")
+    if C.one(con, "SELECT 1 AS x FROM app_user_dong WHERE dong_id=? LIMIT 1", (did,)):
+        raise C.UserError("담당자에게 연결된 동은 지울 수 없습니다. 담당 동을 먼저 변경하거나 '사용' 표시를 끄세요.")
     n = C.one(con, "SELECT COUNT(*) AS n FROM request WHERE dong=?", (d["name"],))["n"]
     if n:
         raise C.UserError(f"이 동으로 접수된 건이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
