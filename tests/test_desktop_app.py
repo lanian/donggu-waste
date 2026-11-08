@@ -12,6 +12,7 @@ import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,6 +85,13 @@ class AssetFixture(OtherApp):
         self.wfile.write(body)
 
 
+class FixtureHTTPServer(ThreadingHTTPServer):
+    """가상 loopback 서버도 macOS의 외부 이름 조회에 의존하지 않는다."""
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def startup_asset_guard(root):
     """실제 로컬 HTTP만 사용해 구버전 서버의 새 진입 파일 누락을 재현한다."""
     title = "<title>동구 대형폐기물 PC 업무</title>"
@@ -94,8 +102,9 @@ def startup_asset_guard(root):
         "/pc.js": (200, "text/javascript", b"import './core.js';", {}),
         "/core.js": (200, "text/javascript", b"export const ready = true;", {}),
     }
-    with ThreadingHTTPServer(("127.0.0.1", 0), AssetFixture) as http, \
-            ThreadingHTTPServer(("127.0.0.1", 0), AssetFixture) as external:
+    with patch("socket.getfqdn", side_effect=AssertionError("fixture의 역방향 DNS 의존")), \
+            FixtureHTTPServer(("127.0.0.1", 0), AssetFixture) as http, \
+            FixtureHTTPServer(("127.0.0.1", 0), AssetFixture) as external:
         http.assets, http.requests = dict(defaults), []
         external.assets, external.requests = {}, []
         threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (http, external)]
@@ -250,7 +259,7 @@ def main():
 
         def occupy_after_initial_check(new):
             nonlocal competitor
-            competitor = ThreadingHTTPServer(("127.0.0.1", racing.port), RacingDonggu)
+            competitor = FixtureHTTPServer(("127.0.0.1", racing.port), RacingDonggu)
             threading.Thread(target=competitor.serve_forever, daemon=True).start()
             return KEY
 
@@ -267,7 +276,7 @@ def main():
             if competitor:
                 competitor.shutdown()
                 competitor.server_close()
-        with ThreadingHTTPServer(("127.0.0.1", 0), OtherApp) as http:
+        with FixtureHTTPServer(("127.0.0.1", 0), OtherApp) as http:
             thread = threading.Thread(target=http.serve_forever, daemon=True)
             thread.start()
             try:

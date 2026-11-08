@@ -31,6 +31,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Callable
 
 import contextlib
@@ -1901,7 +1902,10 @@ class Server(ThreadingHTTPServer):
     def server_bind(self):
         if os.name == "nt":
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
+        # HTTPServer의 getfqdn()은 로컬 주소도 외부 이름 조회가 끝날 때까지 멈출 수 있다.
+        # 이 앱은 바인딩한 주소만 필요하므로 HTTP 메타데이터도 숫자 주소로 설정한다.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def verify_request(self, request, client_address):  # LAN 모드: 허용 대역 밖 PC는 연결 자체를 끊는다
         return not LAN or ip_allowed(client_address[0], LAN["nets"])
