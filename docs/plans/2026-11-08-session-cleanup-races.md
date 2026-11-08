@@ -70,3 +70,13 @@ Windows 임시 환경에 잠긴 의존성을 해시 검증으로 설치하고 CI
 - 전체 검사 뒤 종료 시험의 성공 반환 판정을 [Microsoft API 문서](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects)에 맞춰 성공 범위 전체로 보완했다. 변경한 실행기 시험 19개를 별도로 재실행하여 **21.656초·exit 0**을 확인했다. 이 후속 보정은 시험 파일 한 줄이며 제품·다른 시험은 변경하지 않았다. 증거: `D:/Temp/dg-finish-launcher-final-teyr8qmn/report.json`, `launcher.log`.
 - 별도 생성물 4종·버전 3곳·CI YAML/10개 화면 시험 경로·진단 artifact 경로 검증을 통과했다. 포함 라이브러리 4개도 Git 원본 바이트가 고정 npm 패키지와 일치했다. Windows 작업본의 CRLF 차이는 라이브러리 내용 변경이 아니므로 불필요한 파일 재생성은 하지 않았다.
 - 커밋 대상은 검토한 소스·시험·문서 13개로 한정했다. DB·키·로그·EXE·ZIP은 포함하지 않으며 기존 `AGENTS.md`도 수정하지 않았다. 현재 작업 브랜치에서 로컬 커밋으로 보관하고 원격 푸시·배포는 수행하지 않는다.
+
+## main 병합 전 검증 보완
+
+- 사용자 요청으로 원격 작업 브랜치 `fix/project-review-20261106`의 `a0b5d89`를 최신 본선 `cb190f1` 위로 충돌 없이 FF 병합했다. 원격 본선 푸시와 작업 브랜치 정리는 검증 뒤 수행한다.
+- 병합 작업본의 첫 전체 `npm run test:all`은 **991.547초·exit 1**이었다. 모바일 정리 13개 중 한 시험의 초기 PIN 입력 대기가 실패했고 시작 복구 묶음은 단락 실행되지 않았다. 실행 중 소스 변경은 없었다. 증거: `D:/Temp/dg-project-finish-final-_mojf0cj/report.json`, `test-all.log`.
+- 실패 진단은 PIN/IndexedDB 준비 전 `/fees.js`의 `ERR_CONNECTION_REFUSED`를 기록했다. 나머지 모듈은 수신됐고 후속 `/`·`/app.js`는 200이었다. 서버 생성 시 bind/listen이 끝나고 클래스 종료 때만 shutdown하므로 정상 시작·종료 생명주기로는 설명되지 않았다. 증거: `D:/Temp/dg-mobile-cleanup-startup-s9wuga4w/startup.json`.
+- 실제 Chromium·원본 모바일 앱에서 `app.js` 전송 뒤 accept를 이벤트로 잠시 멈췄다. 기본 대기열 5개는 3회 모두 서버가 LISTENING인 채 모듈 연결이 거부되고 PIN 화면이 열리지 않았으며, 대기열 128개는 같은 조건 3회 모두 PIN 표시·요청 실패 0이었다. 자연 발생 실패 순간의 큐 상태를 직접 수집한 것은 아니며, 동일 증상의 원인 메커니즘을 대조 재현한 범위다. 증거: `D:/Temp/dg-mobile-network-d28b2a0bd37741c19409b90df024bbe3/results-q5-pause1.json`, `results-q128-pause1.json`. [Python 대기열 동작](https://docs.python.org/3.12/library/socketserver.html#socketserver.TCPServer.request_queue_size)도 확인했다.
+- `mobile_server()`의 시험용 HTTP 서버에 대기열 128개를 지정하고, accept 지연 중 실제 동시 연결 6개가 모두 모듈을 받을 수 있어야 하는 회귀를 추가했다. 새 회귀는 원본에서 연결 1개 시간 초과로 실패하고 보완 후 통과했다. 제품 코드·시간 제한·재시도 정책은 변경하지 않았으며, 기존 `test_mobile_cleanup.py` 실행 경로를 통해 로컬 전체 시험과 CI에 포함된다. 별도 전체 점검에서 찾은 제품 결함 7건은 이번 병합 작업에서 수정하지 않는다.
+- 모바일 정리·동시 연결 회귀 14개가 22.148초에 통과했다. 독립 검토 뒤 재현 이벤트의 자동 시간 해제를 제거했고, 최종 회귀도 대기열 5에서 실패 1개·128에서 성공을 확인했다. 게이트·소켓은 `finally`에서 해제·종료한다. 증거: 위 대조 폴더의 `fixture-regression-red-green.json`.
+- 보완한 병합 작업본의 전체 `npm run test:all` 재실행은 Node 22.23.4·Python 3.12.14에서 **837.75초·exit 0**이었다. 모바일 정리 14개와 마지막 시작 복구까지 통과했고 실행 중 소스 해시 변경은 없었다. 증거: `D:/Temp/dg-project-finish-final-brb94prg/report.json`, `test-all.log`. 제품 `pc/`·`web/` 소스는 `a0b5d89`와 동일하며 기존 EXE·ZIP을 다시 만들거나 사용자 자료를 변경하지 않았다.

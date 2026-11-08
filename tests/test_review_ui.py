@@ -45,7 +45,12 @@ def mobile_server():
         def log_message(self, *args):
             pass
 
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(ROOT / "web")))
+    class MobileHTTPServer(http.server.ThreadingHTTPServer):
+        # 초기 ES 모듈의 동시 연결을 받는다. Windows에서는 기본 대기열 5개가 차면
+        # 서버가 살아 있어도 연결이 거부되어 정적 import가 중단될 수 있다.
+        request_queue_size = 128
+
+    srv = MobileHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(ROOT / "web")))
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:

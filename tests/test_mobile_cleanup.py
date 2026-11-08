@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import os
 import json
+import http.server
 from pathlib import Path
+import socket
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -13,6 +17,47 @@ from playwright.sync_api import expect, sync_playwright
 
 from test_review_ui import mobile_server
 from test_workflow_mobile import daylist, event, open_mobile, seed, stop
+
+
+class MobileServerConnectionTests(unittest.TestCase):
+    def test_module_connection_burst_waits_while_accept_loop_is_busy(self):
+        """Chrome의 동시 모듈 연결 6개가 짧은 accept 지연에도 거부되지 않는다."""
+        accepted, resume = threading.Event(), threading.Event()
+        original = http.server.ThreadingHTTPServer.process_request
+        clients, errors = [], []
+
+        def pause_first(server, connection, address):
+            if not accepted.is_set():
+                accepted.set()
+                resume.wait()
+            return original(server, connection, address)
+
+        with patch.object(http.server.ThreadingHTTPServer, "process_request", pause_first):
+            with mobile_server() as url:
+                address = (urlsplit(url).hostname, urlsplit(url).port)
+                try:
+                    clients.append(socket.create_connection(address, timeout=1))
+                    self.assertTrue(accepted.wait(2), "시험 서버가 첫 연결을 받지 못했습니다")
+                    for _ in range(6):
+                        try:
+                            clients.append(socket.create_connection(address, timeout=0.5))
+                        except OSError as error:
+                            errors.append(type(error).__name__)
+                    resume.set()
+                    for client in clients:
+                        client.settimeout(2)
+                        client.sendall(b"GET /fees.js HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                        response = bytearray()
+                        while block := client.recv(65536):
+                            response.extend(block)
+                        self.assertTrue(response.startswith(b"HTTP/1.0 200 "), bytes(response[:80]))
+                        expected = (Path(__file__).resolve().parent.parent / "web" / "fees.js").read_bytes()
+                        self.assertEqual(response.partition(b"\r\n\r\n")[2], expected)
+                    self.assertEqual(errors, [], "초기 모듈 연결이 거부되었습니다")
+                finally:
+                    resume.set()
+                    for client in clients:
+                        client.close()
 
 
 class MobileCleanupTests(unittest.TestCase):
