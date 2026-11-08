@@ -99,10 +99,11 @@ sys.path.insert(0, sys.argv[1])
 from dgpc.paths import resource_root
 sys.frozen = True
 sys._MEIPASS = sys.argv[2]
-assert resource_root() == Path(sys.argv[2])
+expected_root = Path(sys.argv[2]).resolve()
+assert resource_root() == expected_root
 from dgpc import core, fees, routing
 import sample_data
-assert core.ROOT == Path(sys.argv[2])
+assert core.ROOT == expected_root
 assert fees.FEE_TABLE['label'] == '가상 배포판 수수료표'
 assert sample_data.FEE_TABLE['label'] == '가상 배포판 수수료표'
 assert routing.DEFAULT_VOLUME == 19.75
@@ -117,7 +118,9 @@ else:
     raise AssertionError('frozen 자산 위치가 없는데 원본 위치로 조용히 대체함')
 """
         env = {**os.environ, "DG_STATE": str(work / "업무 자료"), "DG_OUT": str(work / "출력")}
-        result = subprocess.run([sys.executable, "-c", script, str(ROOT / "pc"), str(assets)], cwd=work,
+        # CI 임시 경로의 별칭·정규화 차이도 통과해야 한다.
+        asset_argument = assets / ".." / assets.name
+        result = subprocess.run([sys.executable, "-c", script, str(ROOT / "pc"), str(asset_argument)], cwd=work,
                                 env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
         ok(result.returncode == 0, "frozen 자산 위치를 core·fees·routing·QR용 sample_data가 함께 사용: " + result.stderr)
         ok(not (work / "업무 자료").exists() and not (work / "출력").exists(), "자산 조회가 업무 자료·출력 폴더를 만들지 않음")

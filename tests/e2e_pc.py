@@ -249,7 +249,9 @@ def run():
 
         # 비밀번호 설정
         page.goto(URL)
-        page.get_by_placeholder(re.compile("^이름")).fill("시험 관리자")
+        initial_name = page.get_by_placeholder(re.compile("^이름"))
+        expect(initial_name).to_be_focused()  # 로그인 화면의 초기 autofocus가 입력 중 포커스를 옮기지 않게 한다.
+        initial_name.fill("시험 관리자")
         page.get_by_placeholder("비밀번호", exact=True).fill(PW)
         page.get_by_placeholder("비밀번호 한 번 더").fill(PW)
         page.get_by_role("button", name="관리자 계정 만들기").click()
