@@ -26,7 +26,7 @@ def build_output_preflight():
     import build_desktop as builder
     from PIL import Image
     with tempfile.TemporaryDirectory(prefix="dg desktop output preflight ") as temporary:
-        repository = Path(temporary)
+        repository = Path(temporary).resolve()
         distribution = repository / "dist" / "desktop"
         selected = distribution / "v0.13.4"
         app = selected / "Donggu-PC"
@@ -76,7 +76,7 @@ def main():
     from dgpc.paths import resource_root
     ok(resource_root() == ROOT, "원본 실행의 기존 저장소 자산 위치 보존")
     with tempfile.TemporaryDirectory(prefix="dg desktop paths ") as temporary:
-        work = Path(temporary)
+        work = Path(temporary).resolve()
         old_cwd = Path.cwd()
         try:
             os.chdir(work)
@@ -134,7 +134,7 @@ else:
     ok(not any(name.startswith(("pc/state/", "pc/out/", "tests/", "data/source/")) or name.endswith("derive_vectors.json")
                for name in included), "업무 자료·출력·시험 벡터·HWP 원문은 자산 목록에서 제외")
     with tempfile.TemporaryDirectory(prefix="dg desktop zip ") as temporary:
-        work = Path(temporary)
+        work = Path(temporary).resolve()
         app = work / "Donggu-PC"
         app.mkdir()
         (app / "Donggu-PC.exe").write_bytes(b"MZ-test-fixture")
