@@ -1,8 +1,10 @@
 // PC 화면: 접수 목록·일괄 처리·CSV 일괄 등록
 import { won } from '/web/fees.js';
-import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, searchbox, statusChip, toast, wrap } from '../core.js';
-
+import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, routeEpoch, searchbox, statusChip, toast, wrap } from '../core.js';
 async function screenRequests() {
+  const myRoute = routeEpoch, myHash = location.hash;
+  let view, loadSeq = 0, ready = false;
+  const current = () => view?.isConnected && myRoute === routeEpoch && location.hash === myHash;
   const f = (screenRequests.f ||= { q: '', date_field: 'planned', date_from: '', date_to: '', status: 'OPEN', crew: '', dong: '', pay: '', channel: '', quick: 'ALL', sort: '', dir: '', page: 1, size: 50 });
   const sel = (screenRequests.sel ||= new Set());
   const q = h('input', { type: 'search', id: 'rq-q', placeholder: '이름·연락처·주소·접수번호', value: f.q });
@@ -26,8 +28,8 @@ async function screenRequests() {
   const work = canWork();
   const drawHead = () => {
     const pageIds = res.rows.map((r) => r.id);
-    const all = h('input', { type: 'checkbox', 'aria-label': '이 쪽 모두 고르기', checked: pageIds.length && pageIds.every((i) => sel.has(i)),
-      onchange: (e) => { pageIds.forEach((i) => (e.target.checked ? sel.add(i) : sel.delete(i))); draw(); } });
+    const all = h('input', { type: 'checkbox', 'aria-label': '이 쪽 모두 고르기', disabled: !ready, checked: pageIds.length && pageIds.every((i) => sel.has(i)),
+      onchange: (e) => { if (!ready || !current() || !e.currentTarget.isConnected) return; pageIds.forEach((i) => (e.target.checked ? sel.add(i) : sel.delete(i))); draw(); } });
     thead.replaceChildren(h('tr', {}, ...COLS.map(([t, key], i) => {
       if (i === 0) return h('th', { class: 'chk', scope: 'col' }, work ? all : null);
       if (!key) return h('th', { class: i === 1 ? 'num' : null, scope: 'col' }, t);
@@ -38,6 +40,7 @@ async function screenRequests() {
     })));
   };
   const draw = () => {
+    if (!ready || !current()) return;
     quickBar.replaceChildren(...QUICK.map(([k, t]) => h('button', { type: 'button', class: 'qchip' + (f.quick === k ? ' on' : ''), 'aria-pressed': f.quick === k ? 'true' : 'false',
       onclick: () => { f.quick = k; f.page = 1; reload(); } }, t, h('b', {}, (k === 'ALL' ? res.counts.ALL : res.counts[k]) ?? 0))));
     count.textContent = res.total.toLocaleString();
@@ -45,7 +48,7 @@ async function screenRequests() {
     const shortDate = (d) => (!d ? '-' : d === boot.today ? '오늘' : d.slice(5));
     const base = (res.page - 1) * res.size;
     tbody.replaceChildren(...(res.rows.length ? res.rows.map((r, ri) => h('tr', { class: 'click' + (sel.has(r.id) ? ' sel' : ''), onclick: (e) => { if (!['A', 'INPUT', 'LABEL'].includes(e.target.tagName)) go(`#/request/${r.id}`); } },
-      h('td', { class: 'chk' }, work ? h('input', { type: 'checkbox', 'aria-label': `${r.receipt_no} 고르기`, checked: sel.has(r.id), onchange: (e) => { e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); } }) : null),
+      h('td', { class: 'chk' }, work ? h('input', { type: 'checkbox', 'aria-label': `${r.receipt_no} 고르기`, checked: sel.has(r.id), onchange: (e) => { if (!ready || !current() || !e.currentTarget.isConnected) return; e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); } }) : null),
       h('td', { class: 'num rn' }, base + ri + 1), h('td', { class: 'code' }, h('a', { href: `#/request/${r.id}`, title: r.receipt_no }, r.receipt_no.replace(/^DG-\d{4}/, ''))), h('td', { class: 'code' }, shortDate(r.planned_date)),
       h('td', { class: 'nowrap' }, r.dong || h('span', { class: 'muted' }, '-')), h('td', { class: 'nowrap' }, r.name), h('td', { class: 'code' }, fmtPhone(r.phone)),
       h('td', {}, h('span', { class: 'clamp' }, r.address)),
@@ -62,16 +65,36 @@ async function screenRequests() {
       btn('예정일 변경', bulkDate, 'small'), btn('동 지정', bulkDong, 'small'), btn('취소', bulkCancel, 'small danger'), btn('목록 인쇄', bulkPrint, 'small'), btn('배출 표지', bulkLabels, 'small'), btn('CSV', bulkCsv, 'small')] : []));
   };
   const load = wrap(async () => {
+    if (!current()) return;
+    const my = ++loadSeq;
     Object.assign(f, { q: q.value, date_field: dfield.value, date_from: dfrom.value, date_to: dto.value, status: status.value, crew: crew.value, dong: dong.value, pay: pay.value, channel: channel.value });
     const qs = new URLSearchParams(Object.entries(f).map(([k, v]) => [k, String(v ?? '')]));
-    res = await api('requests?' + qs);
+    markLoading();
+    let next;
+    try { next = await api('requests?' + qs); }
+    catch (e) {
+      if (my !== loadSeq || !current()) return;
+      tbody.removeAttribute('aria-busy');
+      tbody.replaceChildren(h('tr', {}, h('td', { colspan: COLS.length, class: 'muted' }, '목록을 불러오지 못했습니다. ', btn('다시 시도', () => load(), 'small'))));
+      throw e;
+    }
+    if (my !== loadSeq || !current()) return;
+    res = next;
     f.page = res.page;
+    ready = true; tbody.removeAttribute('aria-busy');
     draw();
   });
   // 조건을 바꾸면 이전 결과를 지우고 불러오는 중 표시 (옛 목록을 새 결과로 오인하지 않게)
-  const reload = () => { tbody.replaceChildren(h('tr', {}, h('td', { colspan: COLS.length, class: 'muted' }, '불러오는 중…'))); load(); };
+  const markLoading = () => {
+    ready = false; tbody.setAttribute('aria-busy', 'true');
+    thead.querySelectorAll('input').forEach((x) => { x.disabled = true; });
+    pager.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+    selBar.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+    tbody.replaceChildren(h('tr', {}, h('td', { colspan: COLS.length, class: 'muted' }, '불러오는 중…')));
+  };
+  const reload = () => { if (current()) load(); };
   let t = null;
-  q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { f.page = 1; load(); }, 300); });
+  q.addEventListener('input', () => { clearTimeout(t); loadSeq++; markLoading(); t = setTimeout(() => { if (current()) { f.page = 1; load(); } }, 300); });
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(t); f.page = 1; load(); } });
   [dfield, dfrom, dto, status, crew, dong, pay, channel].forEach((x) => x.addEventListener('change', () => { f.page = 1; reload(); }));
   // 일괄 처리 (고른 건, 한 번에 한 트랜잭션·건별 이력)
@@ -118,11 +141,14 @@ async function screenRequests() {
     await download('requests/export', `동구-선택-${sel.size}건${ok.pii ? '-개인정보' : ''}.csv`, { method: 'POST', body: { ids: ids(), include_pii: ok.pii } });
     toast('내려받았습니다');
   });
-  load();
-  setTimeout(() => { if (!document.activeElement || document.activeElement === document.body) q.focus(); }, 30);
+  // mount한 화면만 조회한다. 더 늦은 render가 만든 뒤 버린 화면은 공유 조건에도 손대지 않는다.
+  setTimeout(() => { if (current()) load(); }, 0);
+  setTimeout(() => { if (current() && (!document.activeElement || document.activeElement === document.body)) q.focus(); }, 30);
   // 조회조건 상자(회색 이름 칸 + 값 칸) → 목록 머리줄(총 N건 · 단추) → 목록 표
   const cl = (t, forId) => h('label', { class: 'cond-l', for: forId }, t);
-  return h('div', {}, h('div', { class: 'pagehead' }, h('h1', {}, '접수'), h('span', { class: 'muted small' }, '단축키: ', h('kbd', {}, '/'), ' 찾기 · ', h('kbd', {}, 'N'), ' 새 접수')),
+  view = h('div', {}, h('div', { class: 'pagehead requests-heading' },
+    h('div', {}, h('h1', {}, '접수'), h('p', { class: 'muted small' }, '단축키: ', h('kbd', {}, '/'), ' 찾기 · ', h('kbd', {}, 'N'), ' 새 접수')),
+    work ? btn('+ 전화 접수 등록', () => go('#/request/new'), 'primary requests-create') : null),
     h('div', { class: 'card filters searchbox', role: 'search', 'aria-label': '조회조건' },
       h('div', { class: 'cond' }, cl('검색어', 'rq-q'), h('div', { class: 'cond-v' }, q), cl('기간', 'rq-from'), h('div', { class: 'cond-v' }, dfield, dfrom, '~', dto), cl('처리 상태', 'rq-status'), h('div', { class: 'cond-v' }, status),
         cl('수거팀', 'rq-crew'), h('div', { class: 'cond-v' }, crew), cl('행정동', 'rq-dong'), h('div', { class: 'cond-v' }, dong), cl('수납 상태', 'rq-pay'), h('div', { class: 'cond-v' }, pay),
@@ -130,8 +156,10 @@ async function screenRequests() {
         h('span', { class: 'cond-l' }, '빠른 조회'), h('div', { class: 'cond-v wide2' }, quickBar)),
       h('div', { class: 'cond-btns' }, btn('검색', () => { f.page = 1; load(); }, 'dark'))),
     h('div', { class: 'gridbar' }, h('span', { class: 'cnt' }, '총 ', count, '건'), selBar, h('span', { class: 'grow' }),
-      work ? btn('일괄 등록(CSV)', () => importDlg().then((n) => { if (n) load(); }), '') : null, work ? btn('+ 전화 접수 등록', () => go('#/request/new'), 'primary') : null),
+      work ? btn('일괄 등록(CSV)', () => importDlg().then((n) => { if (n) load(); }), '') : null),
     h('div', { class: 'card tablecard' }, h('table', { class: 'grid' }, thead, tbody)), pager);
+  markLoading(); drawHead();
+  return view;
 }
 
 // 접수 일괄 등록: 서식 내려받기 → 파일 고르기 → 미리보기(오류·중복 후보) → 등록

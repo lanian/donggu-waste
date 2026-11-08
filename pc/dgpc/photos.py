@@ -51,7 +51,16 @@ def import_photos(con, data: bytes, prepared: dict | None = None) -> dict:
                 counts["hash_mismatch"] += 1
                 continue
             raw = p["raw"]
-            cur = one(con, "SELECT sha256, recovery_status FROM photo WHERE photo_id=?", (p["photo_id"],))
+            cur = one(con, "SELECT sha256, recovery_status, request_id, purged_at FROM photo WHERE photo_id=?", (p["photo_id"],))
+            rid = cur["request_id"] if cur else p.get("request_id")
+            req = one(con, "SELECT pii_purged_at FROM request WHERE id=?", (rid,))
+            if (cur and cur["purged_at"]) or (req and req["pii_purged_at"]):
+                # 파기된 사진은 늦게 도착해도 되살리지 않는다. 받은 것으로 확인하되 바이트·좌표는 계속 비워 둔다.
+                if cur:
+                    con.execute("""UPDATE photo SET data=NULL, lat=NULL, lon=NULL, purged_at=COALESCE(purged_at, ?),
+                        recovery_status='RECOVERED', recovered_at=COALESCE(recovered_at, ?) WHERE photo_id=?""", (now(), now(), p["photo_id"]))
+                counts["purged"] = counts.get("purged", 0) + 1
+                continue
             if cur and cur["recovery_status"] == "RECOVERED":
                 counts["already"] += 1
                 continue

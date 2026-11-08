@@ -14,6 +14,12 @@ async function screenExport() {
   const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
   ui.exportMsg = '';
   const say = (t) => { ui.exportMsg = t; msg.textContent = t; };
+  const saveResultFile = (file, name, message) => {
+    const u = URL.createObjectURL(file);
+    const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 30000);
+    say(message);
+  };
   // 결과 파일: 이름·연락처·주소·메모 없이 이벤트만, PC 공개키로 암호화 + 기기 서명
   const buildResult = async () => {
     const from = pending[0].seq, to = pending[pending.length - 1].seq;
@@ -47,12 +53,12 @@ async function screenExport() {
       const file = new File([sealed.bytes], name, { type: 'application/octet-stream' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 결과 반영 코드(D-)를 아래에 입력하세요.'); }
-        catch (e) { say(e.name === 'AbortError' ? '보내기를 취소했습니다. 결과 반영 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.' : '공유 실패: ' + e.message); }
+        catch (e) {
+          if (e.name === 'AbortError') say('보내기를 취소했습니다. 결과 반영 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.');
+          else saveResultFile(file, name, '공유창을 열 수 없어 파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
+        }
       } else {
-        const u = URL.createObjectURL(file);
-        const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(u), 30000);
-        say('파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
+        saveResultFile(file, name, '파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
       }
     } catch (e) { say('파일을 만들지 못했습니다: ' + errMsg(e)); }
     make.disabled = false; render();

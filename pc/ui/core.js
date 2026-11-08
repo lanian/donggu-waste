@@ -16,6 +16,9 @@ function FEES() {
 }
 const $app = document.getElementById('app');
 let boot = null;       // 설정·팀·기기
+// 라우터보다 먼저 탐색 세대를 올린다. 늦게 읽은 화면의 응답도 같은 탐색 기준으로 검사한다.
+let routeEpoch = 0;
+addEventListener('hashchange', () => { routeEpoch++; });
 let liveMaps = [];
 // 접수 상태·연락·미수거 사유·스티커 확인: 휴대폰·PC 파이썬과 같은 표(data/labels.json → /web/labels-data.js)
 const STATUS = LABELS.status;
@@ -75,16 +78,22 @@ const searchbox = (pairs, ...btns) => h('div', { class: 'card searchbox', role: 
 const statusChip = (s) => chip(STATUS[s] || s, s === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(s) ? 'warn' : s === 'CANCELLED' ? 'neutral' : ['IN_PROGRESS', 'ASSIGNED'].includes(s) ? 'info' : '');
 
 // 세션이 끝난 뒤(401) 요청하면 화면(작성 중인 양식)은 그대로 두고 로그인 대화 상자를 띄운 뒤, 다시 로그인하면 같은 요청을 한 번 더 보낸다.
-async function apiRaw(path, { method = 'GET', body, raw, retry = true } = {}) {
+async function apiRaw(path, { method = 'GET', body, raw, retry = true, signal, _readBudget } = {}) {
   const r = await fetch('/api/' + path, {
     method, credentials: 'same-origin',
     headers: { 'X-DG-CSRF': '1', ...(raw ? { 'Content-Type': 'application/octet-stream' } : body ? { 'Content-Type': 'application/json' } : {}) },
     body: raw || (body ? JSON.stringify(body) : undefined),
+    ...(signal ? { signal } : {}),
   });
   if (r.status === 401) {
-    const data = await r.clone().json().catch(() => ({}));
+    const data = await r.clone().json().catch((e) => { if (signal?.aborted) throw e; return {}; });
     if (data.login) {
-      if (boot && retry) { await relogin(); return apiRaw(path, { method, body, raw, retry: false }); }
+      if (boot && retry) {
+        // 사람의 비밀번호 입력은 네트워크 조회 시간이 아니다. 재인증 뒤에는 새 예산으로 같은 조회를 잇는다.
+        _readBudget?.pause();
+        try { await relogin(); } finally { _readBudget?.resume(); }
+        return apiRaw(path, { method, body, raw, retry: false, signal: _readBudget?.signal || signal, _readBudget });
+      }
       boot = null; render(); throw new Error('로그인이 필요합니다');
     }
   }
@@ -93,21 +102,94 @@ async function apiRaw(path, { method = 'GET', body, raw, retry = true } = {}) {
 }
 // 오류에는 HTTP 상태(status)와 응답(data)을 붙인다: 409(다른 곳에서 바뀜)는 화면이 따로 안내한다
 async function api(path, opts = {}) {
-  const r = await apiRaw(path, opts);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(data.error || '오류'); e.status = r.status; e.data = data; throw e; }
-  return data;
+  // 시작 화면의 GET만 명시적으로 제한한다. 저장·가져오기·파일 응답의 기존 수명은 바꾸지 않는다.
+  const bounded = (opts.method || 'GET').toUpperCase() === 'GET' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0;
+  let timer = null, forwardAbort = null, expired = false;
+  const readBudget = bounded ? {
+    signal: null,
+    pause() {
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (forwardAbort) { opts.signal.removeEventListener('abort', forwardAbort); forwardAbort = null; }
+    },
+    resume() {
+      this.pause(); expired = false;
+      const controller = new AbortController(); this.signal = controller.signal;
+      if (opts.signal) {
+        forwardAbort = () => controller.abort(opts.signal.reason);
+        if (opts.signal.aborted) forwardAbort();
+        else opts.signal.addEventListener('abort', forwardAbort, { once: true });
+      }
+      timer = setTimeout(() => { expired = true; controller.abort(); }, opts.timeoutMs);
+    },
+  } : null;
+  readBudget?.resume();
+  try {
+    const r = await apiRaw(path, readBudget ? { ...opts, signal: readBudget.signal, _readBudget: readBudget } : opts);
+    const data = await r.json().catch((e) => { if ((readBudget?.signal || opts.signal)?.aborted) throw e; return {}; });
+    if (!r.ok) { const e = new Error(data.error || '오류'); e.status = r.status; e.data = data; throw e; }
+    return data;
+  } catch (e) {
+    if (expired) { const timeout = new Error('PC 서버 응답을 기다리는 시간이 지났습니다. 서버 상태를 확인한 뒤 다시 시도해 주세요.'); timeout.code = 'READ_TIMEOUT'; throw timeout; }
+    throw e;
+  } finally { readBudget?.pause(); }
 }
 const post = (path, body) => api(path, { method: 'POST', body });
 const isStale = (e) => e && e.status === 409;
-// 요청 번호(client_req_id): 양식을 보낼 때마다 새로 만들고, 실패해서 다시 보낼 때는 같은 값을 쓴다(두 번 눌러도 서버는 한 번만 처리).
-// 키별로 화면 밖에 둬서 다시 그려져도 같은 값. 성공하면 지운다.
+// 요청 번호와 보낸 본문을 함께 보관한다. 응답을 잃었을 때 다른 입력을 과거 요청의 성공으로 처리하지 않는다.
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join(''));
-const REQ_IDS = new Map();
+const REQ_IDS = new Map(), pendingRequests = new Map();
+const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;  // pc/dgpc/core.py의 IDEM_HOURS와 같은 보관 기간
 const reqId = (key) => { if (!REQ_IDS.has(key)) REQ_IDS.set(key, uuid()); return REQ_IDS.get(key); };
-const reqDone = (key) => REQ_IDS.delete(key);
-// client_req_id를 붙여 보내고, 성공하면 그 키의 번호를 지운다
-async function postOnce(key, path, body) { const r = await post(path, { ...body, client_req_id: reqId(key) }); reqDone(key); return r; }
+const reqDone = (key) => { pendingRequests.delete(key); REQ_IDS.delete(key); };
+function requestSignature(path, json) {
+  const body = JSON.parse(json);
+  // 재시도하는 동안 늘어난 측정 시간은 같은 업무다. 서버에는 처음 보낸 시간을 그대로 보낸다.
+  if (path === 'requests') delete body.intake_secs;
+  if (path === 'close') delete body.close_secs;
+  return path + '\n' + JSON.stringify(body);
+}
+function checkPending(request) {
+  if (request.owner !== (boot?.me?.username || '')) throw new Error('로그인 사용자가 바뀌었습니다. 이전 기록을 확인한 뒤 저장해 주세요.');
+  if (request.uncertain && Date.now() - request.sentAt >= RETRY_WINDOW_MS)
+    throw new Error('이전 요청의 확인 기간(24시간)이 지났습니다. 중복 처리를 막기 위해 다시 보내지 않았습니다. 기존 기록을 직접 확인해 주세요.');
+}
+function sendPending(key, request) {
+  checkPending(request);
+  if (request.inFlight) return request.inFlight;
+  request.inFlight = (async () => {
+    try {
+      const result = await post(request.path, { ...JSON.parse(request.json), client_req_id: request.id });
+      if (pendingRequests.get(key) === request) reqDone(key);
+      return result;
+    } catch (e) {
+      // 첫 응답이 입력 오류 등으로 확정 거절된 때는 고쳐 쓸 수 있다. 응답 유실 이력이 있으면 확인 전까지 보존한다.
+      if (!request.uncertain && e.status >= 400 && e.status < 500 && e.status !== 408) {
+        if (pendingRequests.get(key) === request) reqDone(key);
+      } else request.uncertain = true;
+      throw e;
+    } finally { request.inFlight = null; }
+  })();
+  return request.inFlight;
+}
+async function postOnce(key, path, body) {
+  const json = JSON.stringify(body || {}), signature = requestSignature(path, json), owner = boot?.me?.username || '';
+  let request = pendingRequests.get(key);
+  if (request && request.owner !== owner) { reqDone(key); request = null; }  // 다음 사용자에게 이전 본문을 넘기지 않는다.
+  if (request) checkPending(request);
+  if (request && request.signature !== signature) {
+    const confirmed = await modal({ title: '이전 요청의 반영 확인', ok: '이전 요청 확인', cancel: '돌아가기',
+      body: [h('p', {}, '앞서 보낸 요청의 응답을 받지 못했습니다. 현재 변경값은 저장하지 않고, 이전 내용을 같은 요청 번호로 다시 보내 반영 여부부터 확인합니다.'),
+        h('p', { class: 'muted small' }, '확인한 뒤 기존 기록을 살펴보고 필요한 내용을 별도로 저장해 주세요.')],
+      onOk: async () => { await sendPending(key, request); return true; } });
+    throw new Error(confirmed ? '이전 요청의 반영을 확인했습니다. 현재 변경값은 저장하지 않았습니다. 기존 기록을 확인한 뒤 다시 저장해 주세요.'
+      : '이전 요청의 반영 여부를 먼저 확인해 주세요. 현재 변경값은 저장하지 않았습니다.');
+  }
+  if (!request) {
+    request = { id: reqId(key), path, json, signature, owner, sentAt: Date.now(), uncertain: false, inFlight: null };
+    pendingRequests.set(key, request);
+  }
+  return sendPending(key, request);
+}
 
 // ------------------------------------------------------------ 백그라운드 작업 (백업·파기·사진 정리·전체 무결성 검사): 오른쪽 아래 진행 띠, GET /api/jobs/{id}를 불러 끝나면 결과
 function jobsPanel() {
@@ -341,6 +423,6 @@ export {
   grid, gridbar, h, isPlaceholderContact, isStale, jobsPanel, kst, liveMaps,
   mb, md, modal, nowHM, pagehead, pendingActions, post, postOnce,
   prefsControls, promptDlg, reasonDlg, reasonFields, reauth, relogin, render, reqDone,
-  reqId, runJob, savePrefs, searchbox, sessTimer, setBoot, setRender, statusChip,
+  reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, setBoot, setRender, statusChip,
   stopSessionTimer, toast, touchSession, uuid, workEnd, wrap,
 };

@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from dgpc import store as _store, settings as settings_reg
+from dgpc.paths import resource_root
 
 KST = dt.timezone(dt.timedelta(hours=9))
 
@@ -41,7 +42,7 @@ class _SafeCsv:
 def safe_csv_writer(buf):
     return _SafeCsv(buf)
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = resource_root()
 # PC 화면·휴대폰과 같은 표시 이름(접수 상태·연락·미수거 사유·스티커 확인). 휴대폰용 web/labels-data.js 는 tools/build_labels.py 가 만든다
 LABELS = {k: v for k, v in json.loads((ROOT / "data" / "labels.json").read_text(encoding="utf8")).items() if k != "about"}
 

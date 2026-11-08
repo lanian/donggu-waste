@@ -2,6 +2,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import io
 import json
@@ -265,6 +266,108 @@ def stats_csv(con, start: str, end: str, kind: str = "requests", basis: str = "p
             w.writerow(line)
     audit(con, "report", kind, "EXPORT", {"start": start, "end": end, "basis": basis})
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+# ------------------------------------------------------------------ 일일 작업일지·월보 (현재 원자료 조회, 개인정보 없는 집계)
+def _operational_report(con, start: str, end: str, basis: str, kind: str, period: str) -> dict:
+    _check_period(start, end, basis)
+    try:
+        _kst_range(start, end)
+    except OverflowError:
+        raise UserError("보고서 기간을 지원하는 날짜로 골라 주세요.")
+    result = stats(con, start, end, basis)
+    unloads = one(con, """SELECT COUNT(*) AS count,
+        COALESCE(SUM(volume_m3 IS NOT NULL),0) AS volume_records,
+        COALESCE(SUM(weight_kg IS NOT NULL),0) AS weight_records
+        FROM unload_log WHERE work_date BETWEEN ? AND ? AND void_reason IS NULL""", (start, end))
+    result.update(kind=kind, generated_at=dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M"), unload_summary=unloads)
+    result["work_date" if kind == "daily" else "month"] = period
+    result["source_note"] = (
+        f"접수·품목·부과 금액은 {STATS_BASIS[basis]} 기준으로 고른 접수의 현재 상태를 집계합니다. "
+        "수거 수량과 접수별 납부 기록은 현재 확인된 누적 값입니다. "
+        "완료일은 마지막 최종 결과일이며 취소 건은 취소일을 사용합니다. "
+        "별도로 표시한 기간 내 접수 건수는 접수일, 하차 기록은 작업일, 세입은 납부일이 보고 기간에 속하는 기록을 집계합니다. "
+        "수거팀은 접수의 마지막 배정팀입니다. "
+        "무효 하차·납부 기록은 제외합니다. 예정일 변경·추가 결과·수정에 따라 다시 조회한 값이 달라질 수 있습니다."
+    )
+    return result
+
+
+def daily_report(con, work_date: str, basis: str = "planned") -> dict:
+    """일일 작업일지용 현재 집계. 조회만 하며 마감·이월·저장된 보고서를 만들지 않는다."""
+    return _operational_report(con, work_date, work_date, basis, "daily", work_date)
+
+
+def monthly_report(con, month: str, basis: str = "planned") -> dict:
+    """YYYY-MM 한 달 전체의 현재 집계. 기존 통계의 날짜·상태·금액 의미를 유지한다."""
+    if not isinstance(month, str) or not re.fullmatch(r"\d{4}-\d\d", month) or not _date_ok(month + "-01"):
+        raise UserError("보고할 월을 YYYY-MM 형식으로 골라 주세요.")
+    year, month_number = map(int, month.split("-"))
+    end = f"{month}-{calendar.monthrange(year, month_number)[1]:02d}"
+    return _operational_report(con, month + "-01", end, basis, "monthly", month)
+
+
+def _operational_report_csv(report: dict) -> bytes:
+    """조회한 집계의 전체 섹션을 내보낸다. 접수별 상세·주민 정보·자유 메모를 넣지 않는다."""
+    buf = io.StringIO()
+    w = safe_csv_writer(buf)
+    w.writerow(["일일 작업일지" if report["kind"] == "daily" else "대형폐기물 수거 월보"])
+    w.writerow(["기간", report["start"], report["end"]])
+    w.writerow(["집계 기준", report["basis_label"]])
+    w.writerow(["생성 시각(한국시간)", report["generated_at"]])
+    w.writerow(["집계 안내", report["source_note"]])
+
+    def section(title, headers, values):
+        w.writerow([])
+        w.writerow([title])
+        w.writerow(headers)
+        w.writerows(values)
+
+    t = report["totals"]
+    summary = [("선택 기준 접수 건수", "requests"), ("기간 내 접수 건수(접수일)", "received"),
+               ("계산 금액(원)", "calculated"), ("감면액(원)", "reduction"), ("부과 금액(원)", "levied"),
+               ("접수별 누적 납부 기록(원)", "paid"), ("금액 확인 대기(건)", "amount_pending"),
+               ("미납·부족(건)", "unpaid"), ("현장 추가 품목 행", "field_added_lines"),
+               ("접수일부터 예정일까지 평균 일수", "lead_days_avg"), ("감면 접수(건)", "reduction_count"),
+               ("하차 부피(m3)", "unload_m3"), ("하차 중량(kg)", "unload_kg")]
+    section("요약", ["항목", "값"], ([label, "" if t[key] is None else t[key]] for label, key in summary))
+    section("상태별", ["현재 상태", "상태 코드", "건수"],
+            ([STATUS_LABEL.get(status, status), status, count] for status, count in sorted(t["by_status"].items())))
+    section("날짜별", ["날짜", "접수일 기준 접수", "선택 기준 건수", "수거 완료", "일부 수거", "미수거", "취소",
+                       "계산 금액(원)", "부과 금액(원)", "접수별 누적 납부 기록(원)", "하차 부피(m3)", "하차 중량(kg)"],
+            ([x[key] for key in ("date", "received", "planned", "done", "partial", "not_collected", "cancelled", "calculated", "levied", "paid", "unload_m3", "unload_kg")] for x in report["days"]))
+    section("행정동별", ["행정동", "선택 기준 건수", "수거 완료", "재방문·보류", "취소", "부과 금액(원)", "접수별 누적 납부 기록(원)"],
+            ([x["dong"] or "(동 미지정)", x["planned"], x["done"], x["revisit"], x["cancelled"], x["levied"], x["paid"]] for x in report["dongs"]))
+    section("품목별", ["품목", "규격", "단위", "확인 수량", "누적 수거 수량"],
+            ([x[key] for key in ("name", "spec", "unit_label", "requested", "collected")] for x in report["items"]))
+    section("품목 분류별", ["분류", "품목 행", "확인 수량", "누적 수거 수량", "계산 금액(원)"],
+            ([x[key] for key in ("category", "lines", "requested", "collected", "amount")] for x in report["categories"]))
+    section("수거팀별", ["수거팀", "배정 건수", "수거 완료", "재방문·보류"],
+            ([x[key] for key in ("crew", "assigned", "done", "partial_or_not")] for x in report["crews"]))
+    section("접수 경로별", ["접수 경로", "선택 기준 건수", "수거 완료", "취소"],
+            ([x[key] for key in ("channel", "planned", "done", "cancelled")] for x in report["channels"]))
+    section("감면별", ["감면 사유", "감면율(%)", "건수", "감면액(원)"],
+            ([x[key] for key in ("label", "rate", "count", "amount")] for x in report["reductions"]))
+    section("월별", ["월", "선택 기준 건수", "수거 완료", "재방문·보류", "취소", "계산 금액(원)", "감면액(원)", "부과 금액(원)", "접수별 누적 납부 기록(원)"],
+            ([x[key] for key in ("month", "count", "done", "revisit", "cancelled", "calculated", "reduction", "levied", "paid")] for x in report["months"]))
+    u = report["unload_summary"]
+    section("하차 기록", ["하차 횟수", "부피 입력 횟수", "중량 입력 횟수", "하차 부피(m3)", "하차 중량(kg)"],
+            [[u["count"], u["volume_records"], u["weight_records"], t["unload_m3"], t["unload_kg"]]])
+    revenue_fields = ("pay_n", "pay", "refund_n", "refund", "net")
+    section("세입(납부일 기준)", ["납부 방법", "납부 건수", "납부액(원)", "환불 건수", "환불액(원)", "순수입(원)"],
+            ([x["method"], *(x[key] for key in revenue_fields)] for x in report["revenue"]["methods"]))
+    w.writerow(["합계", *(report["revenue"]["totals"][key] for key in revenue_fields)])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def daily_report_csv(con, work_date: str, basis: str = "planned") -> bytes:
+    """일일 작업일지의 전체 집계 CSV(UTF-8 BOM, 원자료 변경 없음)."""
+    return _operational_report_csv(daily_report(con, work_date, basis))
+
+
+def monthly_report_csv(con, month: str, basis: str = "planned") -> bytes:
+    """월보의 전체 집계 CSV(UTF-8 BOM, 원자료 변경 없음)."""
+    return _operational_report_csv(monthly_report(con, month, basis))
 
 
 # ------------------------------------------------------------------ 시범 운영 비교 (기존 방식 수치 ↔ 이 시스템으로 운영한 기간)

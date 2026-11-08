@@ -67,6 +67,10 @@ jobs:
         run: python tools/check_generated.py
       - run: npm test
       - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)
+      - run: python tests/test_review_server.py   # 백업 구조 버전 보존·로그인 중 계정 변경 경쟁
+      - run: python tests/test_pc_reports.py
+      - run: python tests/test_pc_labels.py
+      - run: python tests/test_pc_labels_migration.py
 
   e2e:
     name: 화면 종단 시험 (${{ matrix.suite }})
@@ -75,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [e2e, e2e_pc]      # tests/e2e.py (휴대폰 화면), tests/e2e_pc.py (PC 화면)
+        suite: [e2e, e2e_pc, test_review_ui, test_workflow, test_pc_startup, test_reports_labels_api, test_reports_labels_ui, test_reports_labels_e2e]  # 화면·복구·보고서·번호표·첫 로딩 회귀
     steps:
       - uses: actions/checkout@v7
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
@@ -129,22 +133,49 @@ jobs:
       - name: SQLCipher 동작 확인
         id: sqlcipher
         run: python -c "import sqlcipher3; c = sqlcipher3.connect(':memory:'); v = c.execute('PRAGMA cipher_version').fetchone(); assert v and v[0], 'SQLCipher 아님(평문 SQLite)'; print('SQLCipher', v[0])"
+      - name: 실행기 시험용 Python 환경
+        if: runner.os == 'Windows'
+        # 실행기가 우선 선택하는 .venv도 setup-python과 같은 버전·설치 모듈을 사용한다.
+        run: python -m venv --system-site-packages .venv
       - name: PC 업무 로직 시험
-        run: python tests/test_pc.py
+        run: |
+          python tests/test_pc.py
+          python tests/test_review_server.py
+          python tests/test_pc_launcher.py
+          python tests/test_desktop_paths.py
+          python tests/test_desktop_lifecycle.py
+          python tests/test_desktop_app.py
+          python tests/test_desktop_ui.py
+      - name: Windows 실행 앱 빌드 도구
+        if: runner.os == 'Windows'
+        run: pip install --require-hashes -r tools/requirements-desktop.txt
+      - name: Windows 실행 앱 생성·실제 EXE 시험
+        if: runner.os == 'Windows'
+        run: |
+          python tools/build_desktop.py
+          python tests/test_desktop_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe
+      - name: Windows 실행 앱 보관
+        if: success() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Donggu-PC-windows-x64
+          path: dist/desktop/Donggu-PC-windows-x64.zip
+          retention-days: 14
+          if-no-files-found: error
       - name: 결과 요약
         if: always()
         run: |
           {
             echo "### PC 로직 시험 — ${{ matrix.os }}"
             if [ "${{ job.status }}" = "success" ]; then
-              echo "통과: 의존성 설치(바이너리 휠)·SQLCipher·tests/test_pc.py"
+              echo "통과: 의존성 설치(바이너리 휠)·SQLCipher·PC 로직·회귀 시험 (실행기는 Windows에서만)"
             elif [ "${{ steps.install.outcome }}" != "success" ]; then
               echo "**실패: pip 설치 단계.** 이 OS·Python ${{ env.PYTHON_VERSION }} 용 바이너리 휠이 없는 패키지가 있을 수 있습니다."
               echo "sqlcipher3 휠이 없으면 docs/배포·운영.md \"SQLCipher 설치가 안 될 때\"를 따르세요."
             elif [ "${{ steps.sqlcipher.outcome }}" != "success" ]; then
               echo "**실패: SQLCipher 확인.** sqlcipher3 가 설치됐지만 암호화가 동작하지 않습니다."
             else
-              echo "**실패: tests/test_pc.py.** 이 OS에서만 나는 문제인지 로그를 확인하세요 (배포는 막지 않음)."
+              echo "**실패: PC 로직·회귀 시험.** 이 OS에서만 나는 문제인지 로그를 확인하세요 (배포는 막지 않음)."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           [ "${{ job.status }}" = "success" ] || echo "::warning::${{ matrix.os }} PC 로직 시험 실패 (참고용, 배포 계속)"

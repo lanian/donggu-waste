@@ -104,6 +104,13 @@ p.notice { padding: 10px 12px; border-radius: var(--radius-sm); font-weight: 600
 .card > h2:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .hint { font-size: 0.8667rem; color: var(--warn); font-weight: 700; }
 
+/* ---- 현재 상태에 맞는 다음 행동: 기존 경고와 별개로 주요 동작 하나만 ---- */
+.next-action { border: 1.5px solid var(--brand); }
+.next-action > h2 { color: var(--brand-soft-ink); font-size: 0.8667rem; margin-bottom: 6px; }
+.next-action .next-title { font-size: 1.2rem; font-weight: 800; line-height: 1.35; margin: 0 0 8px; }
+.next-action .next-detail { margin: 0 0 12px; }
+.next-action .btn { margin: 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+
 /* ---- 아래 탭 막대 (목록 · 지도 · 설정) ---- */
 main.with-tabs { padding-bottom: calc(var(--tabbar-h) + 32px + env(safe-area-inset-bottom)); }
 .tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex; justify-content: center;

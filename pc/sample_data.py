@@ -10,8 +10,9 @@ import json
 import random
 import uuid
 from pathlib import Path
+from dgpc.paths import resource_root
 
-FEE_TABLE = json.loads((Path(__file__).resolve().parent.parent / "data" / "fee_table.json").read_text(encoding="utf8"))
+FEE_TABLE = json.loads((resource_root() / "data" / "fee_table.json").read_text(encoding="utf8"))
 
 
 _SURNAMES = "김이박최정강조윤장임"

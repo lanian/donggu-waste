@@ -74,7 +74,10 @@ from dgpc.close import (
 from dgpc.reports import (
     EXPORT_COLS, STATUS_LABEL, PAY_LABEL, _export_rows, _export_line, _export_row, export_requests, print_requests, STATS_BASIS, _basis_date,
     _basis_rows, _last_crew_names, _check_period, stats, stats_csv, PILOT_BASE, PILOT_MISS_KINDS, pilot_settings, save_pilot, pilot_report,
-    pilot_csv,
+    pilot_csv, daily_report, monthly_report, daily_report_csv, monthly_report_csv,
+)
+from dgpc.numbered_labels import (
+    label_page, label_history, receive_range, distribute_range, use_number, void_number,
 )
 from dgpc.backup import (
     backup_dir, make_backup, list_backups, BACKUP_NAME_RE, backup_path, verify_backup,

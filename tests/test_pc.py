@@ -1983,6 +1983,18 @@ def v13():
     base = {"phone": "010-0000-9300", "address": "가상시 동구 예시로 13", "planned_date": today, "lat": 35.15, "lon": 126.92}
 
     # 17. 이전 단계
+    def replay_legacy_migrations(connection):
+        # 아래 과거 회귀는 현재 DB의 버전만 강제로 내린다. 실제로 지우지 않은
+        # 7단계 표를 재생성하지 않고, 검증 대상인 3~6단계까지만 재실행한다.
+        saved = store.MIGRATIONS, store.LATEST
+        store.MIGRATIONS, store.LATEST = saved[0][:6], 6
+        try:
+            return store.run_migrations(connection)
+        finally:
+            store.MIGRATIONS, store.LATEST = saved
+            # 실제 표는 최신 구조 그대로이므로 과거 단계 검증 뒤 메타데이터도 복구한다.
+            connection.execute(f"PRAGMA user_version = {saved[1]}")
+
     ok(con.execute("PRAGMA user_version").fetchone()[0] == store.LATEST and con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2,
        f"새 DB: 구조 버전 {store.LATEST}(PRAGMA user_version), auto_vacuum=INCREMENTAL")
     import sqlcipher3
@@ -1998,8 +2010,8 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
-       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 6, "다시 열면 멈춘 단계부터 다시 실행(2~6단계)")
+    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6, 7] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 7, "다시 열면 멈춘 단계부터 다시 실행(2~7단계)")
     # 5단계(주소 위치 자료 식별 번호)·6단계(카카오 이동시간 보관 중단): 4단계까지의 DB에 옛 자료를 넣고 올린다
     m4 = sqlcipher3.connect(str(mp.parent / "m4.db"), isolation_level=None)
     m4.execute("PRAGMA key = 'test-db-key-not-for-production'")
@@ -2013,7 +2025,7 @@ def v13():
     m4.execute("CREATE TABLE travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY (origin, dest))")
     m4.execute("INSERT INTO travel_cache VALUES ('35.15000,126.92000','35.15100,126.92100',120,'2026-11-01T00:00:00+00:00')")
     old_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
-    ok(store.run_migrations(m4) == [5, 6], "4단계 DB → 5·6단계 실행")
+    ok(store.run_migrations(m4) == [5, 6, 7], "4단계 DB → 5·6·7단계 실행")
     a4 = m4.execute("SELECT sigungu, road, main, lat, dong_h, bname, jibun_main, underground, road_cd, bjd_cd, entr_sn FROM addr_point").fetchall()
     new_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
     ok(a4 == [("동구", "옛로", 3, 35.15, "가상1동", "옛빌라", 12, 0, None, None, None)] and "underground" in new_pk and "underground" not in old_pk
@@ -2021,7 +2033,7 @@ def v13():
        "이전 단계 5: 주소 위치 자료에 지하여부(기본 키)·도로명코드·법정동코드·출입구일련번호 — 기존 좌표·동·건물명·지번 그대로(지상, 식별 번호는 다시 가져오면 채움)")
     ok(not m4.execute("SELECT 1 FROM sqlite_master WHERE name='travel_cache'").fetchone(), "이전 단계 6: 카카오 이동시간 보관 표(travel_cache)와 남은 좌표 쌍 삭제")
     m4.execute("PRAGMA user_version = 4")
-    ok(store.run_migrations(m4) == [5, 6] and m4.execute("SELECT COUNT(*) FROM addr_point").fetchone()[0] == 1, "5·6단계는 여러 번 실행해도 같음")
+    ok(replay_legacy_migrations(m4) == [5, 6] and m4.execute("SELECT COUNT(*) FROM addr_point").fetchone()[0] == 1, "5·6단계는 여러 번 실행해도 같음")
     m4.close()
     mc.execute("PRAGMA user_version = 99")
     try:
@@ -2117,7 +2129,7 @@ def v13():
     # 3단계 이전: 기존 감면 접수는 그때의 설정값으로 채움(지금까지와 같은 금액)
     con.execute("UPDATE request SET reduction_round_unit=NULL WHERE id=?", (ru1,))
     con.execute("PRAGMA user_version = 2")
-    ok(store.run_migrations(con) == [3, 4, 5, 6] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
+    ok(replay_legacy_migrations(con) == [3, 4, 5, 6] and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru1,))["u"] == 10
        and S.one(con, "SELECT reduction_round_unit AS u FROM request WHERE id=?", (ru2,))["u"] is None and lev(ru1) == (2480, 2480),
        "이전 단계 3: 기존 감면 접수에 지금 설정값(10) 채움, 감면 없는 접수는 비움")
     S.save_settings(con, {"reduction_round_unit": 1})
@@ -2290,7 +2302,7 @@ def v13():
     legacy_now = S.release_info(con, dev)["seq"]
     con.execute("DELETE FROM result_seq WHERE gen=''")
     con.execute("PRAGMA user_version = 3")
-    ok(store.run_migrations(con) == [4, 5, 6] and S.release_info(con, dev)["seq"] == legacy_now == legacy0, "이전 단계 4: 이전 기록 순번을 세대 ''로 채움(rel.seq 같음)")
+    ok(replay_legacy_migrations(con) == [4, 5, 6] and S.release_info(con, dev)["seq"] == legacy_now == legacy0, "이전 단계 4: 이전 기록 순번을 세대 ''로 채움(rel.seq 같음)")
 
     # 7. 완료일 = 휴대폰 최종 결과 시각
     fut = ph.ev(stop_b, "ATTEMPT", {"outcome": "DONE"})
@@ -2662,8 +2674,17 @@ def v13_refactor():
     from dgpc import server as SV, settings as SR
     # 경로 표(역할 × 경로)가 정리 전 server.allowed() 결과와 같은지 (tests/data/route_matrix_v013.json: 정리 전에 떠 둔 표)
     snap = json.loads((ROOT / "tests" / "data" / "route_matrix_v013.json").read_text(encoding="utf-8"))["routes"]
+    # 정리 전 권한 스냅샷은 유지하고, 새 기능의 허용 역할을 명시적으로 추가한다.
+    for method, paths, roles in (
+        ("GET", ("reports/daily", "reports/monthly", "reports/daily.csv", "reports/monthly.csv",
+                 "numbered-labels", "numbered-labels/{id}/history"), ("ADMIN", "INTAKE", "LEAD")),
+        ("POST", ("numbered-labels/receive", "numbered-labels/distribute", "numbered-labels/{id}/use",
+                  "numbered-labels/{id}/void"), ("ADMIN", "INTAKE")),
+        ("POST", ("numbered-labels/{id}/print", "reports/print"), ("ADMIN", "INTAKE", "LEAD")),
+    ):
+        snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표의 경로 {len(cur)}개 = 정리 전 경로(빠지거나 늘어난 것 없음)")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·숫자 배출표 12개")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
     ok(not diff, f"역할 × 경로 권한이 정리 전과 같음 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
@@ -3060,6 +3081,148 @@ def review_p2():
         srv.server_close()
 
 
+def review_round3():
+    """추가 검토: 파기 뒤 늦은 자료의 개인정보 재유입·재방문 배정·주소 정정 뒤 좌표 보존."""
+    print("\n— 전체 검토 3차 —")
+    from dgpc import privacy as PV
+    os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-rv3-")
+    con = store.connect(create=True)
+    S.ensure_pc_keys(con)
+    S.ACTOR.set("admin")
+    day = S.today_kst()
+    tomorrow = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
+    chair = next(r["id"] for r in S.FEE_TABLE["rows"] if r["name"] == "의자" and r["spec"] == "고정식 의자")
+    base = {"phone": "010-0000-9600", "address": "가상시 동구 예시로 16", "planned_date": day,
+            "lat": 35.15, "lon": 126.92, "items": [{"fee_rate_id": chair, "qty": 1}]}
+    ph = Phone(S.registration_text(con))
+    dev = S.register_device(con, ph.code(), "추가검토폰", confirm=True)["device_id"]
+    crew = S.save_crew(con, {"name": "추가검토팀", "device_id": dev})
+
+    def make_stop(name):
+        rid = S.create_request(con, {**base, "name": name})["id"]
+        bid = S.confirm_plan(con, day, {crew: [{"request_id": rid}]})[0]["batch_id"]
+        _, payload, _ = ph.receive(S.make_bundle(con, bid)["frames"])
+        return rid, payload["stops"][0]
+
+    def result(events):
+        return ph.seal({"schema": "dg.result/1", "work_date": day, "events": events}, P.TYPE_RESULT)
+
+    rid, stop = make_stop("파기뒤재유입가상")
+    pic = b"fake-jpeg-rv3"
+    digest = hashlib.sha256(pic).hexdigest()
+    pid = str(uuid.uuid4())
+    meta = ph.ev(stop, "PHOTO_META", {"photo_id": pid, "phase": "AFTER", "sha256": digest, "bytes": len(pic), "lat": 35.151, "lon": 126.921})
+    S.import_result(con, result([meta]))
+    S.cancel_request(con, rid, code="RESIDENT", req_ver=RV(con, rid))
+    old_loc = ph.ev(stop, "LOCATION_FIX", {"lat": 35.152, "lon": 126.922})
+    S.import_result(con, result([old_loc]))
+    with S.tx(con):
+        con.execute("UPDATE request SET cancelled_at='2020-01-01T00:00:00Z' WHERE id=?", (rid,))
+    ok(PV.purge_pii(con)["count"] == 1, "시험 접수 개인정보 파기(미회수 사진·충돌 위치 기록 포함)")
+    pfile = ph.seal({"schema": "dg.photos/1", "photos": [{"photo_id": pid, "request_id": rid, "phase": "AFTER", "sha256": digest,
+                                                                          "data": base64.b64encode(pic).decode()}]}, S.TYPE_PHOTOS)
+    photo_report = S.import_photos(con, pfile)
+    photo = S.one(con, "SELECT data, lat, lon, purged_at FROM photo WHERE photo_id=?", (pid,))
+    ok(photo["data"] is None and photo["lat"] is None and photo["lon"] is None and photo["purged_at"] and photo_report["release_code"],
+       "파기 뒤 늦게 온 미회수 사진: 바이트·좌표를 다시 저장하지 않고 수신 확인")
+    late = [ph.ev(stop, "CORRECTION", {"fields": {"phone": "010-0000-9699", "address": "가상시 동구 비밀로 99"}, "reason": "파기뒤비밀"}),
+            ph.ev(stop, "FIELD_MEMO", {"text": "파기뒤비밀 010-0000-9699"}),
+            ph.ev(stop, "LOCATION_FIX", {"lat": 35.199, "lon": 126.999}),
+            ph.ev(stop, "PHOTO_META", {"photo_id": str(uuid.uuid4()), "phase": "AFTER", "sha256": digest, "bytes": len(pic), "lat": 35.199, "lon": 126.999})]
+    late_file = result(late)
+    late_report = S.import_result(con, late_file)
+    stored = [S.one(con, "SELECT body_json, apply_status FROM result_event WHERE event_id=?", (e["event_id"],)) for e in late]
+    ok(all(e["apply_status"] == "REJECTED" and json.loads(e["body_json"]) == {"pii_purged": True} for e in stored)
+       and S.one(con, "SELECT lat FROM request WHERE id=?", (rid,))["lat"] is None
+       and S.one(con, "SELECT COUNT(*) AS n FROM photo WHERE request_id=?", (rid,))["n"] == 1,
+       "파기 뒤 정정·현장 메모·위치·새 사진 기록은 개인정보 없이 거부(원본·사진 변경 없음)")
+    repeated = S.import_result(con, late_file)
+    duplicate = S.import_result(con, result(late))
+    ok(late_report["release_code"] and repeated["duplicate_file"] and repeated["release_code"] == late_report["release_code"]
+       and duplicate["skipped_duplicate"] == len(late) and S.release_info(con, dev)["seq"] == ph.seq,
+       "파기 뒤 거부한 기록도 순번·수신 확인·같은 파일/이벤트 중복 방지 유지")
+    raises(lambda: S.resolve_conflict(con, old_loc["event_id"], "APPLY", "현장 확인"), "파기",
+           "파기 전부터 충돌함에 남은 위치 기록도 강제 반영 불가")
+
+    # 이전 방문의 최종 결과가 있어도, 연락처 정정은 다음 방문의 새 수거 결과가 아니다.
+    revisit_id, revisit_stop = make_stop("재방문정정가상")
+    correction = ph.ev(revisit_stop, "CORRECTION", {"fields": {"phone": "010-0000-9601"}, "reason": "연락처 정정"})
+    S.import_result(con, result([ph.ev(revisit_stop, "ATTEMPT", {"outcome": "NOT_COLLECTED"}), correction]))
+    next_batch = S.confirm_plan(con, tomorrow, {crew: [{"request_id": revisit_id}]})[0]["batch_id"]
+    S.resolve_conflict(con, correction["event_id"], "APPLY", "새 연락처 확인")
+    revisit = S.get_request(con, revisit_id)
+    active = S.one(con, "SELECT batch_id FROM active_assignment WHERE request_id=?", (revisit_id,))
+    ok(revisit["phone"] == "01000009601" and revisit["status"] in ("ASSIGNED", "IN_PROGRESS") and active and active["batch_id"] == next_batch,
+       "재방문 배정 뒤 연락처 정정을 반영해도 지난 미수거 결과로 되돌리지 않고 새 배정 유지")
+
+    # 주소를 바꿔 비운 좌표는 과거 위치 기록으로 복원하지 않고, 실제 새 위치 기록이 왔을 때만 바뀐다.
+    address_id, address_stop = make_stop("주소정정가상")
+    S.import_result(con, result([ph.ev(address_stop, "LOCATION_FIX", {"lat": 35.153, "lon": 126.923, "source": "ADDR"})]))
+    address_fix = ph.ev(address_stop, "CORRECTION", {"fields": {"address": "가상시 동구 바뀐로 17"}, "reason": "배출 장소 변경"})
+    S.import_result(con, result([address_fix]))
+    S.resolve_conflict(con, address_fix["event_id"], "APPLY", "새 주소 확인")
+    changed = S.one(con, "SELECT address, lat, lon, geo_source FROM request WHERE id=?", (address_id,))
+    ok(changed["address"] == "가상시 동구 바뀐로 17" and changed["lat"] is None and changed["lon"] is None and changed["geo_source"] is None,
+       "과거 위치 보정이 있는 접수도 주소 정정 후 이전 주소의 좌표를 다시 쓰지 않음")
+    S.import_result(con, result([ph.ev(address_stop, "CONTACT", {"result": "REACHED"})]))
+    ok(S.one(con, "SELECT lat FROM request WHERE id=?", (address_id,))["lat"] is None,
+       "주소 정정 뒤 연락 기록을 받아도 지난 위치 보정 좌표가 되살아나지 않음")
+    S.import_result(con, result([ph.ev(address_stop, "LOCATION_FIX", {"lat": 35.154, "lon": 126.924, "source": "ADDR"})]))
+    changed = S.one(con, "SELECT lat, lon, geo_source FROM request WHERE id=?", (address_id,))
+    ok(changed["lat"] == 35.154 and changed["lon"] == 126.924 and changed["geo_source"] == "ADDR",
+       "실제 새 위치 보정 기록을 받으면 새 주소의 좌표로 갱신")
+
+    # 단독 방식의 파기 표시도 모든 가져오기 경로에 적용한다. 정상 접수·사진과 익명 업무 수량은 유지한다.
+    import zlib
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    solo_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    solo_pids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    solo_lines = [str(uuid.uuid4()), str(uuid.uuid4())]
+    secret = "단독파기비밀"
+    solo_requests, solo_events = [], []
+    for i, sid in enumerate(solo_ids):
+        solo_requests.append({"request_id": sid, "receipt_no": f"DG-20200101-009{i}", "name": secret if i == 0 else "정상단독가상",
+                              "phone": "01000009610", "address": "가상시 동구 단독로 19", "planned_date": day, "status": "RECEIVED",
+                              "pii_purged": "2020-01-01T00:00:00Z" if i == 0 else None,
+                              "items": [{"line_id": solo_lines[i], "fee_rate_id": chair, "qty": 2}],
+                              "versions": [{"req_ver": 1, "reason": secret, "snapshot": {"name": secret, "cancel_reason": secret}}] if i == 0 else []})
+        for kind, body in [("ARRIVE", {"lat": 35.155, "lon": 126.925, "acc": 5}),
+                           ("LOCATION_FIX", {"lat": 35.155, "lon": 126.925, "source": "ADDR"}),
+                           ("FIELD_MEMO", {"text": secret if i == 0 else "정상 현장 메모"}),
+                           ("PHOTO_META", {"photo_id": solo_pids[i], "sha256": digest, "bytes": len(pic), "phase": "AFTER", "lat": 35.155, "lon": 126.925}),
+                           ("ITEM_RESULT", {"line_id": solo_lines[i], "qty_confirmed": 2, "qty_collected": 2}),
+                           ("ATTEMPT", {"outcome": "DONE"})]:
+            solo_events.append({"event_id": str(uuid.uuid4()), "seq": len(solo_events) + 1, "request_id": sid, "kind": kind, "body": body, "ts": S.now()})
+    solo_obj = {"format": "dg.backup/1", "state": {"mode": "SOLO", "requests": solo_requests, "events": solo_events},
+                "photos": {p: base64.b64encode(pic).decode() for p in solo_pids}}
+    salt, iv = os.urandom(16), os.urandom(12)
+    key = hashlib.pbkdf2_hmac("sha256", b"solo-review-pass-03", salt, 600000, 32)
+    comp = zlib.compressobj(wbits=-15)
+    plain = comp.compress(json.dumps(solo_obj).encode()) + comp.flush()
+    solo_raw = b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1")
+    solo_report = S.import_solo(con, solo_raw, "solo-review-pass-03")
+    purged_solo, normal_solo = [S.get_request(con, sid) for sid in solo_ids]
+    sensitive = [e for e in purged_solo["events"] if e["kind"] in ("LOCATION_FIX", "FIELD_MEMO", "PHOTO_META")]
+    ok(purged_solo["pii_purged_at"] and purged_solo["lat"] is None and purged_solo["lon"] is None and not purged_solo["photos"]
+       and len(sensitive) == 3 and all(e["apply_status"] == "REJECTED" and json.loads(e["body_json"]) == {"pii_purged": True} for e in sensitive),
+       "단독 백업의 파기된 접수: 위치·메모·사진 원문을 되살리지 않음")
+    snapshot = S.one(con, "SELECT snapshot_json, reason FROM request_version WHERE request_id=?", (solo_ids[0],))
+    ok(secret not in json.dumps(snapshot, ensure_ascii=False) and purged_solo["status"] == "DONE"
+       and purged_solo["state"]["lines"][0]["qty_collected"] == 2 and purged_solo["payment"]["levied"] == 4000,
+       "단독 파기 접수: 수정 이력의 개인정보도 비우고 품목·수거 수량·금액·완료 상태는 보존")
+    ok(solo_report["photos_recovered"] == 1 and normal_solo["name"] == "정상단독가상" and normal_solo["lat"] == 35.155
+       and normal_solo["lon"] == 126.925 and normal_solo["state"]["memos"] == ["정상 현장 메모"]
+       and S.photo_bytes(con, solo_pids[1]) == pic and normal_solo["status"] == "DONE",
+       "같은 단독 백업의 정상 접수는 위치·메모·사진·완료 결과를 그대로 가져옴")
+    arrival = next(e for e in purged_solo["events"] if e["kind"] == "ARRIVE")
+    arrival_body = json.loads(arrival["body_json"])
+    ok(arrival["apply_status"] == "APPLIED" and arrival_body.get("lat") is None and arrival_body.get("lon") is None and arrival_body.get("acc") is None
+       and purged_solo["state"]["field"]["arrive"] and not purged_solo["state"]["field"]["arrive"]["has_gps"]
+       and normal_solo["state"]["field"]["arrive"]["has_gps"],
+       "단독 파기 접수의 도착 시각은 남기고 도착 기록에 섞인 좌표는 제거(정상 접수 GPS는 유지)")
+    con.close()
+
+
 if __name__ == "__main__":
     main()
     v10()
@@ -3073,4 +3236,5 @@ if __name__ == "__main__":
     v13_refactor()
     review_fixes()
     review_p2()
+    review_round3()
     print(f"\n통과 {passed}개 (구조 정리 포함)")

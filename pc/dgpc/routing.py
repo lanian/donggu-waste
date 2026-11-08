@@ -30,10 +30,11 @@ from pathlib import Path
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from dgpc import external as X
+from dgpc.paths import resource_root
 
 # 품목별 적재 기준(1단위당 부피 m³·무게 kg·작업 분·취급 표시): data/item_handling.json 을 PC·휴대폰이 함께 쓴다.
 # 추정치다. 담당자가 실측한 부피 보정값(fee_rate_id 별)이 있으면 부피는 그것을 쓴다.
-HANDLING = json.loads((Path(__file__).resolve().parent.parent.parent / "data" / "item_handling.json").read_text(encoding="utf8"))
+HANDLING = json.loads((resource_root() / "data" / "item_handling.json").read_text(encoding="utf8"))
 TAG_LABEL = {k: v["label"] for k, v in HANDLING["tags"].items()}
 DEFAULT_VOLUME = HANDLING["default"][0]
 TAG_ORDER = ("EQUIP", "TWO", "BASE", "UPRIGHT", "DRAIN", "FRAGILE")

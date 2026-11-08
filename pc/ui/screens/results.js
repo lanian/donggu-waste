@@ -8,7 +8,7 @@ import { refreshBadges } from './home.js';
 const CODE_NAME = { R: '수신 코드', D: '결과 반영 코드', P: '사진 회수 코드' };
 const codeEl = (kind, code) => h('span', { class: 'code-wrap', title: CODE_NAME[kind] }, h('span', { class: 'code-kind' }, kind + '-'), h('span', { class: 'big' }, code ? `${code.slice(0, 4)} ${code.slice(4)}` : ''));
 const IMP_LABEL = { applied: '반영', skipped_duplicate: '중복 건너뜀', conflict: '충돌함으로', review: '현장 요청 → 충돌함', field_intakes: '현장 접수 만듦', photos_expected: '사진 기록', recovered: '사진 회수',
-  already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진', seq_reused: '순번 겹침(반영·확인만)', stored_other: '기타 기록 보관', requests: '접수', events: '기록', unloads_applied: '하차' };
+  already: '이미 회수', hash_mismatch: '해시 불일치', unexpected: '결과보다 먼저 온 사진', purged: '파기 자료 제외', seq_reused: '순번 겹침(반영·확인만)', stored_other: '기타 기록 보관', requests: '접수', events: '기록', unloads_applied: '하차' };
 const impSummary = (r) => Object.entries(r || {}).filter(([k, v]) => IMP_LABEL[k] && typeof v === 'number' && v).map(([k, v]) => `${IMP_LABEL[k]} ${v}`).join(' · ') || '변경 없음';
 const IMP_KIND = { RESULT: '결과', PHOTO: '사진', SOLO: '단독 옮김' };
 async function screenResults() {

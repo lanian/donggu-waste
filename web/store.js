@@ -7,6 +7,11 @@ const DB_NAME = 'dg-proto';
 const PBKDF2_ITER = 600000;
 let dbp = null;
 let dataKey = null; // 잠금 해제 동안만 존재
+// 디스크 저장 실패분은 암호문만 잠시 보관한다. 잠금 때 키를 버려도 PIN 해제 뒤 다시 저장할 수 있다.
+const pendingSecure = new Map(), secureWrites = new Map();
+let storageEpoch = 0, secureWriteSeq = 0;
+function resetRecovery() { storageEpoch++; pendingSecure.clear(); secureWrites.clear(); }
+export const hasPendingSecure = (k) => pendingSecure.has(k);
 
 function idb() {
   if (!dbp) dbp = new Promise((res, rej) => {
@@ -61,6 +66,7 @@ export async function setupPin(pin) {
   const k = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
   const wrapped = new Uint8Array(await subtle.wrapKey('raw', k, await pinKey(pin, salt), { name: 'AES-GCM', iv }));
   await putRaw('lock', { salt, iv, wrapped, iter: PBKDF2_ITER, fails: 0, until: 0 });
+  resetRecovery();  // 새 데이터 키로 바뀌면 이전 키의 미저장 암호문을 복원하지 않는다.
   return unlock(pin);
 }
 
@@ -127,8 +133,54 @@ async function decryptBytes(rec, aad) {
   if (!dataKey) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
   return new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: enc.encode(aad) }, dataKey, rec.ct));
 }
-export async function putSecure(k, obj) { await putRaw('s:' + k, await encryptBytes(enc.encode(JSON.stringify(obj)), k)); }
-export async function getSecure(k) { const r = await getRaw('s:' + k); return r ? JSON.parse(dec.decode(await decryptBytes(r, k))) : null; }
+function sameRecord(a, b) {
+  if (!a || !b) return a == null && b == null;
+  return ['iv', 'ct'].every((k) => {
+    const x = new Uint8Array(a[k]), y = new Uint8Array(b[k]);
+    return x.length === y.length && x.every((v, i) => v === y[i]);
+  });
+}
+async function writeSecureRecord(k, record, recovery, observed, epoch) {
+  const db = await idb();
+  if (epoch !== storageEpoch) throw Object.assign(new Error('저장소가 바뀌었습니다'), { code: 'STORE_CHANGED' });
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('kv', 'readwrite'), store = t.objectStore('kv');
+    let failure = null;
+    t.oncomplete = () => resolve();
+    t.onerror = (ev) => { failure ||= (ev && ev.target && ev.target.error) || t.error; };
+    t.onabort = () => reject(failure || t.error || new Error('저장 실패'));
+    const read = store.get('s:' + k);
+    read.onsuccess = () => {
+      observed.base = read.result; observed.known = true;
+      // 복구 기준 대조와 쓰기를 한 트랜잭션에서 한다. 그 사이 다른 창의 쓰기가 끼어들 수 없다.
+      if (recovery && (!recovery.known || !sameRecord(read.result, recovery.base))) {
+        failure = Object.assign(new Error('다른 창에서 기록이 바뀌었습니다. 이 창의 기록을 먼저 보내거나 백업하세요.'), { code: 'STORE_CONFLICT' });
+        t.abort(); return;
+      }
+      try { store.put(record, 's:' + k); } catch (e) { failure = e; t.abort(); }
+    };
+  });
+}
+export async function putSecure(k, obj) {
+  const epoch = storageEpoch, seq = ++secureWriteSeq;
+  const recovery = pendingSecure.get(k), observed = { known: false, base: undefined };
+  secureWrites.set(k, seq);
+  const record = await encryptBytes(enc.encode(JSON.stringify(obj)), k);
+  // 암호화하는 동안 자료를 지우거나 PIN을 새로 만들었다면 옛 자료를 다시 쓰지 않는다.
+  if (epoch !== storageEpoch) throw Object.assign(new Error('저장소가 바뀌었습니다'), { code: 'STORE_CHANGED' });
+  try {
+    await writeSecureRecord(k, record, recovery, observed, epoch);
+    if (epoch === storageEpoch && secureWrites.get(k) === seq) pendingSecure.delete(k);
+  } catch (e) {
+    if (epoch === storageEpoch && secureWrites.get(k) === seq)
+      pendingSecure.set(k, { record, base: recovery ? recovery.base : observed.base, known: recovery ? recovery.known : observed.known });
+    throw e;  // 화면의 저장 실패 안내는 실제 디스크 저장 성공 때까지 유지한다.
+  }
+}
+export async function getSecure(k) {
+  const r = pendingSecure.get(k)?.record || await getRaw('s:' + k);
+  return r ? JSON.parse(dec.decode(await decryptBytes(r, k))) : null;
+}
 export async function putSecureBytes(k, bytes) { await putRaw('b:' + k, await encryptBytes(bytes, k)); }
 export async function getSecureBytes(k) { const r = await getRaw('b:' + k); return r ? decryptBytes(r, k) : null; }
 export const delSecureBytes = (k) => delRaw('b:' + k);
@@ -136,7 +188,7 @@ export const delSecureBytes = (k) => delRaw('b:' + k);
 export async function wipeAll() {
   // 저장소 파일을 지우지(deleteDatabase) 않고 안의 기록을 모두 비운다. 파일 삭제는 다른 창이 연결을 놓을 때까지
   // 끝나지 않아 다시 열 때 '불러오는 중'에 멈출 수 있었다. 비우기는 다른 창이 열려 있어도 바로 끝난다.
-  dataKey = null;
+  resetRecovery(); dataKey = null;
   await tx('readwrite', (st) => st.clear());
   try { const bc = new BroadcastChannel('dg-store'); bc.postMessage('wiped'); bc.close(); } catch {}
 }

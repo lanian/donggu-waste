@@ -60,7 +60,16 @@ def create_user(con, username: str, display_name: str, role: str, password: str,
     return uid
 
 
-def verify_login(con, username: str, password: str) -> dict | None:
+def _login_user(u: dict) -> dict:
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
+            "crew_id": u["crew_id"]}
+
+
+def _login_credential(u: dict) -> str:
+    return _hl.sha256((u["pw_salt"] + u["pw_hash"]).encode("ascii")).hexdigest()
+
+
+def verify_login(con, username: str, password: str, *, evidence: dict | None = None) -> dict | None:
     """비밀번호 확인만(쓰기 없음 — 서버는 DB 잠금 밖·조회 전용 연결에서 scrypt를 돌린다)."""
     u = one(con, "SELECT * FROM app_user WHERE username=? AND active=1", ((username or "").strip().lower(),))
     if not u:
@@ -68,8 +77,17 @@ def verify_login(con, username: str, password: str) -> dict | None:
         return None
     if not _hmac.compare_digest(_pw_hash(password or "", bytes.fromhex(u["pw_salt"])), u["pw_hash"]):
         return None
-    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
-            "crew_id": u["crew_id"]}
+    if evidence is not None:  # 서버 내부에서만 전달한다. 사용자 정보·세션·API에는 넣지 않는다.
+        evidence["credential"] = _login_credential(u)
+    return _login_user(u)
+
+
+def current_login(con, uid: str, credential: str) -> dict | None:
+    """비싼 암호 검증 뒤 잠금 안에서 현재 계정·자격을 확인하고 최신 접근 범위만 돌려준다."""
+    u = one(con, "SELECT * FROM app_user WHERE id=? AND active=1", (uid,))
+    if not u or not _hmac.compare_digest(_login_credential(u), credential):
+        return None
+    return _login_user(u)
 
 
 def check_login(con, username: str, password: str) -> dict | None:
@@ -78,8 +96,7 @@ def check_login(con, username: str, password: str) -> dict | None:
         return None
     con.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (now(), u["id"]))
     u = one(con, "SELECT * FROM app_user WHERE id=?", (u["id"],))
-    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "role": u["role"], "must_change": bool(u["must_change"]),
-            "crew_id": u["crew_id"]}
+    return _login_user(u)
 
 
 THEMES = ("auto", "light", "dark")

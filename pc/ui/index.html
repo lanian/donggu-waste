@@ -8,7 +8,25 @@
 <link rel="stylesheet" href="/pc.css">
 </head>
 <body>
-<div id="app"><p class="pad">불러오는 중…</p></div>
-<script type="module" src="/pc.js"></script>
+<div id="app">
+  <main class="startup-page">
+    <section id="startup-card" class="startup-card" aria-labelledby="startup-title" aria-busy="true">
+      <div class="startup-brand"><span class="logo" aria-hidden="true">동</span><div><strong>동구 PC 업무</strong><span>접수 · 배정 · 수거 관리</span></div></div>
+      <h1 id="startup-title">업무 화면을 준비하고 있습니다</h1>
+      <div class="startup-status" role="status" aria-live="polite">
+        <span class="startup-spinner" aria-hidden="true"></span>
+        <div><p id="startup-detail">필요한 화면 파일을 읽고 있습니다.</p><span id="startup-elapsed">경과 0초</span></div>
+      </div>
+      <ol class="startup-steps" aria-label="업무 화면 시작 단계">
+        <li class="current" aria-current="step"><span>1</span>화면 파일</li>
+        <li><span>2</span>연결 확인</li>
+        <li><span>3</span>화면 준비</li>
+      </ol>
+      <p id="startup-help" class="startup-help">서버 실행 상태는 PC 실행 앱에서 확인할 수 있습니다.</p>
+      <div class="startup-actions"><button id="startup-retry" type="button" class="primary" hidden>화면 다시 불러오기</button><a id="startup-fallback" href="/">화면 다시 열기</a></div>
+    </section>
+  </main>
+</div>
+<script src="/pc.js" defer></script>
 </body>
 </html>

@@ -49,6 +49,7 @@ SRV: list = []  # 서버 프로세스 (중간에 죽으면 바로 실패)
 PW = "test-password-123"
 PROXY = os.environ.get("HTTPS_PROXY", "")
 REQUESTS: list[tuple[str, str]] = []
+INFLIGHT: set = set()
 passed = 0
 
 
@@ -230,16 +231,20 @@ def run():
                                args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", *([f"--proxy-server={PROXY}", "--proxy-bypass-list=127.0.0.1"] if PROXY else [])])
         ctx = b.new_context(viewport={"width": 1400, "height": 950}, ignore_https_errors=True, permissions=["clipboard-read", "clipboard-write"])
         def rec(r):
+            INFLIGHT.add(r)
             try:
                 body = (r.post_data_buffer or b"").decode("utf8", "ignore")
             except Exception:
                 body = ""
             REQUESTS.append((r.url, body))
         ctx.on("request", rec)
+        ctx.on("requestfinished", lambda r: INFLIGHT.discard(r))
+        ctx.on("requestfailed", lambda r: (INFLIGHT.discard(r), print("PC 화면 요청 실패:", urllib.parse.urlsplit(r.url).path, r.failure, flush=True)))
         page = ctx.new_page()
         LAST_PAGE.append(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("console", lambda m: print("PC 화면 콘솔 오류:", m.text, flush=True) if m.type == "error" else None)
         page.on("dialog", lambda d: d.accept(DIALOG["text"]) if d.type == "prompt" else d.accept())
 
         # 비밀번호 설정
@@ -278,6 +283,8 @@ def run():
         ok(S.list_devices(store.connect())[0]["confirmed_at"], "지문 확인을 눌러야 사용 시작(그 전에는 목록을 보낼 수 없음)")
         chooser.get_by_label("새 팀 이름").fill("가상 1팀")
         chooser.get_by_role("button", name="연결").click()
+        # 팀 저장이 끝나 대화상자가 닫힌 뒤 이동한다. 기기의 '사용' 표시는 연결 전에도 이미 참이다.
+        expect(chooser).not_to_be_visible()
         expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("사용")
         page.goto(URL + "#/settings/crews")
         expect(page.locator("td input").first).to_have_value("가상 1팀")
@@ -294,8 +301,10 @@ def run():
             page.get_by_label("이름").fill(name)
             page.get_by_label("연락처").fill(phone_no)
             if name == "가상하나":
+                expect(page.get_by_text("주소 검색 미설정 · 직접 입력 가능", exact=True)).to_be_visible()
+                page.get_by_text("주소 검색 미설정 · 직접 입력 가능", exact=True).click()
                 ok(page.locator(".addr-setup").get_by_text("주소 검색 자료가 아직 없습니다").is_visible(),
-                   "주소 자료·행안부 승인키가 없으면 접수 화면에 '주소 검색 자료가 아직 없습니다'와 설정 위치 안내")
+                   "주소 미설정 요약에서 설정 안내를 펼치면 자료 없음·직접 입력·설정 위치를 확인")
             page.get_by_label("배출 주소").fill(addr)
             page.get_by_label("상세 배출 위치").fill("현관 앞")
             page.get_by_label("수거 예정일").fill(today)
@@ -308,8 +317,11 @@ def run():
             if click_map:
                 canvas = page.locator(".mapbox canvas")
                 expect(canvas).to_be_visible(timeout=30000)
+                # 비율로 지도 안쪽을 선택한다. 하단 저작권·우측 확대 버튼은 클릭하지 않는다.
+                size = canvas.evaluate("el => ({width: el.clientWidth, height: el.clientHeight})")
+                point = {"x": size["width"] * click_map["x"], "y": size["height"] * click_map["y"]}
                 for _ in range(20):  # 지도 클릭 처리기가 붙을 때까지 다시 누른다(바탕 지도가 늦게 와도)
-                    canvas.click(position=click_map)
+                    canvas.click(position=point)
                     if page.locator("input[readonly]").first.input_value():
                         break
                     page.wait_for_timeout(300)
@@ -325,7 +337,7 @@ def run():
             else:
                 page.get_by_role("button", name="접수 등록").click()
 
-        intake("가상하나", "010-0000-5001", "가상시 동구 시험로 1", "3인용 소파", 1, click_map={"x": 300, "y": 180}, appt=("09:00", "11:00"))
+        intake("가상하나", "010-0000-5001", "가상시 동구 시험로 1", "3인용 소파", 1, click_map={"x": .56, "y": .42}, appt=("09:00", "11:00"))
         expect(page.get_by_role("heading", name=re.compile("접수 DG-"))).to_be_visible()
         r1_url = page.url
         r1_head = page.get_by_role("heading", name=re.compile("접수 DG-")).inner_text()
@@ -340,7 +352,7 @@ def run():
            "접수 저장 뒤 [주민 안내 문구 복사]: 접수번호·배출일·금액·문의처(이름·연락처·주소 없음)가 클립보드로")
         done.get_by_role("button", name="+ 다음 접수").click()
         expect(page.get_by_role("heading", name="전화 접수 등록")).to_be_visible()
-        intake("가상둘", "01000005001", "가상시 동구 시험로 2", "장농", 2, click_map={"x": 420, "y": 260})
+        intake("가상둘", "01000005001", "가상시 동구 시험로 2", "장농", 2, click_map={"x": .72, "y": .60})
         expect(page.get_by_text(re.compile("비슷한 미완료 접수 1건"))).to_be_visible()
         ok(True, "같은 연락처 접수 → 중복 후보 경고 (자동 병합 없음)")
         page.get_by_role("button", name="접수 등록").click()
@@ -912,7 +924,7 @@ def run():
         page.goto(URL + "#/home")
         expect(page.locator(".kpi").first).to_be_visible()
         page.screenshot(path=SHOTS / "pc_10_home.png", full_page=True)
-        ok(page.locator(".kpi", has_text="수거 완료").inner_text().find("1건") >= 0 and page.locator(".crew").count() == 1, "오늘 현황: 완료 1건, 팀별 진행 표시")
+        ok(page.locator(".kpi", has_text="수거 완료").locator(".v").text_content() == "1건" and page.locator(".crew").count() == 1, "오늘 현황: 완료 1건, 팀별 진행 표시")
         ok(page.locator(".todo-a", has_text="이번 달 접속기록 점검").count() == 1, "오늘 현황(관리자): 이번 달 접속기록 점검 알림")
 
         # 화면 설정: 어두운 테마·글자 크기 (사용자별 서버 저장, 다시 열어도 유지)
@@ -1302,6 +1314,8 @@ def playwright_with_fail_shot():
         try:
             yield pw
         except BaseException:
+            if INFLIGHT:
+                print("끝나지 않은 PC 화면 요청:", [urllib.parse.urlsplit(r.url).path for r in INFLIGHT], flush=True)
             for pg in LAST_PAGE[-1:]:
                 try:
                     pg.screenshot(path=SHOTS / "fail.png", full_page=True)

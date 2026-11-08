@@ -85,6 +85,10 @@ def write_y4m(path: Path, images: list[Image.Image], hold: int = 4, w: int = 128
 def serve(directory: Path) -> int:
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
     class Quiet(http.server.SimpleHTTPRequestHandler):
+        # Windows의 .js MIME 등록값과 무관하게 ES 모듈로 제공한다.
+        extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                          ".js": "text/javascript", ".mjs": "text/javascript"}
+
         def log_message(self, *a):
             pass
     handler = partial(Quiet, directory=str(directory))
@@ -446,10 +450,19 @@ def main():
             ok(decoded and re.fullmatch(r"[0-9A-Z $%*+\-./:]+", decoded) and len(decoded) > 100, f"결과 QR 화면: 분할 QR 표시, 읽으면 Base45 조각 ({len(decoded or '')}자)")
             page.screenshot(path=SHOTS / "09_result_qr.png")
             page.get_by_role("button", name="← 결과 보내기").click()
+            # 공유 지원으로 보고되더라도 권한 거절이면 같은 암호화 파일을 내려받아 전송할 수 있어야 한다.
+            page.evaluate("""() => {
+                Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true });
+                Object.defineProperty(navigator, 'share', { configurable: true, value: async () => {
+                    throw new DOMException('시험용 공유 권한 거절', 'NotAllowedError');
+                } });
+            }""")
             with page.expect_download() as dl:
                 page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click()
             f = WORK / dl.value.suggested_filename
             dl.value.save_as(f)
+            expect(page.get_by_text("공유창을 열 수 없어 파일을 저장했습니다.", exact=False)).to_be_visible()
+            ok(True, "공유 권한이 거절되어도 같은 암호화 결과 파일을 내려받아 전송 가능")
             imp = py("import-result", str(f))
             release = re.search(RELEASE_RE, imp).group(1)
             ok('"applied"' in imp, "결과 파일 PC 가져오기 성공 " + imp.splitlines()[0])
@@ -1410,7 +1423,7 @@ def solo(pw, url, video):
         again_btn.click()
     page.wait_for_load_state()
     expect(page.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
-    other.reload()
+    # 자료 삭제 알림이 다른 창을 자동으로 다시 연다. 수동 reload를 겹쳐 Chromium의 전환 중인 페이지와 경쟁하지 않는다.
     expect(other.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
     ok(True, "다른 창에 앱이 열린 채로 모든 자료 지우기 → '불러오는 중'에 멈추지 않고 두 창 모두 첫 화면")
     # 이전 버전 창처럼 저장소를 놓지 않는 연결이 있고, 그 사이 저장소 삭제가 걸려 있는 경우:

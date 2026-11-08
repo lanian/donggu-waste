@@ -5,6 +5,7 @@ body { font: 12.5px/1.5 "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", 
 .tools { margin-bottom: 10px; } .tools button { font: inherit; padding: 6px 16px; }
 h1 { font-size: 20px; margin: 0 0 10px; border-bottom: 2px solid #000; padding-bottom: 6px; } h1 small { font-size: 13px; font-weight: 400; }
 h2 { font-size: 14px; margin: 14px 0 6px; }
+.report h2 { break-after: avoid; }
 table { width: 100%; border-collapse: collapse; margin: 0 0 8px; }
 th, td { border: 1px solid #555; padding: 5px 7px; text-align: left; vertical-align: top; }
 th { background: #eee; font-size: 12px; white-space: nowrap; }
@@ -27,5 +28,10 @@ body.labels { margin: 0; }
 .label .litem small { display: block; font-size: 13px; font-weight: 400; }
 .label .lqr { grid-column: 2; grid-row: 2 / 5; width: 30mm; height: 30mm; image-rendering: pixelated; align-self: start; }
 .label .lnote { grid-column: 1 / -1; font-size: 11px; border-top: 1px solid #000; padding-top: 1mm; }
+.numbered-label { grid-template-columns: minmax(0, 1fr) 30mm; }
+.numbered-label .lh { gap: 3mm; }
+.numbered-label .rno { min-width: 0; overflow-wrap: anywhere; }
+.numbered-label .lh span { flex-shrink: 0; }
+.numbered-label .lday { min-width: 0; font-size: 22px; overflow-wrap: anywhere; }
 @media screen { .sheet { border: 1px solid #ccc; margin-bottom: 16px; padding: 6mm; width: calc(186mm + 12mm); height: calc(268mm + 12mm); } }
 @media print { .tools { display: none; } body { margin: 0; } }

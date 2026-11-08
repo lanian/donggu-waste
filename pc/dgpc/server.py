@@ -36,14 +36,16 @@ from typing import Callable
 import contextlib
 import queue
 
-from . import area as A, backup as BK, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store
+from . import area as A, backup as BK, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
+from .paths import resource_root
+from . import numbered_labels as NL, operation_print as OP, reports as RP
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = resource_root()
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
 WEB_ALLOWED = {"fees.js", "fees-data.js", "labels-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
-UI_FILES = {"/": "index.html", "/index.html": "index.html", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/pc.css": "pc.css",
+UI_FILES = {"/": "index.html", "/index.html": "index.html", "/start.js": "start.js", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/pc.css": "pc.css",
             # 화면 모듈(pc/ui/screens/*.js): 폴더에 있는 파일만, 이름 그대로
             **{f"/screens/{f.name}": f"screens/{f.name}" for f in sorted((UI / "screens").glob("*.js"))}, "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
             # 화면 글꼴: Pretendard GOV(범정부 디자인 시스템 권장, SIL OFL) 일부 글자 묶음. 이 PC 안에서만 내려줌(외부 글꼴 서버 없음)
@@ -600,28 +602,32 @@ class Handler(BaseHTTPRequestHandler):
         return self.dispatch(r, params, qs)
 
     def login(self):
-        """로그인: scrypt 확인은 DB 잠금 밖(조회 전용 연결)에서, 마지막 로그인 시각·이력만 잠금 안에서."""
+        """scrypt는 잠금 밖에서, 계정 변경 확인·최신 권한 조회·세션 생성은 같은 잠금 안에서."""
         d = self.json_body()
         ip = login_ip(self.client_address[0])
+        evidence = {}
         with login_attempt(d.get("username") or "", ip) as record:
             with read_con() as rc:
-                good = S.verify_login(rc, d.get("username") or "", d.get("password") or "")
+                good = S.verify_login(rc, d.get("username") or "", d.get("password") or "", evidence=evidence)
                 un = (d.get("username") or "").strip()[:30]
                 known = bool(un and S.one(rc, "SELECT 1 AS x FROM app_user WHERE username=?", (un,)))
-            record(bool(good))
-        with LOCK:
-            if good:
-                S.ACTOR.set(good["username"])
-                with S.tx(CON):
-                    CON.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (S.now(), good["id"]))
-                    S.audit(CON, "user", good["id"], "LOGIN", None)
-            else:
-                # 아이디 칸에 비밀번호를 잘못 넣는 일이 있어, 있는 아이디일 때만 그대로 적고 아니면 가린다. 분마다 모아 한 줄로 남긴다.
-                note_login_fail(un if known else "(없는 아이디)")
-            flush_login_fails(CON)
+            with LOCK:
+                if good:
+                    good = U.current_login(CON, good["id"], evidence.get("credential", ""))
+                record(bool(good))
+                if good:
+                    S.ACTOR.set(good["username"])
+                    with S.tx(CON):
+                        CON.execute("UPDATE app_user SET last_login_at=? WHERE id=?", (S.now(), good["id"]))
+                        S.audit(CON, "user", good["id"], "LOGIN", None)
+                else:
+                    # 아이디 칸에 비밀번호를 잘못 넣는 일이 있어, 있는 아이디일 때만 그대로 적고 아니면 가린다. 분마다 모아 한 줄로 남긴다.
+                    note_login_fail(un if known else "(없는 아이디)")
+                flush_login_fails(CON)
+                if good:
+                    return self.login_ok(good)
         if not good:
             raise S.UserError("아이디 또는 비밀번호가 맞지 않습니다.")
-        return self.login_ok(good)
 
     def idem(self, endpoint: str, fn):
         """client_req_id가 있으면 같은 요청을 한 번만 처리(24시간 안 다시 오면 그때 응답). 잠금 안에서 부른다."""
@@ -732,6 +738,71 @@ class Handler(BaseHTTPRequestHandler):
     def ep_stats(self, qs):
         """통계."""
         return S.stats(self.c, qs.get("start", ""), qs.get("end", ""), qs.get("basis") or "planned")
+
+    @endpoint("GET", "reports/daily", VIEW)
+    def ep_daily_report(self, qs):
+        """일일 작업일지 집계(원자료 변경 없음)."""
+        return RP.daily_report(self.c, qs.get("date", ""), qs.get("basis") or "planned")
+
+    @endpoint("GET", "reports/monthly", VIEW)
+    def ep_monthly_report(self, qs):
+        """월보 집계(원자료 변경 없음)."""
+        return RP.monthly_report(self.c, qs.get("month", ""), qs.get("basis") or "planned")
+
+    @endpoint("GET", "reports/daily.csv", VIEW, access=("EXPORT", lambda h, out, qs: ("", 0, "일일 작업일지 집계 CSV")))
+    def ep_daily_report_csv(self, qs):
+        """개인정보 없는 일일 작업일지 전체 집계 CSV."""
+        return csv_file(RP.daily_report_csv(self.c, qs.get("date", ""), qs.get("basis") or "planned"), "donggu-daily-report.csv")
+
+    @endpoint("GET", "reports/monthly.csv", VIEW, access=("EXPORT", lambda h, out, qs: ("", 0, "월보 집계 CSV")))
+    def ep_monthly_report_csv(self, qs):
+        """개인정보 없는 월보 전체 집계 CSV."""
+        return csv_file(RP.monthly_report_csv(self.c, qs.get("month", ""), qs.get("basis") or "planned"), "donggu-monthly-report.csv")
+
+    @endpoint("GET", "numbered-labels", VIEW)
+    def ep_numbered_labels(self, qs):
+        """숫자 배출표 재고 원장."""
+        return NL.label_page(self.c, qs)
+
+    @endpoint("GET", "numbered-labels/{id}/history", VIEW)
+    def ep_numbered_label_history(self, qs, number):
+        """숫자 배출표 최근 변경 이력."""
+        return NL.label_history(self.c, number)
+
+    @endpoint("POST", "numbered-labels/receive", WORK)
+    def ep_numbered_label_receive(self, qs):
+        """숫자 배출표 구간 입고."""
+        d = self.json_body()
+        return self.idem("numbered-labels/receive", lambda: NL.receive_range(self.c, d.get("start"), d.get("end")))
+
+    @endpoint("POST", "numbered-labels/distribute", WORK)
+    def ep_numbered_label_distribute(self, qs):
+        """숫자 배출표 구간 배부."""
+        d = self.json_body()
+        return self.idem("numbered-labels/distribute", lambda: NL.distribute_range(self.c, d.get("start"), d.get("end"), d.get("destination")))
+
+    @endpoint("POST", "numbered-labels/{id}/use", WORK)
+    def ep_numbered_label_use(self, qs, number):
+        """유효 접수·품목에 숫자 배출표 사용."""
+        d = self.json_body()
+        return self.idem(f"numbered-labels/{number}/use", lambda: NL.use_number(self.c, number, d.get("request_id"), d.get("line_id")))
+
+    @endpoint("POST", "numbered-labels/{id}/void", WORK)
+    def ep_numbered_label_void(self, qs, number):
+        """사유를 남기고 숫자 배출표 무효."""
+        d = self.json_body()
+        return self.idem(f"numbered-labels/{number}/void", lambda: NL.void_number(self.c, number, d.get("reason")))
+
+    @endpoint("POST", "numbered-labels/{id}/print", VIEW)
+    def ep_numbered_label_print(self, qs, number):
+        """번호 확인용 표지 출력. 배출표 상태는 변경하지 않는다."""
+        from pc_tool import qr_png_data_uri
+        label = NL.label_history(self.c, number)["label"]
+        qr = qr_png_data_uri(label["number"], "M")[0]
+        body = OP.numbered_label_body(label, qr)
+        with S.tx(self.c):
+            S.audit(self.c, "numbered_label", label["number_key"], "PRINT_NUMBERED_LABEL", {"number": label["number"]})
+        return {"token": self.put_print(self._doc("배출표 번호 " + label["number"], body, "labels"))}
 
     @endpoint("GET", "pilot", VIEW)
     def ep_pilot(self, qs):
@@ -1173,6 +1244,23 @@ class Handler(BaseHTTPRequestHandler):
         """월보 인쇄."""
         d = self.json_body()
         return {"token": self.put_print(self.monthly_html(d.get("start", ""), d.get("end", ""), d.get("basis") or "planned"))}
+
+    @endpoint("POST", "reports/print", VIEW)
+    def ep_operations_report_print(self, qs):
+        """일일 작업일지·월보 기본 서식 인쇄. 마감·이월을 수행하지 않는다."""
+        d = self.json_body()
+        basis = d.get("basis") or "planned"
+        if d.get("kind") == "daily":
+            report = RP.daily_report(self.c, d.get("date", ""), basis)
+        elif d.get("kind") == "monthly":
+            report = RP.monthly_report(self.c, d.get("month", ""), basis)
+        else:
+            raise S.UserError("일일 작업일지 또는 월보를 선택하세요.")
+        title, body = OP.report_body(report)
+        with S.tx(self.c):
+            S.audit(self.c, "report", report["kind"], "PRINT", {"start": report["start"], "end": report["end"], "basis": report["basis"]})
+            PV.record_access(self.c, "PRINT", "", 0, title + " 집계")
+        return {"token": self.put_print(self._doc(title, body))}
 
     @endpoint("POST", "access/check", REVIEW)
     def ep_access_check(self, qs):
@@ -1739,6 +1827,23 @@ class Server(ThreadingHTTPServer):
         return not LAN or ip_allowed(client_address[0], LAN["nets"])
 
 
+class DesktopServer(Server):
+    # Windows의 SO_REUSEADDR는 이미 듣는 포트에도 두 번째 서버를 바인딩할 수 있다.
+    # 실행 앱이 시작한 서버는 해당 포트를 독점해 다른 서버의 응답을 자기 것으로 오인하지 않는다.
+    allow_reuse_address = os.name != "nt"
+    connection_timeout = 10  # 로컬 브라우저의 idle·미완성 헤더/본문이 정상 종료를 무한히 막지 않게 한다.
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.connection_timeout)
+        return request, address
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def cleanup_sessions() -> int:
     """만료된 세션(무조작·절대 만료)과 지난 인쇄 자료를 메모리에서 지운다."""
     now_ = time.time()
@@ -1777,7 +1882,8 @@ def scheduler(stop: threading.Event, every_s: int = 30):
             LOG.error("예약 작업 오류\n%s", scrub(traceback.format_exc()))
 
 
-def serve(port: int = 8765, lan: dict | None = None, host: str | None = None):
+def serve(port: int = 8765, lan: dict | None = None, host: str | None = None,
+          on_ready: Callable[[Server], None] | None = None):
     global CON, PORT, LAN
     PORT = port
     LAN = lan
@@ -1788,7 +1894,7 @@ def serve(port: int = 8765, lan: dict | None = None, host: str | None = None):
     OPS.JOBS.start()
     logf = setup_logging()
     bind = (host or "0.0.0.0") if lan else "127.0.0.1"
-    srv = Server((bind, port), Handler)
+    srv = (DesktopServer if on_ready else Server)((bind, port), Handler)
     if lan:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -1804,12 +1910,27 @@ def serve(port: int = 8765, lan: dict | None = None, host: str | None = None):
         print(f"동구 대형폐기물 PC 업무 화면: http://127.0.0.1:{port}  (이 PC에서만 열립니다. 끝내려면 Ctrl+C)")
     LOG.info("서버 시작 port=%s lan=%s log=%s", port, bool(lan), logf.name)
     stop = threading.Event()
+    scheduled = None
     if os.environ.get("DG_NO_SCHEDULER") != "1":
-        threading.Thread(target=scheduler, args=(stop,), daemon=True).start()
+        scheduled = threading.Thread(target=scheduler, args=(stop,), daemon=True)
+        scheduled.start()
     try:
+        if on_ready:
+            on_ready(srv)
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
+        srv.server_close()
+        if on_ready:
+            # 실행 앱은 정상 종료를 보장한다. 요청 접수와 예약 작업을 멈춘 뒤 이미 수락한 작업을 마친다.
+            if scheduled:
+                scheduled.join()
+            while True:
+                with OPS.JOBS.lock:
+                    pending = any(job["status"] in {"QUEUED", "RUNNING"} for job in OPS.JOBS.jobs.values())
+                if not pending:
+                    break
+                time.sleep(.1)
         LOG.info("서버 종료")

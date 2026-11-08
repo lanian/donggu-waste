@@ -172,6 +172,7 @@ try {
 async function afterUnlock() {
   try { sessionChan && sessionChan.postMessage({ type: 'active', id: WIN_ID }); } catch {}
   await loadState();
+  if (S.hasPendingSecure('state')) await commit();  // 잠금 전에 못 쓴 암호문을 복원했으면 다시 저장한다.
   // 자료 보존(persist) 요청 결과를 상태에 남긴다: 거절되면 첫 화면에 알림(바뀌었을 때만 저장)
   S.persist().then((ok) => { if (st && st.storagePersisted !== !!ok) { st.storagePersisted = !!ok; commit(); if (location.hash === '#/home') render(); } }).catch(() => {});
   if (!location.hash || location.hash === '#/') go('#/home');
@@ -238,7 +239,7 @@ function saveBanner(msg) {
   let b = document.getElementById('save-fail');
   if (!msg) { if (b) b.remove(); return; }
   if (!b) { b = h('div', { id: 'save-fail', class: 'save-fail', role: 'alert' }); document.body.append(b); }
-  b.textContent = `${msg} 앱을 닫지 말고 [결과 보내기]로 지금까지 기록을 PC에 보낸 뒤, 휴대폰 저장 공간을 비우세요.`;
+  b.textContent = `${msg} 앱을 닫지 말고 이 창의 기록을 [결과 보내기] 또는 백업으로 먼저 내보내 주세요.`;
 }
 function commit() {
   const snapshot = JSON.parse(JSON.stringify(st));

@@ -6,9 +6,15 @@
     "test": "node tests/fees.test.mjs && node tests/interop.mjs",
     "vendor": "cp node_modules/jsqr/dist/jsQR.js web/vendor/jsQR.js && cp node_modules/maplibre-gl/dist/maplibre-gl.mjs node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl.css web/vendor/maplibre/ && cp node_modules/qrcode-generator/dist/qrcode.mjs web/vendor/qrcode.mjs",
     "check:version": "python3 tools/check_version.py",
-    "test:pc": "python3 tests/test_pc.py",
-    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_pc.py",
-    "test:all": "npm run check:version && npm test && npm run test:pc && npm run test:e2e"
+    "test:pc": "python3 tests/test_pc.py && python3 tests/test_review_server.py && python3 tests/test_pc_launcher.py && python3 tests/test_pc_reports.py && python3 tests/test_pc_labels.py && python3 tests/test_pc_labels_migration.py",
+    "test:reports": "python3 tests/test_pc_reports.py && python3 tests/test_pc_labels.py && python3 tests/test_pc_labels_migration.py && python3 tests/test_reports_labels_api.py && python3 tests/test_reports_labels_ui.py && python3 tests/test_pc_report_presentation.py && python3 tests/test_reports_labels_e2e.py",
+    "test:desktop": "python3 tests/test_desktop_paths.py && python3 tests/test_desktop_lifecycle.py && python3 tests/test_desktop_app.py && python3 tests/test_desktop_ui.py",
+    "build:desktop": "python3 tools/build_desktop.py",
+    "test:workflow": "python3 tests/test_workflow.py",
+    "test:startup": "python3 tests/test_pc_startup.py",
+    "test:design": "python3 tests/test_pc_design.py",
+    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_pc.py && python3 tests/test_review_ui.py && python3 tests/test_reports_labels_api.py && python3 tests/test_reports_labels_ui.py && python3 tests/test_pc_report_presentation.py && python3 tests/test_reports_labels_e2e.py && npm run test:workflow && npm run test:startup",
+    "test:all": "npm run check:version && npm test && npm run test:pc && npm run test:desktop && npm run test:e2e"
   },
   "devDependencies": {
     "jsqr": "1.4.0",

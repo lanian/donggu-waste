@@ -71,7 +71,7 @@ async function screenRequest(id) {
   const lab = (t, el) => h('label', { class: 'f' }, t, el);
   const itemsBox = h('div', { class: 'items' });
   let saveDraft = () => {};
-  const total = h('p', { class: 'muted' });
+  const total = h('p', { class: 'muted' + (isNew ? ' intake-total' : '') });
   const barTotal = h('span', { class: 'bar-total' });
   const drawItems = () => {
     itemsBox.replaceChildren(...items.map((it, i) => h('div', { class: 'it' },
@@ -312,12 +312,26 @@ async function screenRequest(id) {
 
   // 전화 받는 순서대로: 왼쪽 = 신청자 → 버릴 물건, 오른쪽 = 일정 → 위치. 저장 단추는 화면 아래에 늘 보이게.
   F.lat.tabIndex = -1; F.lon.tabIndex = -1;
-  const actionbar = editable ? h('div', { class: 'actionbar' }, isNew ? null : reason,
-    btn(isNew ? '접수 등록' : '수정 저장', save, 'primary', { 'data-save': '1' }), h('span', { class: 'muted small' }, h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter')),
-    barTotal, h('span', { class: 'grow' }), msg, isNew ? null : btn('접수 취소', cancel, 'danger')) : null;
+  if (isNew && editable) {
+    const search = picker.querySelector('input[type="search"]');
+    search.id = 'intake-item-search';
+    search.setAttribute('aria-label', '품목명·규격 검색');
+    picker.querySelector('input[type="number"]').setAttribute('aria-label', '추가 수량');
+  }
+  const actionbar = editable ? (isNew
+    ? h('div', { class: 'actionbar intake-actionbar' },
+      h('span', { class: 'intake-save-summary' }, h('span', { class: 'intake-save-caption' }, '확인된 접수 금액'), barTotal),
+      h('span', { class: 'grow' }), msg,
+      h('span', { class: 'muted small intake-shortcut' }, h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter')),
+      btn('접수 등록', save, 'primary', { 'data-save': '1' }))
+    : h('div', { class: 'actionbar' }, isNew ? null : reason,
+      btn(isNew ? '접수 등록' : '수정 저장', save, 'primary', { 'data-save': '1' }), h('span', { class: 'muted small' }, h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter')),
+      barTotal, h('span', { class: 'grow' }), msg, isNew ? null : btn('접수 취소', cancel, 'danger'))) : null;
   setTimeout(() => { loadCal(); if (isNew && !(fromDraft && r.dong)) detect(); }, 0);
-  const form = h('div', { class: 'reqform', oninput: () => { intakeSeen = Date.now(); saveDraft(); }, onchange: () => saveDraft() },
-    h('div', { class: 'pagehead' }, h('h1', {}, isNew ? '전화 접수 등록' : `접수 ${r.receipt_no}`),
+  const form = h('div', { class: 'reqform' + (isNew ? ' intake-form' : ''), oninput: () => { intakeSeen = Date.now(); saveDraft(); }, onchange: () => saveDraft() },
+    h('div', { class: 'pagehead' }, isNew
+      ? h('div', { class: 'intake-heading-copy' }, h('h1', {}, '전화 접수 등록'), h('p', { class: 'muted small' }, '신청자와 배출 정보를 입력하고 품목·일정을 확인하세요.'))
+      : h('h1', {}, `접수 ${r.receipt_no}`),
       h('div', { class: 'row' }, !isNew && r.levy_no ? h('span', { class: 'chip' }, `부과번호 ${r.levy_no}`) : null,
         !isNew ? btn('안내 문구 복사', wrap(() => copyNotice(id)), 'small', { title: '주민에게 보낼 안내 글(접수번호·배출일·금액·납부 방법·문의처, 이름·주소 없음)' }) : null,
         !isNew && canWork() ? btn('접수증 인쇄', wrap(async () => {
@@ -337,27 +351,33 @@ async function screenRequest(id) {
         if (dirty()) { b.replaceWith(h('span', {}, `— 방금 사무실 확인 (${boot.me.display_name})`)); } else render(true); }), 'small primary') : null) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
     r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
-    h('div', { class: 'grid2' },
-      h('div', {},
-        h('div', { class: 'card formtable' }, h('h2', {}, '신청자'),
-          h('div', { class: 'grid2' }, lab('이름', F.name), lab('연락처', F.phone)),
-          editable ? h('div', { class: 'addr-find' }, h('label', { class: 'f' }, '주소 찾기', addrQ), addrSug, noAddrSource() ? addrSetupNote() : null) : null,
+    h('div', { class: 'grid2' + (isNew ? ' intake-grid' : '') },
+      h('div', isNew ? { class: 'intake-column' } : {},
+        h('div', { class: 'card formtable' + (isNew ? ' intake-applicant' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '01') : null, '신청자'),
+          h('div', { class: 'grid2' + (isNew ? ' intake-contact' : '') }, lab('이름', F.name), lab('연락처', F.phone)),
+          editable ? h('div', { class: 'addr-find' }, h('label', { class: 'f' }, '주소 찾기', addrQ), addrSug,
+            isNew ? h('p', { class: 'intake-field-help' }, '검색 결과를 고르면 배출 주소에 채워집니다. 직접 입력도 가능합니다.') : null,
+            noAddrSource() ? (isNew ? h('details', { class: 'intake-address-help' }, h('summary', {}, '주소 검색 미설정 · 직접 입력 가능'), addrSetupNote()) : addrSetupNote()) : null) : null,
           lab('배출 주소', F.address), addrWarn,
           h('div', { class: 'grid2' }, lab('행정동', F.dong), lab('접수 경로', F.channel)), dongMsg && h('p', { class: 'dongmsg' }, dongMsg),
-          lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo), dupBox),
-        h('div', { class: 'card' }, h('h2', {}, '버릴 물건'), noticeBox, itemsBox, total, editable ? picker : null,
+          isNew ? h('div', { class: 'grid2 intake-notes' }, lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo))
+            : [lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo)], dupBox),
+        h('div', { class: 'card' + (isNew ? ' intake-items' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '02') : null, '버릴 물건'), noticeBox, itemsBox, total,
+          isNew ? h('p', { class: 'intake-field-help' }, '확인된 단가의 합계입니다. 최종 부과·납부액과 다를 수 있습니다.') : null,
+          isNew && editable ? h('label', { for: 'intake-item-search', class: 'intake-picker-label' }, '품목명·규격 검색') : null,
+          editable ? picker : null,
           isNew ? h('details', { class: 'free redbox', open: !!r.reduction_code }, h('summary', {}, '수수료 감면 (해당자만)'),
             h('div', { class: 'row' }, redSel, redProof, redWho),
             h('p', { class: 'small muted' }, '감면 사유와 증빙을 어떻게 확인했는지만 남깁니다. 주민등록번호·수급자 번호 같은 식별번호는 적지 마세요. 감면율은 설정의 정책 값(조례 확인 필요)입니다.')) : null)),
-      h('div', {},
-        h('div', { class: 'card formtable' }, h('h2', {}, '일정·우선순위'),
+      h('div', isNew ? { class: 'intake-column' } : {},
+        h('div', { class: 'card formtable' + (isNew ? ' intake-schedule' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '03') : null, '일정·우선순위'),
           lab('수거 예정일', F.planned_date),
           h('div', { class: 'calwrap' }, h('div', { class: 'row' }, h('span', { class: 'small muted' }, '다음 업무일 예약/한도'), h('span', { class: 'grow' }),
             btn('가장 빠른 가능일', () => { if (!earliest) return toast('120일 안에 여유 있는 날이 없습니다.', true); F.planned_date.value = earliest; loadCal(); saveDraft(); }, 'small')), calBox, calWarn),
           h('div', { class: 'grid2' }, lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),
-        h('div', { class: 'card' }, h('h2', {}, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
+        h('div', { class: 'card' + (isNew ? ' intake-location' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '04') : null, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
           h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'), geoMsg),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
     staleNote,

@@ -21,7 +21,7 @@ import { screenFix, screenStop } from './screens/stop.js';
 import { screenUnload } from './screens/unload.js';
 
 setRender(render);  // 화면 모듈이 core 의 render() 로 다시 그릴 수 있게
-export const APP_VERSION = '0.13.1';
+export const APP_VERSION = '0.13.10';
 let renderSeq = 0;
 async function render() {
   const my = ++renderSeq;

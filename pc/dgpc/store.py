@@ -435,9 +435,35 @@ def _m6_drop_travel_cache(con):
         con.execute("DROP TABLE travel_cache")
 
 
+def _m7_numbered_labels(con):
+    """숫자 배출표의 재고·접수 연결과 변경 이력. 기존 표지 인쇄/현장 근거는 그대로 둔다."""
+    con.execute("""CREATE TABLE numbered_label (
+      number_key TEXT PRIMARY KEY NOT NULL,
+      number TEXT NOT NULL UNIQUE CHECK(length(number) BETWEEN 1 AND 30 AND number NOT GLOB '*[^0-9]*'),
+      status TEXT NOT NULL CHECK(status IN ('AVAILABLE','DISTRIBUTED','USED','VOID')),
+      destination TEXT NOT NULL DEFAULT '',
+      request_id TEXT REFERENCES request(id), line_id TEXT REFERENCES request_item(line_id),
+      received_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      distributed_at TEXT, used_at TEXT, voided_at TEXT,
+      CHECK(line_id IS NULL OR request_id IS NOT NULL),
+      CHECK(status <> 'USED' OR request_id IS NOT NULL),
+      CHECK(status <> 'DISTRIBUTED' OR length(trim(destination)) > 0))""")
+    con.execute("""CREATE TABLE numbered_label_event (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      number_key TEXT NOT NULL REFERENCES numbered_label(number_key),
+      action TEXT NOT NULL CHECK(action IN ('RECEIVE','DISTRIBUTE','USE','VOID')),
+      from_status TEXT, to_status TEXT NOT NULL,
+      request_id TEXT, line_id TEXT, at TEXT NOT NULL, actor TEXT NOT NULL,
+      audit_id INTEGER REFERENCES audit_log(id))""")
+    con.execute("CREATE INDEX ix_numbered_label_status ON numbered_label(status, received_at)")
+    con.execute("CREATE INDEX ix_numbered_label_request ON numbered_label(request_id)")
+    con.execute("CREATE INDEX ix_numbered_label_event ON numbered_label_event(number_key, id)")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
-              (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache)]
+              (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
+              (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels)]
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -696,6 +722,26 @@ def _quote(s: str) -> str:
 BACKUP_MAGIC_TABLE = "dg_backup_info"
 
 
+def _export_sqlcipher(con, target: str):
+    """암호화 내보내기가 옮기지 않는 구조 버전·공간 반환 설정도 보존한다(target은 내부 별칭)."""
+    # 내보내기와 메타 정보를 한 트랜잭션에 묶어 자동 커밋의 반복 동기 쓰기를 피한다.
+    # 저장점을 쓰므로 호출자가 이미 연 트랜잭션은 임의로 커밋·롤백하지 않는다.
+    con.execute("SAVEPOINT dg_export")
+    try:
+        version = int(con.execute("PRAGMA main.user_version").fetchone()[0])
+        vacuum = int(con.execute("PRAGMA main.auto_vacuum").fetchone()[0])
+        # auto_vacuum은 대상에 표를 만들기 전에 정해야 한다.
+        con.execute(f"PRAGMA {target}.auto_vacuum = {vacuum}")
+        con.execute(f"SELECT sqlcipher_export('{target}')")
+        con.execute(f"PRAGMA {target}.user_version = {version}")
+        con.execute("RELEASE dg_export")
+    except BaseException:
+        if getattr(con, "in_transaction", True):
+            con.execute("ROLLBACK TO dg_export")
+            con.execute("RELEASE dg_export")
+        raise
+
+
 def backup_to(con, dest: Path, passphrase: str) -> Path:
     """현재 DB를 별도 백업 비밀번호로 암호화한 새 파일로 내보낸다(DB 키와 다른 비밀번호).
 
@@ -714,7 +760,7 @@ def backup_to(con, dest: Path, passphrase: str) -> Path:
         if ENCRYPTED:
             con.execute(f"ATTACH DATABASE {_quote(str(part))} AS bk KEY {_quote(passphrase)}")
             try:
-                con.execute("SELECT sqlcipher_export('bk')")
+                _export_sqlcipher(con, "bk")
             finally:
                 con.execute("DETACH DATABASE bk")
         else:  # 개발용 평문 모드
@@ -773,23 +819,32 @@ def restore_from(src: Path, passphrase: str) -> dict:
     """
     import datetime as _dt
     bcon, n = open_backup(src, passphrase)
-    d = state_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    cur = d / "pc.db"
-    tmp = d / "pc.db.restoring"
-    for f in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
-        if f.exists():
-            f.unlink()
-    key = db_key(create=not cur.exists()) if ENCRYPTED else None
-    if ENCRYPTED:
-        bcon.execute(f"ATTACH DATABASE {_quote(str(tmp))} AS cur KEY {_quote(key)}")
-        bcon.execute("SELECT sqlcipher_export('cur')")
-        bcon.execute("DETACH DATABASE cur")
-    else:
-        out = dbapi.connect(str(tmp))
-        bcon.backup(out)
-        out.close()
-    bcon.close()
+    try:
+        version = int(bcon.execute("PRAGMA user_version").fetchone()[0])
+        if version > LATEST:
+            raise ValueError(f"백업 DB 구조 버전({version})이 이 프로그램({LATEST})보다 새것입니다. 최신 PC 프로그램으로 복원하세요.")
+        d = state_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        cur = d / "pc.db"
+        tmp = d / "pc.db.restoring"
+        for f in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
+            if f.exists():
+                f.unlink()
+        key = db_key(create=not cur.exists()) if ENCRYPTED else None
+        if ENCRYPTED:
+            bcon.execute(f"ATTACH DATABASE {_quote(str(tmp))} AS cur KEY {_quote(key)}")
+            try:
+                _export_sqlcipher(bcon, "cur")
+            finally:
+                bcon.execute("DETACH DATABASE cur")
+        else:
+            out = dbapi.connect(str(tmp))
+            try:
+                bcon.backup(out)
+            finally:
+                out.close()
+    finally:
+        bcon.close()
     kept = None
     if cur.exists():
         kept = d / f"pc.db.before-restore-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"

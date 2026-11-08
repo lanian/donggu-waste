@@ -31,6 +31,12 @@
 | `requests/import-template` | ✓ | ✓ | ✓ | ✓ | read |  |  | 접수 일괄 등록 CSV 서식. |
 | `audit.csv` | ✓ |  |  | ✓ | read |  |  | 변경 이력 CSV. |
 | `stats` | ✓ | ✓ |  | ✓ | read |  |  | 통계. |
+| `reports/daily` | ✓ | ✓ |  | ✓ | read |  |  | 일일 작업일지 집계(원자료 변경 없음). |
+| `reports/monthly` | ✓ | ✓ |  | ✓ | read |  |  | 월보 집계(원자료 변경 없음). |
+| `reports/daily.csv` | ✓ | ✓ |  | ✓ | read |  | EXPORT | 개인정보 없는 일일 작업일지 전체 집계 CSV. |
+| `reports/monthly.csv` | ✓ | ✓ |  | ✓ | read |  | EXPORT | 개인정보 없는 월보 전체 집계 CSV. |
+| `numbered-labels` | ✓ | ✓ |  | ✓ | read |  |  | 숫자 배출표 재고 원장. |
+| `numbered-labels/{id}/history` | ✓ | ✓ |  | ✓ | read |  |  | 숫자 배출표 최근 변경 이력. |
 | `pilot` | ✓ | ✓ |  | ✓ | read |  |  | 시범 운영 비교 설정·보고. |
 | `pilot.csv` | ✓ | ✓ |  | ✓ | read |  |  | 시범 운영 비교 CSV. |
 | `stats.csv` | ✓ | ✓ |  | ✓ | read |  |  | 통계 CSV(종류별). |
@@ -83,6 +89,11 @@
 
 | 경로 | 관리자 | 접수 | 수거팀 | 팀장 | 잠금 | 임시 비번 | 접속기록 | 설명 |
 |---|---|---|---|---|---|---|---|---|
+| `numbered-labels/receive` | ✓ | ✓ |  |  | write |  |  | 숫자 배출표 구간 입고. |
+| `numbered-labels/distribute` | ✓ | ✓ |  |  | write |  |  | 숫자 배출표 구간 배부. |
+| `numbered-labels/{id}/use` | ✓ | ✓ |  |  | write |  |  | 유효 접수·품목에 숫자 배출표 사용. |
+| `numbered-labels/{id}/void` | ✓ | ✓ |  |  | write |  |  | 사유를 남기고 숫자 배출표 무효. |
+| `numbered-labels/{id}/print` | ✓ | ✓ |  | ✓ | write |  |  | 번호 확인용 표지 출력. 배출표 상태는 변경하지 않는다. |
 | `import/result` | ✓ | ✓ | ✓ |  | none |  |  | 휴대폰 결과 파일 가져오기(수거팀은 자기 팀 휴대폰 파일만). |
 | `import/photos` | ✓ | ✓ | ✓ |  | none |  |  | 휴대폰 사진 묶음 가져오기. |
 | `import/solo` | ✓ | ✓ |  |  | none |  |  | 단독 휴대폰 백업 옮기기(접수를 만든다). PBKDF2 60만 회는 잠금 밖. |
@@ -106,6 +117,7 @@
 | `requests/{id}/receipt-print` | ✓ | ✓ |  |  | write |  |  | 접수증 인쇄. |
 | `requests/labels` | ✓ | ✓ |  |  | write |  |  | 배출 표지 인쇄. |
 | `stats/print` | ✓ | ✓ |  | ✓ | write |  |  | 월보 인쇄. |
+| `reports/print` | ✓ | ✓ |  | ✓ | write |  |  | 일일 작업일지·월보 기본 서식 인쇄. 마감·이월을 수행하지 않는다. |
 | `access/check` | ✓ |  |  | ✓ | write |  |  | 접속기록 월 점검 기록. |
 | `refunds/request` | ✓ | ✓ |  |  | write |  |  | 환불 신청. |
 | `refunds/{id}/approve` | ✓ |  |  | ✓ | write |  |  | 환불 결재(승인). |
@@ -158,4 +170,4 @@
 | `password` | ✓ | ✓ | ✓ | ✓ | write | ✓ |  | 본인 비밀번호 변경. |
 | `settings` | ✓ |  |  |  | write |  |  | 설정 저장 → 새 설정 묶음. |
 
-경로 129개 (로그인 전 4개 제외).
+경로 141개 (로그인 전 4개 제외).

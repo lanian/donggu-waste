@@ -1,8 +1,8 @@
 // PC 화면: 로그인
 import { api, btn, h, post, render, setBoot, wrap } from '../core.js';
 
-async function screenLogin() {
-  const st = await api('state');
+async function screenLogin(initialState) {
+  const st = initialState ?? await api('state', { timeoutMs: 10_000 });
   const user = h('input', { placeholder: '아이디', autocomplete: 'username', value: st.setup_needed ? 'admin' : '' });
   const dname = st.setup_needed ? h('input', { placeholder: '이름 (예: 홍길동 주무관)' }) : null;
   const pw = h('input', { type: 'password', placeholder: '비밀번호', autocomplete: st.setup_needed ? 'new-password' : 'current-password' });
@@ -19,7 +19,14 @@ async function screenLogin() {
   user.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); (dname || pw).focus(); } });
   pw.addEventListener('keydown', (e) => { if (e.key === 'Enter' && pw2) { e.preventDefault(); pw2.focus(); } });
   setTimeout(() => (st.setup_needed ? dname : user).focus(), 30);
-  return h('main', { class: 'login-wrap' }, h('div', { class: 'login card' }, h('h1', { class: 'sr-only' }, st.setup_needed ? '관리자 계정 만들기' : '로그인'),
+  return h('main', { class: 'login-wrap' },
+    h('section', { class: 'login-intro', 'aria-labelledby': 'login-intro-title' },
+      h('p', { class: 'login-eyebrow' }, 'DONGGU WASTE MANAGEMENT'),
+      h('h2', { class: 'login-intro-title', id: 'login-intro-title' }, '매일의 수거 업무를', h('br'), '더 명확하게.'),
+      h('p', { class: 'login-intro-copy' }, '접수부터 배차, 수거와 마감까지.', h('br'), '동구 대형폐기물 업무를 한곳에서 관리합니다.'),
+      h('ol', { class: 'login-flow', 'aria-label': '주요 업무 흐름' },
+        ...['접수 확인', '배차·수거', '정산·마감'].map((label, index) => h('li', {}, h('span', { class: 'login-flow-index', 'aria-hidden': 'true' }, String(index + 1).padStart(2, '0')), h('span', { class: 'login-flow-label' }, label))))),
+    h('div', { class: 'login card' }, h('h1', { class: 'sr-only' }, st.setup_needed ? '관리자 계정 만들기' : '로그인'),
     h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, '접수·배차·수거 업무 (PC)'))),
     h('p', { class: 'muted' }, st.setup_needed ? '처음 사용합니다. 운영 관리자 계정을 만드세요. 비밀번호는 10자 이상입니다.' : '아이디와 비밀번호를 입력하세요.'),
     h('label', { class: 'f' }, '아이디', user), dname && h('label', { class: 'f' }, '이름', dname), h('label', { class: 'f' }, '비밀번호', pw), pw2 && h('label', { class: 'f' }, '비밀번호 확인', pw2),

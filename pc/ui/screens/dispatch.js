@@ -186,7 +186,7 @@ async function screenDispatch() {
       if (overs.length && !(await confirmDlg('적재 초과', `${overs.map((rt) => `${rt.crew_name} ${rt.overAt + 1}번부터`).join(', ')} 누적 적재(추정)가 차량 용량을 넘습니다. 그대로 확정할까요? (추정치이므로 현장에서 반입지를 더 들를 수 있습니다)`, { ok: '그대로 확정' }))) return;
       const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
       const res = await post('assign', { date: p.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
-      toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go('#/send');
+      toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go(`#/send?date=${p.date}`);
     }, planMsg), 'primary', { disabled: planStale });
     const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
     const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();

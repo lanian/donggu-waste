@@ -13,7 +13,7 @@ AUDIT_ENTITIES = {"request": "접수", "payment": "수납", "batch": "배정", "
                   "photo": "사진", "photo_import": "사진 가져오기", "day": "마감", "device": "휴대폰", "crew": "수거팀", "user": "사용자",
                   "backup": "백업", "fee": "수수료표", "address": "주소 자료", "report": "보고서·내보내기", "unload": "하차", "volume": "적재 보정",
                   "dong": "행정동", "holiday": "휴무일", "settings": "설정", "contact": "민원·통화", "request_import": "접수 일괄 등록",
-                  "privacy": "개인정보 파기", "access": "접속기록", "refund": "환불", "revenue": "세입·대사"}
+                  "privacy": "개인정보 파기", "access": "접속기록", "refund": "환불", "revenue": "세입·대사", "numbered_label": "숫자 배출표"}
 _AUDIT_HIDE = ("name", "phone", "address", "memo", "location_note", "sha256", "content", "spot_note")
 
 

@@ -19,10 +19,11 @@ from dgpc.devices import _open_from_device
 from dgpc.fees import fee_rows, fee_state
 from dgpc.intake import CANCEL_CODES, _cancel, _insert_item, _insert_request, _reason, _resolve_dong, _snapshot, build_items, validate
 
-def _refresh_status(con, rid, new_attempt: bool = True):
+def _refresh_status(con, rid, new_attempt: bool = True, new_location: bool = False):
     """현장 결과에 따라 업무 상태를 갱신한다. 최종 결과가 나오면 활성 배정을 풀어 재배정할 수 있게 한다.
     new_attempt=False: 이번에 들어온 기록에 수거 결과(ATTEMPT)가 없음. 재방문으로 다시 배정된 접수라면 지난 방문의 결과로
-    되돌리지 않는다(도착·연락 기록만 먼저 와도 배정이 풀리고 '미수거'로 돌아가던 문제)."""
+    되돌리지 않는다(도착·연락 기록만 먼저 와도 배정이 풀리고 '미수거'로 돌아가던 문제).
+    new_location=True일 때만 이번에 반영된 위치를 원본에 쓴다(주소 정정으로 비운 위치를 과거 기록으로 복원하지 않음)."""
     r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not r or r["status"] == "CANCELLED":
         return
@@ -33,7 +34,7 @@ def _refresh_status(con, rid, new_attempt: bool = True):
         new = st["outcome"]
     elif st["has_field_records"]:
         new = "IN_PROGRESS"
-    if st["field_loc"] and st["field_loc"]["lat"] is not None:
+    if new_location and st["field_loc"] and st["field_loc"]["lat"] is not None:
         con.execute("UPDATE request SET lat=?, lon=?, geo_source=? WHERE id=?",
                     (st["field_loc"]["lat"], st["field_loc"]["lon"], "ADDR" if st["field_loc"].get("source") == "ADDR" else "FIELD", rid))
     if new != r["status"]:
@@ -78,7 +79,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
     crew = one(con, "SELECT id FROM crew WHERE device_id=?", (dev_id,))
     imp = str(uuid.uuid4())
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}
-    touched, attempted = set(), set()  # attempted: 이번 파일에서 수거 결과(ATTEMPT)가 반영된 접수
+    touched, attempted, located = set(), set(), set()  # 이번 파일에서 결과(ATTEMPT)·위치(LOCATION_FIX)가 실제 반영된 접수
     with tx(con):
         con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,?)",
                     (imp, channel, dev_id, sha, now(), release))
@@ -132,6 +133,13 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
             ev.setdefault("request_id", "")
             if not isinstance(ev.get("body"), dict):
                 ev["body"] = {}
+            req = one(con, "SELECT status, req_ver, origin_device, pii_purged_at FROM request WHERE id=?", (ev["request_id"],))
+            if req and req["pii_purged_at"]:
+                # 이미 파기한 접수는 늦은 기록으로 되살리지 않는다. 순번·이벤트 ID는 받아 두어 재전송과 수신 확인을 유지한다.
+                insert_event(ev, ev["request_id"], ev.get("assign_ver") or 0, ev.get("base_req_ver"), ev["kind"],
+                             {"pii_purged": True}, "REJECTED", "개인정보가 파기된 접수의 기록")
+                counts["purged"] = counts.get("purged", 0) + 1
+                return
             if ev["kind"] == "FIELD_INTAKE" and ev["request_id"]:  # 휴대폰 현장 접수 → PC 원본에 접수를 만든다(사무실 확인 표시)
                 reason, note = None, None
                 if one(con, "SELECT 1 AS x FROM request WHERE id=?", (ev["request_id"],)):
@@ -153,7 +161,6 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 insert_event(ev, "", ev.get("assign_ver") or 0, None, str(ev.get("kind") or "?")[:40], ev["body"], "APPLIED", None)
                 counts["stored_other"] = counts.get("stored_other", 0) + 1
                 return
-            req = one(con, "SELECT status, req_ver, origin_device FROM request WHERE id=?", (ev["request_id"],))
             reason, info = None, None
             # 이 휴대폰이 현장에서 접수한 건: PC 목록에 들어오기 전(갱신본 0)에 남긴 결과는 배정 기록 없이도 받는다
             own = bool(req) and req.get("origin_device") == dev_id
@@ -201,6 +208,8 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 touched.add(ev["request_id"])
                 if ev["kind"] == "ATTEMPT":
                     attempted.add(ev["request_id"])
+                if ev["kind"] == "LOCATION_FIX":
+                    located.add(ev["request_id"])
                 if ev["kind"] == "REVISIT_APPT":
                     _apply_revisit(con, ev["request_id"], ev.get("body", {}))
         for ev in payload.get("events", []):
@@ -216,19 +225,22 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                 counts["conflict"] += 1
                 try:
                     seen(ev)
+                    rid = str(ev.get("request_id") or "")
+                    purged = one(con, "SELECT 1 AS x FROM request WHERE id=? AND pii_purged_at IS NOT NULL", (rid,))
                     con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
-                        body_json, apply_status, conflict_reason, device_ts, gen) VALUES (?,?,?,?,?,?,?,?,?,'CONFLICT',?,?,?)""",
+                        body_json, apply_status, conflict_reason, device_ts, gen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                 (str(ev.get("event_id") or uuid.uuid4()), imp, dev_id,
                                  ev["seq"] if isinstance(ev.get("seq"), int) and not isinstance(ev.get("seq"), bool) else -int.from_bytes(os.urandom(4), "big") - 1,
-                                 str(ev.get("request_id") or ""),
+                                 rid,
                                  _int_clamp(ev.get("assign_ver"), 0, 10 ** 9), ev.get("base_req_ver") if isinstance(ev.get("base_req_ver"), int) else None,
                                  str(ev.get("kind") or "?")[:40],
-                                 json.dumps(ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
+                                 json.dumps({"pii_purged": True} if purged else ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
+                                 "REJECTED" if purged else "CONFLICT",
                                  f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts"), P.norm_gen(ev.get("gen"))))
                 except Exception:  # noqa: BLE001
                     counts["failed"] = counts.get("failed", 0) + 1
         for rid in touched:
-            _refresh_status(con, rid, new_attempt=rid in attempted)
+            _refresh_status(con, rid, new_attempt=rid in attempted, new_location=rid in located)
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
@@ -317,6 +329,8 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
     if not isinstance(body, dict):
         body = {}
     with tx(con):
+        if action == "APPLY" and one(con, "SELECT 1 AS x FROM request WHERE id=? AND pii_purged_at IS NOT NULL", (e["request_id"],)):
+            raise UserError("개인정보가 파기된 접수는 현장 기록을 반영할 수 없습니다. [거부]로 정리하세요.")
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
@@ -336,7 +350,7 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
             if e["kind"] == "PHOTO_META":
                 _photo_meta(con, e["request_id"], body, e["device_id"])
             if e["request_id"]:
-                _refresh_status(con, e["request_id"])
+                _refresh_status(con, e["request_id"], new_attempt=e["kind"] == "ATTEMPT", new_location=e["kind"] == "LOCATION_FIX")
         if e["kind"] in ("FIELD_INTAKE", "CORRECTION"):  # 처리한 요청 기록에서는 개인정보를 지운다(원본은 접수·버전 이력에)
             con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps(_strip_request_pii(e["kind"], body), ensure_ascii=False), event_id))
         audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip(), "kind": e["kind"], **({"request": e["request_id"]} if e["request_id"] else {})})
@@ -597,6 +611,8 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
         return {**info, "duplicate_file": True}
     imp = str(uuid.uuid4())
     newids = {c["r"]["request_id"] for c in new}
+    purgedids = {c["r"]["request_id"] for c in new if c["purged"]}
+    located = set()
     line_map: dict[tuple[str, str], str] = {}
     counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0, "renamed": 0}
     with tx(con):
@@ -631,10 +647,10 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                     continue
                 snap = v.get("snapshot") or {}
                 if purged and isinstance(snap, dict):
-                    snap = {k: x for k, x in snap.items() if k not in ("name", "phone", "address", "spot_note", "memo", "lat", "lon")}
+                    snap = {k: x for k, x in snap.items() if k not in ("name", "phone", "address", "spot_note", "memo", "lat", "lon", "cancel_reason")}
                 vv = v.get("req_ver")
                 con.execute("INSERT OR IGNORE INTO request_version VALUES (?,?,?,?,?)",
-                            (r["request_id"], vv if isinstance(vv, int) else 1, json.dumps(snap, ensure_ascii=False), str(v.get("reason") or "휴대폰 단독 수정")[:200],
+                            (r["request_id"], vv if isinstance(vv, int) else 1, json.dumps(snap, ensure_ascii=False), "(파기)" if purged else str(v.get("reason") or "휴대폰 단독 수정")[:200],
                              _sane_ts(v.get("at")) or now()))
             counts["requests"] += 1
         for e in events:
@@ -662,14 +678,30 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
             if (e["request_id"], body.get("line_id")) in line_map:
                 body = {**body, "line_id": line_map[(e["request_id"], body["line_id"])]}
             kind = str(e.get("kind") or "?")[:40]
-            if kind in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 휴대폰 단가·수량을 그대로 믿지 않음(PC 수수료표, 0~9999)
-                body = dict(body)
-                _sanitize_item_event(con, kind, body)
+            private_event = e["request_id"] in purgedids and kind in ("FIELD_INTAKE", "CORRECTION", "CANCEL_REQUEST", "FIELD_MEMO", "LOCATION_FIX", "PHOTO_META")
+            if private_event:
+                # 단독 백업도 파기 경계를 유지한다. 익명 수거·금액 기록은 남기되 위치·메모·사진·정정 원문은 되살리지 않는다.
+                body = {"pii_purged": True}
+            else:
+                if e["request_id"] in purgedids:
+                    body = dict(body)
+                    for key in ("text", "lat", "lon", "acc", "note", "location_note", "number_note"):
+                        if key in body:
+                            body[key] = None if key in ("lat", "lon", "acc") else ""
+                    body["pii_purged"] = True
+                if kind in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 휴대폰 단가·수량을 그대로 믿지 않음(PC 수수료표, 0~9999)
+                    body = dict(body)
+                    _sanitize_item_event(con, kind, body)
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (e["event_id"], imp, solo_dev, seq, e["request_id"], 0, e.get("base_req_ver") if isinstance(e.get("base_req_ver"), int) else None, kind,
-                         json.dumps(body, ensure_ascii=False), "APPLIED", None, e.get("ts")))
+                         json.dumps(body, ensure_ascii=False), "REJECTED" if private_event else "APPLIED", "개인정보가 파기된 접수의 기록" if private_event else None, e.get("ts")))
             counts["events"] += 1
+            if private_event:
+                counts["purged"] = counts.get("purged", 0) + 1
+                continue
+            if kind == "LOCATION_FIX":
+                located.add(e["request_id"])
             if kind == "PHOTO_META":
                 data = None
                 if body.get("photo_id") in photos:
@@ -685,7 +717,7 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
             elif kind == "REVISIT_APPT":
                 _apply_revisit(con, e["request_id"], body)
         for rid in newids:
-            _refresh_status(con, rid)
+            _refresh_status(con, rid, new_location=rid in located)
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts, "invalid": len(errors)}), imp))
         audit(con, "import", imp, "SOLO", {**counts, "invalid": len(errors)})
     return {**info, **counts}

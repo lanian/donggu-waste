@@ -9,6 +9,8 @@ __pycache__/
 .venv/
 shots/
 *.log
+build/desktop/
+dist/desktop/
 # 업무 자료가 들어 있는 파일(주민 사진·백업·키) — 작업 폴더에 받아 두었더라도 저장소에 올리지 않는다
 *.dgp
 *.dgbak
