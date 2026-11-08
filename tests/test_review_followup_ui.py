@@ -211,6 +211,23 @@ class DispatchResponseTests(unittest.TestCase):
         self.release()
         self.assertFalse(self.page.evaluate("__calls.some(call=>call.endpoint==='assign')"))
 
+    def test_recalculation_invalidates_pending_plan_confirmation(self):
+        self.page.get_by_role("button", name="노선 계산", exact=True).click()
+        self.page.wait_for_function("__C.pendingActions.size === 0")
+        self.hold("batches", "배정 확정")
+        self.page.evaluate("__hold='route'")
+        self.page.get_by_role("button", name="노선 계산", exact=True).click()
+        self.page.wait_for_function("__gates.length === 2")
+        self.page.evaluate("__gates.shift()()")
+        self.page.wait_for_function("__C.pendingActions.get('#/dispatch') === 1")
+        self.assertFalse(self.page.evaluate("__calls.some(call=>call.endpoint==='assign')"))
+        self.assertEqual(self.page.evaluate("location.hash"), "#/dispatch")
+        self.release()
+        self.page.get_by_role("button", name="배정 확정", exact=True).click()
+        self.page.wait_for_function("__C.pendingActions.size === 0")
+        self.assertEqual(self.page.evaluate("__calls.filter(call=>call.endpoint==='assign').length"), 1)
+        self.assertEqual(self.page.evaluate("location.hash"), "#/send?date=2026-11-09")
+
     def test_completed_route_crew_change_requires_recalculation(self):
         self.page.get_by_role("button", name="노선 계산", exact=True).click()
         self.page.wait_for_function("__C.pendingActions.size === 0")

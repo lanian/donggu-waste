@@ -88,6 +88,48 @@ class PrivacyWriteGuardsTest(T.SessionHTTPTestCase):
         self.assertNotIn("01000000000", body)
         self.assertNotIn("가상 비공개", body)
 
+    def test_existing_purged_conflict_reason_only_is_repaired_once(self):
+        rid, _ = self.request(finished=True)
+        self.purge()
+        original = self.row(rid)
+        with T.SV.LOCK, T.S.tx(self.con):
+            self.con.execute("INSERT INTO result_import (id,channel,device_id,package_sha256,imported_at) VALUES ('reason-import','USB','fixture-device','reason-fixture','2018-01-01T00:00:00Z')")
+            self.con.execute("""INSERT INTO result_event
+                (event_id,import_id,device_id,device_seq,request_id,assign_ver,kind,body_json,apply_status,resolved_reason,device_ts)
+                VALUES ('reason-event','reason-import','fixture-device',1,?,1,'CONTACT',?,'REJECTED',?,'2018-01-01T00:00:00Z')""",
+                (rid, json.dumps({"result": "REACHED", "pii_purged": True}), "가상 주민 전화 01000000000"))
+        result = self.purge()
+        self.assertEqual(result.get("repaired_requests"), 1)
+        self.assertEqual(self.con.execute("SELECT resolved_reason FROM result_event WHERE event_id='reason-event'").fetchone()[0], PV.PURGED)
+        repaired = self.row(rid)
+        self.assertEqual(repaired["req_ver"], original["req_ver"] + 1)
+        self.assertEqual(repaired["pii_purged_at"], original["pii_purged_at"])
+        chain_count = self.con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        self.assertTrue(PV.verify_audit(self.con)["ok"])
+        self.assertIsNone(self.purge().get("repaired_requests"))
+        self.assertEqual(self.row(rid), repaired)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], chain_count)
+
+    def test_purged_pending_correction_is_not_repaired_again_for_its_system_reason(self):
+        rid, editor = self.request(finished=True)
+        with T.SV.LOCK, T.S.tx(self.con):
+            self.con.execute("INSERT INTO result_import (id,channel,device_id,package_sha256,imported_at) VALUES ('pending-import','USB','fixture-device','pending-fixture','2018-01-01T00:00:00Z')")
+            self.con.execute("""INSERT INTO result_event
+                (event_id,import_id,device_id,device_seq,request_id,assign_ver,kind,body_json,apply_status,device_ts)
+                VALUES ('pending-event','pending-import','fixture-device',1,?,1,'CORRECTION',?,'CONFLICT','2018-01-01T00:00:00Z')""",
+                (rid, json.dumps({"fields": {"name": "가상 비공개 이름"}, "reason": "가상 비공개 연락처 01000000000"})))
+        first = self.purge()
+        self.assertEqual(first["count"], 1)
+        self.assertIsNone(first.get("repaired_requests"))
+        purged = self.row(rid)
+        self.assertEqual(purged["req_ver"], editor["req_ver"] + 1)
+        event = self.con.execute("SELECT apply_status, resolved_reason FROM result_event WHERE event_id='pending-event'").fetchone()
+        self.assertEqual(event, ("REJECTED", "보유기간 경과로 개인정보 파기(미처리 요청)"))
+        chain_count = self.con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        self.assertIsNone(self.purge().get("repaired_requests"))
+        self.assertEqual(self.row(rid), purged)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], chain_count)
+
     def test_existing_purged_reentry_is_repaired_once_without_changing_business_records(self):
         rid, _ = self.request(finished=True)
         with T.SV.LOCK:

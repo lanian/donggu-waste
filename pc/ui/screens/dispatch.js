@@ -199,9 +199,10 @@ async function screenDispatch() {
     const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
     const crewStale = crewKey(p.crewIds) !== crewKey(selectedCrews());
     const planStale = p.date !== date.value || crewStale;
-    const planCurrent = () => current() && s.plan === p && p.date === date.value && crewKey(p.crewIds) === crewKey(selectedCrews());
     const confirmBtn = btn('배정 확정', wrap(async () => {
       if (!current() || s.plan !== p) return;
+      const confirmSeq = requestSeq;
+      const planCurrent = () => current() && confirmSeq === requestSeq && s.plan === p && p.date === date.value && crewKey(p.crewIds) === crewKey(selectedCrews());
       if (p.date !== date.value) throw new Error(`이 결과는 ${md(p.date)} 계산 결과입니다. 날짜를 바꿨으면 [노선 계산]을 다시 하세요.`);
       if (crewKey(p.crewIds) !== crewKey(selectedCrews())) throw new Error('수거팀 선택이 바뀌었습니다. [노선 계산]을 다시 하세요.');
       if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }

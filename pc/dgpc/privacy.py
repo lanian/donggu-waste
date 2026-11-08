@@ -334,6 +334,7 @@ def purge_preview(con, today: str | None = None) -> dict:
 
 
 _REQ_KINDS = ("FIELD_INTAKE", "CORRECTION")  # 휴대폰 현장 접수·정정 요청: 이름·연락처·주소가 본문에 들어 있음
+_PURGED_REVIEW_REASON = "보유기간 경과로 개인정보 파기(미처리 요청)"
 
 
 def _scrub_event_body(raw: str, kind: str | None = None) -> str:
@@ -449,7 +450,7 @@ def pseudonymize(con, rid: str, ts: str):
     for eid, kind, body, status in con.execute("SELECT event_id, kind, body_json, apply_status FROM result_event WHERE request_id=?", (rid,)).fetchall():
         con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (_scrub_event_body(body, kind), eid))
         if status == "CONFLICT" and kind in _REQ_KINDS:  # 처리하지 않은 정정 요청은 값이 지워져 반영할 수 없으므로 정리
-            con.execute("UPDATE result_event SET apply_status='REJECTED', resolved_reason=?, resolved_at=? WHERE event_id=?", ("보유기간 경과로 개인정보 파기(미처리 요청)", ts, eid))
+            con.execute("UPDATE result_event SET apply_status='REJECTED', resolved_reason=?, resolved_at=? WHERE event_id=?", (_PURGED_REVIEW_REASON, ts, eid))
     con.execute("UPDATE photo SET data=NULL, lat=NULL, lon=NULL, purged_at=COALESCE(purged_at, ?) WHERE request_id=?", (ts, rid))
     # 사람이 적은 사유·메모 글. void_reason 은 '취소됨' 표시도 겸하므로(IS NULL = 유효) 비우지 않고 (파기)로 바꾼다
     con.execute("UPDATE payment SET note='', void_reason=CASE WHEN void_reason IS NULL THEN NULL ELSE ? END WHERE request_id=?", (PURGED, rid))
@@ -460,8 +461,8 @@ def pseudonymize(con, rid: str, ts: str):
 
 def _pii_repair_candidates(con, ids=None) -> list[dict]:
     """이미 파기된 접수 중 재유입·누락된 민감 값만 고른다. 깨끗한 행은 버전·감사를 다시 쓰지 않는다."""
-    extra = " AND r.id IN (SELECT value FROM json_each(?5))" if ids is not None else ""
-    args = [PURGED, PURGED_PHONE, json.dumps(_PII_SNAPSHOT_KEYS), json.dumps(_PII_EVENT_KEYS)]
+    extra = " AND r.id IN (SELECT value FROM json_each(?6))" if ids is not None else ""
+    args = [PURGED, PURGED_PHONE, json.dumps(_PII_SNAPSHOT_KEYS), json.dumps(_PII_EVENT_KEYS), _PURGED_REVIEW_REASON]
     if ids is not None:
         args.append(json.dumps(list(ids)))
     return C.rows(con, """SELECT r.id, r.pii_purged_at FROM request r WHERE r.pii_purged_at IS NOT NULL AND (
@@ -480,6 +481,7 @@ def _pii_repair_candidates(con, ids=None) -> list[dict]:
         OR EXISTS (SELECT 1 FROM refund_case f WHERE f.request_id=r.id AND (f.account_last4 IS NOT NULL OR COALESCE(f.note,'')<>''
             OR COALESCE(f.approve_note,?1)<>?1 OR COALESCE(f.void_reason,?1)<>?1))
         OR EXISTS (SELECT 1 FROM item_link l WHERE l.request_id=r.id AND (COALESCE(l.reason,?1)<>?1 OR COALESCE(l.void_reason,?1)<>?1))
+        OR EXISTS (SELECT 1 FROM result_event e WHERE e.request_id=r.id AND COALESCE(e.resolved_reason,'') NOT IN ('',?1,?5))
         OR EXISTS (SELECT 1 FROM result_event e, json_each(CASE WHEN json_valid(e.body_json) THEN e.body_json ELSE '{}' END) j
             WHERE e.request_id=r.id AND ((j.key IN (SELECT value FROM json_each(?4)) AND j.value IS NOT NULL AND j.value<>'')
                 OR (e.kind IN ('FIELD_INTAKE','CORRECTION') AND (j.key IN ('name','phone','address','spot_note','memo')
