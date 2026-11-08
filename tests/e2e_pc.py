@@ -278,6 +278,8 @@ def run():
         ok(S.list_devices(store.connect())[0]["confirmed_at"], "지문 확인을 눌러야 사용 시작(그 전에는 목록을 보낼 수 없음)")
         chooser.get_by_label("새 팀 이름").fill("가상 1팀")
         chooser.get_by_role("button", name="연결").click()
+        # 팀 저장이 끝나 대화상자가 닫힌 뒤 이동한다. 기기의 '사용' 표시는 연결 전에도 이미 참이다.
+        expect(chooser).not_to_be_visible()
         expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("사용")
         page.goto(URL + "#/settings/crews")
         expect(page.locator("td input").first).to_have_value("가상 1팀")
