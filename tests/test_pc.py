@@ -2681,23 +2681,34 @@ def v13_refactor():
         ("POST", ("numbered-labels/receive", "numbered-labels/distribute", "numbered-labels/{id}/use",
                   "numbered-labels/{id}/void"), ("ADMIN", "INTAKE")),
         ("POST", ("numbered-labels/{id}/print", "reports/print"), ("ADMIN", "INTAKE", "LEAD")),
+        ("GET", ("dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
+                 "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
+        ("POST", ("dong-work/requests", "dong-work/requests/{id}", "dong-work/requests/{id}/cancel",
+                  "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
+        ("POST", ("users/{id}/dongs",), ("ADMIN",)),
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
+    self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}
+    for entry in snap:
+        if (entry["method"], entry["path"]) in self_routes:
+            entry["roles"] = (*entry["roles"], "DONG")
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·숫자 배출표 12개")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
-    ok(not diff, f"역할 × 경로 권한이 정리 전과 같음 (다른 곳: {diff[:5]})")
+    ok(not diff, f"기존 권한과 명시한 동별 업무·자기 정보 권한만 허용 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
-    ok(all(SV.allowed(role, x["method"], sample(x["path"])) == (role in x["roles"]) for x in snap for role in ("ADMIN", "INTAKE", "FIELD", "LEAD")),
-       "server.allowed() 가 경로 표에서 나온 판단과 같음(4역할 × 경로)")
+    ok(all(SV.allowed(role, x["method"], sample(x["path"])) == (role in x["roles"]) for x in snap for role in ("ADMIN", "INTAKE", "FIELD", "LEAD", "DONG")),
+       "server.allowed() 가 경로 표에서 나온 판단과 같음(5역할 × 경로)")
     ok(all(cur[(x["method"], x["path"])].must_change_ok == x["must_change_ok"] for x in snap), "임시 비밀번호 상태에서 쓸 수 있는 경로(me·password·bootstrap·prefs) 그대로")
     ok(all(SV.match(x["method"], sample(x["path"]))[0] is cur[(x["method"], x["path"])] for x in snap),
        "견본 주소가 모두 자기 경로로 맞춰짐(앞 경로에 가려지는 것 없음)")
-    ok(all(r.lock == ("read" if r.method == "GET" else r.lock) for r in SV.ROUTES) and
+    scoped_reads = {"bootstrap", "me", "dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
+                    "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"}
+    ok(all(r.lock == ("write" if r.pattern in scoped_reads else "read") for r in SV.ROUTES if r.method == "GET") and
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
                                                              "external/test", "route", "backup", "backup/auto", "backup/retention", "privacy/purge",
-                                                             "photo-purge", "refunds/sync", "integrity/full"},
-       "잠금 정책: GET = 조회 전용 연결, 잠금 밖 검증 POST 15개 = none, 나머지 POST = write")
+                                                             "photo-purge", "refunds/sync", "integrity/full", "dong-work/route"},
+       "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 POST 16개는 잠금 밖")
     ok(not SV.allowed("FIELD", "GET", "nothing-here") and SV.allowed("ADMIN", "GET", "nothing-here") and SV.allowed("INTAKE", "GET", "requests/a/b/c"),
        "경로 표에 없는 주소: 관리자·같은 첫 마디를 쓸 수 있는 역할은 404, 그 밖은 403")
     # 설정 등록표
