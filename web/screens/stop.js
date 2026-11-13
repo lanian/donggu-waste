@@ -10,10 +10,14 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, saveFailed, saving, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
+const collectionWrites = new WeakMap();
+const settledStateWrites = new WeakSet();
+const collectionPending = () => saveFailed || S.hasPendingSecure('state');
+const priorQty = (stop, line) => Math.max(0, Number(stop.items.find((item) => item.line_id === line.line_id)?.prior_collected) || 0);
 
 // 화면/복사 전용: 주민 정보나 전송 동작을 포함하지 않고 PC의 수거 입력을 돕는다.
 function screenPcInputHelp(id) {
@@ -21,12 +25,19 @@ function screenPcInputHelp(id) {
   const stop = source && findStop(id);
   const back = () => go('/stop/' + id);
   if (!source || !stop || stop.pii_purged) return h('main', {}, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'), h('p', {}, '이 접수의 입력 도움을 표시할 수 없습니다.'));
+  const activeWrite = collectionWrites.get(source)?.get(id), route = location.hash;
+  const stateWrite = saving, waitingStateWrite = !settledStateWrites.has(stateWrite);
+  const busySave = !!activeWrite || waitingStateWrite;
+  const eventsKey = () => JSON.stringify(source.events.filter((event) => event.request_id === id));
+  const snapshot = eventsKey();
   const d = deriveStop(stop, source.events);
   const last = [...source.events].reverse().find((e) => e.request_id === stop.request_id && e.kind === 'ATTEMPT'
     && !(e.seq <= (stop.since_seq || 0)) && (!stop.pc_collection_ver || e.base_req_ver >= stop.pc_collection_ver && e.body?.pc_collection_ver === stop.pc_collection_ver));
   const instant = last && new Date(last.ts);
   const day = instant && Number.isFinite(instant.getTime()) ? new Date(instant.getTime() + 9 * 3600000).toISOString().slice(0, 10) : todayKST();
-  const status = d.outcome ? LABEL.outcome[d.outcome] : '결과 미확정 · 실제 수거 여부를 확인하세요';
+  const status = busySave ? '저장 중 · 저장 결과를 확인한 뒤 PC에 전달하세요'
+    : collectionPending() ? '저장 대기 · 수거 기록을 다시 저장한 뒤 PC에 전달하세요'
+    : d.outcome ? LABEL.outcome[d.outcome] : '결과 미확정 · 실제 수거 여부를 확인하세요';
   const rows = d.lines.map((line) => {
     const previous = (stop.items.find((i) => i.line_id === line.line_id)?.prior_collected || 0);
     return { ...line, previous, added: Math.max(0, line.qty_collected - previous) };
@@ -36,6 +47,10 @@ function screenPcInputHelp(id) {
     'PC에서 같은 접수를 찾아 실제 수거일·이번 수거 개수를 확인하고 저장하세요.'].join('\n');
   const fallback = h('textarea', { readonly: true, hidden: true, rows: 6, class: 'search', 'aria-label': 'PC 전달 내용' }, note);
   const message = h('p', { class: 'small', role: 'status' });
+  const current = () => st === source && body.isConnected && location.hash === route && findStop(id) === stop;
+  const canCopy = () => current() && !collectionPending() && !collectionWrites.get(source)?.has(id)
+    && stateWrite === saving && settledStateWrites.has(saving) && snapshot === eventsKey();
+  const refresh = () => { if (current()) render(); };
   const body = h('section', { class: 'pc-input-help' },
     h('p', { class: 'small' }, 'PC에서 찾을 접수번호'),
     h('strong', { class: 'pc-help-receipt', 'aria-label': 'PC에서 찾을 접수번호' }, stop.receipt_no),
@@ -46,10 +61,21 @@ function screenPcInputHelp(id) {
       h('p', {}, `누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}`))),
     h('p', { class: 'small' }, 'PC: 접수 검색 → 같은 접수번호 → 수거 처리. PC의 이전 수거 수량을 확인하고 이번에 추가 수거한 개수만 입력하세요.'),
     btn('전달 내용 복사', async () => {
-      if (st !== source || !body.isConnected) return;
-      try { await navigator.clipboard.writeText(note); if (st === source && body.isConnected) message.textContent = '전달 내용을 복사했습니다.'; }
-      catch { if (st === source && body.isConnected) { fallback.hidden = false; fallback.focus(); fallback.select(); message.textContent = '선택된 내용을 길게 눌러 복사하세요.'; } }
-    }, 'big primary'), fallback, message);
+      if (!canCopy()) { refresh(); return; }
+      try {
+        await navigator.clipboard.writeText(note);
+        if (canCopy()) message.textContent = '전달 내용을 복사했습니다.'; else refresh();
+      } catch {
+        if (!canCopy()) { refresh(); return; }
+        fallback.hidden = false; fallback.focus(); fallback.select(); message.textContent = '선택된 내용을 길게 눌러 복사하세요.';
+      }
+    }, 'big primary', { disabled: busySave || collectionPending() }), fallback, message);
+  if (activeWrite) activeWrite.promise.then(refresh, refresh);
+  // 스티커/추가 금액처럼 직접 기록을 쓰는 경로도 암호화 저장 응답까지 확인한다.
+  if (waitingStateWrite) {
+    const settled = () => { settledStateWrites.add(stateWrite); setTimeout(refresh, 0); };
+    stateWrite.then(settled, settled);
+  }
   return h('main', { class: 'pc-help-page' }, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'),
     h('p', { class: 'small' }, '휴대폰 내용을 보면서 PC에 입력하세요. 이 화면에서는 수거 결과를 변경하지 않습니다.'), body);
 }
@@ -78,38 +104,49 @@ async function smsSheet(stop, d) {
 }
 // 스티커·신고필증 확인 (품목별 3가지). 없음·불일치면 그 품목을 수거할지 바로 정한다.
 async function stickerCheck(stop, l, result) {
-  if (result === 'OK') { await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result }); return render(); }
+  const source = st, route = location.hash;
+  const active = () => st === source && location.hash === route && findStop(stop.request_id) === stop;
+  if (result === 'OK') { await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result }); if (active()) return render(); return; }
   const v = await sheet({ title: `${l.name} — 스티커·필증 ${LABEL.sticker[result]}`,
     text: '이 품목을 어떻게 할까요? 미수거로 하면 "스티커·필증 없음·불일치" 사유로 남습니다.',
     input: result === 'MISMATCH' ? { label: '붙어 있는 번호 (선택)', placeholder: '예: 2611-0042' } : null,
     choices: [{ label: '그래도 수거', value: 'COLLECT', cls: 'primary' }, { label: '미수거 (사유 기록)', value: 'LEAVE' }] });
-  if (v == null) return;
+  if (v == null || !active()) return;
+  await flushSteps();
+  if (!active()) return;
+  l = deriveStop(stop, st.events).lines.find((line) => line.line_id === l.line_id) || l;
   const decision = typeof v === 'object' ? v.value : v;
   const number = typeof v === 'object' ? v.text.slice(0, 30) : '';
   await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result, ...(number ? { number } : {}), decision });
-  if (decision === 'LEAVE') await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: 0, reason: 'NO_STICKER' });
-  render();
+  if (!active()) return;
+  if (decision === 'LEAVE') await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: Math.max(priorQty(stop, l), l.qty_confirmed), qty_collected: priorQty(stop, l), reason: 'NO_STICKER' });
+  if (active()) render();
 }
 // 현장 금액 변경 고지: 접수 때보다 금액이 늘면 주민 안내 결과를 기록한다. 거부하면 늘어난 품목은 미수거.
 // 돌려주는 값: true = 계속 저장, false = 저장 멈춤
 async function feeNotice(stop, d) {
+  const source = st, route = location.hash;
+  const active = () => st === source && location.hash === route && findStop(stop.request_id) === stop;
   const x = feeExtra(d), f = d.fee;
   const v = await sheet({ title: `추가 금액 ${won(x)}`,
     text: `접수 당시 ${won(f.received)} → 현장 확인 ${won(f.confirmedSubtotal)}${f.pendingCount ? ` (금액 확인 대기 ${f.pendingCount}건 제외)` : ''}.`
       + (f.reductionRate ? ` 감면 ${f.reductionRate}% 적용 시 늘어나는 부과 금액은 ${won(applyReduction(x, f.reductionRate, f.reductionRoundUnit).levied)}입니다.` : '') + ' 주민에게 안내하고 결과를 고르세요.',
     choices: [{ label: LABEL.feeResponse.AGREED, value: 'AGREED', cls: 'primary' }, { label: LABEL.feeResponse.NOTIFIED, value: 'NOTIFIED' },
       { label: LABEL.feeResponse.REFUSED, value: 'REFUSED', cls: 'danger' }] });
-  if (v == null) return false;
+  if (v == null || !active()) return false;
   const body = { received: f.received, total: f.confirmedSubtotal, extra: x, pending: f.pendingCount, response: v };
   if (v !== 'REFUSED') { await addEvent(stop, 'FEE_NOTICE', body); return true; }
   // 늘어난 부분: 현장 추가 품목 전체, 접수 품목은 접수 수량을 넘는 만큼
   const lines = [];
   for (const l of d.lines) {
+    if (!active()) return false;
     if (l.price == null) continue;
-    if (l.kind === 'FIELD' && l.qty_confirmed > 0) { lines.push(l.line_id); await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: 0, reason: 'FEE_REFUSED' }); }
-    else if (l.kind === 'RECEIVED' && l.qty_confirmed > l.qty_received) { lines.push(l.line_id); await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: Math.min(l.qty_collected, l.qty_received), reason: 'FEE_REFUSED' }); }
+    if (l.kind === 'FIELD' && l.qty_confirmed > 0) { lines.push(l.line_id); await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: priorQty(stop, l), reason: 'FEE_REFUSED' }); }
+    else if (l.kind === 'RECEIVED' && l.qty_confirmed > l.qty_received) { lines.push(l.line_id); await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: Math.max(priorQty(stop, l), Math.min(l.qty_collected, l.qty_received)), reason: 'FEE_REFUSED' }); }
   }
+  if (!active()) return false;
   await addEvent(stop, 'FEE_NOTICE', { ...body, lines });
+  if (!active()) return false;
   ui.tried = stop.request_id; ui.outcomeMsg = '추가 금액을 거부한 품목을 미수거로 바꿨습니다. 결과를 다시 골라 주세요 (일부 수거·미수거).';
   render();
   return false;
@@ -133,21 +170,44 @@ function loadGuide(items) {
 async function screenStop(id) {
   const stop = findStop(id);
   if (!stop) { go('#/home'); return h('main'); }
+  const source = st, route = location.hash;
+  let view;
+  const owned = () => st === source && findStop(id) === stop;
+  const current = () => owned() && !!view?.isConnected && location.hash === route;
+  if (!collectionWrites.has(source)) collectionWrites.set(source, new Map());
+  const writes = collectionWrites.get(source), activeWrite = writes.get(id);
+  const pendingSave = collectionPending(), busySave = !!activeWrite;
+  const resultUnsaved = pendingSave || busySave;
   const d = deriveStop(stop, st.events);
   // 새 목록에서 바뀐 표시는 한 번 열어 보면 지운다
   const seen = (st.listChanges || {})[id];
   if (seen) { delete st.listChanges[id]; commit(); }
   const purged = !!stop.pii_purged;
-  const setLine = async (l, patch) => {
+  const setLine = async (l, patch, acceptedQuantity = false) => {
+    // 이미 누른 수량은 화면 이동·앞선 저장 실패 뒤의 flush에서도 같은 접수에 보존한다.
+    if (!owned() || !acceptedQuantity && (!current() || collectionPending() || writes.has(id))) return;
     // 화면을 그린 뒤 다른 수량이 저장됐을 수 있으니 지금 기록에서 다시 계산한 값 위에 바꾼 칸만 덮는다
     const now = deriveStop(stop, st.events).lines.find((x) => x.line_id === l.line_id) || l;
     const v = { qty_confirmed: now.qty_confirmed, qty_collected: now.qty_collected, reason: now.reason, ...patch };
+    v.qty_confirmed = Math.max(priorQty(stop, l), v.qty_confirmed);
+    v.qty_collected = Math.max(priorQty(stop, l), v.qty_collected);
     if (v.qty_collected > v.qty_confirmed) v.qty_collected = v.qty_confirmed;
-    await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, ...v });
-    render();
+    const write = addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, ...v });
+    const previous = writes.get(id);
+    if (previous?.kind === 'collection') { await write; return; } // 바깥 결과 저장을 교체하거나 자기 자신을 기다리지 않는다.
+    const tracked = { kind: 'line' };
+    tracked.promise = Promise.all([...(previous ? [previous.promise] : []), write]).finally(() => {
+      if (writes.get(id) === tracked) writes.delete(id);
+    });
+    writes.set(id, tracked); freezeCollection();
+    await tracked.promise;
+    if (current()) render();
   };
 
   const smsLog = st.events.filter((e) => e.request_id === id && e.kind === 'SMS_INTENT');
+  const helpButton = !purged ? btn('PC 입력 도움', () => {
+    if (current() && !collectionPending() && !writes.has(id)) pcInputHelp(stop);
+  }, 'big', { disabled: resultUnsaved }) : null;
   const info = h('section', { class: 'card who' },
     seen ? h('p', { class: 'notice changed-note' }, '새 목록에서 바뀐 곳: ' + seen.map((c) => F.DIFF_LABEL[c] || c).join(', ')) : null,
     purged ? h('p', { class: 'name' }, '개인정보 정리됨') : h('p', { class: 'name' }, stop.name),
@@ -158,7 +218,7 @@ async function screenStop(id) {
     stop.spot_note ? h('p', { class: 'spot' }, '배출 위치: ' + stop.spot_note) : null,
     stop.memo ? h('p', { class: 'memo' }, '요청: ' + stop.memo) : null,
     h('p', { class: 'small' }, stop.eta ? `${stop.receipt_no} · 도착 예정 ${stop.eta}` : stop.receipt_no),
-    !purged ? btn('PC 입력 도움', () => pcInputHelp(stop), 'big') : null,
+    helpButton,
     stop.pc_collection_ver ? h('p', { class: 'notice small' }, 'PC에서 직접 입력한 수거량을 반영한 목록입니다. 이전 수거분에서 이어서 계산합니다.') : null,
     stop.levy_no ? h('p', { class: 'small levy-no' }, `부과번호 ${stop.levy_no}`) : null,
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
@@ -203,8 +263,9 @@ async function screenStop(id) {
         l.price == null ? h('span', { class: 'amt pending' }, '확인 대기') : h('span', { class: 'amt', 'aria-label': `금액 ${won(l.price * l.qty_confirmed)}` }, won(l.price * l.qty_confirmed))),
       h('div', { class: 'price' }, l.price == null ? '금액 확인 대기' : `${won(l.price)} / ${l.unit_label} × ${l.qty_confirmed}`),
       l.kind === 'RECEIVED' ? h('div', { class: 'row' }, h('span', {}, '접수 수량'), h('span', { class: 'val' }, l.qty_received)) : null,
-      h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }), 0, 99, 350, `${l.name} 현장 수량`)),
-      h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }), 0, l.qty_confirmed, 350, `${l.name} 실은 수량`)),
+      h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }, true), priorQty(stop, l), 9999, 350, `${l.name} 현장 수량`)),
+      h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`)),
+      priorQty(stop, l) ? h('p', { class: 'small' }, `이전 수거 ${priorQty(stop, l)}${l.unit_label} · 이번 추가 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label} · 누적 ${l.qty_collected}${l.unit_label}`) : null,
       showLeft(l) ? h('div', { class: 'row' + (l.remaining ? ' left' : '') }, h('span', {}, '못 실은 수량'), h('span', { class: 'val' }, `${l.remaining} ${l.unit_label}`)) : null,
       l.remaining && showLeft(l) ? (() => {
         const sel = h('select', { class: 'reason' + (l.reason || ui.tried !== id ? '' : ' need'), 'aria-label': `${l.name} 못 실은 사유`, onchange: (e) => setLine(l, { reason: e.target.value }) },
@@ -257,32 +318,74 @@ async function screenStop(id) {
     h('p', { class: 'small' }, '사진은 앱 안에만 암호화 저장되며 갤러리에 남지 않습니다. 찍은 시각(과 허용했으면 위치)이 함께 기록됩니다.'));
 
   const msg = h('p', { class: 'msg' });
+  const freezeCollection = () => {
+    if (helpButton) helpButton.disabled = true;
+    for (const section of [lines, outcome]) section.querySelectorAll('button,input,select,textarea').forEach((element) => { element.disabled = true; });
+    const nextButton = dock.querySelector('.dock-next');
+    if (nextButton) { nextButton.disabled = true; nextButton.textContent = '저장 중…'; }
+  };
+  const runCollection = (fn, { retry = false } = {}) => () => {
+    if (!current() || writes.has(id)) return;
+    if (collectionPending() && !retry) { ui.tried = id; ui.outcomeMsg = '대기 중인 수거 기록을 먼저 다시 저장하세요.'; render(); return; }
+    const operation = { kind: 'collection' };
+    operation.promise = Promise.resolve().then(async () => {
+      try { await fn(); }
+      catch (error) { if (current()) { ui.tried = id; ui.outcomeMsg = errMsg(error); } }
+      finally {
+        if (writes.get(id) === operation) writes.delete(id);
+        if (current()) await render();
+      }
+    });
+    writes.set(id, operation); freezeCollection();
+    return operation.promise;
+  };
+  const savedResult = (saved, text) => {
+    if (!current()) return;
+    if (saved) { ui.tried = null; ui.outcomeMsg = ''; toast(text); }
+    else { ui.tried = id; ui.outcomeMsg = '수거 기록을 저장하지 못했습니다. 앱을 닫지 말고 저장 다시 시도를 눌러 주세요.'; }
+  };
+  const retryCollection = runCollection(async () => {
+    const saved = await commit();
+    savedResult(saved, '수거 기록을 다시 저장했습니다');
+  }, { retry: true });
   // 추가 금액을 거부했거나 스티커가 없어 두고 가기로 한 품목은 [전부 실음]에서도 싣지 않은 채로 둔다
   const KEEP_OUT = ['FEE_REFUSED', 'NO_STICKER'];
   const fillAll = async () => {
     await flushSteps();
+    if (!current()) return null;
     const cur = deriveStop(stop, st.events);
-    for (const l of cur.lines) if (!KEEP_OUT.includes(l.reason) && l.qty_collected !== l.qty_confirmed) await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: l.qty_confirmed, reason: '' });
+    for (const l of cur.lines) {
+      if (!current()) return null;
+      if (!KEEP_OUT.includes(l.reason) && l.qty_collected !== l.qty_confirmed) await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: l.qty_confirmed, qty_collected: l.qty_confirmed, reason: '' });
+    }
+    if (!current()) return null;
     return deriveStop(stop, st.events);
   };
-  const fail = (t) => { ui.tried = id; ui.outcomeMsg = t; render(); };
+  const fail = (t) => { ui.tried = id; ui.outcomeMsg = t; };
   const outMsg = h('p', { class: 'msg err', role: 'alert' }, ui.outcomeMsg && ui.tried === id ? ui.outcomeMsg : '');
-  const outcome = h('section', { class: 'card' }, h('h2', {}, '수거 결과', d.outcome ? h('span', { class: 'hint' }, ' — 저장됨: ' + LABEL.outcome[d.outcome]) : null),
+  const outcome = h('section', { class: 'card' }, h('h2', {}, '수거 결과', d.outcome ? h('span', { class: 'hint' }, (resultUnsaved ? ' — 저장 대기: ' : ' — 저장됨: ') + LABEL.outcome[d.outcome]) : null),
+    pendingSave ? h('div', { class: 'notice', role: 'status' }, h('strong', {}, '수거 기록 저장 대기'),
+      h('p', { class: 'small' }, '이 창의 수량·결과는 남아 있습니다. 같은 기록을 다시 저장하며 새 수거 기록을 만들지 않습니다.'),
+      btn('저장 다시 시도', retryCollection, 'primary big')) : null,
     // 가장 흔한 경우를 한 번에: 모든 품목을 실은 것으로 채우고 완료 저장
-    btn('전부 실음 · 수거 완료', async () => {
+    btn('전부 실음 · 수거 완료', runCollection(async () => {
       await flushSteps();
+      if (!current()) return;
       const d = deriveStop(stop, st.events);
       if (needsFeeNotice(d) && !(await feeNotice(stop, d))) return;
+      if (!current()) return;
       ui.tried = null; ui.outcomeMsg = '';
       const after = await fillAll();
+      if (!after || !current()) return;
       const left = after.lines.filter((l) => l.qty_collected < l.qty_confirmed);
-      if (left.length) { await addEvent(stop, 'ATTEMPT', { outcome: 'PARTIAL' }); toast(`일부 수거로 저장했습니다 (안 싣기로 한 품목 ${left.length}개는 남김)`); render(); return; }
-      await addEvent(stop, 'ATTEMPT', { outcome: 'DONE' }); toast('수거 완료로 저장했습니다'); render();
-    }, d.outcome === 'DONE' ? 'primary huge on' : 'primary huge'),
+      if (left.length) { savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'PARTIAL' }), `일부 수거로 저장했습니다 (안 싣기로 한 품목 ${left.length}개는 남김)`); return; }
+      savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'DONE' }), '수거 완료로 저장했습니다');
+    }), d.outcome === 'DONE' && !resultUnsaved ? 'primary huge on' : 'primary huge', { disabled: pendingSave || busySave }),
     outMsg,
-    h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(LABEL.outcome[k], async () => {
+    h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(LABEL.outcome[k], runCollection(async () => {
       // 사유·수량을 고른 직후 누르면 화면이 아직 다시 그려지기 전일 수 있다: 모아 둔 수량을 먼저 저장하고 지금 기록으로 판단
       await flushSteps();
+      if (!current()) return;
       const d = deriveStop(stop, st.events);
       const left = d.lines.filter((l) => l.remaining > 0);
       if (k !== 'ON_HOLD' && !left.length) return fail('못 실은 품목이 없습니다. 모두 실었으면 [전부 실음 · 수거 완료]를 누르세요.');
@@ -293,19 +396,21 @@ async function screenStop(id) {
       // 부재·배출 안 됨으로 미수거: 사진 또는 "사진 불가" 이유가 있어야 한다
       if (k === 'NOT_COLLECTED' && (d.contact === 'NO_ANSWER' || left.some((l) => l.reason === 'NOT_PUT_OUT')) && !d.photos.length && !pendingPhotos.some((p) => p.stopId === id)) {
         const why = await evidence(stop, d);
-        if (!why) return;
+        if (!why || !current()) return;
         body.no_photo_reason = why;
       }
       if (k === 'PARTIAL' && needsFeeNotice(d) && !(await feeNotice(stop, d))) return;
+      if (!current()) return;
       ui.tried = null; ui.outcomeMsg = '';
-      await addEvent(stop, 'ATTEMPT', body); toast('저장했습니다'); render();
-    }, d.outcome === k ? 'opt on' : 'opt'))),
+      savedResult(await addEvent(stop, 'ATTEMPT', body), '저장했습니다');
+    }), d.outcome === k && !resultUnsaved ? 'opt on' : 'opt', { disabled: pendingSave || busySave }))),
     d.outcome ? h('div', { class: 'result-sum' },
-      h('p', {}, `저장된 결과: ${LABEL.outcome[d.outcome]}`),
+      h('p', {}, `${resultUnsaved ? '저장 대기 결과' : '저장된 결과'}: ${LABEL.outcome[d.outcome]}`),
+      h('p', { class: 'small' }, '수량을 다시 바꿨다면 수거 결과도 다시 골라 저장하세요.'),
       d.notice ? h('p', {}, `추가 금액 ${won(d.notice.extra)}: ${LABEL.feeResponse[d.notice.response] || d.notice.response}`) : null,
       d.noPhotoReason ? h('p', {}, `사진 불가 사유: ${LABEL.noPhoto[d.noPhotoReason] || d.noPhotoReason}`) : null,
       Object.values(d.stickers).some((x) => x.result !== 'OK') ? h('p', {}, '스티커·필증 문제 품목 있음') : null) : null,
-    btn('품목 수량을 모두 실음으로 채우기', async () => { await fillAll(); render(); }, 'ghost link'),
+    btn('품목 수량을 모두 실음으로 채우기', runCollection(async () => { await fillAll(); }), 'ghost link', { disabled: pendingSave || busySave }),
     msg, fieldMemo(stop, d));
 
   const manage = isSolo() ? h('section', { class: 'card' }, h('h2', {}, '접수 관리'),
@@ -326,29 +431,33 @@ async function screenStop(id) {
   const next = seqList.slice(seqList.indexOf(stop) + 1).find((x) => deriveStop(x, st.events).progress !== 'DONE');
   // 결과를 저장하기 전에는 "결과 저장 ↓", 저장한 뒤에는 "다음 N번 ▶" — 기록 없이 건너뛰지 않게
   // 길안내는 전화 옆: 결과 저장 전에는 이 지점, 저장한 뒤에는 다음 미완료 지점
-  const saved = d.outcome || stop.status === 'CANCELLED';
+  const saved = !resultUnsaved && (d.outcome || stop.status === 'CANCELLED');
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
     btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': '목록으로' }),
     btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
     saved ? (next ? navBtn('다음 길안내', next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
-    saved
+    busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
+      : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
       ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
       : btn('결과 저장 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
   contact.id = 'st-contact'; lines.id = 'st-items'; photos.id = 'st-photos'; outcome.id = 'st-result';
   const itemsDone = d.lines.length > 0 && st.events.some((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT');
-  const steps = [['st-contact', '연락', d.contact !== 'NOT_CONTACTED'], ['st-items', '품목', itemsDone], ['st-photos', '사진', d.photos.length > 0], ['st-result', '결과', !!d.outcome]];
-  const nextStep = d.outcome ? null : steps.find(([, , done]) => !done);
+  const steps = [['st-contact', '연락', d.contact !== 'NOT_CONTACTED'], ['st-items', '품목', itemsDone], ['st-photos', '사진', d.photos.length > 0], ['st-result', '결과', !!d.outcome && !resultUnsaved]];
+  const nextStep = d.outcome && !resultUnsaved ? null : steps.find(([, , done]) => !done);
   const stepNav = h('nav', { class: 'steps', 'aria-label': '처리 단계' }, ...steps.map(([sid, label, done], i) =>
     h('a', { href: '#', class: 'step' + (done ? ' done' : '') + (nextStep && nextStep[0] === sid ? ' next' : ''), 'aria-current': nextStep && nextStep[0] === sid ? 'step' : null,
       onclick: (e) => { e.preventDefault(); document.getElementById(sid).scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); } },
       h('span', { class: 'n' }, done ? '✓' : String(i + 1)), h('span', {}, label))));
-  return h('main', { class: 'with-dock' },
+  view = h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go(ui.stopBackTo || '#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`),
-      h('span', { class: `chip state p-${d.outcome || d.progress}` }, stop.status === 'CANCELLED' ? '취소' : d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress])),
+      h('span', { class: `chip state p-${resultUnsaved ? 'STARTED' : d.outcome || d.progress}` }, resultUnsaved ? '저장 대기' : stop.status === 'CANCELLED' ? '취소' : d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress])),
     stepNav, info, contact, lines, fee, photos, outcome, manage, dock);
+  if (pendingSave || busySave) lines.querySelectorAll('button,input,select,textarea').forEach((element) => { element.disabled = true; });
+  if (activeWrite) activeWrite.promise.then(() => { if (current()) render(); }, () => { if (current()) render(); });
+  return view;
 }
 
 // ------------------------------------------------------------ PC 연결 방식: 접수 변경 요청 (정정·취소). PC가 원본이라 바로 바꾸지 않고 사무실 확인을 거친다.

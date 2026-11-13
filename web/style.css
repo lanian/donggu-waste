@@ -16,6 +16,8 @@
   --shadow-up: 0 -1px 0 rgba(25, 31, 40, .06), 0 -8px 24px rgba(25, 31, 40, .07);
   --fs: 15px; --radius: 16px; --radius-sm: 12px; --tap: 56px; --bar-h: 64px; --tabbar-h: 68px; --gutter: 56px;
 }
+.auto-lock-times { border: 0; padding: 0; margin: 14px 0; min-width: 0; }
+.auto-lock-times:disabled { opacity: .55; }
 /* 밝기 테마: 자동(휴대폰 설정 따름) · 밝게 · 어둡게 (설정 → 화면) */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { --bg: #0f1419; --card: #1a2027; --ink: #eef1f4; --muted: #a7b0ba; --line: #2c343d; --line-strong: #3a444f;
@@ -535,6 +537,8 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .devcode-alt { margin-top: 8px; } .devcode-alt summary { cursor: pointer; font-weight: 700; color: var(--muted); padding: 8px 0; }
 /* 저장 실패 띠: 다시 저장될 때까지 계속 보인다 */
 .save-fail { position: fixed; left: 8px; right: 8px; top: 8px; z-index: 90; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--bad); color: var(--on-bad); font-weight: 700; box-shadow: var(--shadow); }
+/* PC 입력 도움에는 위쪽 복귀 버튼 하나뿐이므로 저장 오류 띠가 그 버튼을 가리지 않는다. */
+body:has(.pc-help-page) .save-fail { top: calc(80px + env(safe-area-inset-top)); }
 /* 앱이 가려지면(최근 앱 미리보기) 화면 내용을 숨김 */
 .veil body > * { visibility: hidden; }
 .veil body { background: var(--bg); }

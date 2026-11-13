@@ -8,9 +8,38 @@ import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
-import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setLockMs, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, unsent } from '../core.js';
+import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, unsent } from '../core.js';
 import { CHECKS, installCard, runningAsApp } from '../widgets.js';
 import { APP_VERSION } from '../app.js';
+
+function autoLockControls(times) {
+  const owner = st, hint = h('p', { class: 'small' }), error = h('p', { class: 'msg err', role: 'alert' });
+  const toggle = btn('', async () => {
+    if (st !== owner || !S.isUnlocked() || autoLockStatus().pending) return;
+    const enabled = !autoLockStatus().enabled, pending = setAutoLockEnabled(enabled);
+    sync();
+    const saved = await pending;
+    if (!root.isConnected || st !== owner) return;
+    sync();
+    if (saved) toast(enabled ? '자동 잠금을 켰습니다' : '자동 잠금을 껐습니다');
+  }, 'opt big', { role: 'switch', 'aria-label': '자동 잠금' });
+  const root = h('div', { class: 'auto-lock-controls' }, h('div', { class: 'fld-label' }, '자동 잠금'), toggle, hint, times, error);
+  function sync() {
+    const status = autoLockStatus();
+    toggle.textContent = status.pending ? '설정 저장 중…' : status.enabled ? '자동 잠금 켜짐' : '자동 잠금 꺼짐';
+    toggle.setAttribute('aria-checked', String(status.enabled));
+    toggle.classList.toggle('on', status.enabled); toggle.disabled = !!status.pending;
+    times.disabled = !status.enabled || !!status.pending;
+    hint.textContent = status.enabled ? '무조작 시간이 지나면 잠깁니다. 카메라·전화·문자·길안내 앱은 10분, 다른 앱은 2분까지 자리를 비울 수 있습니다.'
+      : '자동으로 잠그지 않습니다. 필요할 때 첫 화면의 [잠금]을 누르세요. 앱을 다시 열 때는 PIN을 입력합니다.';
+    error.textContent = status.error;
+  }
+  sync();
+  // 저장을 기다리며 설정 화면을 다시 열어도 이 부분만 갱신해 다른 입력 초안을 보존한다.
+  const pending = autoLockStatus().pending;
+  if (pending) pending.then(() => { if (root.isConnected && st === owner) sync(); });
+  return root;
+}
 
 async function screenSettings() {
   const dev = await S.getRaw('device');
@@ -25,9 +54,8 @@ async function screenSettings() {
   const bio = await S.getBio().catch(() => null);
   const bioOk = bio ? true : await BIO.bioAvailable();
   const bioCard = h('section', { class: 'card' }, h('h2', {}, '잠금'),
-    h('p', { class: 'small' }, '조작하지 않으면 자동으로 잠깁니다. 카메라·전화·문자·길안내 앱에 다녀오는 동안은 10분까지 잠그지 않습니다(그 밖의 다른 앱은 2분).'),
-    h('div', { class: 'fld-label' }, '자동 잠금'),
-    choice(LOCK_CHOICES.map((m) => [m, `${m}분`]), LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10, (v) => set({ lockMin: v }, `${v}분 동안 조작이 없으면 잠급니다`)),
+    autoLockControls(h('fieldset', { class: 'auto-lock-times' }, h('legend', { class: 'fld-label' }, '무조작 시간'),
+      choice(LOCK_CHOICES.map((m) => [m, `${m}분`]), LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10, (v) => set({ lockMin: v }, `${v}분 동안 조작이 없으면 잠급니다`)))),
     h('div', { class: 'fld-label' }, '지문·얼굴로 열기'),
     bio ? h('div', {}, h('p', { class: 'small' }, `등록됨 (${bio.at.slice(0, 10)}). 데이터 키는 생체 인증 뒤에만 풀리는 키로 감싸 저장됩니다.`),
       btn('지문·얼굴 등록 해제', async () => { await S.removeBio(); toast('지문·얼굴 잠금 해제를 껐습니다'); render(); }, 'big'))

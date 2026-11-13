@@ -133,7 +133,7 @@ def main(exe=None):
             dialog.get_by_role('button', name='입력 접기', exact=True).click()
             page.get_by_role('button', name='수거 처리', exact=True).click()
             expect(dialog.get_by_label('1번 이번 수거 개수', exact=True)).to_have_value('1')
-            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            dialog.get_by_role('button', name='저장 여부 다시 확인', exact=True).click()
             expect(dialog).to_have_count(0)
             assert api('requests/' + retry['id'])['state']['lines'][0]['qty_collected'] == 1
             assert api('label-auto?dong_id=' + dong['id'])['assigned'] == 4

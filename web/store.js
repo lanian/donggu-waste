@@ -29,8 +29,9 @@ function idb() {
 }
 // 저장소가 열릴 때까지(다른 창이 붙잡고 있으면 놓을 때까지) 기다리는 약속. 화면은 이것을 보고 '기다리는 중'을 보여 준다.
 export const whenReady = () => idb();
-async function tx(mode, fn) {
+async function tx(mode, fn, epoch) {
   const db = await idb();
+  if (epoch !== undefined && epoch !== storageEpoch) throw Object.assign(new Error('저장소가 바뀌었습니다'), { code: 'STORE_CHANGED' });
   return new Promise((res, rej) => {
     const t = db.transaction('kv', mode);
     const out = fn(t.objectStore('kv'));
@@ -45,6 +46,19 @@ export const getRaw = (k) => tx('readonly', (s) => s.get(k));
 export const putRaw = (k, v) => tx('readwrite', (s) => s.put(v, k));
 export const delRaw = (k) => tx('readwrite', (s) => s.delete(k));
 export const keysRaw = () => tx('readonly', (s) => s.getAllKeys());
+
+// 자동 잠금은 이 기기의 비밀이 아닌 설정이다. 업무 상태나 PIN/데이터 키는 바꾸지 않는다.
+export const readAutoLock = async () => (await getRaw('auto-lock'))?.enabled !== false;
+export async function saveAutoLock(enabled) {
+  if (typeof enabled !== 'boolean') throw new Error('자동 잠금 설정값이 올바르지 않습니다.');
+  if (!dataKey) throw Object.assign(new Error('잠금을 해제한 뒤 설정해 주세요.'), { code: 'LOCKED' });
+  const epoch = storageEpoch, key = dataKey;
+  await tx('readwrite', (s) => {
+    if (dataKey !== key) throw Object.assign(new Error('잠금 상태가 바뀌었습니다.'), { code: 'LOCKED' });
+    return s.put({ enabled }, 'auto-lock');
+  }, epoch);
+  if (epoch !== storageEpoch) throw Object.assign(new Error('저장소가 바뀌었습니다'), { code: 'STORE_CHANGED' });
+}
 
 export async function persist() {
   try { return navigator.storage && navigator.storage.persist ? await navigator.storage.persist() : false; } catch { return false; }

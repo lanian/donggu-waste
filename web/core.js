@@ -155,6 +155,7 @@ async function loadState() {
   if (!st.mode && st.daylist) st.mode = 'PC'; // 0.1.0에서 쓰던 자료는 PC 연결 방식
   F.ensureGen(st); // 기록 세대(v0.13): 처음 쓰는 휴대폰·이전 버전 자료는 여기서 세대를 만든다(복원 때는 mergeRestore가 새로 만듦)
   lockMs = (LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10) * 60000;
+  autoLockEnabled = await S.readAutoLock().catch(() => true);
   lastActive = Date.now();
 }
 // 잠금 해제 직후: 화면 그리기, 기다리던 사진 저장
@@ -293,6 +294,25 @@ const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
 
 // ------------------------------------------------------------ 잠금
 let lockMs = 10 * 60000; // 잠금 해제 동안 설정값(5·10·15분)
+let autoLockEnabled = true, autoLockChange = null, autoLockError = '';
+const autoLockStatus = () => ({ enabled: autoLockEnabled, pending: autoLockChange, error: autoLockError });
+function setAutoLockEnabled(enabled) {
+  if (autoLockChange) return autoLockChange;
+  if (typeof enabled !== 'boolean' || !st || !S.isUnlocked()) return Promise.resolve(false);
+  autoLockError = '';
+  autoLockChange = (async () => {
+    try {
+      await S.saveAutoLock(enabled);
+      autoLockEnabled = enabled;
+      lastActive = Date.now(); hiddenAt = 0; handoffUntil = 0;
+      return true;
+    } catch {
+      autoLockError = '자동 잠금 설정을 저장하지 못했습니다. 이전 설정을 유지합니다.';
+      return false;
+    } finally { autoLockChange = null; }
+  })();
+  return autoLockChange;
+}
 // 잠그기 전에: 모아 둔 수량(stepper)·저장 중인 기록·저장 중인 사진이 모두 끝나야 데이터 키를 버린다.
 // (키를 먼저 버리면 뒤따르는 암호화 저장이 '잠겨 있습니다'로 실패해 메모리에만 있던 기록·사진이 사라진다)
 let locking = null;
@@ -317,7 +337,7 @@ function lockNow() {
 ['pointerdown', 'keydown'].forEach((t) => addEventListener(t, () => { lastActive = Date.now(); }, { passive: true }));
 setInterval(() => {
   // 화면이 가려져 있거나 다른 앱으로 넘어간 동안에는 무조작으로 세지 않는다(돌아올 때 따로 판단)
-  if (S.isUnlocked() && !document.hidden && Date.now() > handoffUntil && Date.now() - lastActive > lockMs) lockNow();
+  if (autoLockEnabled && S.isUnlocked() && !document.hidden && Date.now() > handoffUntil && Date.now() - lastActive > lockMs) lockNow();
 }, 15000);
 document.addEventListener('visibilitychange', () => {
   // 최근 앱 화면 미리보기에 이름·주소가 남지 않게 가린다
@@ -326,7 +346,7 @@ document.addEventListener('visibilitychange', () => {
   const away = hiddenAt ? Date.now() - hiddenAt : 0;
   const limit = hiddenAt && hiddenAt <= handoffUntil ? HANDOFF_MS : HIDDEN_LOCK_MS;
   handoffUntil = 0; hiddenAt = 0;
-  if (S.isUnlocked() && away > limit) { lockNow(); return; }
+  if (autoLockEnabled && S.isUnlocked() && away > limit) { lockNow(); return; }
   lastActive = Date.now();
   if (S.isUnlocked() && wakeRoute()) wantWake(true);
   if (S.isUnlocked() && ui.afterCall && location.hash === `#/stop/${ui.afterCall}`) render().then(() => { const c = document.getElementById('st-contact'); if (c) c.scrollIntoView({ block: 'start' }); });
@@ -589,7 +609,7 @@ const clearPhotoUrls = () => { photoUrls.forEach((u) => URL.revokeObjectURL(u));
 export {
   $app, BACKUP_WARN_MS, COLLECT_TTL_MS, END_OF_DAY_H, ERR, HANDOFF_MS, HIDDEN_LOCK_MS, LOCK_CHOICES,
   LOW_SPACE_MB, TEXT_SIZES, WIN_ID, addCrewEvent, addEvent, addrRoute, afterUnlock, ago,
-  allStops, appLogo, applyPrefs, applyTextSize, ask, btn, camInput, camInputs,
+  allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
   camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, dial, digits,
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,
@@ -598,7 +618,7 @@ export {
   mergePrefs, nextSeq, normAddr, openExternal, openSheets, pcStops, pcWorkDate, pendingPhotos,
   photoFlushing, photoUrls, prefs, reduceMotion, registeredNow, reloadWanted, reloadWhenSafe, render,
   routeStopId, saveBanner, saveFailed, savePhoto, saving, sessionChan, setLiveMap, setLockMs,
-  setPrefs, setRegisteredNow, setRender, setSt, settleWrites, sheet, smsTemplates, st,
+  setAutoLockEnabled, setPrefs, setRegisteredNow, setRender, setSt, settleWrites, sheet, smsTemplates, st,
   startCamera, stepFlush, stepper, stopCamera, storageLeft, tabBar, themeToggle, toast,
   todayKST, ui, unsent, wakeLock, wakeRoute, wantWake, withOverrides, withWorker,
   writesPending,

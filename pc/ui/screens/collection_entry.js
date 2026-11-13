@@ -61,20 +61,40 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
     inputmode: 'numeric', class: 'w-xs', 'aria-label': `${i + 1}번 이번 수거 개수` }));
   const left = info.lines.map(() => h('span'));
   let submitted = null, id = uuid();
+  const setQuantity = (i, value) => {
+    if (submitted) return;
+    quantities[i].value = value; draw();
+  };
+  const stepQuantity = (i, delta) => {
+    const input = quantities[i], n = Number(input.value);
+    if (submitted || input.value === '' || !Number.isInteger(n) || n < 0 || n > info.lines[i].remaining) return;
+    if (n + delta >= 0 && n + delta <= info.lines[i].remaining) setQuantity(i, n + delta);
+  };
+  const quick = info.lines.map((line, i) => ({
+    minus: btn('−', () => stepQuantity(i, -1), 'small', { 'aria-label': `${i + 1}번 수거 수량 줄이기` }),
+    plus: btn('+', () => stepQuantity(i, 1), 'small', { 'aria-label': `${i + 1}번 수거 수량 늘리기` }),
+    remaining: btn('남은 수량', () => setQuantity(i, line.remaining), 'small', { 'aria-label': `${i + 1}번 남은 수량 채우기` }),
+  }));
   const rows = info.lines.map((line, i) => h('tr', {}, h('th', { scope: 'row' }, `${i + 1}. ${line.name} ${line.spec || ''}`, h('small', { class: 'block muted' }, `확인 수량 ${line.confirmed}${line.unit_label}`)),
-    h('td', {}, `${line.previous}${line.unit_label}`), h('td', {}, quantities[i]), h('td', {}, left[i])));
+    h('td', {}, `${line.previous}${line.unit_label}`), h('td', {}, h('div', { class: 'row' }, quick[i].minus, quantities[i], quick[i].plus, h('span', {}, line.unit_label), quick[i].remaining)), h('td', {}, left[i])));
   const draw = () => {
     let added = 0, invalid = false;
-    info.lines.forEach((line, i) => { const n = Number(quantities[i].value); invalid ||= quantities[i].value === '' || !Number.isInteger(n) || n < 0 || n > line.remaining;
-      added += n; left[i].textContent = Number.isFinite(n) ? `${Math.max(0, line.remaining - n)}${line.unit_label}` : '확인 필요'; });
+    info.lines.forEach((line, i) => {
+      const n = Number(quantities[i].value), bad = quantities[i].value === '' || !Number.isInteger(n) || n < 0 || n > line.remaining;
+      invalid ||= bad; quantities[i].setAttribute('aria-invalid', String(bad));
+      quick[i].minus.disabled = !!submitted || bad || n === 0;
+      quick[i].plus.disabled = !!submitted || bad || n === line.remaining;
+      quick[i].remaining.disabled = !!submitted || (!bad && n === line.remaining);
+      added += n; left[i].textContent = bad ? '확인 필요' : `${line.remaining - n}${line.unit_label}`;
+    });
     const rest = info.lines.reduce((sum, line) => sum + line.remaining, 0) - added;
     summary.textContent = invalid ? '수량을 확인해 주세요.' : `이전 수거 ${info.previous_total}개 · 이번 수거 ${added}개 · 남음 ${rest}개 → ${rest === 0 ? '수거 완료' : info.previous_total + added ? '일부 수거' : '미수거'}`;
   };
   quantities.forEach((input) => input.addEventListener('input', draw));
   const all = btn('남은 수량 전부', () => { quantities.forEach((input, i) => { input.value = info.lines[i].remaining; }); draw(); }, 'small');
   const zero = btn('이번 수거 0개', () => { quantities.forEach((input) => { input.value = 0; }); draw(); }, 'small');
-  const controls = [day, reason, ...quantities, all, zero];
-  const freeze = (value) => controls.forEach((el) => { el.disabled = value; });
+  const controls = [day, reason, ...quantities, all, zero, ...quick.flatMap((row) => [row.minus, row.plus, row.remaining])];
+  const freeze = (value) => { controls.forEach((el) => { el.disabled = value; }); if (!value) draw(); };
   const close = btn('입력 접기', collapse, 'small');
   const message = h('p', { role: 'alert' });
   const heading = h('h3', { tabindex: -1 }, 'PC 수거 처리');
@@ -104,8 +124,8 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
     let result;
     try { result = await api(`${path}/${request.id}/collection`, { method: 'POST', body: submitted, _prefsOwner: owner }); }
     catch (error) {
-      if (error.status >= 400 && error.status < 500 && error.status !== 408) { submitted = null; id = uuid(); freeze(false); }
-      else error.message += ' 같은 저장 버튼을 누르면 동일한 요청의 반영 여부를 확인합니다.';
+      if (error.status >= 400 && error.status < 500 && error.status !== 408) { submitted = null; id = uuid(); freeze(false); save.textContent = '수거 결과 저장'; }
+      else { save.textContent = '저장 여부 다시 확인'; error.message += ' 같은 저장 버튼을 누르면 동일한 요청의 반영 여부를 확인합니다.'; }
       throw error;
     }
     finally { close.disabled = false; box.removeAttribute('aria-busy'); }

@@ -1,0 +1,25 @@
+# Collection Input and Save Improvements
+
+**Goal:** PC·모바일 수거 수량 입력과 저장 상태를 정확하고 쉽게 표시한다.
+
+**Approved scope:** User selected "PC·모바일 모두, 수량 입력과 저장 흐름부터". Keep actual collection date, additional PC quantity versus cumulative mobile quantity, preserved previous collections, maximum confirmed quantity, item IDs/payloads, numbered-label assignment and caller drafts.
+
+## Tasks and ownership
+
+1. [x] PC owner: `pc/ui/screens/collection_entry.js`, `tests/test_pc_collection_ui.py` and new `tests/test_collection_quick_ui.py`. Add per-line decrement/increment/fill-remaining and visible unit, respecting 0..remaining integer limits. Keep the existing aria labels and full-fill action. After an uncertain response label the frozen retry as "저장 여부 다시 확인"; keep the exact submitted payload/request ID and post-save reload behavior.
+2. [x] Mobile owner: `web/screens/stop.js` and new `tests/test_mobile_collection_save.py`. Reproduce and fix confirmed quantity 150 minus one becoming 99; use the intake limit 9999. Check actual persistence results before success/next-stop UI. Keep a failed ATTEMPT event in memory/recovery and retry committing it without adding another event. Clarify previous/current/cumulative quantities without changing cumulative event payloads; focus the first missing reason where useful.
+3. [x] Root owns shared lock changes, versions, package/CI/docs and integration. Avoid shared CSS/backend/API changes unless an observed failure requires a scoped change. Review source changes and actual browser regressions; verify both source and frozen PC workflows. Run related mobile collection/lock/photo/backup and business logic checks appropriate to changes.
+4. [ ] Release 0.14.15 together with the separately approved mobile automatic-lock switch, preserve production state/AGENTS.md, publish through required CI/Pages and verify live source/version/features/offline behavior.
+
+## Initial diagnostic evidence
+
+- Read-only real-PIN/IndexedDB probe under `D:/Temp/dg-collection-review-20261113` reproduced both mobile defects before implementation: 150 decrements to 99; failed encrypted state persistence shows success toast and next-stop action while disk lacks the ATTEMPT event. Source hashes and screenshots recorded.
+- PC quick controls regression was RED for a missing decrement button before production edits (`D:/Temp/dg-collection-quick-20261113/red.log`).
+- Core/store/settings are root-owned for the parallel auto-lock work. Collection agents do not edit them or commit/push/build/deploy.
+- Additional mobile diagnosis found that the cumulative quantity control could reduce values below `prior_collected`. Root approved a local UI/handler lower bound while preserving global derive/retirement and cumulative event payloads; regressions cover prior2 remaining at2 and prior2+today1 reducing to2/today0.
+- PC implementation source regression and existing collection UI pass against real temporary HTTP state; independent review finds no Important issue. New controls and unknown-response retry retain request body/ID, dates, drafts, stock allocation and confirmed refusal recovery. One initial parallel startup locator timeout was followed by two standalone passes and diagnostic capture was added; frozen verification remains the integration check.
+- Final mobile source is frozen at raw SHA256 `641bd9197903679dd640079b46de2851a80b5028dcea5c55c84840ee611b958c` (CRLF; deployment compares canonical Git blobs). Eleven real-PIN/IndexedDB regression cases and the existing PC input-help test pass. Review also reproduced and resolved helper copying during pending outcome/quantity/direct sticker saves, multiple simultaneous line writes and accepted debounce data lost after an earlier failure. Helper now checks settled business-save promises and a fresh copy snapshot; line saves are aggregated separately from outer collection operations.
+- The normal helper's initial settled-promise notification is deferred until DOM attachment, avoiding an initially disabled copy control. A helper-scoped CSS offset keeps its back button available under the persistent save-failure banner. Final read-only review reports no remaining Important/Critical issue.
+- Existing global ATTEMPT/retirement/export correction semantics remain unchanged. A short instruction asks users who edit quantities after an existing result to select/save the result again; no implicit rewriting of historical outcomes is added.
+- Frozen PC 0.14.15 passes new quick-entry/idempotency/stock tests and legacy DB/order/restart/theme suite. Packaged PC collection code matches final source bytes. ZIP 66,711,506 bytes, SHA256 `60dd9aaec69b62122aaaf422785290a96204102a6f83177ff3f3e2894f04200b`; shortcut targets the new EXE with a backup of the 0.14.14 shortcut in the evidence directory.
+- Root final integration passes eleven collection-save cases, the automatic-lock regression and all 186 existing mobile E2E checks against the final frozen source. Pending-save and previous-collection screenshots were inspected; evidence is under `D:/Temp/dg-auto-lock-20261113`.
