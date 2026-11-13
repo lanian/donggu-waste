@@ -44,11 +44,42 @@ export function searchFees(table, query) {
 
 export const won = (n) => (n == null ? '미확정' : n.toLocaleString('ko-KR') + '원');
 
+// 접수 저장 없이 현재 요금표로 계산한다. 확인 대기 행과 서로 다른 부과 단위를 보존한다.
+export function quoteFees(table, items) {
+  const rows = new Map((table?.rows || []).map((r) => [r.id, r]));
+  const qtyByUnit = {};
+  let confirmedSubtotal = 0, pendingCount = 0;
+  const lines = items.map((item) => {
+    const row = rows.get(item.fee_rate_id);
+    if (!row) throw new Error('요금표에서 찾을 수 없는 품목입니다. 삭제한 뒤 다시 골라 주세요.');
+    const qty = typeof item.qty === 'number' || typeof item.qty === 'string' ? Number(item.qty) : NaN;
+    if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error('수량은 1~9999 사이의 정수로 입력해 주세요.');
+    const confirmed = row.status === 'CONFIRMED' && Number.isSafeInteger(row.price) && row.price >= 0;
+    const amount = confirmed ? row.price * qty : null;
+    if (confirmed && !Number.isSafeInteger(amount + confirmedSubtotal)) throw new Error('계산할 수 있는 금액 범위를 넘었습니다. 수량을 확인해 주세요.');
+    if (confirmed) confirmedSubtotal += amount; else pendingCount++;
+    const unit = row.unit_label || '개';
+    qtyByUnit[unit] = (qtyByUnit[unit] || 0) + qty;
+    return { fee_rate_id: row.id, name: row.name, spec: row.spec, qty, unit_label: unit,
+      unit_price: confirmed ? row.price : null, amount };
+  });
+  return { lines, version: table?.version_id || '', qtyByUnit, confirmedSubtotal, pendingCount, total: pendingCount ? null : confirmedSubtotal };
+}
+
+export function feeQuoteText(quote, source = '') {
+  return ['수수료 계산 (감면 전)', `요금표 ${quote.version}`, source,
+    ...quote.lines.map((line) => `${line.name} ${line.spec} · ${line.qty}${line.unit_label} · ${line.amount == null ? '금액 확인 대기' : `${won(line.unit_price)} × ${line.qty} = ${won(line.amount)}`}`),
+    quote.pendingCount ? `확정 소계 ${won(quote.confirmedSubtotal)}\n합계 금액 확인 대기 (${quote.pendingCount}종)` : `합계 ${won(quote.total)}`,
+  ].filter(Boolean).join('\n');
+}
+
 // 한 접수 건의 현재 상태를 이벤트에서 계산한다 (이벤트는 추가만, 최신 값이 현재 값).
 export function deriveStop(stop, events) {
   // since_seq: 새 날짜 목록을 받은 시점. 그 전 기록(전날 방문)은 재방문 상태 계산에 넣지 않는다(이전 수거분은 prior_collected로 옴)
   const from = stop.since_seq || 0;
-  const mine = events.filter((e) => e.request_id === stop.request_id && !(e.seq <= from));
+  const mine = events.filter((e) => e.request_id === stop.request_id && !(e.seq <= from)
+    && (!(stop.pc_collection_ver && ['ITEM_RESULT', 'ATTEMPT', 'FIELD_ITEM_ADD', 'LOCATION_FIX', 'REVISIT_APPT'].includes(e.kind))
+      || e.base_req_ver >= stop.pc_collection_ver && e.body?.pc_collection_ver === stop.pc_collection_ver));
   // 재방문 목록은 남은 품목만 오며, 이전 방문에서 이미 수거한 수량(prior_collected)에서 이어서 센다.
   const lines = stop.items.map((it) => ({
     line_id: it.line_id, kind: it.line_kind || 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,

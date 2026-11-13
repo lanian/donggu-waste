@@ -418,6 +418,8 @@ def get_request(con, rid: str) -> dict:
     r["versions"] = rows(con, "SELECT req_ver, reason, at FROM request_version WHERE request_id=? ORDER BY req_ver DESC", (rid,))
     r["locked_lines"] = sorted(locked_lines(con, rid))
     r["state"] = derive(con, r)
+    from dgpc.pc_collection import preview as collection_preview
+    r['collection'] = collection_preview(con, r)
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event
         WHERE request_id=? ORDER BY device_ts""", (rid,))
     r["photos"] = rows(con, "SELECT photo_id, phase, recovery_status, purged_at, line_id, taken_at, acc, (lat IS NOT NULL) AS has_gps FROM photo WHERE request_id=?", (rid,))

@@ -9,8 +9,10 @@ async function screenLogin(initialState) {
   const pw2 = st.setup_needed ? h('input', { type: 'password', placeholder: '비밀번호 한 번 더', autocomplete: 'new-password' }) : null;
   const msg = h('p', { class: 'msg' });
   const go1 = wrap(async () => {
+    if (st.setup_needed && pw.value !== pw2.value) throw new Error('두 번 입력한 비밀번호가 다릅니다.');
+    // 새 쿠키가 적용되기 전에 이전 로그인에서 대기하던 외형 저장을 폐기한다.
+    setBoot(null, { sessionChanged: true });
     if (st.setup_needed) {
-      if (pw.value !== pw2.value) throw new Error('두 번 입력한 비밀번호가 다릅니다.');
       await post('setup', { username: user.value, display_name: dname.value, password: pw.value });
     } else await post('login', { username: user.value, password: pw.value });
     setBoot(null); render();
@@ -18,7 +20,12 @@ async function screenLogin(initialState) {
   (pw2 || pw).addEventListener('keydown', (e) => { if (e.key === 'Enter') go1(); });
   user.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); (dname || pw).focus(); } });
   pw.addEventListener('keydown', (e) => { if (e.key === 'Enter' && pw2) { e.preventDefault(); pw2.focus(); } });
-  setTimeout(() => (st.setup_needed ? dname : user).focus(), 30);
+  setTimeout(() => {
+    const target = st.setup_needed ? dname : user;
+    const active = document.activeElement;
+    const editing = target.closest('.login')?.contains(active) && active.matches('input, button, select, textarea, a');
+    if (target.isConnected && !editing) target.focus();
+  }, 30);
   return h('main', { class: 'login-wrap' },
     h('section', { class: 'login-intro', 'aria-labelledby': 'login-intro-title' },
       h('p', { class: 'login-eyebrow' }, 'DONGGU WASTE MANAGEMENT'),

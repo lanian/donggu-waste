@@ -9,7 +9,7 @@ import json
 import secrets
 import time
 
-from . import area as A, core as C, routing, service as S, users as U
+from . import area as A, core as C, routing, route_depots as DP, service as S, users as U
 
 READ_ROLES = frozenset({"ADMIN", "INTAKE", "LEAD", "DONG"})
 WRITE_ROLES = frozenset({"ADMIN", "INTAKE", "DONG"})
@@ -86,7 +86,7 @@ def safe_settings(con) -> dict:
 
 def _ids(con, u: dict, selected="all", *, date=None, bucket=None) -> set[str]:
     where, args = _selection(con, u, selected)
-    clauses = {"day": ("planned_date=? AND status<>'CANCELLED'", [date]),
+    clauses = {'all': ('1=1', []), "day": ("planned_date=? AND status<>'CANCELLED'", [date]),
                "done": ("planned_date=? AND status='DONE'", [date]),
                "unassigned": (f"planned_date=? AND {_OPEN} AND active_crew_id IS NULL", [date]),
                "overdue": (f"planned_date<? AND {_OPEN}", [date]),
@@ -220,6 +220,13 @@ def cancel(con, user: dict, rid: str, data: dict) -> dict:
     return S.cancel_request(con, rid, data.get("reason") or "", data.get("code") or None, data.get("req_ver"))
 
 
+def collect(con, user: dict, rid: str, data: dict) -> dict:
+    from dgpc.pc_collection import save
+    u = actor(con, user, write=True)
+    require_request(con, u, rid)
+    return save(con, rid, data)
+
+
 def assignments(con, user: dict, date=None, selected="all") -> list[dict]:
     u, date = actor(con, user), _date(date)
     allowed = _ids(con, u, selected or "all")
@@ -283,12 +290,15 @@ def prepare_route(con, user: dict, data: dict) -> dict:
             r["items"] = [{"name": line["name"], "spec": line["spec"], "qty": line["remaining"], "fee_rate_id": line["fee_rate_id"]}
                           for line in r["state"]["lines"] if line["remaining"]]
     crew_versions = _crew_versions(con, date, sorted(wanted))
-    basis = {"date": date, "dong": selected, "crew_versions": crew_versions}
+    settings = S.settings(con)
+    dongs = A.list_dongs(con)
+    context = DP.resolve(reqs, crews, dongs, settings['depot'], settings['end_site'])
+    basis = {"date": date, "dong": selected, "crew_versions": crew_versions, 'depot_signature': context['signature']}
     signed = {**basis, "scope": fingerprint(u), "requests": versions, "at": time.time()}
     basis["proof"] = _proof(signed)
     method = S.travel_method(con)
-    return {"user_scope": fingerprint(u), "basis": basis, "requests": reqs, "crews": crews, "settings": S.settings(con),
-            "dongs": A.list_dongs(con), "method": method, "kakao_key": S.secret(con, "kakao_rest_key") if method == "KAKAO" else "",
+    return {"user_scope": fingerprint(u), "basis": basis, "requests": reqs, "crews": crews, "settings": settings, 'route_context': context,
+            "dongs": dongs, "method": method, "kakao_key": S.secret(con, "kakao_rest_key") if method == "KAKAO" else "",
             "overrides": S.volume_overrides(con)}
 
 
@@ -300,7 +310,8 @@ def calculate(prepared: dict) -> dict:
                           travel_method=prepared["method"], kakao_key=prepared["kakao_key"], service_per_item=settings["service_min_per_item"],
                           time_limit_s=routing.clamp_time_limit(min(20, max(5, len(reqs) // 10))), volume_overrides=ov,
                           unload_site=settings["unload_site"], unload_min=settings["unload_min"], max_unloads=settings["max_unloads"],
-                          end_site=settings["end_site"], crew_pref=pref, unload_hours=settings["unload_hours"], lunch=settings["lunch"], base_first=settings["base_first"])
+                          end_site=settings["end_site"], crew_pref=pref, unload_hours=settings["unload_hours"], lunch=settings["lunch"], base_first=settings["base_first"],
+                          crew_depots=prepared['route_context']['crew_depots'], crew_required=prepared['route_context']['crew_required'])
     result["prefer_dong_crew"] = bool(settings["capacity"]["prefer_dong_crew"])
     result["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"], "lon": r["lon"],
                                      "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]], "status": r["status"], "dong": r["dong"],
@@ -321,6 +332,16 @@ def validate_route_result(con, user: dict, prepared: dict):
         r = require_request(con, u, rid)
         if rid not in selected or r["req_ver"] != version:
             raise C.StaleError("계산 중 접수가 바뀌었습니다. 다시 조회하고 계산하세요.")
+    _check_depots(con, proof)
+
+
+def _check_depots(con, proof):
+    try:
+        signature = DP.current(con, list(proof['requests']), list(proof['crew_versions']))['signature']
+    except C.UserError:
+        raise C.StaleError('차고지·담당팀 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
+    if signature != proof.get('depot_signature'):
+        raise C.StaleError('차고지·담당팀 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
 
 
 def assign(con, user: dict, data: dict) -> list[dict]:
@@ -332,8 +353,9 @@ def assign(con, user: dict, data: dict) -> list[dict]:
     proof = _read_proof(basis.get("proof"))
     if proof["scope"] != fingerprint(u) or proof["date"] != date or proof["dong"] != selected:
         raise C.StaleError("계정·담당 범위·기준일이 바뀌었습니다. 다시 계산하세요.")
-    if any(basis.get(k) != proof[k] for k in ("date", "dong", "crew_versions")):
+    if any(basis.get(k) != proof.get(k) for k in ("date", "dong", "crew_versions", 'depot_signature')):
         raise C.StaleError("계산 기준이 달라졌습니다. 다시 계산하세요.")
+    _check_depots(con, proof)
     plan = data.get("plan")
     if not isinstance(plan, dict) or not plan or any(not isinstance(stops, list) for stops in plan.values()):
         raise C.UserError("확정할 팀별 배정 목록을 확인하세요.")

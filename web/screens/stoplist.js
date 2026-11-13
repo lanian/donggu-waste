@@ -21,7 +21,6 @@ function daySummary(items) {
 }
 // 목록 찾기: 이름·주소·품목, 초성도 됨 (예: ㄱㅅ)
 function stopSearch(total) {
-  if (total < 6) return null;
   const q = h('input', { type: 'search', class: 'search', placeholder: '이름·주소·품목 찾기 (초성 가능)', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
   q.addEventListener('input', () => { ui.stopQ = q.value; clearTimeout(stopSearch.t); stopSearch.t = setTimeout(() => { render().then(() => { const el = document.querySelector('input[aria-label="목록에서 찾기"]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 250); });
   return q;

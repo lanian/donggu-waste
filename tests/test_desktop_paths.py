@@ -129,7 +129,8 @@ else:
     from build_desktop import asset_files, zip_distribution
     included = {path.relative_to(ROOT).as_posix() for path in asset_files()}
     ok({"data/labels.json", "data/fee_table.json", "data/item_handling.json", "pc/ui/start.js",
-        "web/vendor/maplibre/maplibre-gl-worker.mjs", "web/icons/icon-512.png"} <= included,
+        "web/vendor/maplibre/maplibre-gl-worker.mjs", "web/icons/icon-512.png",
+        "data/report_templates/monthly.xlsx", "data/report_templates/ledger.odt"} <= included,
        "PC 시작 화면·공유 worker·JSON·아이콘을 배포 자산에 포함")
     ok(not any(name.startswith(("pc/state/", "pc/out/", "tests/", "data/source/")) or name.endswith("derive_vectors.json")
                for name in included), "업무 자료·출력·시험 벡터·HWP 원문은 자산 목록에서 제외")

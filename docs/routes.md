@@ -42,6 +42,9 @@
 | `reports/monthly` | ✓ | ✓ |  | ✓ |  | read |  |  | 월보 집계(원자료 변경 없음). |
 | `reports/daily.csv` | ✓ | ✓ |  | ✓ |  | read |  | EXPORT | 개인정보 없는 일일 작업일지 전체 집계 CSV. |
 | `reports/monthly.csv` | ✓ | ✓ |  | ✓ |  | read |  | EXPORT | 개인정보 없는 월보 전체 집계 CSV. |
+| `label-usage` | ✓ | ✓ |  | ✓ |  | read |  |  | 수거 수량 기준 배출표 사용 장수 자동 집계(전체 기간 누적). |
+| `reports/forms` | ✓ | ✓ |  | ✓ |  | read |  |  | 동별 원본 서식의 실제 수거·재고 집계 미리보기(개인정보 제외). |
+| `label-auto` | ✓ | ✓ |  | ✓ |  | read |  |  | 동별 배출표 자동 배정·부족 장수와 재고 조회. |
 | `numbered-labels` | ✓ | ✓ |  | ✓ |  | read |  |  | 숫자 배출표 재고 원장. |
 | `numbered-labels/{id}/history` | ✓ | ✓ |  | ✓ |  | read |  |  | 숫자 배출표 최근 변경 이력. |
 | `pilot` | ✓ | ✓ |  | ✓ |  | read |  |  | 시범 운영 비교 설정·보고. |
@@ -99,8 +102,12 @@
 | `dong-work/requests` | ✓ | ✓ |  |  | ✓ | write |  |  | 현재 담당 동으로 접수 등록(멱등 재시도도 최신 범위 검사). |
 | `dong-work/requests/{id}` | ✓ | ✓ |  |  | ✓ | write |  |  | 원래 동과 이동할 동을 모두 검사한 접수 수정. |
 | `dong-work/requests/{id}/cancel` | ✓ | ✓ |  |  | ✓ | write |  |  | 담당 접수만 버전·사유 코드 계약으로 취소. |
+| `dong-work/requests/{id}/collection` | ✓ | ✓ |  |  | ✓ | write |  |  | 현재 담당 동 접수의 PC 직접 수거 입력(멱등 재시도 전에도 범위 검사). |
 | `dong-work/route` | ✓ | ✓ |  |  | ✓ | none |  |  | 준비만 잠금, 노선 계산은 잠금 밖, 반환 직전 최신 범위 재검사. |
 | `dong-work/assign` | ✓ | ✓ |  |  | ✓ | write |  |  | 최신 계정·동·예정일·계산 기준·혼합 배정을 검사한 명시적 확정. |
+| `reports/forms/download` | ✓ | ✓ |  |  |  | write |  |  | 개인정보를 포함한 원본 XLSX 월보·ODT 일일 대장 내려받기. |
+| `label-auto/sync` | ✓ | ✓ |  |  |  | write |  |  | 확정 수거량을 동별 입고 번호에 자동 배정. |
+| `numbered-labels/stock-dong` | ✓ | ✓ |  |  |  | write |  |  | 기존 번호 구간의 재고 동·수령일 지정. |
 | `numbered-labels/receive` | ✓ | ✓ |  |  |  | write |  |  | 숫자 배출표 구간 입고. |
 | `numbered-labels/distribute` | ✓ | ✓ |  |  |  | write |  |  | 숫자 배출표 구간 배부. |
 | `numbered-labels/{id}/use` | ✓ | ✓ |  |  |  | write |  |  | 유효 접수·품목에 숫자 배출표 사용. |
@@ -113,6 +120,7 @@
 | `recon` | ✓ | ✓ |  |  |  | none |  |  | 세외수입 납부 자료 대사(preview=1 은 미리보기). |
 | `addr-import` | ✓ |  |  |  |  | none |  |  | 주소 자료 가져오기(큰 파일 읽기는 잠금 밖). |
 | `external/test` | ✓ |  |  |  |  | none |  |  | 외부 서비스 연결 시험(잠금 밖). |
+| `vworld/locate` | ✓ | ✓ |  |  |  | none |  |  | VWorld 위치 참고 조회. 결과 비저장, 외부 호출은 잠금 밖, 전후 세션 재검사. |
 | `route` | ✓ | ✓ |  |  |  | none |  | LIST | 노선 계산(OR-Tools·카카오 길찾기는 잠금 밖). |
 | `backup` | ✓ |  |  |  |  | none |  |  | 수동 백업(백그라운드 작업). |
 | `backup/auto` | ✓ |  |  |  |  | none |  |  | 자동 백업 지금 실행(백그라운드 작업). |
@@ -140,6 +148,7 @@
 | `backups/verify-auto` | ✓ |  |  |  |  | write |  |  | 자동 백업 파일 열어 확인. |
 | `requests/{id}` | ✓ | ✓ |  |  |  | write |  |  | 접수 수정(이전 내용은 버전으로). |
 | `requests/{id}/field-check` | ✓ | ✓ |  |  |  | write |  |  | 현장 접수 확인. |
+| `requests/{id}/collection` | ✓ | ✓ |  |  |  | write |  |  | 실제 수거일·품목별 추가 수거량 입력과 배출표 자동 배정을 함께 저장. |
 | `requests/{id}/cancel` | ✓ | ✓ |  |  |  | write |  |  | 접수 취소(사유 코드). |
 | `requests/{id}/contacts` | ✓ | ✓ |  |  |  | write |  |  | 민원·통화 기록. |
 | `requests/{id}/location` | ✓ | ✓ |  |  |  | write |  |  | 위치 직접 지정. |
@@ -154,6 +163,8 @@
 | `close` | ✓ | ✓ |  |  |  | write |  |  | 마감 기록(담당자). |
 | `close/approve` | ✓ |  |  | ✓ |  | write |  |  | 마감 확인(팀장). |
 | `dongs` | ✓ |  |  |  |  | write |  |  | 행정동 저장. |
+| `dongs/order` | ✓ |  |  |  |  | write |  |  | 관리자가 전체 행정동의 직제순을 한 번에 저장. 기존 순서와 다르면 충돌 반환. |
+| `dongs/centers` | ✓ |  |  |  |  | write |  |  | 관리자가 담당팀이 연결된 동의 비어 있는 차고지만 공식 행정복지센터로 보충. |
 | `dongs/{id}/delete` | ✓ |  |  |  |  | write |  |  | 행정동 지우기. |
 | `holidays` | ✓ |  |  |  |  | write |  |  | 휴무일 추가. |
 | `holidays/{id}/delete` | ✓ |  |  |  |  | write |  |  | 휴무일 지우기. |
@@ -183,4 +194,4 @@
 | `password` | ✓ | ✓ | ✓ | ✓ | ✓ | write | ✓ |  | 본인 비밀번호 변경. |
 | `settings` | ✓ |  |  |  |  | write |  |  | 설정 저장 → 새 설정 묶음. |
 
-경로 154개 (로그인 전 4개 제외).
+경로 165개 (로그인 전 4개 제외).

@@ -73,9 +73,30 @@ jobs:
       - run: python tests/test_pc_device_revocation.py
       - run: python tests/test_pc_server_bind.py
       - run: python tests/test_dong_work.py
+      - run: python tests/test_default_dongs.py
+      - run: python tests/test_dong_order.py
+      - run: python tests/test_dong_depots.py
+      - run: python tests/test_routing_depots.py
+      - run: python tests/test_route_review.py
+      - run: python tests/test_route_review_api.py
+      - run: python tests/test_dong_depots_api.py
+      - run: python tests/test_dong_centers.py
+      - run: python tests/test_dong_centers_api.py
+      - run: python tests/test_pc_collection.py
+      - run: python tests/test_pc_collection_api.py
+      - run: python tests/test_date_visibility_api.py
+      - run: python tests/test_vworld.py
       - run: python tests/test_pc_reports.py
       - run: python tests/test_pc_labels.py
       - run: python tests/test_pc_labels_migration.py
+      - run: python tests/test_label_usage.py
+      - run: python tests/test_label_usage_api.py
+      - run: python tests/test_collection_trace.py
+      - run: python tests/test_label_auto.py
+      - run: python tests/test_label_auto_api.py
+      - run: python tests/test_official_templates.py
+      - run: python tests/test_official_forms.py
+      - run: python tests/test_official_forms_api.py
 
   e2e:
     name: 화면 종단 시험 (${{ matrix.suite }})
@@ -91,15 +112,31 @@ jobs:
           - test_review_ui
           - test_review_followup_ui
           - test_dong_work_ui
+          - test_dong_order_ui
+          - test_dong_depots_ui
+          - test_dong_depots_races_ui
+          - test_dong_centers_ui
+          - test_fee_calculator_ui
+          - test_pc_collection_ui
+          - test_dispatch_workflow_ui
+          - test_collection_help_mobile
+          - test_date_visibility_ui
+          - test_date_visibility_mobile
+          - test_vworld_ui
           - test_dong_work_e2e
           - test_pc_item_picker
           - test_pc_item_picker_flow
           - test_workflow
           - test_pc_startup
+          - test_pc_theme
+          - test_pc_theme_races
           - test_reports_labels_api
           - test_reports_labels_ui
           - test_pc_report_presentation
           - test_reports_labels_e2e
+          - test_label_usage_ui
+          - test_official_forms_ui
+          - test_official_forms_e2e
           - test_mobile_cleanup
     steps:
       - uses: actions/checkout@v7
@@ -167,10 +204,14 @@ jobs:
           python tests/test_pc_device_revocation.py
           python tests/test_pc_server_bind.py
           python tests/test_dong_work.py
+          python tests/test_default_dongs.py
+          python tests/test_dong_order.py
+          python tests/test_vworld.py
           python tests/test_pc_launcher.py
           python tests/test_desktop_paths.py
           python tests/test_desktop_lifecycle.py
           python tests/test_desktop_app.py
+          python tests/test_desktop_tray.py
           python tests/test_desktop_ui.py
       - name: Windows 실행 앱 빌드 도구
         if: runner.os == 'Windows'
@@ -180,6 +221,7 @@ jobs:
         run: |
           python tools/build_desktop.py
           python tests/test_desktop_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe
+          python tests/test_desktop_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe --legacy-dongs
       - name: Windows 실행 앱 보관
         if: success() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4

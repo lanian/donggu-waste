@@ -106,6 +106,9 @@ class DesktopView(ttk.Frame):
                   foreground=[("disabled", "#637285"), ("!disabled", WHITE)])
         style.configure("DG.Stop.TButton", background=BG, foreground="#87424d", borderwidth=0, focuscolor="#2866b1", font=self.fonts["small"], padding=(9, 6))
         style.map("DG.Stop.TButton", background=[("active", "#f8e9ec")], foreground=[("disabled", "#8290a0")])
+        style.configure("DG.Minimize.TButton", background=WHITE, foreground=NAVY, bordercolor=LINE,
+                        focuscolor="#2866b1", font=self.fonts["small"], padding=(9, 6), borderwidth=1)
+        style.map("DG.Minimize.TButton", background=[("active", "#edf2f8")])
         style.configure("DG.Disclosure.TButton", background=BG, foreground=MUTED, borderwidth=0, focuscolor="#2866b1", font=self.fonts["strong"], padding=(4, 7))
         style.map("DG.Disclosure.TButton", background=[("active", "#e8edf5")])
         style.configure("DG.Horizontal.TProgressbar", background="#356a98", troughcolor="#e9eef5", borderwidth=0, thickness=4)
@@ -192,8 +195,10 @@ class DesktopView(ttk.Frame):
         self.footer_var = tk.StringVar()
         self.footer_label = ttk.Label(self.footer, textvariable=self.footer_var, background=BG, foreground=MUTED, font=self.fonts["small"])
         self.footer_label.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.minimize_button = self._button(self.footer, "최소화", "minimize", style="DG.Minimize.TButton")
+        self.minimize_button.grid(row=0, column=1, sticky="e", padx=(0, 8))
         self.stop_button = self._button(self.footer, "서버 종료", "stop", style="DG.Stop.TButton")
-        self.stop_button.grid(row=0, column=1, sticky="e")
+        self.stop_button.grid(row=0, column=2, sticky="e")
         self.canvas.bind("<Configure>", self._resize)
         self.content.bind("<Configure>", lambda event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.bind("<Configure>", self._resize)
@@ -274,7 +279,8 @@ class DesktopView(ttk.Frame):
         self.status_label.configure(wraplength=max(80, width - 100))
         for label in (self.stage_label, self.description_label):
             label.configure(wraplength=max(80, width - 44))
-        self.footer_label.configure(wraplength=max(80, self.winfo_width() - self.stop_button.winfo_reqwidth() - 64))
+        self.footer_label.configure(wraplength=max(80, self.winfo_width() - self.stop_button.winfo_reqwidth()
+                                                   - self.minimize_button.winfo_reqwidth() - 72))
         for parent, buttons in ((self.path_buttons, (self.folder_button, self.shortcut_button)),
                                 (self.recovery_buttons, (self.retry_button, self.password_button))):
             available = max(120, self.winfo_width() - 48) if parent is self.recovery_buttons else width - 40
@@ -393,7 +399,7 @@ class DesktopView(ttk.Frame):
             self.recovery_buttons.grid_remove()
         self.footer_var.set("기존 서버 사용 중 · 이 앱에서 종료 불가" if state == "existing" else
                             "기존 서버의 연결만 다시 확인합니다." if state == "connection_lost" else
-                            "이 앱이 시작한 서버만 종료합니다." if owned else "업무 자료는 그대로 보관됩니다.")
+                            "이 앱이 시작한 서버만 종료합니다." if owned else "업무 자료는 보관됩니다.")
         self._resize()
 
     def destroy(self):

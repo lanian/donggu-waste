@@ -61,6 +61,7 @@ def _clean_stop(x: dict) -> dict:
 
 def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: str, extra: dict | None = None, action: str = "CONFIRM") -> dict:
     """팀의 그날 배정 새 버전(assign_ver = 지난 최대 + 1)을 만들고 이전 버전은 SUPERSEDED. 트랜잭션은 호출하는 쪽."""
+    _check_fixed_crew(con, cid, stops)
     prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
     con.execute("UPDATE assignment_batch SET status='SUPERSEDED' WHERE crew_id=? AND work_date=? AND status='ACTIVE'", (cid, work_date))
     bid = str(uuid.uuid4())
@@ -74,6 +75,21 @@ def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: st
                     (work_date, now(), st["request_id"]))
     audit(con, "batch", bid, action, {"crew": crew_name, "date": work_date, "ver": prev + 1, "n": len(clean), **(extra or {})})
     return {"batch_id": bid, "crew_id": cid, "assign_ver": prev + 1, "count": len(clean)}
+
+
+def _check_fixed_crew(con, cid, stops):
+    if not stops:
+        return
+    from dgpc.area import list_dongs
+    dongs = {d['name']: d for d in list_dongs(con) if d.get('depot')}
+    if not dongs:
+        return
+    crew = one(con, 'SELECT active FROM crew WHERE id=?', (cid,))
+    for chunk in _chunks([s['request_id'] for s in stops]):
+        for req in rows(con, f"SELECT dong FROM request WHERE id IN ({','.join('?' for _ in chunk)})", chunk):
+            dong = dongs.get(req['dong'])
+            if dong and (dong['crew_id'] != cid or not crew or not crew['active']):
+                raise UserError('차고지가 지정된 동은 해당 동의 사용 중인 담당 수거팀에 배정해 주세요.')
 
 
 def _release_dropped(con, old_batch_ids):
@@ -257,7 +273,9 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
         # "levy_no": 부과번호 → "lv". 감면액 끝수 단위(접수에 저장된 값, 10원일 때만) → "ru"
         red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or "",
                               **({"round_unit": 10} if request_round_unit(r) == 10 else {})}} if r.get("reduction_code") else {}
-        stops.append({**extra_u, **red_, "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
+        from dgpc.pc_collection import revision as pc_collection_revision
+        pc_ver = pc_collection_revision(con, r['id'])
+        stops.append({**extra_u, **red_, **({'pc_collection_ver': pc_ver} if pc_ver else {}), "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],
                       "lat": r["lat"], "lon": r["lon"], "eta": s["eta"] or (r["appt_start"] or ""),
                       "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None,

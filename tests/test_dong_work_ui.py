@@ -81,7 +81,7 @@ FIXTURE = r"""async ({role}) => {
   const json=JSON.stringify(out);if(hold)await new Promise(release=>window.__gates.push(release));
   return new Response(json,{status:200,headers:{'Content-Type':'application/json'}});
  };
- try{window.__S=await import('/pc/ui/screens/dongs.js');window.__mount=async()=>document.getElementById('app').replaceChildren(await window.__S.screenDongs());await window.__mount();return true;}
+ try{window.__S=await import('/pc/ui/screens/dongs.js');window.__mount=async()=>document.getElementById('app').replaceChildren(await window.__S.screenDongs(location.hash.split('/')[2]||null));addEventListener('hashchange',window.__mount);await window.__mount();return true;}
  catch(error){window.__loadError=error.message;return false;}
 }"""
 
@@ -95,6 +95,10 @@ def mount(browser, url, role='DONG'):
     loaded = page.evaluate(FIXTURE, {'role': role})
     ok(loaded, '원본 동별관리 모듈 mount: ' + (page.evaluate('window.__loadError') or role))
     return context, page
+
+
+def location_is_new(page):
+    return page.url.endswith('/new')
 
 
 def regressions(browser, url):
@@ -116,16 +120,16 @@ def regressions(browser, url):
         expect(page.get_by_text('가상 주민 d2', exact=True)).to_be_visible()
         ok(page.get_by_text('가상 주민 d1', exact=True).count() == 0, '이전동 늦은 목록이 새 범위를 덮지 않는다')
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        dlg = page.get_by_role('dialog')
+        dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
         dlg.get_by_label('이름', exact=True).fill('초안 주민')
-        dlg.get_by_role('button', name='닫기·초안 보관', exact=True).click()
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('초안 주민')
-        page.get_by_role('dialog').get_by_role('button', name='닫기·초안 보관', exact=True).click()
+        expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('초안 주민')
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         page.get_by_label('행정동 범위', exact=True).select_option('d1')
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('')
-        page.get_by_role('dialog').get_by_role('button', name='닫기·초안 보관', exact=True).click()
+        expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('')
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         ok(True, '등록 초안은 원래 동에 묶여 복구하고 다른 동에 복사하지 않는다')
         page.get_by_role('button', name='노선 계산', exact=True).click()
         expect(page.get_by_role('button', name='배정 확정', exact=True)).to_be_enabled()
@@ -144,8 +148,8 @@ def regressions(browser, url):
         page.evaluate("async()=>{window.__boot('other');await window.__mount();}")
         page.get_by_label('행정동 범위', exact=True).select_option('d2')
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('')
-        page.keyboard.press('Escape')
+        expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('')
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         ok(True, '계정 교체시 이전 담당자 초안을 비운다')
         ok(all(x['endpoint'].startswith('dong-work') or x['endpoint'] == 'fee-usage' for x in page.evaluate('window.__calls')), '동 계정은 기존 전역 주민 API를 호출하지 않는다')
         for width, height in [(1440, 900), (980, 680), (390, 844)]:
@@ -169,7 +173,7 @@ def form_regressions(browser, url):
     try:
         page.get_by_label('행정동 범위', exact=True).select_option('d1')
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        dlg = page.get_by_role('dialog')
+        dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
         dlg.get_by_label('이름', exact=True).fill('가상 새 주민')
         dlg.get_by_label('연락처', exact=True).fill('01000000001')
         dlg.get_by_label('배출 주소', exact=True).fill('가상로 10')
@@ -191,7 +195,7 @@ def form_regressions(browser, url):
         dlg.locator('.results button').first.click()  # 여러 규격은 먼저 명시적으로 선택한다.
         dlg.get_by_label('품목명·규격 검색', exact=True).press('Enter')
         expect(dlg.locator('.dw-item-row')).to_have_count(1)
-        expect(dlg.locator(':scope > .msg')).to_have_text('')
+        expect(dlg.locator('.dw-detail-actions [role=alert]')).to_have_text('')
         ok(not page.evaluate("window.__calls.some(x=>x.endpoint==='dong-work/requests'&&x.method==='POST')"), '품목 검색 Enter는 품목만 추가하고 접수를 저장하지 않는다')
         for width, height in [(1440, 900), (980, 680), (390, 844)]:
             page.set_viewport_size({'width': width, 'height': height})
@@ -208,7 +212,7 @@ def form_regressions(browser, url):
         page.evaluate('window.__gates.shift()()')
         expect(page.get_by_role('dialog')).to_have_count(0)
         page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
-        dlg = page.get_by_role('dialog')
+        dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
         dlg.get_by_label('이름', exact=True).fill('고친 가상 주민')
         dlg.get_by_label('수정 사유', exact=True).fill('가상 수정')
         page.evaluate("window.__fail='dong-work/requests/r1'")
@@ -216,14 +220,39 @@ def form_regressions(browser, url):
         expect(dlg.get_by_label('이름', exact=True)).to_have_value('고친 가상 주민')
         expect(dlg.get_by_text('다른 곳에서 접수가 바뀌었습니다.', exact=False)).to_be_visible()
         ok(True, '수정 충돌은 값을 지우지 않고 접수 버전을 유지한다')
+        page.evaluate("window.__fail='dong-work/requests/r1'")
         dlg.get_by_role('button', name='초안 버리고 다시 열기', exact=True).click()
-        dlg = page.get_by_role('dialog')
+        page.get_by_role('button', name='다시 시도', exact=True).click()
+        dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
         expect(dlg.get_by_label('이름', exact=True)).to_have_value('가상 주민')
-        dlg.get_by_role('button', name='닫기·초안 보관', exact=True).click()
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
-        expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('가상 주민')
-        page.keyboard.press('Escape')
+        expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('가상 주민')
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
         ok(True, '충돌 초안 버리기는 이전 수정값을 다시 복구하지 않는다')
+    finally:
+        context.close()
+
+
+def pending_save_draft_regression(browser, url):
+    context, page = mount(browser, url)
+    try:
+        page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
+        page.get_by_label('이름', exact=True).fill('먼저 저장한 가상 초안')
+        page.get_by_label('수정 사유', exact=True).fill('가상 응답 지연')
+        page.evaluate("window.__hold='dong-work/requests/r1'")
+        page.get_by_role('button', name='수정 저장', exact=True).click()
+        page.wait_for_function('window.__gates.length===1')
+        page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
+        page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
+        page.get_by_label('이름', exact=True).fill('응답을 기다리는 동안 새로 쓴 가상 초안')
+        page.get_by_label('이름', exact=True).press('Tab')
+        page.evaluate('window.__gates.shift()()')
+        page.wait_for_function('window.__C.pendingActions.size===0')
+        page.evaluate("location.hash='#/dongs'")
+        page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
+        expect(page.get_by_label('이름', exact=True)).to_have_value('응답을 기다리는 동안 새로 쓴 가상 초안')
+        ok(True, '이전 저장 응답은 다시 연 화면에서 새로 작성한 초안을 지우지 않는다')
     finally:
         context.close()
 
@@ -259,7 +288,7 @@ def cancel_reason_regressions(browser, url):
         context, page = mount(browser, url)
         try:
             page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
-            page.get_by_role('dialog').get_by_role('button', name='접수 취소', exact=True).click()
+            page.locator('.dw-form').get_by_role('button', name='접수 취소', exact=True).click()
             dlg = page.get_by_role('dialog', name='접수 취소', exact=True)
             dlg.get_by_role('combobox').select_option(code)
             reason = f'{code} 가상 취소 사유'
@@ -278,7 +307,7 @@ def stored_price_regressions(browser, url):
         try:
             page.evaluate("""(status)=>{const r=window.__C.FEES().rows.find(x=>x.price===9000&&x.status==='CONFIRMED');window.__requestItems=[{line_id:'saved-price-line',fee_rate_id:r.id,name:r.name,spec:r.spec,unit:r.unit,unit_label:r.unit_label,qty:2,unit_price:status==='CONFIRMED'?1000:null,price_status:status}];}""", status)
             page.get_by_role('button', name='DG-20261108-0001', exact=True).click()
-            dlg = page.get_by_role('dialog')
+            dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
             expected = '2,000원' if status == 'CONFIRMED' else '0원 + 금액 확인 대기'
             expect(dlg.locator('.dw-total')).to_have_text(expected)
             expect(dlg.locator('.dw-item-row small')).to_have_text('1,000원' if status == 'CONFIRMED' else '금액 확인 대기')
@@ -299,7 +328,7 @@ def duplicate_scope_regressions(browser, url):
     try:
         page.get_by_label('행정동 범위', exact=True).select_option('d1')
         page.get_by_role('button', name='접수 등록', exact=True).click()
-        dlg = page.get_by_role('dialog')
+        dlg = page.get_by_role('region', name='동별 접수 등록' if location_is_new(page) else '동별 접수 상세', exact=True)
         dlg.get_by_label('이름', exact=True).fill('가상 중복 후보')
         dlg.get_by_label('연락처', exact=True).fill('01000000001')
         dlg.get_by_label('배출 주소', exact=True).fill('가상로 10')
@@ -326,6 +355,7 @@ def router_regressions(browser, url):
     context, page = mount(browser, url)
     try:
         page.evaluate("location.hash='#/request/r1'")
+        page.evaluate("removeEventListener('hashchange',window.__mount)")
         page.add_script_tag(url=url + '/pc/ui/pc.js')
         expect(page.locator('.shell .dong-workspace h1')).to_have_text('동별 관리')
         ok(page.locator('nav.side a[href="#/requests"],nav.side a[href="#/home"],nav.side a[href="#/dispatch"]').count() == 0, '원본 PC 라우터는 DONG의 전역 상세 주소를 동별 화면으로 돌리고 전역 메뉴를 숨긴다')
@@ -339,10 +369,11 @@ def reauthentication_regressions(browser, url):
     for action in ['cancel', 'continue']:
         context, page = mount(browser, url)
         try:
+            page.evaluate("removeEventListener('hashchange',window.__mount)")
             page.add_script_tag(url=url + '/pc/ui/pc.js')
             expect(page.locator('.shell .dong-workspace h1')).to_have_text('동별 관리')
             page.get_by_role('button', name='접수 등록', exact=True).click()
-            page.get_by_role('dialog').get_by_label('이름', exact=True).fill('이전 담당자 주민 비공개초안')
+            page.locator('.dw-form').get_by_label('이름', exact=True).fill('이전 담당자 주민 비공개초안')
             page.evaluate("""()=>{
               const original=window.fetch;window.__expireOnce=true;window.__loggedOut=true;window.__reauthDone=false;
               window.fetch=async(path,options={})=>{
@@ -360,18 +391,18 @@ def reauthentication_regressions(browser, url):
                 relogin.get_by_role('button', name='로그인 화면으로', exact=True).click()
                 expect(page.locator('#app .login')).to_be_visible()
                 ok(page.locator('[data-dong-owner]').count() == 0 and page.get_by_role('dialog').count() == 0 and '이전 담당자 주민 비공개초안' not in page.locator('body').inner_text(), '재인증 취소 후 로그인 화면에는 이전 주민 양식과 대화 상자가 남지 않는다')
-                page.evaluate("async()=>{window.__boot();await window.__C.render(true);}")
+                page.evaluate("async()=>{window.__boot();history.replaceState(null,'','#/dongs');await window.__C.render(true);}")
                 page.get_by_role('button', name='접수 등록', exact=True).click()
-                expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('')
+                expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('')
                 ok(True, '로그인 화면으로 돌아간 뒤에는 같은 계정도 이전 주민 초안을 복구하지 않는다')
             else:
                 relogin.get_by_label('비밀번호', exact=True).fill('Fixture-Secret-2026')
                 relogin.get_by_role('button', name='로그인하고 계속', exact=True).click()
                 page.wait_for_function('window.__reauthDone')
-                expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('이전 담당자 주민 비공개초안')
-                page.get_by_role('dialog').get_by_role('button', name='닫기·초안 보관', exact=True).click()
+                expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('이전 담당자 주민 비공개초안')
+                page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
                 page.get_by_role('button', name='접수 등록', exact=True).click()
-                expect(page.get_by_role('dialog').get_by_label('이름', exact=True)).to_have_value('이전 담당자 주민 비공개초안')
+                expect(page.locator('.dw-form').get_by_label('이름', exact=True)).to_have_value('이전 담당자 주민 비공개초안')
                 ok(True, '같은 계정으로 재인증하고 계속하면 원래 입력과 보관 초안을 유지한다')
         finally:
             context.close()
@@ -388,10 +419,10 @@ def visual_regressions(browser, url):
             page.set_viewport_size({'width': width, 'height': height})
             page.screenshot(path=str(shots / f'dongs-{theme}-{font}-{width}.png'), full_page=True)
             page.get_by_role('button', name='접수 등록', exact=True).click()
-            bounds = page.get_by_role('dialog').get_by_role('button', name='접수 저장', exact=True).bounding_box()
+            bounds = page.locator('.dw-form').get_by_role('button', name='접수 저장', exact=True).bounding_box()
             ok(bounds is not None and bounds['y'] >= 0 and bounds['y'] + bounds['height'] <= height, f'{theme} {font}% {width}px에서도 양식 저장 단추가 viewport 안에 있다')
             page.screenshot(path=str(shots / f'dong-form-{theme}-{font}-{width}.png'), full_page=True)
-            page.keyboard.press('Escape')
+            page.get_by_role('button', name='목록으로 · 초안 보관', exact=True).click()
             expect(page.get_by_role('button', name='접수 등록', exact=True)).to_be_focused()
         ok(True, '양식 닫기 후 접수 등록 버튼으로 키보드 초점을 돌려준다')
         print('  SCREENSHOTS', shots, flush=True)
@@ -407,7 +438,7 @@ def main():
         browser = p.chromium.launch(**options)
         try:
             selected = os.environ.get('DG_DONG_UI_CASE')
-            cases = {'cancel': cancel_reason_regressions, 'price': stored_price_regressions, 'duplicate': duplicate_scope_regressions, 'auth': reauthentication_regressions}
+            cases = {'cancel': cancel_reason_regressions, 'price': stored_price_regressions, 'duplicate': duplicate_scope_regressions, 'auth': reauthentication_regressions, 'race': pending_save_draft_regression}
             if selected:
                 cases[selected](browser, url)
             else:

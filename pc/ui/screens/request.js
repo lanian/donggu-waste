@@ -4,7 +4,9 @@ import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
 import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, statusChip, toast, wrap } from '../core.js';
 import { itemPicker, mapIn } from '../widgets.js';
+import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
+import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
 
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
@@ -23,7 +25,7 @@ async function screenRequest(id) {
   const fromDraft = isNew && intakeDraft;
   if (isNew && !fromDraft) dupAckKey = null;  // 중복 경고 확인은 같은 작성 중 접수에만 유효 (새로 쓰기·다른 접수에는 다시 확인)
   const r = isNew ? { ...blank, ...(intakeDraft ? intakeDraft.r : {}), items: intakeDraft ? intakeDraft.items : [] } : await api('requests/' + id);
-  const baseVer = r.req_ver;  // 이 화면이 연 접수 버전: 수정·취소·감면에 함께 보내고, 다르면 서버가 409
+  let baseVer = r.req_ver;  // 이 화면이 연 접수 버전: 수정·취소·감면에 함께 보내고, 다르면 서버가 409
   const showDone = !isNew && justSaved === id; if (showDone) justSaved = null;
   const items = r.items.map((i) => ({ ...i }));
   const locked = new Set(r.locked_lines || []);
@@ -276,6 +278,16 @@ async function screenRequest(id) {
 
   // 현장 결과 (아래 카드들은 수정 양식과 따로 다시 그린다: 수납·통화 기록을 남겨도 적던 수정 내용이 지워지지 않게)
   const fieldCard = (r) => { const st = r.state; return !isNew && st ? h('div', { class: 'card' }, h('h2', {}, '현장 결과'),
+    canWork() && r.status !== 'CANCELLED' && !r.pii_purged_at ? collectionButton(r, { current: () => form.isConnected,
+      before: () => unchangedCollectionItems(items, r.items),
+      after: async (result, authOwner) => {
+        if (!form.isConnected) return;
+        const fresh = await api('requests/' + id, { _prefsOwner: authOwner });
+        if (!form.isConnected) return;
+        if (fresh.req_ver !== result.req_ver) { showStale(); return; }
+        baseVer = fresh.req_ver; locked.clear(); fresh.locked_lines.forEach((line) => locked.add(line)); drawItems();
+        lower.replaceChildren(...lowerCards(fresh).filter(Boolean));
+      } }) : null,
     h('div', { class: 'row' }, statusChip(r.status), chip('연락: ' + CONTACT[st.contact]), st.outcome ? chip('저장된 결과: ' + (STATUS[st.outcome] || st.outcome)) : null),
     fieldExtras(st, r),
     h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['품목', '구분', '처음 접수', '현장 수량', '실은 수량', '못 실은 수량', '사유', '스티커', ''].map((t) => h('th', {}, t)))),
@@ -378,7 +390,8 @@ async function screenRequest(id) {
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),
         h('div', { class: 'card' + (isNew ? ' intake-location' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '04') : null, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
-          h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'), geoMsg),
+          h('div', { class: 'row' }, btn('주소로 위치 찾기', findAddr, 'small'),
+            editable && canWork() ? btn('VWorld 위치 참고', () => vworldDialog({ address: F.address.value, name: F.name.value }), 'small') : null, geoMsg),
           mapBox, h('div', { class: 'row' }, '위도', F.lat, '경도', F.lon)))),
     staleNote,
     actionbar,

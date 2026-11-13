@@ -326,7 +326,11 @@ export function carryOver(oldList, pl, events) {
     const o = prev.get(s.request_id);
     if (!o) continue;
     if (o.since_seq != null) s.since_seq = o.since_seq;
-    const mine = events.filter((e) => e.request_id === s.request_id && !(e.seq <= (o.since_seq || 0)));
+    // PC에서 직접 추가한 수거량은 같은 날의 옛 휴대폰 수량으로 되돌리지 않는다.
+    if ((s.pc_collection_ver || 0) > (o.pc_collection_ver || 0)) { n++; continue; }
+    const mine = events.filter((e) => e.request_id === s.request_id && !(e.seq <= (o.since_seq || 0))
+      && (!(s.pc_collection_ver && ['ITEM_RESULT', 'ATTEMPT', 'FIELD_ITEM_ADD', 'LOCATION_FIX', 'REVISIT_APPT'].includes(e.kind))
+        || e.base_req_ver >= s.pc_collection_ver && e.body?.pc_collection_ver === s.pc_collection_ver));
     if (!mine.length) continue;
     let touched = false;
     if (s.revisit && !o.revisit) { s.revisit = false; touched = true; }

@@ -38,7 +38,7 @@ def make_view(scaling=4 / 3):
     root.tk.call("tk", "scaling", scaling)
     root.geometry("720x560")
     actions = []
-    callbacks = {name: (lambda key=name: actions.append(key)) for name in ("open", "retry", "reconnect", "password", "stop", "folder", "shortcut")}
+    callbacks = {name: (lambda key=name: actions.append(key)) for name in ("open", "retry", "reconnect", "password", "stop", "folder", "shortcut", "minimize")}
     view = DesktopView(root, "0.13.3", callbacks=callbacks)
     view.pack(fill="both", expand=True)
     root.update()
@@ -396,6 +396,10 @@ def main():
         ok(view.status_var.get() == "PC 서버 준비 완료" and view.primary_button.instate(["!disabled"])
            and view.folder_button.instate(["disabled"]) and view.stop_button.instate(["!disabled"]),
            "서버 준비 완료에서 업무 열기·소유 서버 종료만 가능하고 자료 위치 변경은 잠금")
+        ok(hasattr(view, "minimize_button"), "서버 종료 옆에 독립된 최소화 버튼을 제공")
+        view.minimize_button.invoke()
+        ok(actions == ["minimize"], "최소화 버튼은 종료나 업무 열기 대신 전용 콜백만 호출")
+        actions.clear()
         ok(not view.canvas.master.grid_slaves(row=0, column=1), "내용이 창 안에 들어가면 불필요한 세로 스크롤바를 숨김")
         root.focus_force()
         view.primary_button.focus_set()
@@ -464,7 +468,7 @@ def main():
                     for state in ("waiting", "ready", "existing", "error", "stopping", "stopped"):
                         view.show_state(state, detail="가상 설명이 긴 오류와 상태 " * 60, owned=state in ("ready", "stopping"))
                         root.update()
-                        for widget in (view.header, view.canvas, view.primary_button, view.footer, view.stop_button):
+                        for widget in (view.header, view.canvas, view.primary_button, view.footer, view.minimize_button, view.stop_button):
                             x = widget.winfo_rootx() - root.winfo_rootx()
                             y = widget.winfo_rooty() - root.winfo_rooty()
                             assert x >= 0 and y >= 0 and x + widget.winfo_width() <= root.winfo_width() + 1

@@ -77,6 +77,7 @@ def main():
         "stop": lambda: show("stopped"),
         "folder": lambda: note("가상 미리보기입니다. 자료 폴더를 읽거나 변경하지 않습니다."),
         "shortcut": lambda: note("가상 미리보기입니다. 바로가기나 다른 파일을 만들지 않습니다."),
+        "minimize": root.iconify,
     }
     view = DesktopView(root, args.version, callbacks=callbacks)
     view.pack(fill="both", expand=True)

@@ -16,6 +16,12 @@ function FEES() {
 }
 const $app = document.getElementById('app');
 let boot = null;       // 설정·팀·기기
+// 인증 경계와 단순 bootstrap 재조회는 구분한다. me 객체가 바뀌어도 같은 로그인은 같은 저장 큐다.
+let prefsSession = {}, prefsIdentity = '', prefsRevision = 0, confirmedPrefs = null;
+const bootstrapPrefsReads = new WeakMap();
+function resetPrefsSession(identity = '') {
+  prefsSession = {}; prefsIdentity = identity; prefsRevision = 0; confirmedPrefs = null;
+}
 // 라우터보다 먼저 탐색 세대를 올린다. 늦게 읽은 화면의 응답도 같은 탐색 기준으로 검사한다.
 let routeEpoch = 0;
 addEventListener('hashchange', () => { routeEpoch++; });
@@ -78,23 +84,30 @@ const searchbox = (pairs, ...btns) => h('div', { class: 'card searchbox', role: 
 const statusChip = (s) => chip(STATUS[s] || s, s === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(s) ? 'warn' : s === 'CANCELLED' ? 'neutral' : ['IN_PROGRESS', 'ASSIGNED'].includes(s) ? 'info' : '');
 
 // 세션이 끝난 뒤(401) 요청하면 화면(작성 중인 양식)은 그대로 두고 로그인 대화 상자를 띄운 뒤, 다시 로그인하면 같은 요청을 한 번 더 보낸다.
-async function apiRaw(path, { method = 'GET', body, raw, retry = true, signal, _readBudget } = {}) {
+function checkPrefsOwner(owner) {
+  if (owner && prefsSession !== owner) throw new Error('접속 계정이 바뀌어 이전 화면 설정을 적용하지 않았습니다.');
+}
+async function apiRaw(path, { method = 'GET', body, raw, retry = true, signal, _readBudget, _prefsOwner } = {}) {
+  checkPrefsOwner(_prefsOwner);
   const r = await fetch('/api/' + path, {
     method, credentials: 'same-origin',
     headers: { 'X-DG-CSRF': '1', ...(raw ? { 'Content-Type': 'application/octet-stream' } : body ? { 'Content-Type': 'application/json' } : {}) },
     body: raw || (body ? JSON.stringify(body) : undefined),
     ...(signal ? { signal } : {}),
   });
+  checkPrefsOwner(_prefsOwner);
   if (r.status === 401) {
     const data = await r.clone().json().catch((e) => { if (signal?.aborted) throw e; return {}; });
+    checkPrefsOwner(_prefsOwner);
     if (data.login) {
       if (boot && retry) {
         // 사람의 비밀번호 입력은 네트워크 조회 시간이 아니다. 재인증 뒤에는 새 예산으로 같은 조회를 잇는다.
         _readBudget?.pause();
         try { await relogin(); } finally { _readBudget?.resume(); }
-        return apiRaw(path, { method, body, raw, retry: false, signal: _readBudget?.signal || signal, _readBudget });
+        checkPrefsOwner(_prefsOwner);
+        return apiRaw(path, { method, body, raw, retry: false, signal: _readBudget?.signal || signal, _readBudget, _prefsOwner });
       }
-      boot = null; render(); throw new Error('로그인이 필요합니다');
+      setBoot(null, { sessionChanged: true }); render(); throw new Error('로그인이 필요합니다');
     }
   }
   if (r.ok) touchSession();
@@ -102,6 +115,7 @@ async function apiRaw(path, { method = 'GET', body, raw, retry = true, signal, _
 }
 // 오류에는 HTTP 상태(status)와 응답(data)을 붙인다: 409(다른 곳에서 바뀜)는 화면이 따로 안내한다
 async function api(path, opts = {}) {
+  const prefsRead = path === 'bootstrap' ? { session: prefsSession, revision: prefsRevision } : null;
   // 시작 화면의 GET만 명시적으로 제한한다. 저장·가져오기·파일 응답의 기존 수명은 바꾸지 않는다.
   const bounded = (opts.method || 'GET').toUpperCase() === 'GET' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0;
   let timer = null, forwardAbort = null, expired = false;
@@ -127,6 +141,7 @@ async function api(path, opts = {}) {
     const r = await apiRaw(path, readBudget ? { ...opts, signal: readBudget.signal, _readBudget: readBudget } : opts);
     const data = await r.json().catch((e) => { if ((readBudget?.signal || opts.signal)?.aborted) throw e; return {}; });
     if (!r.ok) { const e = new Error(data.error || '오류'); e.status = r.status; e.data = data; throw e; }
+    if (prefsRead && data?.me) bootstrapPrefsReads.set(data, prefsRead);
     return data;
   } catch (e) {
     if (expired) { const timeout = new Error('PC 서버 응답을 기다리는 시간이 지났습니다. 서버 상태를 확인한 뒤 다시 시도해 주세요.'); timeout.code = 'READ_TIMEOUT'; throw timeout; }
@@ -315,7 +330,7 @@ function relogin() {
       return true;
     } }).then((v) => {
     reauth = null;
-    if (!v) { boot = null; render(); throw new Error('로그인이 필요합니다'); }
+    if (!v) { setBoot(null, { sessionChanged: true }); render(); throw new Error('로그인이 필요합니다'); }
     touchSession(); toast('다시 로그인했습니다');
   });
   return reauth;
@@ -354,7 +369,7 @@ const wrap = (fn, msgEl) => async (...a) => {
 };
 
 // ------------------------------------------------------------ 로그인
-const ACTION = { CREATE: '등록', UPDATE: '수정', CANCEL: '취소', LOCATION: '위치 지정', ASSIGN: '배정', LOGIN: '로그인', LOGIN_FAIL: '로그인 실패', PASSWORD: '비밀번호 변경',
+const ACTION = { CREATE: '등록', UPDATE: '수정', REORDER: '순서 변경', CANCEL: '취소', LOCATION: '위치 지정', ASSIGN: '배정', LOGIN: '로그인', LOGIN_FAIL: '로그인 실패', PASSWORD: '비밀번호 변경',
   ACTIVE: '사용', DEACTIVATE: '중지', IMPORT: '가져오기', RESOLVE: '충돌 처리', VOID: '정정', CLOSE: '마감', RECEIPT: '수신 확인', BACKUP: '백업', RESTORE: '복원', PURGE: '사진 정리',
   CONFIRM: '배정 확정', PRINT: '배차표 인쇄', DISPLAY: 'QR 표시', SAVE: '저장', REGISTER: '휴대폰 등록', STATUS: '상태 변경', RESOLVE_APPLY: '충돌 반영', RESOLVE_REJECT: '충돌 거부',
   APPROVE: '승인', REJECT: '반려', DRAFT: '개정안 작성', RESULT: '결과 반영', SOLO: '단독 자료 옮김', EXPORT: '내보내기', LINK_SIMILAR: '유사 품목 적용', UNLINK_SIMILAR: '유사 품목 해제',
@@ -384,15 +399,30 @@ const isPlaceholderContact = () => { const c = (boot.settings.contact_info || ''
 const THEME = { auto: '자동(시스템)', light: '밝게', dark: '어둡게' };
 const FONT = { 14: '작게', 15: '보통', 16: '크게', 17: '아주 크게' };
 function applyPrefs(p) {
+  if (typeof globalThis.dgPcApplyAppearance === 'function') {
+    globalThis.dgPcApplyAppearance(p); return;
+  }
+  // 옛 진입점이나 단독 화면 모듈에서도 계정 외형 적용은 유지한다.
   const root = document.documentElement;
   const t = (p && p.theme) || 'auto';
   if (t === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', t);
   root.style.setProperty('--fs', `${(p && p.font) || 15}px`);
 }
+const prefsWrites = new WeakMap();
 async function savePrefs(patch) {
-  const p = await post('prefs', patch);
-  boot.me.prefs = p; applyPrefs(p);
-  return p;
+  const owner = prefsSession, body = { ...patch };
+  if (!prefsIdentity) throw new Error('로그인이 필요합니다.');
+  // 같은 계정의 테마·글자 크기 변경을 순서대로 보내 전체 설정 응답이 서로 덮지 않게 한다.
+  const write = (prefsWrites.get(owner) || Promise.resolve()).catch(() => {}).then(async () => {
+    const p = await api('prefs', { method: 'POST', body, _prefsOwner: owner });
+    checkPrefsOwner(owner);
+    confirmedPrefs = { ...p }; prefsRevision++;
+    if (boot?.me) boot.me.prefs = p;
+    applyPrefs(p);
+    return p;
+  });
+  prefsWrites.set(owner, write);
+  return write;
 }
 function prefsControls() {
   const p = boot.me.prefs || { theme: 'auto', font: 14 };
@@ -409,7 +439,18 @@ let renderFn = () => {};
 const setRender = (fn) => { renderFn = fn; };
 const render = (...a) => renderFn(...a);
 // boot(설정·팀·기기·나)는 여기 한 곳에 둔다. 다른 모듈은 읽기만 하고, 바꿀 때는 setBoot().
-const setBoot = (b) => { boot = b; };
+const setBoot = (b, { sessionChanged = false } = {}) => {
+  const identity = b?.me ? `${b.me.username}|${b.me.role}` : '';
+  if (sessionChanged || (identity && identity !== prefsIdentity)) resetPrefsSession(identity);
+  const read = b?.me && bootstrapPrefsReads.get(b);
+  // 조회를 시작한 뒤 저장한 외형을, 늦게 도착한 이전 bootstrap이 되돌리지 않게 한다.
+  if (read?.session === prefsSession && read.revision < prefsRevision && confirmedPrefs) {
+    b = { ...b, me: { ...b.me, prefs: { ...confirmedPrefs } } };
+  }
+  boot = b;
+};
+// 같은 계정으로 재로그인해도 이전 인증에서 시작한 작업과 구분하는 불투명한 소유자.
+const sessionOwner = () => prefsSession;
 // 열린 지도(MapLibre)를 모두 닫는다(화면을 바꿀 때)
 const clearMaps = () => { liveMaps.forEach((m) => { try { m.remove(); } catch {} }); liveMaps = []; };
 const stopSessionTimer = () => clearTimeout(sessTimer);
@@ -423,6 +464,6 @@ export {
   grid, gridbar, h, isPlaceholderContact, isStale, jobsPanel, kst, liveMaps,
   mb, md, modal, nowHM, pagehead, pendingActions, post, postOnce,
   prefsControls, promptDlg, reasonDlg, reasonFields, reauth, relogin, render, reqDone,
-  reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, setBoot, setRender, statusChip,
+  reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, sessionOwner, setBoot, setRender, statusChip,
   stopSessionTimer, toast, touchSession, uuid, workEnd, wrap,
 };

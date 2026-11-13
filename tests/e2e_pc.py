@@ -437,6 +437,8 @@ def run():
         ok(("1.4m³" in first_load or "2.8m³" in first_load) and page.locator(".over-note").count() == 0,
            "순서를 바꾸면 누적 적재(추정)를 화면에서 바로 다시 셈 (용량 안이면 초과 경고 없음)")
         page.get_by_role("button", name="2번 위로").first.click()  # 바꿨다 되돌림 → 조정한 것으로 보고 사유 요구
+        page.get_by_role("button", name="순서 유지 재계산", exact=True).click()
+        expect(page.get_by_role("button", name="배정 확정", exact=True)).to_be_enabled(timeout=30000)
         page.get_by_role("button", name="배정 확정").click()
         expect(page.get_by_text("조정 사유를 적어 주세요")).to_be_visible()
         page.get_by_placeholder(re.compile("^조정 사유")).fill("수거팀 의견으로 순서 확인(가상)")
@@ -762,8 +764,10 @@ def run():
         # 행정동 관리 → 접수 화면에서 주소로 동 자동 선택 → 목록 동 필터
         page.goto(URL + "#/settings/dongs")
         dc = page.locator(".card", has=page.get_by_role("heading", name="행정동 관리"))
-        dc.get_by_placeholder(re.compile("^새 동 이름")).fill("가상1동")
-        dc.get_by_placeholder(re.compile("^법정동·도로명")).fill("예시로, 가상법정동")
+        expect(dc.get_by_label("충장동 이름", exact=True)).to_have_value("충장동")
+        ok(dc.locator("tbody tr").count() == 14, "설정 → 행정동: 기본 동 13개와 신규 추가 행이 처음부터 표시됨")
+        dc.get_by_label("새 동 이름", exact=True).fill("가상1동")
+        dc.get_by_label("새 동 주소 판별 낱말", exact=True).fill("예시로, 가상법정동")
         dc.get_by_label("새 동 월요일").check()
         dc.get_by_role("button", name="추가").click()
         expect(dc.get_by_label("가상1동 이름")).to_have_value("가상1동")

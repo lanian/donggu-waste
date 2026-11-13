@@ -6,6 +6,7 @@ import { appLogo, btn, commit, go, h, isSolo, lockNow, mdOf, pcStops, pcWorkDate
 import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
 import { screenHomeSolo } from './solo.js';
+import { openFinder } from './find.js';
 import { daySummary, dongChips, filterDong, filterQ, homeBanners, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
 
 async function screenHome() {
@@ -31,6 +32,8 @@ async function screenHome() {
     : h('section', { class: 'actions' },
       btn('오늘 목록 받기', () => go('#/scan'), 'primary huge', { disabled: !registered }),
       btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (stale ? 'warn' : '')), intakeBtn);
+  actions.append(btn('날짜·접수 찾기', openFinder, 'big'));
+  actions.append(btn('빠른 수수료 계산', () => go('#/calculator'), 'big'));
   ui.scanAck = false;
   const otherDay = !!dl && dl.work_date !== todayKST();
   const out = [top, workerBar()];
@@ -102,7 +105,10 @@ async function screenHome() {
     out.push(dongChips(stops));
     out.push(stopSearch(stops.length));
     const list = filterDong(filterQ({ ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter]));
-    if (!list.length) out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 곳이 없습니다.` : '해당하는 곳이 없습니다.'));
+    if (!list.length) {
+      out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 곳이 없습니다.` : '해당하는 곳이 없습니다.'));
+      if (ui.stopQ) out.push(btn('다른 날짜에서도 찾기', () => openFinder({ q: ui.stopQ }), 'big'));
+    }
     const nowId = otherDay ? null : (stops.find((x) => x.d.progress !== 'DONE' && !x.d.outcome && !x.s.removed) || {}).s?.request_id;  // 지금 갈 곳 (오늘 목록만)
     // 방문 순서 바꾸기(이 휴대폰만): 골목 사정 등으로 순서를 바꿔 다닐 때. PC 노선·배정은 그대로이고, 새 목록을 받으면 PC 순서로 돌아간다.
     const canReorder = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && stops.length > 1;

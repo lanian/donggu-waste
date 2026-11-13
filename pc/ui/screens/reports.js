@@ -1,6 +1,7 @@
-// PC 화면: 일일 작업일지·월보 (저장된 업무 기록을 개인정보 없이 집계)
+// PC 화면: 원본 서식 다운로드와 개인정보 없는 전체 업무 집계.
 import { won } from '/web/fees.js';
 import { api, apiRaw, boot, btn, grid, h, pagehead, post, routeEpoch, searchbox, toast } from '../core.js';
+import { officialForms } from './official_forms.js';
 
 const BASIS = [['planned', '수거 예정일'], ['received', '접수일'], ['completed', '완료일']];
 const number = (value) => Number(value || 0).toLocaleString('ko-KR');
@@ -116,7 +117,8 @@ async function screenReports() {
   [kind, date, month, basis].forEach((input) => input.addEventListener('change', changed));
   period.append(kind.value === 'daily' ? date : month);
   view = h('div', {}, pagehead('업무 보고서', printButton, csvButton),
-    h('p', { class: 'muted' }, '업무 기록을 조회해 일일 작업일지와 월보를 만듭니다. 출력 서식은 추후 조정할 수 있습니다.'),
+    officialForms(current), h('h2', {}, '전체 업무 집계'),
+    h('p', { class: 'muted' }, '일일 작업일지와 월보의 전체 업무 집계를 조회합니다.'),
     searchbox([['보고서', kind], ['기간', period], ['집계 기준', basis]], query), message, content);
   setTimeout(() => { if (current()) load(); }, 0);
   return view;

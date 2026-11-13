@@ -1,7 +1,7 @@
 """행정동 관리·휴무일·날짜별 수거 한도·예약 달력.
 
 - 행정동(dong 표): 사용 여부, 기본 담당 수거팀(노선 계산의 약한 선호), 수거 요일, 일일 한도(건수·m³), 주소 자동 판별 낱말.
-  실제 동 이름을 미리 넣지 않는다. 시험용 가상 동은 sample_data.seed_dongs 가 넣는다.
+  동구 기본 행정동은 DB 이전 단계에서 누락분만 등록한다. 시험용 가상 동은 sample_data.seed_dongs 가 넣는다.
 - 접수의 동은 이름(문자열)으로 request.dong 에 둔다(목록·CSV·휴대폰 목록에 그대로 쓰기 위해). 동 이름을 바꾸면 접수도 함께 바꾼다.
 - 휴무일(holiday 표)과 쉬는 요일(설정)은 담당자가 정한다. 공휴일을 미리 넣지 않는다.
 - 한도는 경고만 하고 막지 않는다(담당자가 판단).
@@ -124,6 +124,9 @@ def delete_holiday(con, day: str):
 
 # ------------------------------------------------------------------ 행정동
 def _dong_row(r: dict) -> dict:
+    from dgpc.dong_centers import center_for
+    r['center_depot'] = center_for(r['name'])
+    r['depot'] = json.loads(r.pop('depot_json', None) or 'null')
     r["keywords"] = json.loads(r.pop("keywords_json") or "[]")
     r["weekdays"] = [int(x) for x in (r["weekdays"] or "").split(",") if x != ""]
     r["weekdays_label"] = weekdays_label(r["weekdays"]) if r["weekdays"] else "매일(쉬는 요일 제외)"
@@ -140,6 +143,26 @@ def list_dongs(con, active_only: bool = False) -> list[dict]:
 def get_dong(con, name: str) -> dict | None:
     r = C.one(con, "SELECT d.*, c.name AS crew_name FROM dong d LEFT JOIN crew c ON c.id=d.crew_id WHERE d.name=?", ((name or "").strip(),))
     return _dong_row(r) if r else None
+
+
+def reorder_dongs(con, ids, base_ids) -> list[dict]:
+    """전체 동을 한 번에 정렬한다. 읽은 뒤 바뀐 목록·순서는 덮어쓰지 않는다."""
+    for value in (ids, base_ids):
+        if (not isinstance(value, list) or any(not isinstance(did, str) or not did for did in value)
+                or len(value) != len(set(value))):
+            raise C.UserError("동 순서를 목록에서 다시 확인해 주세요.")
+    with C.tx(con):
+        current = [d["id"] for d in list_dongs(con)]
+        if set(ids) != set(current) or set(base_ids) != set(current):
+            raise C.StaleError("행정동 목록이 변경되었습니다. 입력 내용을 확인한 뒤 목록을 다시 열어 주세요.")
+        if ids == current:  # 응답을 잃은 같은 요청의 재시도도 이력을 중복 기록하지 않는다.
+            return list_dongs(con)
+        if base_ids != current:
+            raise C.StaleError("다른 창에서 동 순서를 변경했습니다. 입력 내용을 확인한 뒤 목록을 다시 열어 주세요.")
+        now = C.now()
+        con.executemany("UPDATE dong SET sort=?, updated_at=? WHERE id=?", [(i, now, did) for i, did in enumerate(ids)])
+        C.audit(con, "dong", "order", "REORDER", {"from": current, "to": ids})
+        return list_dongs(con)
 
 
 def save_dong(con, data: dict) -> str:
@@ -168,21 +191,41 @@ def save_dong(con, data: dict) -> str:
     if did and not old:
         raise C.UserError("동을 찾을 수 없습니다.")
     did = did or str(uuid.uuid4())
+    from dgpc import route_depots as DP
+    depot = DP.point(data['depot'], name + ' 차고지') if 'depot' in data else json.loads((old or {}).get('depot_json') or 'null')
+    if depot and not crew:
+        raise C.UserError('동별 차고지를 사용하려면 기본 담당 수거팀을 지정해 주세요.')
     with C.tx(con):
+        if depot and data.get('active', True):
+            other = [d for d in list_dongs(con) if d['id'] != did and d['active'] and d['crew_id'] == crew and d.get('depot') and not DP.same(depot, d['depot'])]
+            if other:
+                raise C.UserError(f"{other[0]['name']}과 같은 수거팀에 서로 다른 차고지를 지정할 수 없습니다. 담당팀을 확인해 주세요.")
+        if "sort" in data:
+            order = int(data.get("sort") or 0)
+        elif old:
+            current = C.one(con, "SELECT sort FROM dong WHERE id=?", (did,))
+            if not current:
+                raise C.UserError("동을 찾을 수 없습니다.")
+            order = current["sort"]
+        else:
+            order = C.one(con, "SELECT COALESCE(MAX(sort), -1) + 1 AS next FROM dong")["next"]
         con.execute("""INSERT INTO dong (id, name, active, crew_id, weekdays, daily_limit, daily_limit_m3, keywords_json, sort, updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, active=excluded.active, crew_id=excluded.crew_id,
             weekdays=excluded.weekdays, daily_limit=excluded.daily_limit, daily_limit_m3=excluded.daily_limit_m3, keywords_json=excluded.keywords_json,
             sort=excluded.sort, updated_at=excluded.updated_at""",
                     (did, name, 1 if data.get("active", True) else 0, crew, ",".join(map(str, days)), limit, limit_m3,
-                     json.dumps(kws, ensure_ascii=False), int(data.get("sort") or 0), C.now()))
+                     json.dumps(kws, ensure_ascii=False), order, C.now()))
         if code is not None:
             con.execute("UPDATE dong SET code=? WHERE id=?", (code or None, did))
+        if 'depot' in data:
+            con.execute('UPDATE dong SET depot_json=? WHERE id=?', (json.dumps(depot, ensure_ascii=False) if depot else None, did))
         renamed = 0
         if old and old["name"] != name:
             renamed = con.execute("UPDATE request SET dong=? WHERE dong=?", (name, old["name"])).rowcount
         C.audit(con, "dong", did, "SAVE" if old else "CREATE",
                 {"name": name, "active": bool(data.get("active", True)), "crew_id": crew, "weekdays": weekdays_label(days) if days else "",
-                 "limit": limit, "limit_m3": limit_m3, "keywords": len(kws), **({"renamed_from": old["name"], "n": renamed} if renamed or (old and old["name"] != name) else {})})
+                 "limit": limit, "limit_m3": limit_m3, "keywords": len(kws), "depot": depot,
+                 **({"renamed_from": old["name"], "n": renamed} if renamed or (old and old["name"] != name) else {})})
     return did
 
 

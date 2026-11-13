@@ -1,8 +1,12 @@
 // PC 화면: 배정·노선
 import * as M from '/web/map.js';
 import * as NAV from '/web/nav.js';
-import { api, boot, btn, chip, clearMaps, confirmDlg, go, grid, h, isStale, md, post, reasonDlg, routeEpoch, searchbox, statusChip, toast, wrap } from '../core.js';
+import { api, boot, btn, chip, clearMaps, confirmDlg, go, grid, h, isStale, md, post, reasonDlg, routeEpoch, searchbox, sessionOwner, statusChip, toast, wrap } from '../core.js';
 import { mapIn } from '../widgets.js';
+import { kstDay, moveDay } from '../date_filters.js';
+
+const copy = (value) => JSON.parse(JSON.stringify(value));
+const requiredCrew = (request) => request.required_crew_id || boot.dongs?.find((d) => d.name === request.dong && d.depot)?.crew_id;
 
 // 품목별 취급 표시(적재 기준표): 사람·장비가 더 필요한 것은 주의, 싣는 방법은 안내
 const LOAD_TAG_CLS = { EQUIP: 'warn', TWO: 'warn', FRAGILE: 'warn', BASE: 'info', UPRIGHT: 'info', DRAIN: 'info' };
@@ -28,6 +32,8 @@ function kakaoLink(q, n) {
 }
 let dispatchViewSeq = 0;
 async function screenDispatch() {
+  const owner = sessionOwner();
+  if (screenDispatch.owner !== owner) { screenDispatch.s = { date: screenDispatch.s?.date || boot.today, crews: new Set(), seen: new Set(), plan: null }; screenDispatch.owner = owner; }
   const myView = ++dispatchViewSeq, myRoute = routeEpoch, myHash = location.hash;
   let view, requestSeq = 0;
   const s = (screenDispatch.s ||= { date: boot.today, crews: new Set(), seen: new Set(), plan: null });
@@ -36,7 +42,7 @@ async function screenDispatch() {
   crews.forEach((c) => { if (!s.seen.has(c.id)) { s.seen.add(c.id); s.crews.add(c.id); } });  // 새로 만든 팀은 자동으로 포함
   const selectedCrews = () => [...s.crews].filter((id) => crews.some((c) => c.id === id));
   const crewKey = (ids = []) => JSON.stringify([...ids].sort());
-  const current = () => view?.isConnected && myView === dispatchViewSeq && myRoute === routeEpoch && location.hash === myHash;
+  const current = () => owner === sessionOwner() && view?.isConnected && myView === dispatchViewSeq && myRoute === routeEpoch && location.hash === myHash;
   const beginRequest = () => ({ seq: ++requestSeq, date: date.value, crewIds: selectedCrews() });
   const requestCurrent = (request) => current() && request.seq === requestSeq && request.date === date.value && crewKey(request.crewIds) === crewKey(selectedCrews());
   const calcBtn = btn('노선 계산', null, 'primary');
@@ -46,44 +52,76 @@ async function screenDispatch() {
     `${c.name} (${c.capacity_m3}m³${c.capacity_kg ? ` · ${Number(c.capacity_kg).toLocaleString()}kg` : ''}, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
   const msg = h('p', { class: 'msg' });
   const planMsg = h('p', { class: 'msg' });
-  const out = h('div');
+  const progress = h('nav', { class: 'dispatch-steps', 'aria-label': '배정 진행 단계' }, ...['대상 확인', '노선 조정', '배정 확정'].map((label, i) => h('span', {}, h('b', {}, i + 1), label)));
+  const showStage = (active) => [...progress.children].forEach((step, i) => { step.classList.toggle('on', i === active); if (i === active) step.setAttribute('aria-current', 'step'); else step.removeAttribute('aria-current'); });
+  const quality = h('select', { 'aria-label': '자동 계산 정밀도', onchange: (e) => { s.quality = +e.target.value; } },
+    h('option', { value: 5, selected: s.quality !== 20 }, '빠른 추천'), h('option', { value: 20, selected: s.quality === 20 }, '정밀 추천'));
+  const out = h('section', { role: 'region', 'aria-label': '노선 조정안' });
   const calc = wrap(async () => {
+    if (!current()) return;
+    if (s.plan?.adjusted && !(await confirmDlg('자동 추천 다시 계산', '현재 조정안을 새 자동 추천으로 바꿉니다. 직접 정한 순서를 유지하려면 순서 유지 재계산을 사용하세요.', { ok: '자동 추천 다시 계산' }))) return;
     if (!current()) return;
     const request = beginRequest();
     s.date = request.date; calcBtn.disabled = true;
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '노선을 계산하는 중입니다 (몇 초 걸립니다)'));
     let res;
-    try { res = await post('route', { date: request.date, crew_ids: request.crewIds }); }
-    catch (error) { if (requestCurrent(request)) throw error; return; }
+    try { res = await post('route', { date: request.date, crew_ids: request.crewIds, time_limit: +quality.value }); }
+    catch (error) { if (requestCurrent(request)) { draw(); throw error; } return; }
     finally { if (current()) syncCalc(); }
     if (!requestCurrent(request)) return;
     s.edit = null;
-    s.plan = { date: request.date, crewIds: request.crewIds, res, routes: res.routes.map((r) => ({ crew_id: r.crew_id, crew_name: r.crew_name, stops: r.stops.map((x) => ({ ...x, unload_after: x.unload_after ? { ...x.unload_after } : undefined })), end: r.end, unloads: r.unloads,
-      lunch: r.lunch, capacity_m3: r.capacity_m3, capacity_kg: r.capacity_kg, end_load_m3: r.end_load_m3, end_load_kg: r.end_load_kg })),
-      unassigned: res.unassigned.map((u) => ({ ...u })) };
+    s.plan = { date: request.date, crewIds: request.crewIds, res, routes: copy(res.routes), unassigned: copy(res.unassigned), history: [], revision: 0 };
     draw();
   }, msg);
   calcBtn.addEventListener('click', async (event) => { await calc(event); if (current()) syncCalc(); }); syncCalc();
   // 날짜를 바꾸면 이전 계산 결과는 그 날짜 것이므로 확정하지 못하게(다시 계산하거나 현재 배정을 불러오게)
   date.addEventListener('change', () => { requestSeq++; s.date = date.value; if (s.edit) { s.edit = null; } draw(); });
+  const reviewPlan = wrap(async () => {
+    const p = s.plan;
+    if (!current() || !p || p.busy || p.date !== date.value || crewKey(p.crewIds) !== crewKey(selectedCrews())) return;
+    msg.replaceChildren(); msg.className = 'msg';
+    const request = beginRequest(), revision = p.revision;
+    const valid = () => requestCurrent(request) && s.plan === p && p.revision === revision;
+    p.busy = true; draw();
+    try {
+      const res = await post('route', { date: p.date, crew_ids: p.crewIds, time_limit: +quality.value,
+        request_ids: Object.keys(p.res.requests), depot_basis: p.res.depot_basis,
+        fixed_plan: Object.fromEntries(p.routes.map((route) => [route.crew_id, route.stops.map((stop) => stop.request_id)])) });
+      if (!valid()) return;
+      if (res.infeasible) throw new Error('현재 순서와 팀으로 시간·적재 조건을 만족하지 못했습니다. 다른 팀으로 옮기거나 일부 접수를 미룬 뒤 다시 계산하세요.');
+      const reasons = new Map(p.unassigned.map((u) => [u.request_id, u]));
+      p.routes = copy(res.routes); p.unassigned = res.unassigned.map((u) => reasons.get(u.request_id) || u);
+      p.res = res; p.needsReview = false;
+      toast('조정한 순서로 시간·적재를 다시 확인했습니다.');
+    } catch (error) { if (valid()) { p.needsReview = true; p.routes.forEach((route) => { route.end = ''; route.stops.forEach((stop) => { stop.eta = ''; }); }); throw error; } }
+    finally { p.busy = false; if (current() && s.plan === p) draw(); }
+  }, planMsg);
   // ---- 확정된 배정 부분 수정 (다시 계산하지 않음): 넣기·빼기·순서·팀 옮기기. 고친 팀마다 새 갱신본 → 그 팀 목록 다시 보내기
   const loadCurrent = wrap(async () => {
     if (!current()) return;
+    if (s.plan?.adjusted && !(await confirmDlg('확정 배정 불러오기', '현재 조정안을 닫고 저장된 배정을 바로 수정합니다. 계속할까요?', { ok: '확정 배정 불러오기' }))) return;
+    if (!current()) return;
     const request = beginRequest();
-    s.date = request.date; s.plan = null;
+    s.date = request.date;
     out.replaceChildren(h('div', { class: 'card loading', 'aria-busy': 'true' }, '확정된 배정을 불러오는 중입니다'));
     let cur, bs, cand;
     try {
       [cur, bs, cand] = await Promise.all([api('assign/current?date=' + request.date), api('batches?date=' + request.date),
         api('requests?' + new URLSearchParams({ date_field: 'planned', date_from: request.date, date_to: request.date, status: '', quick: 'UNASSIGNED', size: 200, page: 1 }))]);
-    } catch (error) { if (requestCurrent(request)) throw error; return; }
+      for (let page = 2; page <= cand.pages && requestCurrent(request); page++) {
+        const next = await api('requests?' + new URLSearchParams({ date_field: 'planned', date_from: request.date, date_to: request.date, status: '', quick: 'UNASSIGNED', size: 200, page }));
+        cand.rows.push(...next.rows);
+      }
+    } catch (error) { if (requestCurrent(request)) { draw(); throw error; } return; }
     if (!requestCurrent(request)) return;
     const names = {}, received = {}, sent = {};
     bs.filter((b) => b.status === 'ACTIVE').forEach((b) => { b.stops.forEach((x) => { names[x.request_id] = x; }); sent[b.crew_id] = !!b.bundles[0]; received[b.crew_id] = !!(b.bundles[0] && b.bundles[0].receipt_confirmed_at); });
-    s.edit = { date: request.date, cur, names, received, sent, cand: cand.rows, reason: (s.edit && s.edit.reason) || '' };
+    s.plan = null;
+    s.edit = { date: request.date, cur, names, received, sent, cand: [...new Map(cand.rows.map((row) => [row.id, row])).values()], reason: (s.edit && s.edit.reason) || '', searches: s.edit?.searches || {} };
     drawEdit();
   }, msg);
   const drawEdit = () => {
+    showStage(1);
     clearMaps();
     const E = s.edit;
     const editSeq = requestSeq;
@@ -118,8 +156,15 @@ async function screenDispatch() {
       const stops = b ? b.stops : [];
       const order = stops.map((x) => x.request_id);
       const swap = (i, d) => { const o = [...order]; [o[i], o[i + d]] = [o[i + d], o[i]]; return op({ op: 'reorder', crew_id: c.id, order: o }, [c.id]); };
-      const pick = h('select', { class: 'small', 'aria-label': `${c.name}에 넣을 접수` }, h('option', { value: '' }, E.cand.length ? `넣을 접수 고르기 (${E.cand.length}건)` : '이날 미배정 접수 없음'),
-        ...E.cand.map((q) => h('option', { value: q.id }, `${q.receipt_no.replace(/^DG-\d{4}/, '')} ${q.name} · ${q.address}${q.lat == null ? ' (위치 없음)' : ''}`)));
+      const pick = h('select', { class: 'small', 'aria-label': `${c.name}에 넣을 접수` });
+      const query = h('input', { type: 'search', 'aria-label': `${c.name} 미배정 접수 찾기`, placeholder: '미배정 접수번호 · 이름 · 주소', value: E.searches[c.id] || '', oninput: (e) => { E.searches[c.id] = e.target.value; drawCandidates(); } });
+      const drawCandidates = () => {
+        const text = query.value.trim().toLowerCase(), selected = pick.value;
+        const rows = E.cand.filter((q) => !text || [q.receipt_no, q.name, q.address, q.dong].join(' ').toLowerCase().includes(text));
+        pick.replaceChildren(h('option', { value: '' }, rows.length ? `넣을 접수 고르기 (${rows.length}건)` : '조건에 맞는 미배정 접수 없음'),
+          ...rows.map((q) => h('option', { value: q.id, selected: q.id === selected, disabled: !!requiredCrew(q) && requiredCrew(q) !== c.id }, `${q.receipt_no.replace(/^DG-\d{4}/, '')} ${q.name} · ${q.address}${q.lat == null ? ' (위치 없음)' : ''}`)));
+      };
+      drawCandidates();
       const pos = h('input', { type: 'number', min: 1, placeholder: '끝', class: 'w-xs', 'aria-label': `${c.name} 넣을 위치(비우면 끝)` });
       return h('div', { class: `card route c${(ci % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${c.name} · ${stops.length}곳 `,
           b ? chip(`갱신본 ${b.assign_ver}`) : chip('배정 없음', 'neutral'), E.received[c.id] ? chip('휴대폰 수신함', 'info') : E.sent[c.id] ? chip('QR 표시함') : null),
@@ -133,7 +178,7 @@ async function screenDispatch() {
               if (!(await confirmDlg('배정에서 빼기', `${label(x)}을(를) ${c.name} 배정에서 뺍니다. 접수는 남고 미배정이 됩니다.`, { ok: '빼기', danger: true }))) return;
               await op({ op: 'remove', request_id: x.request_id }, [c.id])();
             }), 'small danger', { 'aria-label': `${c.name} ${i + 1}번 빼기` })))),
-        h('div', { class: 'row insert-row' }, pick, pos, btn('넣기', (e) => { if (!pick.value) { toast('넣을 접수를 고르세요', true); return; } op({ op: 'insert', crew_id: c.id, request_id: pick.value, position: pos.value || null }, [c.id])(e); }, 'small primary', { 'aria-label': `${c.name}에 넣기` })));
+        query, h('div', { class: 'row insert-row' }, pick, pos, btn('넣기', (e) => { if (!pick.value) { toast('넣을 접수를 고르세요', true); return; } op({ op: 'insert', crew_id: c.id, request_id: pick.value, position: pos.value || null }, [c.id])(e); }, 'small primary', { 'aria-label': `${c.name}에 넣기` })));
     });
     out.replaceChildren(h('div', { class: 'notice info edit-mode' }, h('strong', {}, `${md(E.date)} 확정 배정 부분 수정 `), '— 다시 계산하지 않고 넣기·빼기·순서·팀 옮기기만 합니다. 도착 예상 시각은 다시 계산되지 않으며, 고친 팀은 목록을 다시 보내야 합니다. ',
         btn('수정 끝내기', () => { s.edit = null; draw(); }, 'small')),
@@ -141,6 +186,7 @@ async function screenDispatch() {
       E.cur.length || E.cand.length ? h('div', { class: 'cols edit-cols' }, ...cols) : h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, `${md(E.date)}에 확정된 배정이 없습니다. [노선 계산]으로 먼저 확정하세요.`)));
   };
   const draw = () => {
+    showStage(!s.plan ? 0 : s.plan.needsReview ? 1 : 2);
     if (s.edit && s.edit.date === date.value) return drawEdit();
     clearMaps();
     const p = s.plan;
@@ -162,47 +208,61 @@ async function screenDispatch() {
       });
       rt.end_load_m3 = m / 100; rt.end_load_kg = kg;
     });
-    const clearUnload = (ri) => { if (p.routes[ri].stops.some((x) => x.unload_after)) { p.routes[ri].stops.forEach((x) => delete x.unload_after); p.routes[ri].unloadStale = true; } };
-    const move = (ri, i, d) => { const a = p.routes[ri].stops; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); p.adjusted = true; draw(); };
-    const toCrew = (ri, i, target) => { p.adjusted = true; clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외' }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); draw(); };
-    const cols = p.routes.map((rt, ri) => h('div', { class: `card route c${(ri % 4) + 1}` }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null,
+    const remember = () => {
+      if (p.busy) return false;
+      p.history ||= []; p.history.push(copy({ routes: p.routes, unassigned: p.unassigned, adjusted: !!p.adjusted, needsReview: !!p.needsReview })); if (p.history.length > 20) p.history.shift();
+      p.revision = (p.revision || 0) + 1; p.adjusted = true; p.needsReview = true;
+      return true;
+    };
+    const clearTimes = () => p.routes.forEach((route) => { route.end = ''; route.lunch = null; route.stops.forEach((stop) => { stop.eta = ''; }); });
+    const clearUnload = (ri) => { const route = p.routes[ri]; if (route.stops.some((x) => x.unload_after)) { route.stops.forEach((x) => delete x.unload_after); route.unloadStale = true; } route.unloads = 0; };
+    const focusStop = (id) => out.querySelector(`[data-request-id="${id}"] button:not(:disabled)`)?.focus({ preventScroll: true });
+    const move = (ri, i, d) => { const a = p.routes[ri].stops, j = i + d; if (j < 0 || j >= a.length || !remember()) return; const id = a[i].request_id; [a[i], a[j]] = [a[j], a[i]]; clearUnload(ri); clearTimes(); draw(); focusStop(id); };
+    const toCrew = (ri, i, target) => { if (target === '' || !remember()) return; clearUnload(ri); if (target !== 'OUT') clearUnload(+target); const [x] = p.routes[ri].stops.splice(i, 1); if (target === 'OUT') p.unassigned.push({ request_id: x.request_id, reason: '담당자가 제외', must_today: !!R[x.request_id].must_today }); else p.routes[+target].stops.push({ request_id: x.request_id, eta: '' }); clearTimes(); draw(); focusStop(x.request_id); };
+    const cols = p.routes.map((rt, ri) => h('div', { class: `card route route-card c${(ri % 4) + 1}`, 'data-route-crew': rt.crew_id }, h('h2', {}, h('span', { class: 'swatch', 'aria-hidden': 'true' }), `${rt.crew_name} · ${rt.stops.length}곳`, rt.end ? h('span', { class: 'muted' }, ` 예상 종료 ${rt.end}`) : null, rt.unloads ? chip(`반입지 경유 ${rt.unloads}회`) : null,
         rt.lunch ? chip(`쉬는 시간 ${rt.lunch.start}부터 ${rt.lunch.minutes}분`) : null),
+      h('p', { class: 'muted small', 'aria-label': `${rt.crew_name} 차고지` }, `출발: ${rt.depot?.label || boot.settings.depot.label || '차고지'} · 종료: ${p.res.end_site?.label || rt.depot?.label || boot.settings.depot.label || '차고지'}`),
+      !p.needsReview && rt.drive_min != null ? h('p', { class: 'route-metrics' }, `이동 약 ${rt.drive_min}분 · 현장 작업 ${rt.work_min}분 · 총 ${rt.duration_min}분 · 직선 합계 ${rt.distance_km}km (차고지·반입지·복귀 포함, 도로 거리 아님)`) : null,
       rt.unloadStale ? h('div', { class: 'notice warn small' }, '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
       rt.overAt != null ? h('div', { class: 'notice warn small over-note' }, `${rt.overAt + 1}번부터 누적 적재(추정)가 차량 용량(${rt.capacity_m3 || 8}m³${rt.capacity_kg ? ` · ${rt.capacity_kg.toLocaleString()}kg` : ''})을 넘습니다. 반입지에 들러야 하면 [노선 계산]을 다시 하거나 몇 곳을 다른 팀·다른 날로 옮기세요.`) : null,
-      ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline' }, h('span', { class: 's' }, i + 1),
+      ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline', 'data-request-id': x.request_id }, h('span', { class: 's' }, i + 1),
         h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${loadTxt(x)}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
+          h('small', { class: 'block muted' }, R[x.request_id].receipt_no),
           (R[x.request_id].items || []).length ? h('span', { class: 'stop-items small' }, h('br'), R[x.request_id].items.join(', ')) : null, h('br'),
           ...tagChips(x), x.over ? chip('적재 초과', 'bad') : null,
           R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null,
           R[x.request_id].dong ? chip(R[x.request_id].dong) : null,
           R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null,
           kakaoLink(R[x.request_id], i + 1)),
-        h('span', { class: 'ctl' }, btn('▲', () => move(ri, i, -1), 'small', { 'aria-label': `${i + 1}번 위로`, disabled: i === 0 }), btn('▼', () => move(ri, i, 1), 'small', { 'aria-label': `${i + 1}번 아래로`, disabled: i === rt.stops.length - 1 }),
-          h('select', { class: 'small', 'aria-label': '다른 팀으로 이동', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기')))),
+        h('span', { class: 'ctl' }, btn('▲', () => move(ri, i, -1), 'small', { 'aria-label': `${i + 1}번 위로`, disabled: p.busy || i === 0 }), btn('▼', () => move(ri, i, 1), 'small', { 'aria-label': `${i + 1}번 아래로`, disabled: p.busy || i === rt.stops.length - 1 }),
+          h('select', { class: 'small', disabled: p.busy, 'aria-label': '다른 팀으로 이동', onchange: (e) => toCrew(ri, i, e.target.value) }, h('option', { value: '' }, '이동…'), ...p.routes.map((o, oi) => oi !== ri ? h('option', { value: oi, disabled: !!requiredCrew(R[x.request_id]) && requiredCrew(R[x.request_id]) !== o.crew_id }, o.crew_name) : null), h('option', { value: 'OUT' }, '이번 배정에서 빼기')))),
         x.unload_after ? h('div', { class: 'stopline unload' }, h('span', { class: 's' }, '⇩'), h('span', { class: 't' }, `${x.unload_after.label} 하차`, h('br'),
           h('span', { class: 'muted' }, `도착 ${x.unload_after.eta} · 약 ${x.unload_after.volume_m3}m³${p.res.uses_weight && x.unload_kg ? ` · ${x.unload_kg.toLocaleString()}kg` : ''} 비움 · ${x.unload_after.minutes}분`))) : null]),
       rt.stops.length && rt.end_load_m3 ? h('p', { class: 'muted small' }, `마지막에 실려 있는 양(추정) ${rt.end_load_m3}m³${p.res.uses_weight ? ` · ${(rt.end_load_kg || 0).toLocaleString()}kg` : ''}`) : null));
     const noLoc = p.unassigned.filter((u) => R[u.request_id] && R[u.request_id].lat == null).length;
     const un = h('div', { class: 'card' }, h('h2', {}, `미배정 ${p.unassigned.length}건`),
-      noLoc ? h('div', { class: 'row' }, btn(`위치 없는 ${noLoc}건 주소 자료로 찾기`, wrap(async () => { const g = await post('geocode/missing', { date: s.date }); toast(`찾음 ${g.found}건 · 못 찾음 ${g.missing}건. 노선을 다시 계산합니다.`); calc(); }, msg), 'small'),
+      noLoc ? h('div', { class: 'row' }, btn(`위치 없는 ${noLoc}건 주소 자료로 찾기`, wrap(async () => { const g = await post('geocode/missing', { date: s.date }); if (!current() || s.plan !== p) return; toast(`찾음 ${g.found}건 · 못 찾음 ${g.missing}건.`); if (p.adjusted) { p.revision++; p.needsReview = true; clearTimes(); draw(); } else await calc(); }, msg), 'small'),
         h('span', { class: 'muted' }, '찾은 위치는 건물 출입구 기준입니다.')) : null, ...p.unassigned.map((u, i) => h('div', { class: 'stopline' },
-      h('span', { class: 't' }, R[u.request_id] ? `${R[u.request_id].name} · ${R[u.request_id].address}` : u.request_id, h('br'), h('span', { class: 'muted' }, u.reason)),
+        h('span', { class: 't' }, R[u.request_id] ? `${R[u.request_id].receipt_no} · ${R[u.request_id].name} · ${R[u.request_id].address}` : u.request_id, h('br'), h('span', { class: 'muted' }, u.reason)),
       R[u.request_id] && R[u.request_id].lat == null ? btn('위치 지정', () => go(`#/request/${u.request_id}`), 'small') : null,
       R[u.request_id] ? btn('다른 날로 미루기', wrap(async () => {
         const r = await postponeDlg([u.request_id], R[u.request_id].dong, s.date, `${R[u.request_id].name} · ${R[u.request_id].address}`);
         if (!r) return;
-        p.unassigned.splice(p.unassigned.indexOf(u), 1); draw();
+        if (!current() || s.plan !== p) return;
+        p.unassigned = p.unassigned.filter((row) => row.request_id !== u.request_id); p.revision++; p.needsReview = true; p.history = []; clearTimes(); draw();
       }, msg), 'small') : null,
-      h('select', { class: 'small', 'aria-label': '팀에 넣기', onchange: (e) => { if (e.target.value === '') return; const [x] = p.unassigned.splice(i, 1); p.routes[+e.target.value].stops.push({ request_id: x.request_id, eta: '' }); p.adjusted = true; draw(); } },
-        h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi }, o.crew_name))))));
+      h('select', { class: 'small', disabled: p.busy || !R[u.request_id] || R[u.request_id].lat == null, 'aria-label': '팀에 넣기', onchange: (e) => { if (e.target.value === '' || !remember()) return; const [x] = p.unassigned.splice(i, 1); clearUnload(+e.target.value); p.routes[+e.target.value].stops.push({ request_id: x.request_id, eta: '' }); clearTimes(); draw(); focusStop(x.request_id); } },
+        h('option', { value: '' }, '팀에 넣기…'), ...p.routes.map((o, oi) => h('option', { value: oi, disabled: !!R[u.request_id] && !!requiredCrew(R[u.request_id]) && requiredCrew(R[u.request_id]) !== o.crew_id }, o.crew_name))))));
     const mapBox = h('div', { class: 'mapbox' });
-    const adjReason = h('input', { placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:280px', oninput: (e) => { p.adjustReason = e.target.value; } });
+    const adjReason = h('input', { 'aria-label': '노선 조정 사유', placeholder: '조정 사유 (예: 골목 진입 불가로 순서 변경)', value: p.adjustReason || '', style: 'flex:1;min-width:180px', oninput: (e) => { p.adjustReason = e.target.value; } });
     const crewStale = crewKey(p.crewIds) !== crewKey(selectedCrews());
     const planStale = p.date !== date.value || crewStale;
     const confirmBtn = btn('배정 확정', wrap(async () => {
       if (!current() || s.plan !== p) return;
-      const confirmSeq = requestSeq;
-      const planCurrent = () => current() && confirmSeq === requestSeq && s.plan === p && p.date === date.value && crewKey(p.crewIds) === crewKey(selectedCrews());
+      if (p.needsReview || p.busy) throw new Error('순서 유지 재계산으로 시간·적재를 먼저 확인하세요.');
+      const confirmSeq = requestSeq, revision = p.revision;
+      const snapshot = { routes: copy(p.routes), reason: adjReason.value, adjusted: !!p.adjusted, basis: p.res.depot_basis };
+      const planCurrent = () => current() && confirmSeq === requestSeq && s.plan === p && p.revision === revision && !p.needsReview && p.date === date.value && crewKey(p.crewIds) === crewKey(selectedCrews());
       if (p.date !== date.value) throw new Error(`이 결과는 ${md(p.date)} 계산 결과입니다. 날짜를 바꿨으면 [노선 계산]을 다시 하세요.`);
       if (crewKey(p.crewIds) !== crewKey(selectedCrews())) throw new Error('수거팀 선택이 바뀌었습니다. [노선 계산]을 다시 하세요.');
       if (p.adjusted && !adjReason.value.trim()) { adjReason.focus(); throw new Error('추천에서 순서·팀을 바꿨습니다. 조정 사유를 적어 주세요.'); }
@@ -213,19 +273,24 @@ async function screenDispatch() {
       if ((got.length || shown.length) && !(await confirmDlg('수거팀이 QR을 다시 받아야 합니다',
         `${[...got, ...shown].map((b) => b.crew_name).join(', ')}에 ${md(p.date)} 목록을 이미 ${got.length ? '보냈고 휴대폰이 받았습니다' : 'QR로 표시했습니다'}. 다시 확정하면 새 갱신본이 생겨 [목록 전송]에서 QR을 다시 보여 줘야 하고, 수거팀은 새 목록을 받아야 합니다. 한두 건만 바꾸려면 [현재 배정 불러오기]가 낫습니다.`, { ok: '다시 확정' }))) return;
       if (!planCurrent()) return;
-      const overs = p.routes.filter((rt) => rt.overAt != null);
+      const overs = snapshot.routes.filter((rt) => rt.overAt != null);
       if (overs.length && !(await confirmDlg('적재 초과', `${overs.map((rt) => `${rt.crew_name} ${rt.overAt + 1}번부터`).join(', ')} 누적 적재(추정)가 차량 용량을 넘습니다. 그대로 확정할까요? (추정치이므로 현장에서 반입지를 더 들를 수 있습니다)`, { ok: '그대로 확정' }))) return;
       if (!planCurrent()) return;
-      const plan = {}; p.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
-      const res = await post('assign', { date: p.date, plan, adjusted: !!p.adjusted, adjust_reason: adjReason.value });
-      if (!planCurrent()) return;
+      const plan = {}; snapshot.routes.forEach((rt) => { plan[rt.crew_id] = rt.stops.map((x) => ({ request_id: x.request_id, eta: x.eta || '', unload_after: x.unload_after || null })); });
+      const res = await post('assign', { date: p.date, plan, adjusted: snapshot.adjusted, adjust_reason: snapshot.reason, depot_basis: snapshot.basis });
+      if (!planCurrent()) { if (current() && s.plan === p) toast('확정을 누른 배정은 저장됐습니다. 이후 조정한 안은 다시 검토하고 확정하세요.', true); return; }
       toast(`배정 확정: ${res.map((b) => `${b.count}곳(갱신본 ${b.assign_ver})`).join(', ')}`); s.plan = null; go(`#/send?date=${p.date}`);
-    }, planMsg), 'primary', { disabled: planStale });
+    }, planMsg), 'primary', { disabled: planStale || p.needsReview || p.busy || !p.routes.some((route) => route.stops.length) });
     const nStops = p.routes.reduce((a, rt) => a + rt.stops.length, 0);
     const lastEnd = p.routes.map((rt) => rt.end).filter(Boolean).sort().pop();
     const summary = p.routes.map((rt) => `${rt.crew_name} ${rt.stops.length}곳`).join(' · ') + (p.unassigned.length ? ` · 미배정 ${p.unassigned.length}건` : '');
     const note = p.res.matrix_source === 'KAKAO' ? p.res.matrix_note : `이동시간: ${(p.res.matrix_note || '').replace('로컬 OSRM', 'PC 안의 도로 자료') || '계산할 지점 없음'}`;
-    out.replaceChildren(planStale ? h('div', { class: 'notice bad plan-stale', role: 'alert' }, h('strong', {}, `${md(p.date)} 계산 결과입니다. `), crewStale ? '수거팀 선택을 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하세요.' : `수거일을 ${md(date.value)}로 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하거나 날짜를 되돌리세요.`) : null,
+    const filter = h('input', { type: 'search', 'aria-label': '노선 접수 찾기', placeholder: '접수번호 · 이름 · 주소로 찾기', value: p.q || '', oninput: (e) => { p.q = e.target.value; applyFilter(); } });
+    const applyFilter = () => out.querySelectorAll('.stopline[data-request-id]').forEach((row) => { const request = R[row.dataset.requestId]; row.hidden = !!p.q && ![request.receipt_no, request.name, request.address, request.dong].join(' ').toLowerCase().includes(p.q.trim().toLowerCase()); });
+    const undo = btn('조정 되돌리기', () => { const previous = p.history?.pop(); if (!previous || p.busy) return; Object.assign(p, previous); p.revision++; draw(); }, 'small', { disabled: p.busy || !p.history?.length });
+    out.replaceChildren(...[planStale ? h('div', { class: 'notice bad plan-stale', role: 'alert' }, h('strong', {}, `${md(p.date)} 계산 결과입니다. `), crewStale ? '수거팀 선택을 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하세요.' : `수거일을 ${md(date.value)}로 바꿨으므로 이 결과로는 확정할 수 없습니다. [노선 계산]을 다시 하거나 날짜를 되돌리세요.`) : null,
+      h('div', { class: 'dispatch-tools' }, filter, undo, btn(p.busy ? '시간·적재 확인 중…' : '순서 유지 재계산', reviewPlan, 'primary small', { disabled: planStale || p.busy || !nStops })),
+      p.needsReview ? h('div', { class: 'notice warn', role: 'status' }, '순서·팀이 바뀌어 시간 재계산이 필요합니다. 조정안은 보관됩니다. 순서 유지 재계산 후 확정하세요.') : null,
       h('div', { class: 'notice matrix-note' }, note, p.res.unload_site ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)', p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : '', p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null),
       daySummaryCard(p.res),
       h('div', { class: 'kpis compact' }, ...[['배정 팀', `${p.routes.length}팀`, ''], ['방문 지점', `${nStops}곳`, ''], ['미배정', `${p.unassigned.length}건`, p.unassigned.length ? 'warn' : 'ok'],
@@ -233,17 +298,30 @@ async function screenDispatch() {
       h('div', { class: 'dispatch-grid' }, h('div', { class: 'mapcol' }, h('div', { class: 'card mapcard' }, h('div', { class: 'panel-h' }, h('h2', {}, '지도'), h('span', { class: 'legend small' }, ...p.routes.map((rt, ri) => h('span', { class: `lg route c${(ri % 4) + 1}` }, rt.crew_name)))), mapBox,
         h('p', { class: 'muted small' }, '선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다. 핀 위치와 이름은 지도 서버로 보내지 않습니다.'))),
         h('div', { class: 'routecol' }, h('div', { class: 'routecol-h' }, h('b', {}, '팀별 방문 순서'), h('span', { class: 'muted small' }, '▲▼로 순서 변경, [이동…]으로 팀 변경')), h('div', { class: 'cols' }, ...cols), un)),
-      h('div', { class: 'actionbar' }, h('b', {}, summary), p.adjusted ? adjReason : h('span', { class: 'muted' }, '추천 순서 그대로 확정합니다.'), h('span', { class: 'grow' }), planMsg, confirmBtn));
+      h('section', { class: 'dispatch-final', role: 'region', 'aria-label': '확정 전 확인' }, h('h2', {}, '확정 전 확인'),
+        h('p', {}, `${p.date} · ${summary}`), h('p', { class: 'muted small' }, '선택한 팀의 기존 배정을 새 갱신본으로 바꿉니다. 미배정 접수는 이번 목록에 포함되지 않습니다.'),
+        p.unassigned.some((u) => u.must_today) ? h('p', { class: 'notice warn' }, '오늘 필수 접수가 미배정으로 남아 있습니다. 다른 팀이나 수거일 조정이 필요한지 확인하세요.') : null),
+      h('div', { class: 'actionbar' }, h('b', {}, summary), p.adjusted ? adjReason : h('span', { class: 'muted' }, '추천 순서 그대로 확정합니다.'), h('span', { class: 'grow' }), planMsg, confirmBtn)].filter(Boolean));
+    applyFilter();
     setTimeout(async () => {
       try {
-        const { map, ml } = await mapIn(mapBox, { center: [boot.settings.depot.lon, boot.settings.depot.lat], zoom: 13 });
-        const b = new ml.LngLatBounds(); b.extend([boot.settings.depot.lon, boot.settings.depot.lat]);
-        M.pin(ml, map, { lng: boot.settings.depot.lon, lat: boot.settings.depot.lat, label: '출발', cls: 'me' });
+        if (!current() || s.plan !== p || !mapBox.isConnected) return;
+        const common = { ...boot.settings.depot }, first = p.routes[0]?.depot || common;
+        const { map, ml } = await mapIn(mapBox, { center: [first.lon, first.lat], zoom: 13 });
+        if (!current() || s.plan !== p || !mapBox.isConnected) { map.remove(); return; }
+        const b = new ml.LngLatBounds(); b.extend([first.lon, first.lat]);
         const lines = [];
         p.routes.forEach((rt, ri) => {
-          const coords = [[boot.settings.depot.lon, boot.settings.depot.lat]];
-          rt.stops.forEach((x, i) => { const q = R[x.request_id]; if (q.lat == null) return; coords.push([q.lon, q.lat]); b.extend([q.lon, q.lat]); M.pin(ml, map, { lng: q.lon, lat: q.lat, label: `${ri + 1}-${i + 1}`, cls: 'c' + ((ri % 4) + 1) }); });
-          lines.push({ type: 'Feature', properties: { c: ri % 4 }, geometry: { type: 'LineString', coordinates: coords } });
+          const depot = rt.depot || common, coords = [[depot.lon, depot.lat]];
+          b.extend([depot.lon, depot.lat]); M.pin(ml, map, { lng: depot.lon, lat: depot.lat, label: `출발 ${rt.crew_name}`, cls: 'me' });
+          rt.stops.forEach((x, i) => {
+            const q = R[x.request_id]; if (q.lat == null) return;
+            coords.push([q.lon, q.lat]); b.extend([q.lon, q.lat]); M.pin(ml, map, { lng: q.lon, lat: q.lat, label: `${ri + 1}-${i + 1}`, cls: 'c' + ((ri % 4) + 1) });
+            const unload = x.unload_after && p.res.unload_site;
+            if (unload) { coords.push([unload.lon, unload.lat]); b.extend([unload.lon, unload.lat]); }
+          });
+          const end = p.res.end_site || depot;
+          if (rt.stops.length) { coords.push([end.lon, end.lat]); b.extend([end.lon, end.lat]); lines.push({ type: 'Feature', properties: { c: ri % 4 }, geometry: { type: 'LineString', coordinates: coords } }); }
         });
         p.unassigned.forEach((u) => { const q = R[u.request_id]; if (q && q.lat != null) { b.extend([q.lon, q.lat]); M.pin(ml, map, { lng: q.lon, lat: q.lat, label: '미', cls: 'un' }); } });
         map.fitBounds(b, { padding: 50, maxZoom: 16, duration: 0 });  // 바탕 지도가 늦어도 핀은 모두 보이게
@@ -256,11 +334,15 @@ async function screenDispatch() {
     }, 0);
   };
   draw();
-  view = h('div', { class: 'dispatch' }, h('h1', {}, '배정·노선'),
+  const setDay = (day) => { date.value = day; date.dispatchEvent(new Event('change')); };
+  const pickCrews = (all) => { s.crews = new Set(all ? crews.map((c) => c.id) : []); crewBox.querySelectorAll('input').forEach((input) => { input.checked = all; }); requestSeq++; s.edit = null; syncCalc(); draw(); };
+  view = h('div', { class: 'dispatch' }, h('h1', {}, '배정·노선'), progress,
     h('div', { class: 'card searchbox', role: 'group', 'aria-label': '조회조건' },
       h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'dp-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
         h('span', { class: 'cond-l' }, '수거팀'), h('div', { class: 'cond-v wide' }, crewBox)),
-      h('div', { class: 'cond-btns' }, calcBtn, ['ADMIN', 'INTAKE'].includes(boot.me.role) ? btn('현재 배정 불러오기', loadCurrent, '', { title: '이미 확정한 배정에서 한두 건만 넣기·빼기·순서·팀 옮기기 (다시 계산하지 않음)' }) : null),
+      h('div', { class: 'dispatch-tools' }, btn('이전날', () => setDay(moveDay(date.value, -1)), 'small'), btn('오늘', () => setDay(kstDay()), 'small'), btn('다음날', () => setDay(moveDay(date.value, 1)), 'small'),
+        btn('전체 팀', () => pickCrews(true), 'small'), btn('선택 해제', () => pickCrews(false), 'small'), h('label', {}, '자동 계산 ', quality)),
+      h('div', { class: 'cond-btns' }, calcBtn, ['ADMIN', 'INTAKE'].includes(boot.me.role) ? btn('현재 배정 불러오기', loadCurrent, '', { title: '확정한 배정을 바로 수정합니다. 고친 팀은 목록을 다시 보내야 합니다.' }) : null),
       crews.length ? null : h('p', { class: 'err' }, '설정에서 수거팀을 먼저 만드세요.'), msg),
     out);
   return view;
@@ -270,8 +352,8 @@ async function screenDispatch() {
 async function postponeDlg(ids, dong, fromDate, label) {
   const d = h('input', { type: 'date' });
   const hint = h('span', { class: 'muted small' });
-  const next = new Date(fromDate + 'T00:00:00'); next.setDate(next.getDate() + 1);
-  const start = next.toISOString().slice(0, 10) > boot.today ? next.toISOString().slice(0, 10) : boot.today;
+  const next = moveDay(fromDate, 1);
+  const start = next > boot.today ? next : boot.today;
   const pick = wrap(async () => {
     const c = await api(`calendar?${new URLSearchParams({ start, days: 1, dong: dong || '' })}`);
     if (!c.earliest) throw new Error('120일 안에 여유 있는 날이 없습니다.');

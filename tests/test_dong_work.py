@@ -446,7 +446,7 @@ class DongUserMigrationTest(unittest.TestCase):
                 con.close()
                 con = store.connect()
                 try:
-                    self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 8)
+                    self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], store.LATEST)
                     self.assertEqual(store.run_migrations(con), [])
                     for table, values in before.items():
                         self.assertEqual(con.execute("SELECT * FROM " + table).fetchall(), values, table)
@@ -469,7 +469,7 @@ class DongUserMigrationTest(unittest.TestCase):
                     self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 7)
                     self.assertEqual(con.execute("SELECT sql FROM sqlite_master WHERE name='app_user'").fetchone()[0], old_sql)
                     self.assertIsNone(con.execute("SELECT 1 FROM sqlite_master WHERE name='app_user_dong'").fetchone())
-                    self.assertEqual(store.run_migrations(con), [8])
+                    self.assertEqual(store.run_migrations(con), list(range(8, store.LATEST + 1)))
                 finally:
                     con.close()
 

@@ -14,6 +14,49 @@ import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, di
 import { NO_LOC, navBtn } from '../widgets.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
+
+// 화면/복사 전용: 주민 정보나 전송 동작을 포함하지 않고 PC의 수거 입력을 돕는다.
+function screenPcInputHelp(id) {
+  const source = st;
+  const stop = source && findStop(id);
+  const back = () => go('/stop/' + id);
+  if (!source || !stop || stop.pii_purged) return h('main', {}, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'), h('p', {}, '이 접수의 입력 도움을 표시할 수 없습니다.'));
+  const d = deriveStop(stop, source.events);
+  const last = [...source.events].reverse().find((e) => e.request_id === stop.request_id && e.kind === 'ATTEMPT'
+    && !(e.seq <= (stop.since_seq || 0)) && (!stop.pc_collection_ver || e.base_req_ver >= stop.pc_collection_ver && e.body?.pc_collection_ver === stop.pc_collection_ver));
+  const instant = last && new Date(last.ts);
+  const day = instant && Number.isFinite(instant.getTime()) ? new Date(instant.getTime() + 9 * 3600000).toISOString().slice(0, 10) : todayKST();
+  const status = d.outcome ? LABEL.outcome[d.outcome] : '결과 미확정 · 실제 수거 여부를 확인하세요';
+  const rows = d.lines.map((line) => {
+    const previous = (stop.items.find((i) => i.line_id === line.line_id)?.prior_collected || 0);
+    return { ...line, previous, added: Math.max(0, line.qty_collected - previous) };
+  });
+  const note = [`접수번호 ${stop.receipt_no}`, `수거일 ${day}`, status,
+    ...rows.map((line, i) => `${i + 1}. ${line.name} ${line.spec || ''}: 이전 수거 ${line.previous}${line.unit_label} · 이번 수거 ${line.added}${line.unit_label} · 누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}`),
+    'PC에서 같은 접수를 찾아 실제 수거일·이번 수거 개수를 확인하고 저장하세요.'].join('\n');
+  const fallback = h('textarea', { readonly: true, hidden: true, rows: 6, class: 'search', 'aria-label': 'PC 전달 내용' }, note);
+  const message = h('p', { class: 'small', role: 'status' });
+  const body = h('section', { class: 'pc-input-help' },
+    h('p', { class: 'small' }, 'PC에서 찾을 접수번호'),
+    h('strong', { class: 'pc-help-receipt', 'aria-label': 'PC에서 찾을 접수번호' }, stop.receipt_no),
+    h('p', {}, `수거일 ${day} · ${status}`),
+    ...rows.map((line, i) => h('div', { class: 'card' }, h('h3', {}, `${i + 1}. ${line.name} ${line.spec || ''}`),
+      h('p', {}, `이전 수거 ${line.previous}${line.unit_label}`),
+      h('p', {}, h('strong', { class: 'pc-help-quantity' }, `이번 수거 ${line.added}${line.unit_label}`)),
+      h('p', {}, `누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}`))),
+    h('p', { class: 'small' }, 'PC: 접수 검색 → 같은 접수번호 → 수거 처리. PC의 이전 수거 수량을 확인하고 이번에 추가 수거한 개수만 입력하세요.'),
+    btn('전달 내용 복사', async () => {
+      if (st !== source || !body.isConnected) return;
+      try { await navigator.clipboard.writeText(note); if (st === source && body.isConnected) message.textContent = '전달 내용을 복사했습니다.'; }
+      catch { if (st === source && body.isConnected) { fallback.hidden = false; fallback.focus(); fallback.select(); message.textContent = '선택된 내용을 길게 눌러 복사하세요.'; } }
+    }, 'big primary'), fallback, message);
+  return h('main', { class: 'pc-help-page' }, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'),
+    h('p', { class: 'small' }, '휴대폰 내용을 보면서 PC에 입력하세요. 이 화면에서는 수거 결과를 변경하지 않습니다.'), body);
+}
+function pcInputHelp(stop) {
+  ui.pcInputBack = { id: stop.request_id, y: scrollY };
+  go('/pc-input/' + stop.request_id);
+}
 // [도착]: 시각과(허용했으면) 휴대폰 위치·정확도. 위치는 결과 파일로만 PC에 가고 지도 서버로는 보내지 않는다.
 async function arrive(stop) {
   const geo = st.geoEvidence !== false ? await M.myFix({ ask: true, timeout: 8000 }) : null;
@@ -115,6 +158,8 @@ async function screenStop(id) {
     stop.spot_note ? h('p', { class: 'spot' }, '배출 위치: ' + stop.spot_note) : null,
     stop.memo ? h('p', { class: 'memo' }, '요청: ' + stop.memo) : null,
     h('p', { class: 'small' }, stop.eta ? `${stop.receipt_no} · 도착 예정 ${stop.eta}` : stop.receipt_no),
+    !purged ? btn('PC 입력 도움', () => pcInputHelp(stop), 'big') : null,
+    stop.pc_collection_ver ? h('p', { class: 'notice small' }, 'PC에서 직접 입력한 수거량을 반영한 목록입니다. 이전 수거분에서 이어서 계산합니다.') : null,
     stop.levy_no ? h('p', { class: 'small levy-no' }, `부과번호 ${stop.levy_no}`) : null,
     stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
     stop.field ? h('p', { class: 'notice' }, `이 휴대폰에서 받은 ${stop.channel || '현장'} 접수입니다(임시번호 ${stop.receipt_no}${stop.planned_date ? ` · 예정일 ${stop.planned_date}` : ''}). PC 접수번호는 PC 반영 뒤 목록에 나옵니다.`) : null,
@@ -284,12 +329,12 @@ async function screenStop(id) {
   const saved = d.outcome || stop.status === 'CANCELLED';
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
-    btn('←', () => go('#/home'), 'dock-back', { 'aria-label': '목록으로' }),
+    btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': '목록으로' }),
     btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
     saved ? (next ? navBtn('다음 길안내', next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
     saved
-      ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : '#/home'), 'primary dock-next')
+      ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
       : btn('결과 저장 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
   contact.id = 'st-contact'; lines.id = 'st-items'; photos.id = 'st-photos'; outcome.id = 'st-result';
@@ -301,7 +346,7 @@ async function screenStop(id) {
       onclick: (e) => { e.preventDefault(); document.getElementById(sid).scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); } },
       h('span', { class: 'n' }, done ? '✓' : String(i + 1)), h('span', {}, label))));
   return h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`),
+    h('header', { class: 'bar' }, btn('← 목록', () => go(ui.stopBackTo || '#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`),
       h('span', { class: `chip state p-${d.outcome || d.progress}` }, stop.status === 'CANCELLED' ? '취소' : d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress])),
     stepNav, info, contact, lines, fee, photos, outcome, manage, dock);
 }
@@ -420,4 +465,5 @@ function revisitForm(stop, d) {
 export {
   CANCEL_REQ, FIX_LABEL, arrive, evidence, feeNotice, fieldMemo, hhmm, loadGuide,
   pcManage, revisitForm, screenFix, screenStop, smsSheet, stickerCheck,
+  pcInputHelp, screenPcInputHelp,
 };

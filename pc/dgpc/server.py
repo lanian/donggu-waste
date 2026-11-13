@@ -17,6 +17,7 @@ import datetime as dt
 import html as _h
 import ipaddress
 import json
+import hashlib
 import logging
 import logging.handlers
 import os
@@ -39,14 +40,14 @@ import queue
 
 from . import area as A, backup as BK, dong_work as DW, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
-from . import numbered_labels as NL, operation_print as OP, reports as RP
+from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
 ROOT = resource_root()
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
-WEB_ALLOWED = {"fees.js", "fees-data.js", "labels-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
+WEB_ALLOWED = {"fees.js", "fees-data.js", "fee-calculator.js", "fee-calculator.css", "labels-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
                "vendor/maplibre/maplibre-gl.css"}
-UI_FILES = {"/": "index.html", "/index.html": "index.html", "/start.js": "start.js", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/pc.css": "pc.css",
+UI_FILES = {"/": "index.html", "/index.html": "index.html", "/start.js": "start.js", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/date_filters.js": "date_filters.js", "/pc.css": "pc.css",
             # 화면 모듈(pc/ui/screens/*.js): 폴더에 있는 파일만, 이름 그대로
             **{f"/screens/{f.name}": f"screens/{f.name}" for f in sorted((UI / "screens").glob("*.js"))}, "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
             # 화면 글꼴: Pretendard GOV(범정부 디자인 시스템 권장, SIL OFL) 일부 글자 묶음. 이 PC 안에서만 내려줌(외부 글꼴 서버 없음)
@@ -303,6 +304,13 @@ class Raw:
 
 def csv_file(body: bytes, filename: str) -> Raw:
     return Raw(body, "text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _file_component(value: str) -> str:
+    """다운로드/ZIP의 이름 한 부분. 동 이름을 디렉터리 경로로 해석하지 않는다."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f\ud800-\udfff\ufffe\uffff]', '_', value)
+    name = re.sub(r'\.{2,}', '_', name).strip(' .')[:80].rstrip(' .')
+    return name or '행정동'
 
 
 def json_status(obj, status: int) -> Raw:
@@ -853,6 +861,11 @@ class Handler(BaseHTTPRequestHandler):
         """담당 접수만 버전·사유 코드 계약으로 취소."""
         return DW.cancel(self.c, self.user, rid, self.json_body())
 
+    @endpoint('POST', 'dong-work/requests/{id}/collection', DW.WRITE_ROLES)
+    def ep_dong_collection(self, qs, rid):
+        """현재 담당 동 접수의 PC 직접 수거 입력(멱등 재시도 전에도 범위 검사)."""
+        return DW.collect(self.c, self.user, rid, self.json_body())
+
     @endpoint("POST", "dong-work/route", DW.WRITE_ROLES, lock="none")
     def ep_dong_work_route(self, qs):
         """준비만 잠금, 노선 계산은 잠금 밖, 반환 직전 최신 범위 재검사."""
@@ -942,6 +955,71 @@ class Handler(BaseHTTPRequestHandler):
         """개인정보 없는 월보 전체 집계 CSV."""
         return csv_file(RP.monthly_report_csv(self.c, qs.get("month", ""), qs.get("basis") or "planned"), "donggu-monthly-report.csv")
 
+    @endpoint("GET", "label-usage", VIEW)
+    def ep_label_usage(self, qs):
+        """수거 수량 기준 배출표 사용 장수 자동 집계(전체 기간 누적)."""
+        return NL.usage_page(self.c, qs)
+
+    @endpoint("GET", "reports/forms", VIEW)
+    def ep_official_forms(self, qs):
+        """동별 원본 서식의 실제 수거·재고 집계 미리보기(개인정보 제외)."""
+        return OF.preview(self.c, qs.get("dong_id"), qs.get("date"))
+
+    @endpoint("POST", "reports/forms/download", WORK)
+    def ep_official_forms_download(self, qs):
+        """개인정보를 포함한 원본 XLSX 월보·ODT 일일 대장 내려받기."""
+        from io import BytesIO
+        from zipfile import ZipFile, ZIP_DEFLATED
+        d = self.json_body()
+        kind = d.get("format")
+        if kind not in ("xlsx", "odt", "zip"):
+            raise S.UserError("내려받을 파일 형식을 골라 주세요.")
+        # 일자를 먼저 검사하고, 월보는 선택일이 속한 달 전체로 작성한다.
+        daily = OF.daily_data(self.c, d.get("dong_id"), d.get("date"))
+        dong_name = _file_component(daily['dong'])
+        monthly = OF.monthly_data(self.c, d.get("dong_id"), daily["end"][:7]) if kind != "odt" else None
+        files, ids = [], set()
+        if monthly is not None:
+            files.append((f"{monthly['period']}_{dong_name}_대형폐기물_월보.xlsx", OF.xlsx_file(monthly)))
+            ids.update(monthly["request_ids"])
+        if kind != "xlsx":
+            files.append((f"{daily['period']}_{dong_name}_신고처리_배출표수불대장.odt", OF.odt_file(daily)))
+            ids.update(daily["request_ids"])
+        if kind == "zip":
+            output = BytesIO()
+            with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+                for name, body in files:
+                    archive.writestr(name, body)
+            filename, body = f"{daily['period']}_{dong_name}_업무서식.zip", output.getvalue()
+        else:
+            filename, body = files[0]
+        PV.record_access(self.c, "EXPORT", "", len(ids), f"원본서식 {kind} dong_id={daily['dong_id']} date={daily['end']}")
+        mime = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "odt": "application/vnd.oasis.opendocument.text", "zip": "application/zip"}[kind]
+        return Raw(body, mime, headers={"Content-Disposition": f"attachment; filename=\"donggu-forms.{kind}\"; filename*=UTF-8''{urllib.parse.quote(filename, safe='')}"})
+
+    @endpoint("GET", "label-auto", VIEW)
+    def ep_label_auto(self, qs):
+        """동별 배출표 자동 배정·부족 장수와 재고 조회."""
+        dong_id = qs.get("dong_id") or None
+        if dong_id:
+            NL._stock_dong(self.c, dong_id)
+        return LA.summary(self.c, dong_id)
+
+    @endpoint("POST", "label-auto/sync", WORK)
+    def ep_label_auto_sync(self, qs):
+        """확정 수거량을 동별 입고 번호에 자동 배정."""
+        data = self.json_body()
+        dong_id = data.get("dong_id") or None
+        if dong_id:
+            NL._stock_dong(self.c, dong_id)
+        return self.idem("label-auto/sync", lambda: LA.sync(self.c, dong_id=dong_id))
+
+    @endpoint("POST", "numbered-labels/stock-dong", WORK)
+    def ep_numbered_label_stock_dong(self, qs):
+        """기존 번호 구간의 재고 동·수령일 지정."""
+        d = self.json_body()
+        return self.idem("numbered-labels/stock-dong", lambda: NL.assign_stock_dong(self.c, d.get("start"), d.get("end"), d.get("dong_id"), d.get("received_on")))
+
     @endpoint("GET", "numbered-labels", VIEW)
     def ep_numbered_labels(self, qs):
         """숫자 배출표 재고 원장."""
@@ -956,13 +1034,13 @@ class Handler(BaseHTTPRequestHandler):
     def ep_numbered_label_receive(self, qs):
         """숫자 배출표 구간 입고."""
         d = self.json_body()
-        return self.idem("numbered-labels/receive", lambda: NL.receive_range(self.c, d.get("start"), d.get("end")))
+        return self.idem("numbered-labels/receive", lambda: NL.receive_range(self.c, d.get("start"), d.get("end"), dong_id=d.get("dong_id"), received_on=d.get("received_on")))
 
     @endpoint("POST", "numbered-labels/distribute", WORK)
     def ep_numbered_label_distribute(self, qs):
         """숫자 배출표 구간 배부."""
         d = self.json_body()
-        return self.idem("numbered-labels/distribute", lambda: NL.distribute_range(self.c, d.get("start"), d.get("end"), d.get("destination")))
+        return self.idem("numbered-labels/distribute", lambda: NL.distribute_range(self.c, d.get("start"), d.get("end"), d.get("destination"), dong_id=d.get("dong_id"), distributed_on=d.get("distributed_on")))
 
     @endpoint("POST", "numbered-labels/{id}/use", WORK)
     def ep_numbered_label_use(self, qs, number):
@@ -1347,11 +1425,37 @@ class Handler(BaseHTTPRequestHandler):
     @endpoint("POST", "external/test", ADMIN, lock="none")
     def ep_external_test(self, qs):
         """외부 서비스 연결 시험(잠금 밖)."""
+        data = self.json_body()
+        if not isinstance(data, dict):
+            raise S.UserError("시험할 외부 서비스를 확인하세요.")
+        if data.get("service") == "vworld":
+            return self._vworld_lookup({"address": "광주광역시 동구 서남로 1", "type": "ROAD"}, testing=True)
         with read_con() as rc:
-            return S.external_test(rc, self.json_body().get("service", ""))
+            return S.external_test(rc, data.get("service", ""))
+
+    @endpoint("POST", "vworld/locate", WORK, lock="none")
+    def ep_vworld_locate(self, qs):
+        """VWorld 위치 참고 조회. 결과 비저장, 외부 호출은 잠금 밖, 전후 세션 재검사."""
+        return self._vworld_lookup(self.json_body())
+
+    def _vworld_lookup(self, data, testing=False):
+        """참고 조회와 연결 시험 모두 현재 세션·설정으로 실행한다."""
+        with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            prepared = VW.prepare(CON, data)
+        result = VW.locate(prepared) if prepared else VW.unavailable()
+        with LOCK:
+            error = self._write_session_error()
+            if error:
+                return error
+            if prepared and VW.config_token(CON) != prepared["token"]:
+                result = VW.unavailable("SETTINGS_CHANGED", "VWorld 설정이 변경되었습니다. 다시 조회하세요.")
+        return {"ok": not result.get("none"), "message": result.get("message") or "VWorld 위치 참고 조회 정상 (결과 저장 안 함)"} if testing else result
 
     @endpoint("POST", "route", WORK, lock="none",
-              access=("LIST", lambda h, out, qs: ("", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")))
+              access=("LIST", lambda h, out, qs: None if isinstance(out, Raw) else ("", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")))
     def ep_route(self, qs):
         """노선 계산(OR-Tools·카카오 길찾기는 잠금 밖)."""
         return self.route_plan(self.json_body())
@@ -1520,6 +1624,11 @@ class Handler(BaseHTTPRequestHandler):
         """현장 접수 확인."""
         return S.check_field_intake(self.c, rid)
 
+    @endpoint('POST', 'requests/{id}/collection', WORK)
+    def ep_pc_collection(self, qs, rid):
+        """실제 수거일·품목별 추가 수거량 입력과 배출표 자동 배정을 함께 저장."""
+        return PC.save(self.c, rid, self.json_body())
+
     @endpoint("POST", "requests/{id}/cancel", WORK)
     def ep_request_cancel(self, qs, rid):
         """접수 취소(사유 코드)."""
@@ -1542,6 +1651,8 @@ class Handler(BaseHTTPRequestHandler):
     def ep_assign(self, qs):
         """배정 확정."""
         d = self.json_body()
+        if d.get('depot_basis'):
+            self.check_depot_basis(self.c, d['depot_basis'], d['date'], d['plan'])
         return S.confirm_plan(self.c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted")))
 
     @endpoint("POST", "assign/edit", WORK)
@@ -1601,6 +1712,18 @@ class Handler(BaseHTTPRequestHandler):
     def ep_dong_save(self, qs):
         """행정동 저장."""
         return {"id": A.save_dong(self.c, self.json_body())}
+
+    @endpoint("POST", "dongs/order", ADMIN)
+    def ep_dong_order(self, qs):
+        """관리자가 전체 행정동의 직제순을 한 번에 저장. 기존 순서와 다르면 충돌 반환."""
+        data = self.json_body()
+        return {"dongs": A.reorder_dongs(self.c, data.get("ids"), data.get("base_ids"))}
+
+    @endpoint("POST", "dongs/centers", ADMIN)
+    def ep_dong_centers(self, qs):
+        """관리자가 담당팀이 연결된 동의 비어 있는 차고지만 공식 행정복지센터로 보충."""
+        from dgpc import dong_centers
+        return self.idem('dongs/centers', lambda: dong_centers.apply_missing(self.c))
 
     @endpoint("POST", "dongs/{id}/delete", ADMIN)
     def ep_dong_delete(self, qs, did):
@@ -1780,15 +1903,68 @@ class Handler(BaseHTTPRequestHandler):
         S.save_settings(self.c, self.json_body())
         return S.settings(self.c)
 
+    def route_inputs(self, con, date, request_ids, crew_ids):
+        versions = {}
+        ids = list(request_ids)
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            placeholders = ','.join('?' for _ in chunk)
+            events = {}
+            for event in S.rows(con, f'SELECT * FROM result_event WHERE request_id IN ({placeholders}) ORDER BY event_id', chunk):
+                events.setdefault(event['request_id'], []).append(event)
+            for row in S.rows(con, f'SELECT * FROM request WHERE id IN ({placeholders})', chunk):
+                versions[row['id']] = hashlib.sha256(json.dumps([row, events.get(row['id'], [])], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        profiles = [{k: crew.get(k) for k in ('id', 'name', 'active', 'capacity_m3', 'capacity_kg', 'shift_start', 'shift_end')}
+                    for crew in S.list_crews(con) if crew['id'] in crew_ids]
+        st = S.settings(con)
+        options = {k: st.get(k) for k in ('depot', 'end_site', 'osrm_url', 'service_min_base', 'service_min_per_item',
+            'unload_site', 'unload_min', 'max_unloads', 'unload_hours', 'lunch', 'base_first', 'capacity')}
+        options.update(crews=sorted(profiles, key=lambda c: c['id']), volumes=S.volume_overrides(con), travel_method=S.travel_method(con))
+        signature = hashlib.sha256(json.dumps(options, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        revisions = {r['crew_id']: r['v'] for r in S.rows(con, 'SELECT crew_id,MAX(assign_ver) AS v FROM assignment_batch WHERE work_date=? GROUP BY crew_id', (date,)) if r['crew_id'] in crew_ids}
+        return {'requests': versions, 'profiles': signature, 'revisions': {cid: revisions.get(cid, 0) for cid in crew_ids}}
+
+    def check_depot_basis(self, con, value, date, plan=None, *, refresh_inputs=False):
+        try:
+            proof = DW._read_proof(value)
+            if proof['kind'] != 'depot' or proof['date'] != date:
+                raise ValueError()
+            if plan is not None and (not set(plan).issubset(proof['crew_ids']) or any(s['request_id'] not in proof['request_ids'] for stops in plan.values() for s in stops)):
+                raise ValueError()
+            if refresh_inputs:
+                return  # 재계산은 같은 승인 범위에서 최신 자료를 읽고 새 증명을 만든다. 확정은 엄격하게 검사한다.
+            current = DP.current(con, proof['request_ids'], proof['crew_ids'])
+            if current['signature'] != proof['signature']:
+                raise ValueError()
+            if 'inputs' in proof and proof['inputs'] != self.route_inputs(con, date, proof['request_ids'], proof['crew_ids']):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError, S.UserError):
+            raise S.StaleError('접수·차고지·수거팀·배정 또는 계산 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
+
     def route_plan(self, d):
         """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이력 저장만 다시 잠금 안(카카오 이동시간은 저장하지 않음)."""
         date = d["date"]
         ids = set(d.get("request_ids") or [])
         with LOCK:
+            denied = self._write_session_error()
+            if denied:
+                return denied
             c = CON
             crews = [x for x in S.list_crews(c) if x["id"] in set(d.get("crew_ids") or []) and x["active"]]
+            fixed = d.get('fixed_plan')
+            if fixed is not None:
+                if not isinstance(fixed, dict) or any(not isinstance(ids, list) or any(not isinstance(rid, str) for rid in ids) for ids in fixed.values()):
+                    raise S.UserError('수거팀별 접수 순서를 확인하세요.')
+                self.check_depot_basis(c, d.get('depot_basis'), date, {cid: [{'request_id': rid} for rid in ids] for cid, ids in fixed.items()}, refresh_inputs=True)
+                proof = DW._read_proof(d['depot_basis'])
+                if set(proof['crew_ids']) != {crew['id'] for crew in crews}:
+                    raise S.StaleError('수거팀 선택이 바뀌었습니다. 자동 추천을 다시 계산하세요.')
             reqs = []
-            for r in S.list_requests(c, date=date):
+            candidates = S.search_requests(c, {'date': date, 'size': 500, 'page': 1}, scope_ids=ids or None, with_counts=False)
+            collected = candidates['rows']
+            for page in range(2, candidates['pages'] + 1):
+                collected.extend(S.search_requests(c, {'date': date, 'size': 500, 'page': page}, scope_ids=ids or None, with_counts=False)['rows'])
+            for r in collected:
                 if r["status"] in ("CANCELLED", "DONE") or (ids and r["id"] not in ids):
                     continue
                 r["waiting_days"] = max(0, (time.time() - time.mktime(time.strptime(r["received_at"][:10], "%Y-%m-%d"))) // 86400)
@@ -1800,6 +1976,10 @@ class Handler(BaseHTTPRequestHandler):
             method = S.travel_method(c)
             kakao_key = S.secret(c, "kakao_rest_key") if method == "KAKAO" else ""
             ov = S.volume_overrides(c)
+            context = DP.resolve(reqs, crews, list(dongs.values()), st['depot'], st['end_site'])
+            basis = DW._proof({'kind': 'depot', 'date': date, 'request_ids': [r['id'] for r in reqs],
+                               'crew_ids': [c['id'] for c in crews], 'signature': context['signature'], 'at': time.time(),
+                               'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews])})
         pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
             if st["capacity"]["prefer_dong_crew"] else {}
         res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
@@ -1807,15 +1987,23 @@ class Handler(BaseHTTPRequestHandler):
                            service_per_item=st["service_min_per_item"], time_limit_s=routing.clamp_time_limit(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
                            volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
-                           unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"])
+                           unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"],
+                           crew_depots=context['crew_depots'], crew_required=context['crew_required'], fixed_plan=fixed)
+        res['fixed_order'] = fixed is not None
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
+        with LOCK:
+            denied = self._write_session_error()
+            if denied:
+                return denied
+            self.check_depot_basis(CON, basis, date)
+        res['depot_basis'] = basis
         if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만). 받은 이동시간은 저장하지 않는다(다음 계산은 다시 묻는다)
             mi = res.get("matrix_info") or {}
             with LOCK, S.tx(CON):
                 S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "estimated": mi.get("fallback_pairs", 0)})
         res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
-                                     "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]),
+                                     "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]), 'required_crew_id': context['crew_required'].get(r['id']),
                                      "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])],
                                      "m3": round(sum(routing.volume_of(i, ov) for i in r.get("items", [])), 2),
                                      "kg": int(sum(routing.weight_of(i) for i in r.get("items", []))),

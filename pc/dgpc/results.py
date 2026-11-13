@@ -12,7 +12,7 @@ import zlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import dgproto as P
-from dgpc import store as _store, area
+from dgpc import store as _store, area, label_auto
 from dgpc.core import ACTOR, UserError, _after_close, _date_ok, _int_clamp, _num, _sane_ts, audit, norm_phone, now, one, rows, today_kst, tx
 from dgpc.derive import FINAL, derive
 from dgpc.devices import _open_from_device, _require_active_device
@@ -193,6 +193,14 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                     newer = b0 and one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (crew["id"], b0["work_date"]))
                     if newer and (newer["v"] or 0) > ev["assign_ver"]:
                         reason = f"새 목록(갱신본 {newer['v']})에서 빠진 접수의 옛 목록 결과"
+            if not reason and ev['kind'] in ('ITEM_RESULT', 'FIELD_ITEM_ADD', 'ATTEMPT', 'LOCATION_FIX', 'REVISIT_APPT'):
+                barrier = one(con, """SELECT json_extract(body_json,'$.pc_req_ver') AS version FROM result_event
+                    WHERE request_id=? AND device_id='PC-COLLECTION' AND kind='ATTEMPT' AND apply_status='APPLIED'
+                    ORDER BY rowid DESC LIMIT 1""", (ev['request_id'],))
+                version = ev.get('base_req_ver')
+                if barrier and (isinstance(version, bool) or not isinstance(version, int) or version < barrier['version']
+                                or type(ev['body'].get('pc_collection_ver')) is not int or ev['body']['pc_collection_ver'] != barrier['version']):
+                    reason = 'PC 수거 입력 전의 휴대폰 결과 — 수량을 확인한 뒤 반영해 주세요.'
             if not reason and ev["kind"] == "ITEM_RESULT":
                 reason = _missing_line(con, ev["request_id"], ev["body"].get("line_id"))
             if ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 충돌함에 들어가는 것도 정리해서 저장(반영할 때 다시 정리)
@@ -244,6 +252,8 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                     counts["failed"] = counts.get("failed", 0) + 1
         for rid in touched:
             _refresh_status(con, rid, new_attempt=rid in attempted, new_location=rid in located)
+        assigned = label_auto.sync(con, touched)
+        counts.update(labels_assigned=assigned["new_assigned"], labels_pending=assigned["pending"], labels_voided=assigned["voided"])
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
         audit(con, "import", imp, "RESULT", counts)
     return {**counts, "release_code": release, "import_id": imp}
@@ -374,6 +384,8 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         if e["kind"] in ("FIELD_INTAKE", "CORRECTION"):  # 처리한 요청 기록에서는 개인정보를 지운다(원본은 접수·버전 이력에)
             con.execute("UPDATE result_event SET body_json=? WHERE event_id=?", (json.dumps(_strip_request_pii(e["kind"], body), ensure_ascii=False), event_id))
         audit(con, "event", event_id, "RESOLVE_" + action, {"reason": reason.strip(), "kind": e["kind"], **({"request": e["request_id"]} if e["request_id"] else {})})
+        if e["request_id"] and action == "APPLY":
+            label_auto.sync(con, [e["request_id"]])
 
 
 def resolve_conflicts_bulk(con, action: str, reason: str, request_id: str = "", import_id: str = "") -> dict:
@@ -738,6 +750,8 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                 _apply_revisit(con, e["request_id"], body)
         for rid in newids:
             _refresh_status(con, rid, new_location=rid in located)
+        assigned = label_auto.sync(con, newids)
+        counts.update(labels_assigned=assigned["new_assigned"], labels_pending=assigned["pending"], labels_voided=assigned["voided"])
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps({"source": "SOLO", **counts, "invalid": len(errors)}), imp))
         audit(con, "import", imp, "SOLO", {**counts, "invalid": len(errors)})
     return {**info, **counts}

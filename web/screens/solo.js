@@ -3,6 +3,7 @@ import { deriveStop } from '../fees.js';
 import * as S from '../store.js';
 import { BACKUP_WARN_MS, ago, appLogo, btn, commit, go, h, lockNow, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, todayKST, ui } from '../core.js';
 import { daySummary, dongChips, filterDong, filterQ, homeBanners, routeItems, setupCard, stopCard, stopSearch, workerBar } from './stoplist.js';
+import { openFinder } from './find.js';
 
 async function screenHomeSolo() {
   const today = todayKST(), tomorrow = todayKST(1);
@@ -49,6 +50,8 @@ async function screenHomeSolo() {
     nextCard, setupCard(),
     h('section', { class: 'actions' },
       btn('+ 전화 접수 등록', () => { ui.form = null; go('#/intake'); }, 'primary huge'),
+      btn('날짜·접수 찾기', openFinder, 'big'),
+      btn('빠른 수수료 계산', () => go('#/calculator'), 'big'),
       h('div', { class: 'grid2' }, btn('백업·복원', () => go('#/backup'), 'big'), btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
     h('div', { class: 'tabs', role: 'group', 'aria-label': '목록 거르기' }, ...[['TODAY', `오늘 ${lists.TODAY.length}`], ['TOMORROW', `내일 ${lists.TOMORROW.length}`], ['OPEN', `미처리 ${open.length}`], ['CANCELLED', `취소 ${lists.CANCELLED.length}`]]
       .map(([k, t]) => btn(t, () => { ui.soloView = k; ui.reorder = false; render(); }, view === k ? 'tab on' : 'tab'))),
@@ -56,7 +59,10 @@ async function screenHomeSolo() {
   if (view === 'TODAY' && lists.TODAY.length) out.splice(out.indexOf(out.find((x) => x && x.classList && x.classList.contains('actions'))), 0, daySummary(lists.TODAY));
   out.push(dongChips(lists[view]));
   out.push(stopSearch(lists[view].length));
-  if (!list.length) out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 접수가 없습니다.` : view === 'TODAY' ? '오늘 수거 예정 접수가 없습니다. [+ 전화 접수 등록]으로 시작하세요.' : '해당 접수가 없습니다.'));
+  if (!list.length) {
+    out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 접수가 없습니다.` : view === 'TODAY' ? '오늘 수거 예정 접수가 없습니다. [+ 전화 접수 등록]으로 시작하세요.' : '해당 접수가 없습니다.'));
+    if (ui.stopQ) out.push(btn('다른 날짜에서도 찾기', () => openFinder({ q: ui.stopQ }), 'big'));
+  }
   else {
     if (view === 'TODAY' || view === 'TOMORROW') out.push(btn(ui.reorder ? '순서 정하기 끝' : '방문 순서 바꾸기', () => { ui.reorder = !ui.reorder; render(); }, 'ghost'));
     const route = view === 'TODAY' || view === 'TOMORROW';

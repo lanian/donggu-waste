@@ -1,12 +1,14 @@
 // 동별 통합 업무. 전역 접수·배정 API를 재사용하지 않고 서버가 허용한 범위만 다룬다.
-import { FEES, api, apiRaw, boot, btn, chip, confirmDlg, fmtPhone, h, modal, post, postOnce, reasonFields, routeEpoch, statusChip, toast } from '../core.js';
+import { FEES, api, apiRaw, boot, btn, chip, confirmDlg, fmtPhone, go, h, modal, post, postOnce, reasonFields, routeEpoch, statusChip, toast, wrap } from '../core.js';
 import { itemPicker } from '../widgets.js';
 import { won } from '/web/fees.js';
+import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
+import { kstDay, moveDay } from '../date_filters.js';
 
 const READ = new Set(['ADMIN', 'INTAKE', 'LEAD', 'DONG']);
 const WRITE = new Set(['ADMIN', 'INTAKE', 'DONG']);
 const METRICS = [['scheduled', '예정', 'day'], ['done', '완료', 'done'], ['unassigned', '미배정', 'unassigned'], ['revisit', '재방문', 'revisit'], ['overdue', '지난 미처리', 'overdue'], ['no_date', '예정일 없음', 'no_date']];
-const BUCKET = { day: '선택일 접수', done: '선택일 완료', unassigned: '선택일 미배정', revisit: '선택일 재방문', overdue: '전체 기간 · 지난 미처리', no_date: '전체 기간 · 예정일 없음' };
+const BUCKET = { all: '전체 기간 · 모든 상태', day: '선택일 접수', done: '선택일 완료', unassigned: '선택일 미배정', revisit: '선택일 재방문', overdue: '전체 기간 · 지난 미처리', no_date: '전체 기간 · 예정일 없음' };
 let state = null, viewSeq = 0;
 const owner = () => `${boot?.me?.id || ''}|${boot?.me?.username || ''}|${boot?.me?.role || ''}`;
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -14,13 +16,15 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 function resetDongs() {
   state = null; viewSeq++;
   // 로그아웃·계정 전환 때 이전 주민 양식도 함께 닫는다. 초안은 저장소에 남기지 않는다.
-  document.querySelectorAll('[data-dong-owner]').forEach((node) => node.closest('.dlg-back')?._close?.(null));
+  document.querySelectorAll('[data-dong-owner]').forEach((node) => node.replaceChildren());
 }
 
-async function screenDongs() {
+async function screenDongs(arg = null) {
   if (!READ.has(boot?.me?.role)) return h('div', { class: 'dong-workspace' }, h('h1', {}, '동별 관리'), h('p', { class: 'notice', role: 'status' }, '이 계정은 동별 관리 화면을 사용할 수 없습니다.'));
   if (state?.owner !== owner()) resetDongs();
   const s = state ||= { owner: owner(), date: boot.today, dong: 'all', q: '', bucket: 'day', page: 1, crews: new Set(), seen: new Set(), drafts: new Map() };
+  let restoreList = !arg && s.detailOpen;
+  s.detailOpen = !!arg;
   const mine = ++viewSeq, epoch = routeEpoch, hash = location.hash;
   const canWrite = WRITE.has(boot.me.role), scoped = boot.me.role === 'DONG';
   let view, data = null, loadSeq = 0, routeSeq = 0, detailSeq = 0, plan = null, routeBusy = false;
@@ -32,9 +36,10 @@ async function screenDongs() {
   const body = h('div', { class: 'dw-overview' }), list = h('div', { class: 'dw-list' }), routes = h('div', { class: 'dw-routes' });
   const date = h('input', { type: 'date', value: s.date, 'aria-label': '업무 기준일' });
   const dong = h('select', { 'aria-label': '행정동 범위' });
-  const search = h('input', { type: 'search', value: s.q, placeholder: '이름 · 연락처 · 주소', 'aria-label': '접수 검색어' });
+  const search = h('input', { type: 'search', value: s.q, placeholder: '접수번호 · 이름 · 연락처 · 주소', 'aria-label': '접수 검색어' });
   const teamBox = h('div', { class: 'dw-teams' });
-  const create = canWrite ? btn('접수 등록', () => openForm(), 'primary', { disabled: true }) : null;
+  const enterDetail = (id) => { s.returnFocus = id; s.returnY = scrollY; go('/dongs/' + encodeURIComponent(id)); };
+  const create = canWrite ? btn('접수 등록', () => enterDetail('new'), 'primary', { disabled: true }) : null;
   const calc = canWrite ? btn('노선 계산', () => calculate(), '', { disabled: true }) : null;
   const assign = canWrite ? btn('배정 확정', () => commit(), 'primary', { disabled: true }) : null;
   const scopeText = h('p', { class: 'dw-scope' }, scoped ? '지정된 담당 동의 자료만 표시합니다.' : '전체 동과 개별 동을 한 화면에서 관리합니다.');
@@ -89,7 +94,7 @@ async function screenDongs() {
   function drawList(result) {
     s.page = result.page;
     const rows = (result.rows || []).map((r) => h('tr', {},
-      h('td', {}, btn(r.receipt_no, () => openDetail(r.id), 'dw-receipt'), statusChip(r.status)),
+      h('td', {}, btn(r.receipt_no, () => enterDetail(r.id), 'dw-receipt', { 'data-request-id': r.id }), statusChip(r.status)),
       h('td', {}, h('span', {}, r.planned_date || '예정일 없음'), h('small', {}, r.dong || '동 미지정')),
       h('td', {}, h('span', {}, r.name), h('small', {}, fmtPhone(r.phone))),
       h('td', {}, h('span', {}, r.address), h('small', {}, (r.items || []).map((i) => `${i.name} ${i.spec || ''} ${i.qty}${i.unit_label || '개'}`).join(', ')))));
@@ -97,7 +102,8 @@ async function screenDongs() {
     list.replaceChildren(h('div', { class: 'dw-section-head' }, h('div', {}, h('h2', {}, BUCKET[s.bucket] || BUCKET.day), h('p', { class: 'muted small' }, `총 ${Number(result.total || 0).toLocaleString()}건 · ${s.dong === 'all' ? (scoped ? '담당 동 전체' : '전체 동') : dong.selectedOptions[0]?.textContent || ''}`)),
       h('select', { 'aria-label': '접수 목록 구분', onchange: (e) => pickBucket(e.target.value) }, ...Object.entries(BUCKET).map(([key, text]) => h('option', { value: key, selected: key === s.bucket }, text)))),
       h('div', { class: 'tablewrap' }, table),
-      ...(!(result.rows || []).length ? [h('p', { class: 'dw-idle' }, '이 조건에 맞는 접수가 없습니다. 날짜·동 범위·검색어를 확인하세요.')] : []),
+      ...(!(result.rows || []).length ? [h('p', { class: 'dw-idle' }, '이 조건에 맞는 접수가 없습니다. 날짜·동 범위·검색어를 확인하세요.'),
+        ...(s.bucket !== 'all' ? [btn('날짜 제한 없이 다시 찾기', () => pickBucket('all'), 'small')] : [])] : []),
       h('div', { class: 'pager' }, btn('‹ 이전', () => { s.page--; load(); }, 'small', { disabled: result.page <= 1 }),
         h('span', {}, `${result.page} / ${result.pages}쪽`), btn('다음 ›', () => { s.page++; load(); }, 'small', { disabled: result.page >= result.pages })));
   }
@@ -113,8 +119,13 @@ async function screenDongs() {
       if (!valid()) return;
       data = summary; chooseOptions(); drawTeams(); drawOverview(); drawList(requests);
       const shared = (Array.isArray(assignments) ? assignments : assignments.rows || []).filter((b) => b.shared);
-      scopeText.textContent = `${scoped ? '내 담당 동 범위' : '전체 업무 권한'} · ${s.date} 기준${shared.length ? ` · 다른 동과 함께 배정된 팀 ${shared.length}개 (전체 담당자 조정 필요)` : ''}${canWrite ? '' : ' · 조회 전용'}`;
+      scopeText.textContent = `${scoped ? '내 담당 동 범위' : '전체 업무 권한'} · 집계·배차 기준일 ${s.date} · 목록: ${BUCKET[s.bucket]}${shared.length ? ` · 다른 동과 함께 배정된 팀 ${shared.length}개 (전체 담당자 조정 필요)` : ''}${canWrite ? '' : ' · 조회 전용'}`;
       syncActions();
+      if (restoreList) {
+        restoreList = false;
+        const target = s.returnFocus === 'new' ? create : [...list.querySelectorAll('[data-request-id]')].find((el) => el.dataset.requestId === s.returnFocus);
+        (target || search).focus({ preventScroll: true }); scrollTo(0, s.returnY || 0);
+      }
     } catch (error) {
       if (!valid()) return;
       data = null; body.replaceChildren(); list.replaceChildren(); invalidate(); showError(error);
@@ -136,7 +147,8 @@ async function screenDongs() {
     const saved = s.drafts.get(draftKey);
     const blank = { name: '', phone: '', address: '', spot_note: '', memo: '', planned_date: s.date, dong_id: origin, channel: '전화', items: [] };
     const base = request || blank, r = saved?.data || base, items = clone(r.items || []);
-    const version = request?.req_ver, readonly = !canWrite || request?.status === 'CANCELLED';
+    let version = saved?.baseVersion ?? request?.req_ver;
+    const readonly = !canWrite || request?.status === 'CANCELLED';
     const alive = () => current() && identity === owner() && key === scopeKey() && form.isConnected;
     const F = {};
     const input = (key0, label, attrs = {}) => { F[key0] = h('input', { value: r[key0] || '', 'aria-label': label, disabled: readonly, ...attrs }); return h('label', { class: 'f' }, label, F[key0]); };
@@ -177,7 +189,7 @@ async function screenDongs() {
       } catch (error) { if (valid()) geoMessage.textContent = `${error.message} 주소로 위치 찾기를 다시 누르거나 직접 입력하세요.`; }
       finally { if (alive()) findPosition.disabled = false; }
     }, 'small');
-    function remember() { if (identity === owner() && state === s) s.drafts.set(draftKey, { data: payload(), reason: why.value, baseVersion: saved?.baseVersion ?? version }); }
+    function remember() { if (identity === owner() && state === s) s.drafts.set(draftKey, { data: payload(), reason: why.value, baseVersion: version }); }
     function drawItems() {
       let amount = 0, pending = false;
       lines.replaceChildren(...items.map((item, i) => {
@@ -205,6 +217,16 @@ async function screenDongs() {
     }
     form = h('div', { class: 'dong-workspace dw-form', 'data-dong-owner': identity, oninput: remember, onchange: remember },
       h('p', { class: 'dw-form-context' }, `${isNew ? '새 접수' : request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, request ? statusChip(request.status) : null),
+      !isNew && !readonly && !request.pii_purged_at ? collectionButton(request, { path: 'dong-work/requests', current: alive,
+        before: () => { if (version !== request.req_ver) throw new Error('접수 수정 초안을 먼저 확인한 뒤 수거 처리하세요.'); unchangedCollectionItems(items, request.items); },
+        after: async (result, authOwner) => {
+          if (!alive()) return;
+          const fresh = await api(`dong-work/requests/${request.id}`, { _prefsOwner: authOwner });
+          if (!alive()) return;
+          if (fresh.req_ver !== result.req_ver) { notice.textContent = '접수가 다시 바뀌었습니다. 최신 내용을 확인하세요.'; return; }
+          version = fresh.req_ver; Object.assign(request, fresh); locked.clear(); fresh.locked_lines.forEach((line) => locked.add(line)); drawItems(); remember();
+          form.querySelector('.dw-form-context').replaceChildren(`${request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, statusChip(fresh.status));
+        } }) : null,
       saved ? h('p', { class: 'notice small' }, '보관한 초안을 복구했습니다. 저장 전 현재 예정일과 행정동을 확인하세요.') : null,
       h('div', { class: 'dw-form-grid' }, ...fields, h('label', { class: 'f' }, '행정동', F.dong_id), h('label', { class: 'f' }, '접수 경로', F.channel)),
       h('div', { class: 'dw-position' }, findPosition, geoMessage, h('details', {}, h('summary', {}, '위치 직접 입력'), h('div', { class: 'dw-form-grid' }, h('label', { class: 'f' }, '위도', F.lat), h('label', { class: 'f' }, '경도', F.lon)))),
@@ -213,15 +235,14 @@ async function screenDongs() {
       !isNew && !readonly ? btn('접수 취소', async () => {
         const codes = boot.cancel_codes || { RESIDENT: '주민 요청', OTHER: '기타' }, reasons = reasonFields(codes, '취소 사유');
         const cancelled = await modal({ title: '접수 취소', ok: '취소 확정', danger: true, body: [h('p', {}, '기록을 남겨 접수를 취소합니다. 배정된 접수는 수거팀에 알려 주세요.'), ...reasons.nodes],
-          onOk: async () => { if (!alive()) throw new Error('화면이나 담당 계정이 바뀌었습니다. 다시 열어 주세요.'); const value = reasons.get(); const result = await post(`dong-work/requests/${request.id}/cancel`, { code: value.code, reason: value.text, req_ver: saved?.baseVersion ?? version }); return result || true; } });
-        if (cancelled && alive()) { s.drafts.delete(draftKey); form.closest('.dlg-back')?._close?.(true); invalidate(); load(); toast('접수를 취소했습니다'); }
+          onOk: async () => { if (!alive()) throw new Error('화면이나 담당 계정이 바뀌었습니다. 다시 열어 주세요.'); const value = reasons.get(); const result = await post(`dong-work/requests/${request.id}/cancel`, { code: value.code, reason: value.text, req_ver: version }); return result || true; } });
+        if (cancelled && alive()) { s.drafts.delete(draftKey); go('/dongs'); toast('접수를 취소했습니다'); }
       }, 'danger small') : null);
     drawItems();
-    const result = await modal({ title: isNew ? '동별 접수 등록' : '동별 접수 상세', wide: true, enterSubmit: false, body: [form], ok: readonly ? '닫기' : isNew ? '접수 저장' : '수정 저장', cancel: readonly ? null : '닫기·초안 보관',
-      onOk: async () => {
+    const saveForm = async () => {
         if (!alive()) throw new Error('화면이나 담당 계정이 바뀌었습니다. 목록에서 다시 열어 주세요.');
         if (readonly) return true;
-        const value = payload(); remember(); notice.replaceChildren();
+        const value = payload(); remember(); const submittedDraft = s.drafts.get(draftKey); notice.replaceChildren();
         if (!value.dong_id || value.dong_id === '-' && isNew) throw new Error('담당 행정동을 선택하세요.');
         if (!value.name.trim() || !value.phone.trim() || !value.address.trim()) throw new Error('이름·연락처·배출 주소를 입력하세요.');
         if (!items.length) throw new Error('품목을 하나 이상 추가하세요.');
@@ -239,19 +260,31 @@ async function screenDongs() {
         }
         try {
           savedResult = isNew ? await postOnce(`dong-intake:${identity}:${origin}`, 'dong-work/requests', value)
-            : await post(`dong-work/requests/${request.id}`, { ...value, req_ver: saved?.baseVersion ?? version, reason: why.value });
+            : await post(`dong-work/requests/${request.id}`, { ...value, req_ver: version, reason: why.value });
         } catch (error) {
           if (!alive()) throw new Error('현재 화면이 바뀌었습니다. 저장 여부는 원래 동의 목록에서 확인하세요.');
           if (error.status === 409) notice.append(h('div', { class: 'notice bad', role: 'alert' }, '다른 곳에서 접수가 바뀌었습니다. 입력한 초안을 보관했습니다. 현재 접수를 다시 확인하세요. ',
             btn('최신 접수 확인', async () => { try { const fresh = await api(`dong-work/requests/${request.id}`); if (alive()) notice.replaceChildren(h('p', { class: 'notice' }, `현재 버전 ${fresh.req_ver} · 예정일 ${fresh.planned_date || '없음'} · ${fresh.dong || '미지정'}. 초안을 닫고 최신 내용으로 다시 시작하려면 초안 버리기를 누르세요.`)); } catch (e) { if (alive()) notice.append(h('p', { class: 'notice bad' }, e.message)); } }, 'small'),
-            btn('초안 버리고 다시 열기', () => { discarded = true; s.drafts.delete(draftKey); form.closest('.dlg-back')?._close?.(null); openDetail(request.id); }, 'small')));
+            btn('초안 버리고 다시 열기', () => { discarded = true; s.drafts.delete(draftKey); openDetail(request.id); }, 'small')));
           throw error;
         }
-        if (identity === owner() && state === s) s.drafts.delete(draftKey);
+        if (identity === owner() && state === s && s.drafts.get(draftKey) === submittedDraft) s.drafts.delete(draftKey);
         return savedResult || true;
-      } });
-    if (!result && !readonly && !discarded) remember();
-    if (savedResult && current()) { toast(isNew ? `${savedResult.receipt_no || ''} 접수를 등록했습니다` : '접수를 수정했습니다'); (savedResult.warnings || []).forEach((w) => toast(w, true)); invalidate(); await load(); }
+    };
+    const back = btn(readonly ? '목록으로' : '목록으로 · 초안 보관', () => { if (!readonly && !discarded) remember(); go('/dongs'); }, 'small');
+    const error = h('p', { role: 'alert' });
+    const save = readonly ? null : btn(isNew ? '접수 저장' : '수정 저장', wrap(async () => {
+      if (form.querySelector('.collection-entry [aria-busy="true"], .collection-entry input:disabled')) throw new Error('수거 결과 저장 여부를 먼저 확인하세요.');
+      const result = await saveForm();
+      if (result && current()) { toast(isNew ? `${savedResult.receipt_no || ''} 접수를 등록했습니다` : '접수를 수정했습니다'); (savedResult.warnings || []).forEach((w) => toast(w, true)); go('/dongs'); }
+    }, error), 'primary', { 'data-save': '1' });
+    const title = isNew ? '동별 접수 등록' : '동별 접수 상세';
+    const heading = h('h1', { tabindex: -1 }, title);
+    form.setAttribute('role', 'region'); form.setAttribute('aria-label', title);
+    form.append(h('div', { class: 'dw-detail-actions' }, save, error));
+    view.replaceChildren(h('div', { class: 'dw-heading' }, h('div', {}, h('span', { class: 'dw-eyebrow' }, '동별 통합 업무'), heading,
+      h('p', { class: 'muted small' }, '접수 내용과 수거 결과를 이 화면에서 확인하세요.')), back), msg, form);
+    heading.focus({ preventScroll: true }); scrollTo(0, 0);
   }
   async function calculate() {
     if (!current() || !canWrite || routeBusy || !data || !crewIds().length) return;
@@ -266,8 +299,10 @@ async function screenDongs() {
       routes.replaceChildren(h('div', { class: 'dw-section-head' }, h('h2', {}, '노선 미리보기'), chip('확정 전', 'warn')),
         h('p', { class: 'muted small' }, `${value.date} · ${dong.selectedOptions[0]?.textContent || ''} · 선택 범위의 예정일 접수만 배정합니다.`),
         ...(res.routes || []).map((r) => h('div', { class: 'dw-route' }, h('h3', {}, `${r.crew_name || r.crew_id} · ${(r.stops || []).length}곳`),
+          r.depot ? h('p', { class: 'muted small' }, `출발: ${r.depot.label || '차고지'} · 종료: ${res.end_site?.label || r.depot.label || '차고지'}${r.end ? ` · 예상 ${r.end}` : ''}`) : null,
           h('ol', {}, ...(r.stops || []).map((stop) => { const q = res.requests?.[stop.request_id] || {}; return h('li', {}, h('time', {}, stop.eta || '—'), h('span', {}, q.receipt_no || '접수', h('small', {}, `${q.dong || ''} ${q.address || ''}`))); })))),
-        ...((res.unassigned || []).length ? [h('p', { class: 'notice warn' }, `계산에 넣지 못한 접수 ${res.unassigned.length}건이 있습니다. 위치·팀 용량·예정일을 확인하세요.`)] : []),
+        ...((res.unassigned || []).length ? [h('p', { class: 'notice warn' }, `계산에 넣지 못한 접수 ${res.unassigned.length}건이 있습니다. 위치·담당팀·용량·예정일을 확인하세요.`),
+          ...res.unassigned.map((u) => h('p', { class: 'muted small' }, `${res.requests?.[u.request_id]?.receipt_no || '접수'}: ${u.reason}`))] : []),
         ...(!(res.routes || []).some((r) => r.stops?.length) ? [h('p', { class: 'dw-idle' }, '배정할 접수가 없습니다. 예정일과 위치가 지정된 접수를 확인하세요.')] : []));
     } catch (error) { if (valid()) { plan = null; routes.replaceChildren(); showError(error, calculate); } }
     finally { if (valid()) { routeBusy = false; syncActions(); } }
@@ -303,16 +338,36 @@ async function screenDongs() {
       document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (error) { if (current() && key === scopeKey()) showError(error, exportSummary); }
   }
-  date.addEventListener('change', () => { s.date = date.value; s.page = 1; data = null; invalidate(); load(); });
+  const selectDay = (day) => { date.value = day; s.date = day; s.bucket = 'day'; s.page = 1; data = null; invalidate(); load(); };
+  date.addEventListener('change', () => selectDay(date.value));
   dong.addEventListener('change', () => { s.dong = dong.value; s.page = 1; data = null; invalidate(); load(); });
   search.addEventListener('input', () => { s.q = search.value; });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); s.page = 1; load(); } });
   chooseOptions();
+  if (arg) {
+    view = h('section', { class: 'dong-workspace dw-detail', 'data-dong-owner': s.owner },
+      h('h1', {}, arg === 'new' ? '동별 접수 등록' : '동별 접수 상세'), btn('목록으로', () => go('/dongs'), 'small'),
+      h('p', { role: 'status' }, '접수를 불러오는 중…'), msg);
+    const loadDetail = async () => {
+      try {
+        const summary = await api(`dong-work?${new URLSearchParams({ date: s.date, dong: s.dong })}`);
+        if (!current()) return;
+        data = summary;
+        if (arg === 'new' && !canWrite) { view.replaceChildren(h('h1', {}, '동별 접수 등록'), h('p', { role: 'alert' }, '이 계정은 접수를 등록할 수 없습니다.'), btn('목록으로', () => go('/dongs'))); return; }
+        if (arg === 'new') await openForm(); else await openDetail(arg);
+      } catch (error) { if (current()) showError(error, loadDetail); }
+    };
+    setTimeout(loadDetail, 0);
+    return view;
+  }
   view = h('section', { class: 'dong-workspace' },
     h('div', { class: 'dw-heading' }, h('div', {}, h('span', { class: 'dw-eyebrow' }, '동별 통합 업무'), h('h1', {}, '동별 관리'), scopeText),
-      h('div', { class: 'dw-actions' }, create, calc, assign)),
-    h('div', { class: 'dw-filters', role: 'search', 'aria-label': '동별 조회조건' }, h('label', { class: 'f' }, '기준일', date), h('label', { class: 'f' }, '행정동 범위', dong),
+      h('div', { class: 'dw-actions' }, btn('빠른 수수료 계산', () => go('#/calculator')), create, calc, assign)),
+    h('div', { class: 'dw-filters', role: 'search', 'aria-label': '동별 조회조건' }, h('label', { class: 'f' }, '집계·배차 기준일', date), h('label', { class: 'f' }, '행정동 범위', dong),
       h('label', { class: 'f dw-search' }, '접수 찾기', search), btn('조회', () => { s.page = 1; load(); }), btn('집계 CSV', exportSummary, 'small')),
+    h('div', { class: 'row', role: 'group', 'aria-label': '날짜 빠른 조회' }, btn('이전날', () => selectDay(moveDay(s.date, -1)), 'small'),
+      btn('오늘', () => selectDay(kstDay()), 'small'), btn('다음날', () => selectDay(moveDay(s.date, 1)), 'small'),
+      btn('전체 기간 조회', () => pickBucket('all'), 'small'), h('span', { class: 'muted small' }, '전체 기간 조회는 완료·취소도 포함합니다. 집계·노선은 기준일을 따릅니다.')),
     teamBox, msg, body, list, routes);
   invalidate(); setTimeout(load, 0);
   return view;

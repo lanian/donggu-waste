@@ -1,3 +1,4 @@
+@import url('/web/fee-calculator.css');
 /* 동구 대형폐기물 PC 업무 화면
    틀: 행정 업무 시스템형 — 위 고정 머리줄(시스템명·접속자·로그아웃·날짜), 왼쪽 업무 묶음 메뉴, 위치 표시 + 화면 제목,
        회색 이름 칸의 조회조건 상자, 테두리 있는 촘촘한 목록 표, 표 위 오른쪽 정렬 단추.
@@ -200,6 +201,8 @@ td.code { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .qchip b { margin-left: 6px; font-variant-numeric: tabular-nums; color: var(--navy-2); }
 .qchip.on { background: var(--navy-2); color: #fff; border-color: var(--navy-3); } .qchip.on b { color: #ffe08a; }
 .card.filters .row { margin-bottom: 0; }
+.requests-filters > .requests-date-tools { flex: 1 1 100%; padding: 10px 14px; border-top: 1px solid var(--grid-line); }
+.requests-filters > .notice { flex: 1 1 100%; margin: 0; border-radius: 0; overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------------ 양식 표 (회색 이름 칸 | 입력 칸) */
 .formtable { --lw: 116px; }
@@ -1329,6 +1332,33 @@ table.conflicts tr.grp .row { gap: 6px; align-items: center; }
 .dong-workspace .dw-route li > span { display: inline-block; vertical-align: top; }
 .dong-workspace .dw-route small { display: block; color: var(--muted); margin-top: 4px; }
 .dong-workspace.dw-form { padding: 0; }
+.dw-detail { max-width: 1100px; }
+.dw-detail > .dw-form { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
+.dw-detail-actions { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 0; border-top: 1px solid var(--line-2); background: var(--card); }
+.collection-workspace { width: 100%; margin: 12px 0; }
+.collection-entry { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-left: 4px solid var(--link); border-radius: 6px; background: var(--surface-2); }
+.collection-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.collection-heading h3 { margin: 0; }
+.collection-footer { margin-top: 14px; }
+.collection-footer [role="alert"] { color: var(--bad); }
+.dispatch-steps { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.dispatch-steps > span { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-2); border-radius: 6px; }
+.dispatch-steps > .on { background: var(--navy-tint); color: var(--navy-ink); border-color: var(--link); }
+.dispatch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.dispatch-tools input[type="search"] { flex: 1 1 240px; min-width: 0; }
+.dispatch .route-metrics { padding: 9px 10px; background: var(--surface-2); font-variant-numeric: tabular-nums; font-size: .83rem; }
+.dispatch-final { border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; margin: 16px 0; background: var(--card); }
+.dispatch-final h2 { font-size: 1rem; margin-top: 0; }
+.dispatch .stopline[hidden] { display: none; }
+.dispatch .searchbox > .cond { flex-basis: 100%; grid-template-columns: 84px minmax(160px, .6fr) 84px minmax(0, 1.4fr); }
+.dispatch .searchbox .cond-v.wide { grid-column: auto; }
+.dispatch .searchbox > .dispatch-tools { flex: 1 1 100%; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line-2); }
+.dispatch .searchbox > .cond-btns { flex: 1 1 100%; justify-content: flex-start; border-left: 0; }
+.dispatch .crewpick { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.dispatch .crewpick > label.row { display: inline-flex; align-items: center; justify-content: flex-start; gap: 6px; }
+@media (max-width: 720px) {
+  .dispatch .searchbox > .cond { grid-template-columns: 84px minmax(0, 1fr); }
+}
 .dlg:has(.dong-workspace.dw-form) { display: flex; flex-direction: column; overflow: hidden; max-height: calc(100dvh - 32px); }
 .dlg:has(.dong-workspace.dw-form) > h2, .dlg:has(.dong-workspace.dw-form) > .msg, .dlg:has(.dong-workspace.dw-form) > .dlg-btns { flex: 0 0 auto; }
 .dlg:has(.dong-workspace.dw-form) > .dlg-b { overflow-y: auto; min-height: 0; overscroll-behavior: contain; padding-right: 5px; }

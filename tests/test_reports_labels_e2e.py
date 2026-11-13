@@ -1,13 +1,35 @@
 """실제 API·라우터에서 보고서와 숫자 배출표를 함께 사용하는 가상 업무 회귀."""
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
+import uuid
+import zlib
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from playwright.sync_api import expect, sync_playwright
 from test_review_ui import pc_server
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def usage_backup(fee):
+    """단독 휴대폰의 실제 암호화 백업 형식. 전량 3개 + 일부 1개 = 4장."""
+    requests, events = [], []
+    for suffix, collected, outcome in (("FULL", 3, "DONE"), ("PARTIAL", 1, "PARTIAL")):
+        rid, line = str(uuid.uuid4()), str(uuid.uuid4())
+        requests.append({"request_id": rid, "receipt_no": "USAGE-FIXTURE-" + suffix, "name": "가상 장수 주민", "phone": "01000007777",
+                         "address": "가상 장수 시험로", "dong": "충장동", "items": [{"line_id": line, "fee_rate_id": fee, "qty": 3}]})
+        for kind, body in (("ITEM_RESULT", {"line_id": line, "qty_confirmed": 3, "qty_collected": collected}), ("ATTEMPT", {"outcome": outcome})):
+            events.append({"event_id": str(uuid.uuid4()), "seq": len(events) + 1, "request_id": rid, "kind": kind, "body": body, "ts": "2026-11-12T00:00:00Z"})
+    payload = {"format": "dg.backup/1", "state": {"mode": "SOLO", "requests": requests, "events": events}, "photos": {}}
+    password, salt, iv = "usage-bundle-fixture-only", os.urandom(16), os.urandom(12)
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+    plain = compressor.compress(json.dumps(payload).encode()) + compressor.flush()
+    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000, 32)
+    return b"DGB1" + salt + iv + AESGCM(key).encrypt(iv, plain, b"DGB1"), base64.b64encode(password.encode()).decode()
 
 
 def main():
@@ -49,7 +71,20 @@ def main():
             assert saved.value.suggested_filename.endswith(".csv")
             page.screenshot(path=str(shots / "reports-monthly.png"), full_page=True)
             page.get_by_role("link", name="배출표 관리", exact=True).click()
-            expect(page.get_by_role("heading", name="숫자 배출표", exact=True)).to_be_visible()
+            expect(page.get_by_role("heading", name="배출표 관리", exact=True)).to_be_visible()
+            usage = page.get_by_role("region", name="사용 장수 자동 집계", exact=True)
+            expect(usage.get_by_label("자동 집계 사용 장수", exact=True)).to_have_text("0장")
+            backup, password = usage_backup(fee)
+            def import_backup():
+                response = context.request.post(url + "api/import/solo", headers={"X-DG-CSRF": "1", "X-DG-Pass": password, "Content-Type": "application/octet-stream"}, data=backup)
+                assert response.ok, response.text()
+                return response.json()
+            assert import_backup()["requests"] == 2
+            usage.get_by_role("button", name="집계 조회", exact=True).click()
+            expect(usage.get_by_label("자동 집계 사용 장수", exact=True)).to_have_text("4장")
+            assert import_backup()["duplicate_file"]
+            usage.get_by_role("button", name="집계 조회", exact=True).click()
+            expect(usage.get_by_label("자동 집계 사용 장수", exact=True)).to_have_text("4장")
             page.get_by_role("button", name="번호 구간 입고", exact=True).click()
             dialog = page.get_by_role("dialog", name="번호 구간 입고", exact=True)
             dialog.get_by_label("시작 번호", exact=True).fill("000001")
@@ -76,6 +111,7 @@ def main():
             page.screenshot(path=str(shots / "numbered-labels.png"), full_page=True)
             state = context.request.get(url + "api/numbered-labels", headers={"X-DG-CSRF": "1"}).json()
             assert state["counts"]["ALL"] == 2 and state["counts"]["VOID"] == 1
+            assert context.request.get(url + "api/label-usage", headers={"X-DG-CSRF": "1"}).json()["totals"]["used"] == 4
             longest = "9" * 30
             post("numbered-labels/receive", {"start": longest, "end": longest})
             token = post(f"numbered-labels/{longest}/print", {})["token"]
@@ -88,7 +124,7 @@ def main():
             label.screenshot(path=str(shots / "numbered-label-30-digits.png"), full_page=True)
             label.close()
             assert not errors, errors
-            print("실제 보고서 조회·인쇄·월보 CSV·배출표 입고·접수 연결·번호 인쇄·무효·앞0 보존 통과")
+            print("실제 보고서·월보 CSV·암호화 백업 수거 장수 자동 집계·재전송 중복 방지·번호 원장 입고·접수 연결·인쇄·무효·앞0 보존 통과")
             print("화면: " + str(shots))
         except Exception:
             page.screenshot(path=str(shots / "failure.png"), full_page=True)

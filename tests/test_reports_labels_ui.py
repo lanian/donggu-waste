@@ -75,6 +75,7 @@ FIXTURE = r"""async ({screen, role}) => {
         items:[{name:'가상 의자',spec:'일반',requested:2,collected:1,unit_label:'개'}],crews:[],categories:[],channels:[],reductions:[],
         unload_summary:{count:0,volume_records:0,weight_records:0},private_name:'화면에 나오면 안 되는 이름'};
     } else if (endpoint === 'reports/print' || endpoint.endsWith('/print')) out={token:'fixture-token'};
+    else if (endpoint === 'label-usage') out={rows:[],totals:{used:0,requests:0},page:1,pages:1,total:0,source_note:'전체 기간 누적'};
     else if (endpoint === 'numbered-labels') {
       let rows=window.__labels.filter(x=>(!u.searchParams.get('q') || x.number.includes(u.searchParams.get('q'))) && (!u.searchParams.get('status') || x.status === u.searchParams.get('status')));
       const page=Number(u.searchParams.get('page') || 1);

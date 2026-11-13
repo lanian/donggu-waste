@@ -260,7 +260,8 @@ async function addEvent(stop, kind, body) {
   st.seq += 1;
   st.events.push({
     event_id: crypto.randomUUID(), seq: st.seq, gen: F.ensureGen(st), request_id: stop.request_id,
-    assign_ver: stop.assign_ver ?? (st.daylist ? st.daylist.assign_ver : 1), base_req_ver: stop.req_ver, kind, body: withWorker(body), ts: new Date().toISOString(),
+    assign_ver: stop.assign_ver ?? (st.daylist ? st.daylist.assign_ver : 1), base_req_ver: stop.req_ver, kind,
+    body: withWorker({ ...body, ...(stop.pc_collection_ver ? { pc_collection_ver: stop.pc_collection_ver } : {}) }), ts: new Date().toISOString(),
   });
   return commit();
 }
@@ -332,9 +333,9 @@ document.addEventListener('visibilitychange', () => {
   else if (location.hash.startsWith('#/scan') || location.hash.startsWith('#/register')) render();
 });
 
-// 화면 켜짐 유지: 목록·상세 화면에서만. 지원하지 않거나 거절되면 조용히 넘어간다.
+// 화면 켜짐 유지: 목록·상세·PC 입력 참고 화면. 지원하지 않거나 거절되면 조용히 넘어간다.
 let wakeLock = null;
-const wakeRoute = () => /^#\/(home|stop)\b/.test(location.hash || '#/home');
+const wakeRoute = () => /^#\/(home|stop|pc-input)\b/.test(location.hash || '#/home');
 async function wantWake(on) {
   const r = document.documentElement;
   if (!('wakeLock' in navigator)) { r.dataset.wake = 'unsupported'; return; }

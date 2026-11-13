@@ -1,0 +1,71 @@
+/* 공용 수수료 계산기: 기존 PC/현장 테마 변수와 글꼴을 따른다. */
+.fee-calculator { --fc-accent: var(--brand, var(--navy-2, #24508f)); display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(20rem, .85fr); grid-template-areas: 'search total' 'search cart'; grid-template-rows: auto 1fr; gap: 16px; align-items: start; color: var(--ink); }
+.fee-calculator * { box-sizing: border-box; }
+.fee-calculator .fc-panel { min-width: 0; padding: 24px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.fee-calculator h2 { margin: 0 0 16px; font-size: 1.12em; }
+.fee-calculator p { margin: 0; }
+.fee-calculator button, .fee-calculator input, .fee-calculator select, .fee-calculator textarea { font: inherit; }
+.fee-calculator .fc-button { min-height: 42px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 13px; background: var(--card); color: var(--ink); cursor: pointer; text-align: center; line-height: 1.4; }
+.fee-calculator .fc-button:hover { border-color: var(--fc-accent); }
+.fee-calculator .fc-button:disabled { opacity: .5; cursor: default; }
+.fee-calculator :focus-visible { outline: 3px solid var(--focus-halo); outline-offset: 2px; }
+.fee-calculator input, .fee-calculator select, .fee-calculator textarea { min-width: 0; min-height: 44px; border: 1px solid var(--border); border-radius: 9px; background: var(--card); color: var(--ink); padding: 10px; }
+.fee-calculator input[aria-invalid=true] { border: 2px solid var(--bad, #b42318); }
+.fee-calculator .fc-search { grid-area: search; }
+.fee-calculator input[type=search] { width: 100%; font-size: 1.1em; }
+.fee-calculator .fc-quick { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 18px; }
+.fee-calculator .fc-quick .fc-button { min-height: 36px; padding: 6px 12px; border-radius: 30px; }
+.fee-calculator .fc-filter { display: flex; gap: 12px; align-items: end; justify-content: space-between; }
+.fee-calculator .fc-filter select { flex: 1; max-width: 60%; }
+.fee-calculator .fc-filter label { display: flex; gap: 7px; align-items: center; white-space: nowrap; font-size: .9em; }
+.fee-calculator .fc-filter input { width: 72px; }
+.fee-calculator .fc-small { color: var(--muted); font-size: .88em; line-height: 1.55; overflow-wrap: anywhere; }
+.fee-calculator .fc-search > .fc-small { margin-top: 12px; }
+.fee-calculator .fc-results { display: grid; gap: 8px; margin-top: 10px; max-height: 560px; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.fee-calculator .fc-result { display: flex; gap: 12px; align-items: center; justify-content: space-between; width: 100%; text-align: left; padding: 14px; }
+.fee-calculator .fc-result-copy { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.fee-calculator .fc-result-copy > span { font-size: .94em; }
+.fee-calculator .fc-result-copy small { font-size: .88em; color: var(--muted); }
+.fee-calculator .fc-add { color: var(--fc-accent); font-size: .86em; font-weight: 700; white-space: nowrap; }
+.fee-calculator .fc-more { width: 100%; margin-top: 10px; }
+.fee-calculator .fc-total { grid-area: total; border-top: 4px solid var(--fc-accent); }
+.fee-calculator .fc-kicker { color: var(--muted); font-size: .86em; font-weight: 700; letter-spacing: .03em; }
+.fee-calculator .fc-amount { display: block; margin: 9px 0; font-size: clamp(1.8rem, 3vw, 2.7rem); line-height: 1.25; letter-spacing: -.04em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fee-calculator .fc-waiting { color: var(--warn, #6b4e00); font-size: 1.6rem; }
+.fee-calculator .fc-pending { margin-top: 12px; color: var(--warn, #6b4e00); font-weight: 700; }
+.fee-calculator .fc-error { color: var(--bad, #b42318); margin-top: 8px; font-size: .9em; }
+.fee-calculator .fc-cart { grid-area: cart; }
+.fee-calculator .fc-cart-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fee-calculator .fc-cart-head h2 { margin: 0; }
+.fee-calculator .fc-clear { font-size: .83em; }
+.fee-calculator .fc-lines { list-style: none; margin: 12px 0 18px; padding: 0; }
+.fee-calculator .fc-lines > li { border-bottom: 1px solid var(--line); padding: 15px 0; }
+.fee-calculator .fc-line-title, .fee-calculator .fc-line-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fee-calculator .fc-line-title > div { min-width: 0; overflow-wrap: anywhere; }
+.fee-calculator .fc-remove { font-size: .82em; flex-shrink: 0; }
+.fee-calculator .fc-line-controls { margin-top: 12px; flex-wrap: wrap; }
+.fee-calculator .fc-stepper { display: flex; gap: 6px; align-items: center; }
+.fee-calculator .fc-stepper input { width: 68px; text-align: center; }
+.fee-calculator .fc-stepper .fc-button { min-width: 38px; padding: 7px; }
+.fee-calculator .fc-line-amount { font-variant-numeric: tabular-nums; }
+.fee-calculator .fc-empty { padding: 20px 0; color: var(--muted); font-size: .9em; line-height: 1.6; }
+.fee-calculator .fc-primary { background: var(--fc-accent); color: var(--brand-ink, #fff); border-color: var(--fc-accent); font-weight: 700; }
+.fee-calculator .fc-copy { width: 100%; }
+.fee-calculator .fc-copy-text { display: block; width: 100%; margin-top: 10px; }
+.fee-calculator [hidden] { display: none !important; }
+.fee-calculator .fc-source { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 13px; color: var(--muted); font-size: .8em; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 1050px) {
+  .fee-calculator { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'total' 'search' 'cart'; grid-template-rows: auto; }
+  .fee-calculator .fc-panel { padding: 18px; }
+  .fee-calculator .fc-results { max-height: 360px; }
+}
+@media (max-width: 600px) {
+  .fee-calculator { gap: 12px; }
+  .fee-calculator .fc-panel { padding: 16px; }
+  .fee-calculator .fc-button, .fee-calculator input, .fee-calculator select { min-height: 56px; }
+  .fee-calculator .fc-quick .fc-button { min-height: 44px; }
+  .fee-calculator .fc-filter { gap: 8px; flex-wrap: wrap; }
+  .fee-calculator .fc-filter label { margin-left: auto; }
+  .fee-calculator .fc-filter select { max-width: 100%; }
+  .fee-calculator .fc-results { max-height: 330px; }
+}

@@ -22,7 +22,7 @@ CONTACT_PLACEHOLDER = "동구청 청소 담당 부서 (전화번호는 설정에
 DISPOSAL_GUIDE_DEFAULT = "수거일 아침 7시까지 집 앞(공동주택은 관리사무소가 정한 곳)에 내놓고, 이 표지를 물건에 붙여 주세요."
 DEPOT_DEFAULT = {"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}
 # 외부 서비스 승인키(v0.11): meta 에는 "ext_" + 이름으로 둔다
-EXTERNAL_KEYS = {"juso_search_key": "주소 검색 승인키", "juso_coord_key": "좌표 승인키", "kakao_rest_key": "카카오모빌리티 REST 키"}
+EXTERNAL_KEYS = {"juso_search_key": "주소 검색 승인키", "juso_coord_key": "좌표 승인키", "kakao_rest_key": "카카오모빌리티 REST 키", "vworld_api_key": "VWorld API 키"}
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,7 @@ def contribute(name: str):
 
 # ================================================================== 등록표
 # ---- 노선·이동시간 (설정 > 노선)
-register("depot", DEPOT_DEFAULT, "차고지(출발지) 좌표와 이름. 비어 있으면 동구청 부근 기본값.", _point, expose=True, group="노선")
+register("depot", DEPOT_DEFAULT, "공통 차고지 좌표와 이름. 동별 차고지를 지정하지 않은 팀에 적용하며 미설정 기본값은 동구청 부근.", _point, expose=True, group="노선")
 register("osrm_url", "", "이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 쓰지 않음.", _str_max(200), expose=True, group="노선")
 register("travel_method", None, "이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 비어 있으면 OSRM 주소가 있을 때 OSRM.",
          _opt(lambda v: v in ("ESTIMATE", "OSRM", "KAKAO")), group="노선")
@@ -138,6 +138,8 @@ register("base_first", True, "차고지에서 가까운 곳부터 도는 쪽을 
 register("volume_overrides", {}, "품목(수수료표 ID)별 부피 보정(m³). 노선 적재 계산에 쓴다.", _is_dict, group="노선", owner="fees")
 for _k, _label in EXTERNAL_KEYS.items():
     register("ext_" + _k, "", f"외부 서비스 {_label}. 화면에는 가린 값만 보낸다.", _is_str, secret=True, group="외부 서비스")
+register("vworld_enabled", False, "VWorld 위치 참고 조회 사용. 결과를 접수·초안·QR에 반영하지 않는다.", lambda v: isinstance(v, bool), group="외부 서비스")
+register("vworld_domain", "", "VWorld 키 발급 시 등록한 서비스 URL. 선택 입력이며 다른 사이트의 URL을 대신 사용하지 않는다.", _str_max(200), group="외부 서비스")
 
 # ---- 접수·안내 문구 (설정 > 안내)
 register("jurisdiction", "동구", "관할 구 이름(주소 관할 경고·안내 글 머리).", _str_max(20), expose=True, group="안내")

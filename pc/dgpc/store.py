@@ -475,10 +475,43 @@ def _m8_dong_users(con):
     con.execute("CREATE INDEX IF NOT EXISTS ix_app_user_dong ON app_user_dong(dong_id)")
 
 
+def _m9_default_dongs(con):
+    """기본 행정동의 누락분만 한 번 등록한다. 이후 사용자의 삭제·중지·운영 설정은 유지한다."""
+    from dgpc.dong_defaults import seed_default_dongs
+    seed_default_dongs(con)
+
+
+def _m10_dong_label_stock(con):
+    """동별 실물 재고와 수거 단위별 번호 배정. 기존 번호·수동 연결·이력은 보존한다."""
+    con.execute("ALTER TABLE numbered_label ADD COLUMN stock_dong_id TEXT REFERENCES dong(id) ON DELETE SET NULL")
+    con.execute("""UPDATE numbered_label SET stock_dong_id=(SELECT d.id FROM dong d WHERE d.name=numbered_label.destination)
+        WHERE destination<>''""")
+    con.execute("CREATE INDEX ix_numbered_label_dong ON numbered_label(stock_dong_id,status)")
+    con.execute("""CREATE TABLE numbered_label_allocation (
+        number_key TEXT PRIMARY KEY NOT NULL REFERENCES numbered_label(number_key),
+        request_id TEXT NOT NULL REFERENCES request(id), line_id TEXT NOT NULL,
+        unit_index INTEGER NOT NULL CHECK(unit_index>=0),
+        dong_id TEXT REFERENCES dong(id) ON DELETE SET NULL, dong_name TEXT NOT NULL,
+        collection_at TEXT NOT NULL, source_event TEXT NOT NULL,
+        automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, voided_at TEXT)""")
+    con.execute("""CREATE UNIQUE INDEX ix_label_allocation_unit ON numbered_label_allocation(request_id,line_id,unit_index)
+        WHERE voided_at IS NULL""")
+    con.execute("CREATE INDEX ix_label_allocation_dong_date ON numbered_label_allocation(dong_id,collection_at)")
+
+
+def _m11_dong_depots(con):
+    """기존 동의 모든 값을 보존하고 개별 차고지를 미지정으로 추가한다."""
+    con.execute("ALTER TABLE dong ADD COLUMN depot_json TEXT")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
-              (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels), (8, "담당 동 계정과 권한 연결", _m8_dong_users)]
+              (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels), (8, "담당 동 계정과 권한 연결", _m8_dong_users),
+              (9, "동구 기본 행정동 누락분 자동 등록", _m9_default_dongs),
+              (10, "행정동별 배출표 재고와 수거 번호 자동 배정", _m10_dong_label_stock),
+              (11, "동별 담당 수거팀의 차고지", _m11_dong_depots)]
 LATEST = MIGRATIONS[-1][0]
 
 

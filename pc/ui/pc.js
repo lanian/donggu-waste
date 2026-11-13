@@ -3,6 +3,27 @@
 // 서버(pc/dgpc/server.py UI_FILES)에 파일을 더한다.
 // 이전 서버의 정적 파일 허용 목록에서도 열리는 진입점을 유지한다.
 // 첫 파일·연결·화면 준비를 구분한다. 자동 재시도와 업무 상태 변경은 하지 않는다.
+// 계정을 확인하기 전에는 이 브라우저의 최근 외형만 복원한다. 계정 정보·업무 자료는 저장하지 않는다.
+const appearanceKey = 'dg.pc.appearance.v1';
+function applyPcAppearance(value, remember = false) {
+  const theme = ['auto', 'light', 'dark'].includes(value?.theme) ? value.theme : 'auto';
+  const rawFont = ['number', 'string'].includes(typeof value?.font) ? Number(value.font) : NaN;
+  const font = rawFont === 13 ? 14 : ([14, 15, 16, 17].includes(rawFont) ? rawFont : 15);
+  const root = document.documentElement;
+  if (theme === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', theme);
+  root.style.setProperty('--fs', `${font}px`);
+  if (remember) {
+    try {
+      const stored = JSON.stringify({ theme, font });
+      if (localStorage.getItem(appearanceKey) !== stored) localStorage.setItem(appearanceKey, stored);
+    } catch { /* 저장소가 차단돼도 현재 화면과 로그인은 계속 사용할 수 있다. */ }
+  }
+}
+globalThis.dgPcApplyAppearance = (value) => applyPcAppearance(value, true);
+let rememberedAppearance = null;
+try { rememberedAppearance = JSON.parse(localStorage.getItem(appearanceKey)); } catch { /* 기본 외형 사용 */ }
+applyPcAppearance(rememberedAppearance);
+
 const card = document.getElementById('startup-card');
 const title = document.getElementById('startup-title');
 const detail = document.getElementById('startup-detail');
@@ -54,14 +75,14 @@ async function startPc() {
   // 방문한 화면만 읽는다. 통계·설정 등의 연결을 기다리느라 로그인까지 막히지 않게 한다.
   const screenImports = {
     access: () => import('./screens/access.js'), close: () => import('./screens/close.js'), dispatch: () => import('./screens/dispatch.js'), dongs: () => import('./screens/dongs.js'),
-    fees: () => import('./screens/fees.js'), help: () => import('./screens/help.js'), home: () => import('./screens/home.js'),
+    fees: () => import('./screens/fees.js'), calculator: () => import('./screens/calculator.js'), help: () => import('./screens/help.js'), home: () => import('./screens/home.js'),
     login: () => import('./screens/login.js'), pilot: () => import('./screens/pilot.js'), qrtest: () => import('./screens/qrtest.js'),
     refunds: () => import('./screens/refunds.js'), request: () => import('./screens/request.js'), requests: () => import('./screens/requests.js'),
     results: () => import('./screens/results.js'), revenue: () => import('./screens/revenue.js'), send: () => import('./screens/send.js'),
     reports: () => import('./screens/reports.js'), labels: () => import('./screens/numbered_labels.js'),
     settings: () => import('./screens/settings.js'), stats: () => import('./screens/stats.js'), users: () => import('./screens/users.js'),
   };
-  const screenExports = { dongs: 'screenDongs', reports: 'screenReports', labels: 'screenNumberedLabels', access: 'screenAccess', close: 'screenClose', dispatch: 'screenDispatch', fees: 'screenFees', help: 'screenHelp',
+  const screenExports = { calculator: 'screenCalculator', dongs: 'screenDongs', reports: 'screenReports', labels: 'screenNumberedLabels', access: 'screenAccess', close: 'screenClose', dispatch: 'screenDispatch', fees: 'screenFees', help: 'screenHelp',
     home: 'screenHome', pilot: 'screenPilot', qrtest: 'screenQrTest', refunds: 'screenRefunds', request: 'screenRequest', requests: 'screenRequests',
     results: 'screenResults', revenue: 'screenRevenue', send: 'screenSend', settings: 'screenSettings', stats: 'screenStats', users: 'screenUsers', me: 'screenMe' };
   const screenModules = new Map(), screenLoads = new Map();
@@ -104,6 +125,7 @@ async function startPc() {
         const st = await api('state', { timeoutMs: 10000 });
         if (my !== renderSeq) return;
         if (!st.logged_in) {
+          setBoot(null, { sessionChanged: true });
           startupPhase('screen');
           const login = await loadScreen('login');
           if (my !== renderSeq) return;
@@ -123,7 +145,7 @@ async function startPc() {
         const role = core.boot.me.role;
         applyPrefs(core.boot.me.prefs);
         // 역할별 메뉴 (서버도 같은 기준으로 막는다)
-        const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['dongs', '동별 관리', 'ADMIN INTAKE LEAD DONG'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['labels', '배출표 관리', 'ADMIN INTAKE LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
+        const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['dongs', '동별 관리', 'ADMIN INTAKE LEAD DONG'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['calculator', '빠른 수수료 계산', 'ADMIN INTAKE FIELD LEAD DONG'], ['labels', '배출표 관리', 'ADMIN INTAKE LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
           ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD LEAD'], ['revenue', '세입·대사', 'ADMIN INTAKE LEAD'], ['refunds', '환불', 'ADMIN INTAKE LEAD'],
           ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['stats', '통계·보고서', 'ADMIN INTAKE LEAD'], ['reports', '작업일지·월보', 'ADMIN INTAKE LEAD'], ['pilot', '시범 운영 비교', 'ADMIN INTAKE LEAD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD LEAD'], ['settings', '설정', 'ADMIN'],
           ['users', role === 'ADMIN' ? '사용자·이력' : '변경 이력', 'ADMIN LEAD'], ['access', '접속기록', 'ADMIN LEAD']];
@@ -131,7 +153,7 @@ async function startPc() {
         const defaultRoute = role === 'DONG' ? 'dongs' : 'home';
         let cur = route || defaultRoute;
         if (core.boot.me.must_change) cur = 'me';
-        if (role === 'DONG' && !['dongs', 'me'].includes(cur)) cur = defaultRoute;
+        if (role === 'DONG' && !['dongs', 'me', 'calculator'].includes(cur)) cur = defaultRoute;
         if (!['request', 'me', 'help'].includes(cur) && !nav.some(([k]) => k === cur)) cur = defaultRoute;
         startupPhase('screen');
         const module = await loadScreen(cur);
@@ -152,10 +174,10 @@ async function startPc() {
           // 첫 비밀번호 변경으로 다른 화면을 보여 줄 때는 원래 날짜·조건을 그 화면 진입까지 남긴다.
           if (r0 === cur || !core.boot.me.must_change) history.replaceState(null, '', pathPart);
         }
-        const content = await screen(...(['request', 'settings'].includes(cur) ? [arg] : []));
+        const content = await screen(...(cur === route && ['request', 'settings', 'dongs'].includes(cur) ? [arg] : []));
         const active = cur === 'request' ? 'requests' : cur;
         // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
-        const GROUPS = [['업무 현황', ['home', 'dongs']], ['접수 업무', ['requests', 'labels']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'reports', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
+        const GROUPS = [['업무 현황', ['home', 'dongs']], ['접수 업무', ['requests', 'calculator', 'labels']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'reports', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
         const ICON = {
           home: 'M3 10.5 12 3l9 7.5M5 9v11h5v-6h4v6h5V9',
           dongs: 'M3 21h18M5 21V7l7-4v18M12 9h7v12M8 8h1M8 12h1M8 16h1M15 12h1M15 16h1',
@@ -171,6 +193,7 @@ async function startPc() {
           stats: 'M4 3v18h17M8 16v-5M13 16V7M18 16v-9',
           pilot: 'M5 21V3h13l-3 5 3 5H5',
           fees: 'M3 3h8l10 10-8 8L3 11V3M7 7h.01',
+          calculator: 'M6 3h12v18H6V3M9 7h6M9 11h1M14 11h1M9 15h1M14 15h1M9 18h1M14 18h1',
           qrtest: 'M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM20 14v3M14 20h3M20 20h1',
           settings: 'M4 6h4M12 6h8M4 12h10M18 12h2M4 18h3M11 18h9M8 3v6M14 9v6M7 15v6',
           users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M17 4a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.9',
@@ -193,7 +216,7 @@ async function startPc() {
         const crumbs = [group ? group[0] : '개인', ...(cur === 'request' ? [navLabel.requests] : []), pageName, ...(subName ? [subName] : [])];
         const d = new Date(core.boot.today + 'T00:00:00');
         const dayTxt = isNaN(d) ? core.boot.today : `${core.boot.today.replace(/-/g, '.')} (${'일월화수목금토'[d.getDay()]})`;
-        const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); screenModules.get('dongs')?.resetDongs(); setBoot(null); screenModules.get('request')?.resetIntake(); stopSessionTimer(); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
+        const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); screenModules.get('dongs')?.resetDongs(); setBoot(null, { sessionChanged: true }); screenModules.get('request')?.resetIntake(); stopSessionTimer(); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
         const navOpen = render.navOpen || false;
         const toggleNav = () => { render.navOpen = !render.navOpen; const sh = $app.querySelector('.shell'); sh.classList.toggle('nav-open', render.navOpen); sh.querySelector('.menu-btn').setAttribute('aria-expanded', render.navOpen ? 'true' : 'false'); };
         const railBtn = () => { render.rail = !render.rail; try { localStorage.setItem('dg-rail', render.rail ? '1' : ''); } catch {} $app.querySelector('.shell').classList.toggle('rail', render.rail); };
@@ -249,7 +272,11 @@ async function startPc() {
   addEventListener('keydown', (e) => {
     if (!core.boot || dlgStack.length) return;  // 대화 상자가 열려 있으면 단축키를 쓰지 않는다
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { const b = document.querySelector('[data-save]'); if (b && !b.disabled) { e.preventDefault(); b.click(); } return; }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      const collection = e.target?.closest?.('.collection-entry');
+      const b = collection ? collection.querySelector('[data-collection-save]') : document.querySelector('[data-save]');
+      if (b && !b.disabled) { e.preventDefault(); b.click(); } return;
+    }
     if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === '/') { const q = document.querySelector('main input[type=search]'); if (q) { e.preventDefault(); q.focus(); } }
     else if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') { if (['ADMIN', 'INTAKE'].includes(core.boot.me.role)) { e.preventDefault(); go('#/request/new'); } }

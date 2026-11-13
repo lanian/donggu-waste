@@ -16,8 +16,8 @@ FINAL = {"DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD"}
 
 # ------------------------------------------------------------------ 현장 결과로 현재 상태 계산
 def _events_for(con, rid):
-    return rows(con, """SELECT e.kind, e.body_json, e.device_ts FROM result_event e JOIN result_import i ON i.id=e.import_id
-        WHERE e.request_id=? AND e.apply_status='APPLIED' ORDER BY i.imported_at, e.device_seq""", (rid,))
+    return rows(con, """SELECT e.* FROM result_event e JOIN result_import i ON i.id=e.import_id
+        WHERE e.request_id=? AND e.apply_status='APPLIED' ORDER BY i.imported_at, i.rowid, e.device_seq, e.rowid""", (rid,))
 
 
 def prefetch(con, ids, what=("items", "events", "links", "payments", "partial", "active")) -> dict:
@@ -32,8 +32,8 @@ def prefetch(con, ids, what=("items", "events", "links", "payments", "partial", 
             for r in rows(con, f"SELECT * FROM request_item WHERE request_id IN ({q}) AND removed=0", ch):
                 out["items"][r["request_id"]].append(r)
         if "events" in what:
-            for r in rows(con, f"""SELECT e.request_id, e.kind, e.body_json, e.device_ts FROM result_event e JOIN result_import i ON i.id=e.import_id
-                    WHERE e.request_id IN ({q}) AND e.apply_status='APPLIED' ORDER BY i.imported_at, e.device_seq""", ch):
+            for r in rows(con, f"""SELECT e.* FROM result_event e JOIN result_import i ON i.id=e.import_id
+                    WHERE e.request_id IN ({q}) AND e.apply_status='APPLIED' ORDER BY i.imported_at, i.rowid, e.device_seq, e.rowid""", ch):
                 out["events"][r.pop("request_id")].append(r)
         if "links" in what:
             for r in rows(con, f"SELECT * FROM item_link WHERE request_id IN ({q}) AND void_reason IS NULL ORDER BY at", ch):
@@ -74,6 +74,9 @@ def derive(con, req: dict, pre: dict | None = None) -> dict:
 
 def derive_pure(items: list[dict], events: list[dict], links: list[dict]) -> dict:
     """DB 없이 계산(미리 읽은 품목·현장 기록·유사 품목 적용). 휴대폰이 보낸 이상한 수량·단가가 있어도 멈추지 않는다(0~9999 정수로)."""
+    if events and all('device_id' in e and 'device_seq' in e for e in events):
+        from dgpc.collection import event_order
+        events = list(event_order(events))
     lines = [{"line_id": i["line_id"], "kind": "RECEIVED", "name": i["name"], "spec": i["spec"], "unit": i["unit"],
               "unit_label": i["unit_label"], "price": i["unit_price"] if i["price_status"] == "CONFIRMED" else None,
               "qty_received": i["qty"], "amount_received": i["amount"], "qty_confirmed": i["qty"], "qty_collected": 0, "reason": "",

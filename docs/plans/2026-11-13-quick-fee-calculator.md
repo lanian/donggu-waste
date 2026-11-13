@@ -1,0 +1,30 @@
+# Quick Fee Calculator Implementation Plan
+
+> Use writing-plans, test-driven-development, frontend-design and verification-before-completion. Execute sequentially in the existing checkout to retain the user's accumulated uncommitted application changes. Preserve AGENTS.md, production state, previous release artifacts and the running desktop app. No commit, push or mobile publication is authorized by this task.
+
+**Goal:** PC와 모바일 첫 화면에서 접수 등록 없이 품목·규격·수량을 골라 수수료를 빠르게 계산한다.
+
+**Approved scope:** User chose "계산만 우선". Support multiple fee-table items, immediate quantity/subtotal/total changes, deletion, clear and copy. Do not transfer items into intake or create a request. Show confirmed subtotal and pending lines when any rate is unconfirmed; never label those as free or a final amount. Display total before reductions and group quantities by their actual units.
+
+**Architecture:** Add pure quote helpers to `web/fees.js` using the existing search and confirmed-price rules. Reuse one DOM calculator and scoped stylesheet on both platforms. PC reads its current bootstrap fee table and keeps only session-owned in-memory calculator state. Mobile uses `feeTable()` (including received PC/solo revisions), or explicitly labeled builtin fallback, with in-memory UI state and precached offline modules. Add dedicated calculator routes and first-screen/menu entry points, retaining normal navigation and authentication boundaries. No database or protocol change.
+
+**Tech stack:** Existing browser ES modules, plain CSS, Node assertion scripts, Python Playwright and SQLCipher HTTP fixtures. Use existing government UI fonts and colors, clear search/specification cards, a large amount summary and touch-sized mobile controls.
+
+## Tasks
+
+1. [x] Add RED assertions in `tests/fee_quote.test.mjs` for mixed units, confirmed/pending/zero/invalid prices, quantity boundaries, unknown rows, current revised rates and copied text. Run `node tests/fee_quote.test.mjs`, then implement quote helpers in `web/fees.js`; retain existing 43 fee assertions.
+2. [x] Add RED actual browser tests in `tests/test_fee_calculator_ui.py` for PC entry, selection, quantity/edit/remove, pending totals, copy fallback, owner state isolation and DONG access without usage API; mobile linked/solo/fallback rates, 390px layout, offline execution, navigation state and no business-record mutation. Confirm missing-entry failure before implementation.
+3. [x] Add `web/fee-calculator.js`, `web/fee-calculator.css`, `pc/ui/screens/calculator.js` and `web/screens/calculator.js`; wire PC lazy route/menu/home entries, mobile home/solo entries, service worker and static resource allowlist. Keep source/copy labels tied to the fee table actually used.
+4. [x] Run new source tests plus existing fees/interoperability, picker, mobile intake/workflow and PC startup/role checks appropriate to the integration. Inspect PC/mobile screenshots, including dark theme and small width. Obtain read-only review and resolve material findings.
+5. [x] Register checks in npm/CI, update manuals and synchronize 0.14.14 versions. Build a fresh versioned desktop package; verify the calculator and existing dispatch/legacy startup flows against the frozen EXE in temporary state directories. Verify packaged shared resources, update the existing shortcut after passing and record evidence. Report that mobile source requires deployment/update; do not publish implicitly.
+
+## Evidence
+
+- Baseline `node tests/fees.test.mjs`: 43 assertions pass before calculator changes.
+- Test/build evidence directory: `D:/Temp/dg-fee-quick-20261113`.
+- RED confirmed: missing `quoteFees` assertion and missing PC home entry. The 10 quote cases and 43 existing fee cases pass. `npm test` passes (fees 43, interoperability 130, PC collection protocol, quote 10) with the existing virtualenv on PATH. The global `python3` lacked `qrcode`; created a local `.venv/Scripts/python3.exe` hardlink to the existing virtualenv interpreter rather than changing global packages.
+- Actual source UI and frozen EXE calculator flows pass: multiple items, quantities/invalid input/removal, pending subtotal, clipboard fallback, owner isolation, DONG access without global fee APIs, navigation retention and no new requests. Mobile passes at 390px with real PIN/IndexedDB, linked and solo overrides, complete new tables and real service-worker offline reload/unlock/calculation. Light/dark screenshots inspected.
+- Review found an unreadable received-table fallback; added a RED browser case and now block calculation with an update notice while retaining explicitly labeled builtin fallback only when no received table exists. Added RED/GREEN coverage for delayed clipboard failure after a quantity change; display/fallback updates require matching quote revision and active screen/owner. Final independent read-only review found no remaining Important issue.
+- Related checks pass: picker 13, actual HTTP picker/intake/Ctrl+Enter flow, DONG module UI 61 (synthetic API), mobile workflow 25, PC startup aggregate (including 6 navigation and 35 read-budget checks), desktop resource paths 14, generated files and version/precache checks. Browser path for legacy tests was explicitly set to installed Chromium. This is targeted validation, not a new full-suite or CI run.
+- Built 0.14.14: `dist/desktop/v0.14.14/Donggu-PC/Donggu-PC.exe`. Frozen calculator, existing dispatch workflow and legacy DB/order/restart/theme suite pass in temporary state directories. Shared fee/calculator JS/CSS and PC UI assets match final source bytes. ZIP is 66,713,875 bytes; SHA256 `cc80108fb425fa87a511d718977454c8e9bffd5fec2b6b0a73d67a959840aeaf`.
+- `E:/Projects/waste/동구 PC 실행.lnk` targets 0.14.14 with original arguments/window style; prior shortcut backed up in the evidence directory. Production app/state, previous releases and AGENTS.md (2707 bytes, original 2026-11-04 timestamp) are preserved. No native tray test, production writes, commit/push or mobile-site deployment was performed. Mobile source is ready for deployment and app update.

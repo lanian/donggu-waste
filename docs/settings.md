@@ -11,7 +11,7 @@
 
 | 키 | 기본값 | 묶음 | 저장 모듈 | 화면 묶음 | 설명 |
 |---|---|---|---|---|---|
-| `depot` | `{"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}` | 노선 | config | 예 | 차고지(출발지) 좌표와 이름. 비어 있으면 동구청 부근 기본값. |
+| `depot` | `{"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}` | 노선 | config | 예 | 공통 차고지 좌표와 이름. 동별 차고지를 지정하지 않은 팀에 적용하며 미설정 기본값은 동구청 부근. |
 | `osrm_url` | `""` | 노선 | config | 예 | 이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 쓰지 않음. |
 | `travel_method` | `null` | 노선 | config |  | 이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 비어 있으면 OSRM 주소가 있을 때 OSRM. |
 | `service_min_base` | `5` | 노선 | config | 예 | 한 곳 작업 기본 시간(분). |
@@ -27,6 +27,9 @@
 | `ext_juso_search_key` | (비밀) | 외부 서비스 | config |  | 외부 서비스 주소 검색 승인키. 화면에는 가린 값만 보낸다. |
 | `ext_juso_coord_key` | (비밀) | 외부 서비스 | config |  | 외부 서비스 좌표 승인키. 화면에는 가린 값만 보낸다. |
 | `ext_kakao_rest_key` | (비밀) | 외부 서비스 | config |  | 외부 서비스 카카오모빌리티 REST 키. 화면에는 가린 값만 보낸다. |
+| `ext_vworld_api_key` | (비밀) | 외부 서비스 | config |  | 외부 서비스 VWorld API 키. 화면에는 가린 값만 보낸다. |
+| `vworld_enabled` | `false` | 외부 서비스 | config |  | VWorld 위치 참고 조회 사용. 결과를 접수·초안·QR에 반영하지 않는다. |
+| `vworld_domain` | `""` | 외부 서비스 | config |  | VWorld 키 발급 시 등록한 서비스 URL. 선택 입력이며 다른 사이트의 URL을 대신 사용하지 않는다. |
 | `jurisdiction` | `"동구"` | 안내 | config | 예 | 관할 구 이름(주소 관할 경고·안내 글 머리). |
 | `intake_notices` | `[]` | 안내 | config | 예 | 접수 시 안내: [{keywords: [품목 낱말], text: 안내 글}] (최대 30개). |
 | `contact_info` | `"동구청 청소 담당 부서 (전화번호는 설정에서 입력)"` | 안내 | config | 예 | 문의처(접수증·안내 글). |

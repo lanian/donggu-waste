@@ -145,11 +145,13 @@ def travel_method(con) -> str:
 
 
 def external_settings(con) -> dict:
+    from dgpc import vworld
     return {"keys": {k: {"set": bool(secret(con, k)), "mask": X.mask(secret(con, k)), "label": lab} for k, lab in EXTERNAL_KEYS.items()},
-            "travel_method": travel_method(con)}
+            "travel_method": travel_method(con), "vworld": vworld.settings(con)}
 
 
 def _save_external(con, d: dict):
+    from dgpc import vworld
     for k, lab in EXTERNAL_KEYS.items():
         if k not in (d.get("keys") or {}):
             continue
@@ -158,6 +160,20 @@ def _save_external(con, d: dict):
             raise UserError(f"{lab} 형식이 올바르지 않습니다 (영문·숫자 8자 이상).")
         set_setting(con, "ext_" + k, v)
         audit(con, "settings", "external", "KEY_SET" if v else "KEY_CLEAR", {"key": k})  # 키 값은 남기지 않는다
+        if k == "vworld_api_key" and not v:
+            set_setting(con, "vworld_enabled", False)
+    if "vworld" in d:
+        values = d["vworld"]
+        if not isinstance(values, dict):
+            raise UserError("VWorld 설정을 확인하세요.")
+        if "domain" in values:
+            set_setting(con, "vworld_domain", vworld.valid_domain(values["domain"]))
+        if "enabled" in values:
+            if not isinstance(values["enabled"], bool):
+                raise UserError("VWorld 사용 여부를 확인하세요.")
+            if values["enabled"] and not secret(con, "vworld_api_key"):
+                raise UserError("VWorld API 키를 먼저 저장하세요.")
+            set_setting(con, "vworld_enabled", values["enabled"])
     if "travel_method" in d:
         m = d["travel_method"]
         if m not in TRAVEL_METHODS:

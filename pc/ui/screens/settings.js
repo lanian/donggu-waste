@@ -1,35 +1,266 @@
 // PC 화면: 설정(기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소·백업·개인정보)
 import * as M from '/web/map.js';
-import { api, boot, btn, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, setBoot, toast, wrap } from '../core.js';
+import { api, boot, btn, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, sessionOwner, setBoot, toast, wrap } from '../core.js';
 import { mapIn, purgeLogTable, webcamReadOnce } from '../widgets.js';
 
 const WD = '월화수목금토일';
+let dongOrderGeneration = 0;
+const dongRowDrafts = new WeakMap();
+const dongRefreshGenerations = new WeakMap();
+const dongCenterResults = new WeakMap();
+const dongCenterStates = new WeakMap();
 function dayChecks(cur, label) {
   const boxes = [...WD].map((t, i) => h('input', { type: 'checkbox', checked: cur.includes(i), 'aria-label': `${label} ${t}요일` }));
   return { el: h('span', { class: 'wdays' }, ...boxes.map((b, i) => h('label', {}, b, WD[i]))), get: () => boxes.map((b, i) => (b.checked ? i : null)).filter((x) => x != null) };
 }
 function dongCard() {
   const msg = h('p', { class: 'msg' });
-  const rowsEl = [...boot.dongs, { id: '', name: '', active: true, crew_id: '', weekdays: [], daily_limit: null, daily_limit_m3: null, keywords: [] }].map((d) => {
+  const owner = `${boot.me?.username || ''}|${boot.me?.role || ''}`;
+  const authOwner = sessionOwner();
+  if (!dongRowDrafts.has(authOwner)) dongRowDrafts.set(authOwner, new Map());
+  const drafts = dongRowDrafts.get(authOwner);
+  if (!dongRefreshGenerations.has(authOwner)) dongRefreshGenerations.set(authOwner, { value: 0 });
+  const refreshGeneration = dongRefreshGenerations.get(authOwner);
+  if (!dongCenterStates.has(authOwner)) dongCenterStates.set(authOwner, { phase: 'idle', rowWrites: 0, views: new Set() });
+  const centerState = dongCenterStates.get(authOwner);
+  const alive = () => card?.isConnected && !!boot?.me && authOwner === sessionOwner();
+  const tbody = h('tbody'), models = new Map(), rowButtons = [];
+  const frozenInputs = new Map();
+  const centerStatus = h('p', { class: 'small', role: 'status', 'aria-live': 'polite' });
+  let order = boot.dongs.map((d) => d.id), savedOrder = [...order], saving = false, rowBusy = false;
+  let card, newRow, centerBulk;
+  const centerBlocked = () => centerState.phase !== 'idle';
+  function notifyCenterViews() {
+    for (const view of centerState.views) {
+      if (view.alive()) view.updateControls(); else centerState.views.delete(view);
+    }
+  }
+  const dirty = () => order.some((id, i) => id !== savedOrder[i]);
+  const orderHint = h('p', { class: 'muted small' });
+  const orderMsg = h('p', { class: 'msg', role: 'status', 'aria-live': 'polite' });
+  const orderSave = btn('순서 저장', saveOrder, 'small primary');
+  const orderReset = btn('순서 되돌리기', () => {
+    if (saving || rowBusy || centerBlocked()) return;
+    order = [...savedOrder]; clearOrderMessage(); draw();
+    models.get(order[0])?.down.focus();
+  }, 'small');
+  function clearOrderMessage() {
+    orderMsg.textContent = ''; orderMsg.className = 'msg'; orderMsg.setAttribute('role', 'status');
+  }
+  function updateControls() {
+    const blocked = saving || rowBusy || centerBlocked();
+    orderSave.disabled = blocked || !dirty(); orderReset.disabled = blocked || !dirty();
+    orderHint.textContent = saving ? '동 순서를 저장하고 있습니다.' : dirty()
+      ? '변경한 순서는 아직 저장하지 않았습니다. 순서를 저장하거나 되돌린 뒤 다른 항목을 저장하세요.'
+      : '위·아래 버튼으로 직제순을 맞춘 뒤 순서 저장을 누르세요. 동별 관리·접수·담당 동 선택에 함께 적용됩니다.';
+    order.forEach((id, i) => {
+      const model = models.get(id);
+      model.position.textContent = String(i + 1);
+      model.up.disabled = blocked || i === 0; model.down.disabled = blocked || i === order.length - 1;
+    });
+    rowButtons.forEach((button) => { button.disabled = blocked || dirty() || !!button.dataset.busy; });
+    if (centerBlocked()) {
+      tbody.querySelectorAll('input,select,textarea').forEach((control) => {
+        if (!frozenInputs.has(control)) frozenInputs.set(control, control.disabled);
+        control.disabled = true;
+      });
+    } else {
+      frozenInputs.forEach((disabled, control) => { control.disabled = disabled; });
+      frozenInputs.clear();
+    }
+    if (centerBulk) {
+      centerBulk.textContent = centerState.phase === 'uncertain' ? '적용 결과 다시 확인' : '행정복지센터 차고지 일괄 적용';
+      centerBulk.disabled = saving || rowBusy || !!centerState.rowWrites || dirty() || ['saving', 'refresh'].includes(centerState.phase);
+    }
+    centerStatus.textContent = centerState.phase === 'saving' ? '차고지를 적용하고 있습니다. 결과 확인 전까지 동 설정을 변경할 수 없습니다.'
+      : centerState.phase === 'refresh' ? '적용한 차고지를 다시 불러오고 있습니다.'
+      : centerState.phase === 'uncertain' ? `적용 결과를 확인하지 못했습니다. [적용 결과 다시 확인]을 누른 뒤 동 설정을 변경하세요. ${centerState.error || ''}` : '';
+  }
+  function draw() {
+    tbody.append(...order.map((id) => models.get(id).row), newRow);
+    updateControls();
+  }
+  function move(id, delta) {
+    if (saving || rowBusy || centerBlocked()) return;
+    const at = order.indexOf(id), next = at + delta;
+    if (at < 0 || next < 0 || next >= order.length) return;
+    [order[at], order[next]] = [order[next], order[at]];
+    clearOrderMessage(); draw();
+    const model = models.get(id), preferred = delta < 0 ? model.up : model.down;
+    (preferred.disabled ? (delta < 0 ? model.down : model.up) : preferred).focus();
+  }
+  async function saveOrder() {
+    if (!alive() || saving || rowBusy || centerBlocked() || !dirty()) return;
+    const generation = ++dongOrderGeneration, requestBoot = boot;
+    refreshGeneration.value++;
+    saving = true; centerState.rowWrites++; clearOrderMessage(); orderSave.setAttribute('aria-busy', 'true'); updateControls(); notifyCenterViews();
+    try {
+      const result = await api('dongs/order', { method: 'POST', body: { ids: [...order], base_ids: [...savedOrder] }, _prefsOwner: authOwner });
+      if (authOwner !== sessionOwner() || `${boot?.me?.username || ''}|${boot?.me?.role || ''}` !== owner || generation !== dongOrderGeneration) return;
+      if (!card.isConnected) {
+        if (boot !== requestBoot) return;
+        const positions = new Map(result.dongs.map((d, i) => [d.id, i]));
+        if (boot.dongs.length === positions.size && boot.dongs.every((d) => positions.has(d.id))) {
+          setBoot({ ...boot, dongs: boot.dongs.map((d) => ({ ...d, sort: positions.get(d.id) })).sort((a, b) => a.sort - b.sort) });
+        }
+        return;
+      }
+      setBoot({ ...boot, dongs: result.dongs });
+      savedOrder = result.dongs.map((d) => d.id);
+      orderMsg.textContent = '동 순서를 저장했습니다.';
+      orderMsg.className = 'notice ok-note';
+    } catch (error) {
+      if (card.isConnected) { orderMsg.textContent = error.message; orderMsg.className = 'err'; orderMsg.setAttribute('role', 'alert'); }
+    } finally {
+      saving = false; centerState.rowWrites--; orderSave.removeAttribute('aria-busy'); updateControls(); notifyCenterViews();
+    }
+  }
+  const rowAction = (fn) => wrap(async () => {
+    if (!alive() || saving || rowBusy || centerBlocked() || dirty()) return;
+    rowBusy = true; centerState.rowWrites++; updateControls(); notifyCenterViews();
+    try { await fn(); } finally { rowBusy = false; centerState.rowWrites--; updateControls(); notifyCenterViews(); }
+  }, msg);
+  const refreshDongs = async ({ center = false } = {}) => {
+    if (!boot?.me || authOwner !== sessionOwner()) return false;
+    const generation = ++refreshGeneration.value, requestDongs = boot.dongs;
+    const dongs = await api('dongs', { timeoutMs: 15000, _prefsOwner: authOwner });
+    if (!boot?.me || authOwner !== sessionOwner() || generation !== refreshGeneration.value || boot.dongs !== requestDongs) return false;
+    setBoot({ ...boot, dongs });
+    // 다른 hash에서 시작한 작업의 자동 렌더 생략 규칙은 이 동 카드의 재조회에 적용하지 않는다.
+    if (center) {
+      if ([...centerState.views].some((view) => view.alive())) await render(true);
+    } else if (card?.isConnected) await render();
+    return true;
+  };
+  const refreshSaved = async () => {
+    try { await refreshDongs(); }
+    catch (error) {
+      if (alive()) msg.replaceChildren('저장은 완료했습니다. 목록을 다시 불러오지 못했습니다. ', btn('저장 목록 다시 불러오기', wrap(refreshDongs, msg), 'small'));
+    }
+  };
+  [...boot.dongs, { id: '', name: '', active: true, crew_id: '', weekdays: [], daily_limit: null, daily_limit_m3: null, keywords: [] }].forEach((d) => {
     const lbl = d.name || '새 동';
-    const f = { name: h('input', { value: d.name, placeholder: '새 동 이름 (예: ○○1동)', 'aria-label': `${lbl} 이름`, class: 'w-s' }),
-      code: h('input', { value: d.code || '', placeholder: '코드', 'aria-label': `${lbl} 부과번호 코드`, class: 'w-xs', maxlength: 4 }), active: h('input', { type: 'checkbox', checked: d.active, 'aria-label': `${lbl} 사용` }),
-      crew: h('select', { 'aria-label': `${lbl} 기본 담당 팀` }, h('option', { value: '' }, '(없음)'), ...boot.crews.map((c) => h('option', { value: c.id, selected: c.id === d.crew_id }, c.name))),
-      days: dayChecks(d.weekdays, lbl), limit: h('input', { type: 'number', min: 1, value: d.daily_limit ?? '', placeholder: '건', 'aria-label': `${lbl} 일일 한도 건수`, class: 'w-xs' }),
-      m3: h('input', { type: 'number', step: '0.5', min: 0, value: d.daily_limit_m3 ?? '', placeholder: 'm³', 'aria-label': `${lbl} 일일 한도 m³`, class: 'w-xs' }),
-      kw: h('input', { value: (d.keywords || []).join(', '), placeholder: '법정동·도로명 (쉼표로)', 'aria-label': `${lbl} 주소 판별 낱말`, class: 'w-l' }) };
-    return h('tr', {}, h('td', {}, f.name), h('td', {}, f.code), h('td', { class: 'c' }, f.active), h('td', {}, f.crew), h('td', {}, f.days.el), h('td', {}, f.limit), h('td', {}, f.m3), h('td', {}, f.kw),
-      h('td', { class: 'nowrap' }, btn(d.id ? '저장' : '추가', wrap(async () => {
-        await post('dongs', { id: d.id || null, name: f.name.value, code: f.code.value, active: f.active.checked, crew_id: f.crew.value, weekdays: f.days.get(), daily_limit: f.limit.value, daily_limit_m3: f.m3.value, keywords: f.kw.value, sort: d.sort || 0 });
-        toast('저장했습니다'); setBoot(null); render();
-      }, msg), 'small primary'), d.id ? btn('삭제', wrap(async () => {
+    const draftKey = d.id || '__new__';
+    const baseline = { name: d.name, code: d.code || '', active: !!d.active, crew_id: d.crew_id || '', weekdays: d.weekdays || [],
+      daily_limit: String(d.daily_limit ?? ''), daily_limit_m3: String(d.daily_limit_m3 ?? ''), keywords: (d.keywords || []).join(', '), depot: d.depot || null };
+    const initial = drafts.get(draftKey) || baseline;
+    const f = { name: h('input', { value: initial.name, placeholder: '새 동 이름 (예: ○○1동)', 'aria-label': `${lbl} 이름`, class: 'w-s' }),
+      code: h('input', { value: initial.code, placeholder: '코드', 'aria-label': `${lbl} 부과번호 코드`, class: 'w-xs', maxlength: 4 }), active: h('input', { type: 'checkbox', checked: initial.active, 'aria-label': `${lbl} 사용` }),
+      crew: h('select', { 'aria-label': `${lbl} 기본 담당 팀` }, h('option', { value: '' }, '(없음)'), ...boot.crews.map((c) => h('option', { value: c.id, selected: c.id === initial.crew_id }, c.name))),
+      days: dayChecks(initial.weekdays, lbl), limit: h('input', { type: 'number', min: 1, value: initial.daily_limit, placeholder: '건', 'aria-label': `${lbl} 일일 한도 건수`, class: 'w-xs' }),
+      m3: h('input', { type: 'number', step: '0.5', min: 0, value: initial.daily_limit_m3, placeholder: 'm³', 'aria-label': `${lbl} 일일 한도 m³`, class: 'w-xs' }),
+      kw: h('input', { value: initial.keywords, placeholder: '법정동·도로명 (쉼표로)', 'aria-label': `${lbl} 주소 판별 낱말`, class: 'w-l' }) };
+    f.depot = initial.depot ? { ...initial.depot } : null;
+    f.depotDirty = JSON.stringify(f.depot) !== JSON.stringify(baseline.depot);
+    const values = () => ({ name: f.name.value, code: f.code.value, active: f.active.checked, crew_id: f.crew.value, weekdays: f.days.get(),
+      daily_limit: f.limit.value, daily_limit_m3: f.m3.value, keywords: f.kw.value, depot: f.depot });
+    const remember = () => {
+      // 제출 후 원래 값/공통 차고지로 되돌린 입력도 사용자의 새 초안이다.
+      drafts.set(draftKey, values());
+    };
+    [f.name, f.code, f.active, f.crew, f.limit, f.m3, f.kw, ...f.days.el.querySelectorAll('input')].forEach((el) => {
+      el.addEventListener('input', remember); el.addEventListener('change', remember);
+    });
+    const depotStatus = h('span', { class: 'muted small', 'aria-label': `${lbl} 차고지 현황` });
+    const drawDepot = () => { depotStatus.textContent = f.depot ? `${f.depot.label} · ${f.depot.lat}, ${f.depot.lon}${f.depotDirty ? ' · 저장 전' : ''}` : `공통 차고지 사용${f.depotDirty ? ' · 저장 전' : ''}`; };
+    const depotButton = btn('차고지 설정', async () => {
+      if (saving || rowBusy || centerBlocked() || dirty()) return;
+      const alive = () => card?.isConnected && !!boot?.me && authOwner === sessionOwner();
+      if (!alive()) return;
+      const label = h('input', { value: f.depot?.label || '', maxlength: 80, placeholder: `${f.name.value || lbl} 차고지`, 'aria-label': '차고지 이름' });
+      const lat = h('input', { value: f.depot?.lat ?? '', inputmode: 'decimal', 'aria-label': '차고지 위도' });
+      const lon = h('input', { value: f.depot?.lon ?? '', inputmode: 'decimal', 'aria-label': '차고지 경도' });
+      const center = d.center_depot;
+      const result = await modal({ title: `${lbl} 차고지 설정`, ok: '행에 적용', body: [
+        h('p', { class: 'muted' }, '이 동의 담당팀이 출발하고 돌아올 실제 위치를 지정하세요. 적용한 뒤 행의 [저장]을 눌러야 반영됩니다.'),
+        center ? h('div', { class: 'notice info' }, h('strong', {}, center.label), h('p', { class: 'small' }, center.address),
+          btn('행정복지센터 위치 채우기', () => { lat.value = center.lat; lon.value = center.lon; label.value = center.label; }, 'small primary'),
+          h('p', { class: 'small' }, `공식 지도 표식 · 확인일 ${center.checked_on} · 차량 출입 위치는 필요하면 조정하세요. `, h('a', { href: center.source, target: '_blank', rel: 'noopener noreferrer' }, '공식 안내'))) : null,
+        h('label', { class: 'f' }, '차고지 이름', label),
+        h('div', { class: 'grid2' }, h('label', { class: 'f' }, '차고지 위도', lat), h('label', { class: 'f' }, '차고지 경도', lon)),
+        coordTools(lat, lon, `${lbl} 차고지`, label),
+        h('p', { class: 'muted small' }, '동별 차고지는 기본 담당팀을 고정해 계산합니다. 별도 종료지가 설정되어 있으면 그곳으로 종료합니다.'),
+        btn('공통 차고지 사용', () => { lat.value = ''; lon.value = ''; label.value = ''; lat.focus(); }, 'small'),
+        h('p', { class: 'muted small' }, '위도·경도를 모두 비우면 기존 공통 차고지를 사용합니다.')],
+        onOk: () => {
+          if (!alive() || centerBlocked()) throw new Error('화면이나 설정 처리 상태가 바뀌었습니다. 다시 열어 주세요.');
+          if (!lat.value.trim() && !lon.value.trim()) return { depot: null };
+          if (!lat.value.trim() || !lon.value.trim()) throw new Error('차고지 위도와 경도를 모두 입력해 주세요.');
+          const y = Number(lat.value), x = Number(lon.value);
+          if (!Number.isFinite(y) || !Number.isFinite(x) || y < 33 || y > 39 || x < 124 || x > 132) throw new Error('차고지 좌표가 국내 범위를 벗어났습니다.');
+          return { depot: { lat: y, lon: x, label: label.value.trim() || `${f.name.value || lbl} 차고지` } };
+        } });
+      if (result && alive()) { f.depot = result.depot; f.depotDirty = true; remember(); drawDepot(); }
+    }, 'small', { 'aria-label': `${lbl} 차고지 설정` });
+    drawDepot(); rowButtons.push(depotButton);
+    const save = btn(d.id ? '저장' : '추가', rowAction(async () => {
+        const sent = values(), signature = JSON.stringify(sent);
+        await api('dongs', { method: 'POST', body: { id: d.id || null, ...sent }, _prefsOwner: authOwner });
+        if (!boot?.me || authOwner !== sessionOwner()) return;
+        // 다른 화면에서 다시 편집한 같은 행의 초안은 옛 제출 응답으로 지우지 않는다.
+        if (JSON.stringify(drafts.get(draftKey)) === signature) drafts.delete(draftKey);
+        if (alive()) toast('저장했습니다');
+        await refreshSaved();
+      }), 'small primary');
+    const remove = d.id ? btn('삭제', rowAction(async () => {
         if (!(await confirmDlg('동 삭제', `${d.name}을(를) 지웁니다. 이 동으로 접수된 건이 있으면 지울 수 없고 '사용'을 끄면 됩니다.`, { ok: '삭제', danger: true }))) return;
-        await post(`dongs/${d.id}/delete`); toast('지웠습니다'); setBoot(null); render();
-      }, msg), 'small danger') : null));
+        if (!alive()) return;
+        await api(`dongs/${d.id}/delete`, { method: 'POST', _prefsOwner: authOwner });
+        if (!boot?.me || authOwner !== sessionOwner()) return;
+        drafts.delete(draftKey);
+        if (alive()) toast('지웠습니다');
+        await refreshSaved();
+      }), 'small danger') : null;
+    rowButtons.push(save, ...(remove ? [remove] : []));
+    const position = h('span', { class: 'code', 'aria-label': `${lbl} 현재 순서` });
+    const up = btn('↑', () => move(d.id, -1), 'small', { 'aria-label': `${lbl} 위로 이동`, title: '위로 이동' });
+    const down = btn('↓', () => move(d.id, 1), 'small', { 'aria-label': `${lbl} 아래로 이동`, title: '아래로 이동' });
+    const row = h('tr', { 'data-dong-id': d.id || null }, h('td', { class: 'nowrap' }, d.id ? [position, ' ', up, ' ', down] : h('span', { class: 'muted' }, '새 동')),
+      h('td', {}, f.name), h('td', {}, f.code), h('td', { class: 'c' }, f.active), h('td', {}, f.crew), h('td', {}, depotButton, h('br'), depotStatus), h('td', {}, f.days.el),
+      h('td', {}, f.limit), h('td', {}, f.m3), h('td', {}, f.kw), h('td', { class: 'nowrap' }, save, remove));
+    if (d.id) models.set(d.id, { row, position, up, down }); else newRow = row;
   });
-  return h('div', { class: 'card' }, h('h2', {}, '행정동 관리'),
-    h('p', { class: 'muted' }, '코드는 부과번호(연도-동코드-일련번호)에 쓰는 숫자·영문 1~4자입니다(비우면 00). 접수 화면은 주소에 판별 낱말(법정동 이름·도로명 등)이 있거나 주소 위치 자료의 관할 행정동이 같으면 동을 자동으로 고릅니다. 수거 요일을 비우면 쉬는 요일 말고 매일입니다. 기본 담당 팀은 노선 계산에서 우선(약한 선호)합니다. 바꾼 내용은 변경 이력에 남습니다.'),
-    h('div', { class: 'tablewrap' }, h('table', { class: 'dongedit grid' }, h('thead', {}, h('tr', {}, ...['동', '코드', '사용', '기본 담당 팀', '수거 요일', '한도(건)', '한도(m³)', '주소 판별 낱말', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...rowsEl))), msg);
+  draw();
+  const centerResult = dongCenterResults.get(authOwner);
+  const centerFeedback = centerResult ? h('div', { class: 'notice info', role: 'status' }, `행정복지센터 차고지 ${centerResult.applied}개 적용 · 기존 설정 유지 또는 확인 필요 ${centerResult.skipped.length}개`,
+    centerResult.skipped.length ? h('details', {}, h('summary', {}, '미적용 내역 확인'), h('ul', {}, ...centerResult.skipped.map((row) => h('li', {}, `${row.name}: ${row.reason}`)))) : null) : null;
+  centerBulk = btn('행정복지센터 차고지 일괄 적용', wrap(async () => {
+    if (!alive() || saving || rowBusy || centerState.rowWrites || dirty() || ['saving', 'refresh'].includes(centerState.phase)) return;
+    if (centerState.phase === 'idle') {
+      if ([...drafts.keys()].some((key) => key === '__new__' || models.has(key))) throw new Error('작성 중인 동 설정을 먼저 저장한 뒤 일괄 적용하세요.');
+      centerState.requestId = crypto.randomUUID(); centerState.sentAt = Date.now(); centerState.ack = false;
+    }
+    centerState.phase = centerState.ack ? 'refresh' : 'saving'; centerState.error = ''; notifyCenterViews();
+    try {
+      if (!centerState.ack) {
+        if (Date.now() - centerState.sentAt >= 24 * 60 * 60 * 1000) throw new Error('이전 요청의 확인 기간(24시간)이 지났습니다. 기존 설정을 관리자에게 확인해 주세요.');
+        const result = await api('dongs/centers', { method: 'POST', body: { client_req_id: centerState.requestId }, _prefsOwner: authOwner });
+        if (!boot?.me || sessionOwner() !== authOwner) return;
+        centerState.ack = true; dongCenterResults.set(authOwner, result);
+        centerState.phase = 'refresh'; notifyCenterViews();
+      }
+      if (!(await refreshDongs({ center: true }))) throw new Error('동 목록이 바뀌었습니다. 다시 확인해 주세요.');
+      centerState.phase = 'idle';
+      if ([...centerState.views].some((view) => view.alive())) toast(`행정복지센터 차고지 ${dongCenterResults.get(authOwner).applied}개 적용 · 기존 차고지는 보존했습니다.`);
+    } catch (error) {
+      centerState.phase = 'uncertain'; centerState.error = error.message;
+    } finally { notifyCenterViews(); }
+  }, msg), 'small primary');
+  card = h('div', { class: 'card' }, h('h2', {}, '행정동 관리'),
+    h('p', { class: 'muted' }, '동구 기본 행정동은 자동 등록됩니다. 동별 담당 팀·차고지·수거 요일·한도를 확인하세요. 차고지를 지정하면 해당 팀으로 고정 배정하며, 미지정 동은 공통 차고지를 사용합니다.'),
+    h('div', { class: 'notice info' }, h('strong', {}, '동마다 담당팀 1개 · 행정복지센터 차고지'),
+      h('p', { class: 'small' }, '공식 센터 13곳의 위치를 제공합니다. 저장된 담당팀이 있는 동의 비어 있는 차고지만 채웁니다. 기존 차고지와 담당팀은 유지하며, 팀 미연결·중복 연결·사용 중지 동은 미적용 내역에서 확인하세요.'), centerBulk, centerStatus), centerFeedback,
+    h('div', { class: 'row' }, orderSave, orderReset), orderHint, orderMsg,
+    h('p', { class: 'muted' }, '코드는 부과번호(연도-동코드-일련번호)에 쓰는 숫자·영문 1~4자입니다(비우면 00). 접수 화면은 주소에 판별 낱말(법정동 이름·도로명 등)이 있거나 주소 위치 자료의 관할 행정동이 같으면 동을 자동으로 고릅니다. 수거 요일을 비우면 쉬는 요일 말고 매일입니다. 차고지 미지정 동의 기본 담당 팀은 노선 계산에서 우선(약한 선호)합니다. 바꾼 내용은 변경 이력에 남습니다.'),
+    h('div', { class: 'tablewrap' }, h('table', { class: 'dongedit grid' }, h('thead', {}, h('tr', {}, ...['순서', '동', '코드', '사용', '기본 담당 팀', '차고지', '수거 요일', '한도(건)', '한도(m³)', '주소 판별 낱말', ''].map((t) => h('th', {}, t)))), tbody)), msg);
+  const centerView = { alive, updateControls };
+  centerState.views.add(centerView);
+  updateControls();
+  setTimeout(() => {
+    if (alive()) { centerState.views.add(centerView); notifyCenterViews(); }
+    else centerState.views.delete(centerView);
+  }, 0);
+  return card;
 }
 // 날짜별 수거 한도·쉬는 요일·휴무일
 function capacityCard() {
@@ -42,7 +273,7 @@ function capacityCard() {
   return h('div', { class: 'card' }, h('h2', {}, '수거 한도'),
     h('div', { class: 'row' }, '전체 일일 한도', lim, '건 ·', m3, 'm³', h('span', { class: 'muted small' }, '비우면 한도 없음. 넘어도 막지 않고 접수 화면에서 경고합니다. 동별 한도는 [행정동] 탭에서 정합니다.')),
     h('div', { class: 'row' }, '쉬는 요일', closed.el),
-    h('label', { class: 'row' }, pref, '노선 계산에서 동 기본 담당 팀 우선 (약한 선호, 끄면 팀 구분 없이 계산)'),
+    h('label', { class: 'row' }, pref, '차고지 미지정 동의 기본 담당 팀 우선 (약한 선호)'),
     btn('저장', wrap(async () => { await post('settings', { capacity: { daily_count: lim.value, daily_m3: m3.value, closed_weekdays: closed.get(), prefer_dong_crew: pref.checked } }); toast('저장했습니다'); setBoot(null); render(); }, msg), 'primary'), msg);
 }
 function holidayCard() {
@@ -271,7 +502,7 @@ function settingsBasic() {
   const payGuide = h('textarea', { rows: 2, class: 'fill', maxlength: 300, 'aria-label': '납부 안내' }, st.payment_guide || '');
   const roundUnit = h('select', { 'aria-label': '감면액 끝수 단위' }, ...(boot.reduction_round_units || [1, 10]).map((u) => h('option', { value: u, selected: +u === +(st.reduction_round_unit || 1) }, u === 1 ? '1원 (원 미만 버림)' : `${u}원 (${u}원 미만 버림)`)));
   return [h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'ftable' },
-      ft('차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel)), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
+      ft('공통 차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel), h('span', { class: 'muted small' }, '행정동에서 개별 차고지를 지정하지 않은 팀에 적용')), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
       ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차', umin, '분 · 차량당 최대', umax, '회'),
       ft('반입지 받는 시간', uhs, '~', uhe, h('span', { class: 'muted small' }, '비우면 따지지 않음')),
       ft('쉬는 시간', lus, '~', lue, '사이에', lum, '분', h('span', { class: 'muted small' }, '예: 11:30~13:30 사이 60분. 비우면 넣지 않음')),
@@ -423,7 +654,9 @@ function externalCard() {
     const clr = info.set ? btn('지우기', wrap(async () => { await post('settings', { external: { keys: { [k]: '' } } }); toast(`${info.label}를 지웠습니다`); setBoot(null); render(); }, msg), 'small') : null;
     return { k, inp, el: h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, info.label), h('div', { class: 'ft-v' }, inp, info.set ? chip('저장됨 ' + info.mask, 'ok') : chip('없음'), clr)) };
   };
-  const rows = ['juso_search_key', 'juso_coord_key', 'kakao_rest_key'].map(keyRow);
+  const rows = ['juso_search_key', 'juso_coord_key', 'kakao_rest_key', 'vworld_api_key'].map(keyRow);
+  const vworldEnabled = h('input', { type: 'checkbox', checked: ex.vworld?.enabled, 'aria-label': 'VWorld 참고 조회 사용' });
+  const vworldDomain = h('input', { value: ex.vworld?.domain || '', class: 'fill', 'aria-label': 'VWorld 등록 서비스 URL', placeholder: '키 발급 시 등록한 URL (선택)' });
   const method = h('select', { 'aria-label': '이동시간 계산 방식' }, ...[['ESTIMATE', '직선거리 추정 (기본, 외부 전송 없음)'], ['OSRM', '로컬 OSRM (기본 설정의 OSRM 주소)'], ['KAKAO', '카카오모빌리티 API (REST 키)']]
     .map(([v, t]) => h('option', { value: v, selected: v === ex.travel_method }, t)));
   const testOut = h('span', { class: 'muted small', role: 'status' });
@@ -433,13 +666,17 @@ function externalCard() {
     h('ul', { class: 'small muted' },
       h('li', {}, '행안부 도로명주소 API(business.juso.go.kr): 접수 화면 [주소 찾기]에 적은 검색어만 보냅니다. 전화번호 모양 값·신청인 이름이 든 검색어는 보내지 않습니다. 고른 결과의 좌표는 먼저 이 PC의 주소 위치 자료에서 찾고, 없을 때만 좌표 승인키(선택)로 건물 식별 번호를 보내 묻습니다.'),
       h('li', {}, '카카오모빌리티 길찾기 API: 노선 계산 때 지점 좌표만 보냅니다. 받은 시간은 이 PC에 저장하지 않고 노선을 계산할 때마다 새로 묻습니다. 못 받은 구간은 직선거리로 추정해 화면에 몇 쌍인지 표시합니다.'),
+      h('li', {}, 'VWorld: 전화 접수의 [VWorld 위치 참고]에서 조회한 건물 주소를 보냅니다. 브이월드(국토교통부) 결과는 참고 창에만 표시하며 접수·초안·QR에는 반영하지 않습니다. 키와 등록 서비스 URL은 발급 내용을 확인해 입력하세요.'),
       h('li', {}, '기관망 프록시는 PC 서버를 실행할 때의 HTTPS_PROXY 환경변수를 따릅니다. 검색어는 서버 로그·접속기록에 남지 않습니다(접속기록에는 검색했다는 사실과 건수만).')),
-    h('div', { class: 'ftable' }, ...rows.map((r) => r.el), h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '이동시간 계산 방식'), h('div', { class: 'ft-v' }, method))),
+    h('div', { class: 'ftable' }, ...rows.map((r) => r.el),
+      h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, 'VWorld 사용'), h('div', { class: 'ft-v' }, h('label', {}, vworldEnabled, ' 위치 참고 조회 사용'))),
+      h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, 'VWorld 등록 서비스 URL'), h('div', { class: 'ft-v' }, vworldDomain)),
+      h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '이동시간 계산 방식'), h('div', { class: 'ft-v' }, method))),
     h('div', { class: 'row' }, btn('저장', wrap(async () => {
       const keys = {}; rows.forEach((r) => { if (r.inp.value.trim()) keys[r.k] = r.inp.value.trim(); });
-      await post('settings', { external: { keys, travel_method: method.value } }); rows.forEach((r) => { r.inp.value = ''; });
+      await post('settings', { external: { keys, travel_method: method.value, vworld: { enabled: vworldEnabled.checked, domain: vworldDomain.value.trim() } } }); rows.forEach((r) => { r.inp.value = ''; });
       toast('저장했습니다'); setBoot(null); render();
-    }, msg), 'primary'), btn('주소 검색 연결 시험', test('juso'), 'small'), btn('카카오모빌리티 연결 시험', test('kakao'), 'small'), testOut), msg);
+    }, msg), 'primary'), btn('주소 검색 연결 시험', test('juso'), 'small'), btn('카카오모빌리티 연결 시험', test('kakao'), 'small'), btn('VWorld 연결 시험', test('vworld'), 'small'), testOut), msg);
 }
 
 // ------------------------------------------------------------ 백업·사진 보관 (운영 관리자)

@@ -75,7 +75,7 @@ async function screenClose() {
   return h('div', {}, h('div', { class: 'pagehead' }, h('h1', {}, '일일 마감'), h('label', { class: 'f inline' }, '수거일', date)), body);
 }
 
-// 행정동 관리: 이름·사용·기본 담당 팀·수거 요일·일일 한도·주소 판별 낱말 (실제 동 이름을 미리 넣지 않음)
+// 행정동 관리: 기본 목록 자동 등록 뒤 이름·사용·기본 담당 팀·수거 요일·일일 한도·주소 판별 낱말 설정
 
 export {
   closeSeen, closeT0, screenClose,

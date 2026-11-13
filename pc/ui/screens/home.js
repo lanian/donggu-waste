@@ -1,6 +1,6 @@
 // PC 화면: 오늘 현황(대시보드)·처리할 일 배지
 import * as M from '/web/map.js';
-import { STATUS, afterWork, api, boot, chip, grid, h, kst, md, pagehead, render, workEnd } from '../core.js';
+import { STATUS, afterWork, api, boot, btn, chip, go, grid, h, kst, md, pagehead, render, workEnd } from '../core.js';
 import { mapIn } from '../widgets.js';
 import { screenRequests } from './requests.js';
 
@@ -219,7 +219,7 @@ async function screenHome() {
       : h('p', { class: 'empty' }, sum.total ? (s.date === boot.today && !showNoResult && sum.no_result.length ? `지금 처리할 일이 없습니다. 결과 미회수는 근무가 끝난 뒤(${workEnd()}) 표시합니다.` : '지금 처리할 일이 없습니다. 결과를 가져오면 미회수·충돌·수납 확인이 여기에 모입니다.') : '이 날짜의 접수가 없습니다. 다른 날짜를 고르거나 접수를 등록하세요.'));
   return h('div', { class: 'dash today-dashboard' }, h('div', { class: 'pagehead dash-heading' },
     h('div', { class: 'dash-heading-copy' }, h('h1', {}, '오늘 현황'), h('p', { class: 'muted small' }, '선택한 날짜의 수거 진행과 처리할 일을 확인하세요.')),
-    h('div', { class: 'row dash-controls' }, h('label', { class: 'f inline dash-date-control' }, h('span', {}, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
+    h('div', { class: 'row dash-controls' }, btn('빠른 수수료 계산', () => go('#/calculator'), 'primary'), h('label', { class: 'f inline dash-date-control' }, h('span', {}, '기준일'), date), sum.closed ? chip('마감됨', 'ok') : chip('마감 전'))),
     workflowCard(sum, batches, unassigned, pd, s.date),
     h('div', { class: 'kpis dash-kpis' },
       kpi('수거 예정', active, (bs.CANCELLED ? `취소 ${bs.CANCELLED}건 제외` : '선택일 기준'), '', '#/requests', '건'),

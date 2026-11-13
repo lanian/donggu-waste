@@ -581,7 +581,7 @@ def v10():
 
     # 행정동 관리
     ids = sample_data.seed_dongs(con, [c1, c2, c1])
-    ok(len(ids) == 3 and [d["name"] for d in A.list_dongs(con)] == ["가상1동", "가상2동", "가상3동"] and A.get_dong(con, "가상1동")["weekdays_label"] == "월·수·금",
+    ok(len(ids) == 3 and [d["name"] for d in A.list_dongs(con) if d["id"] in ids] == ["가상1동", "가상2동", "가상3동"] and A.get_dong(con, "가상1동")["weekdays_label"] == "월·수·금",
        "가상 행정동 3개(가상1동~3동) 넣기: 수거 요일·판별 낱말·기본 담당 팀")
     ok(sample_data.seed_dongs(con) == [], "가상 동을 다시 넣어도 중복 없음")
     raises(lambda: A.save_dong(con, {"name": "가상1동"}), "같은 이름", "같은 이름 동 거부")
@@ -2010,8 +2010,8 @@ def v13():
     store._TEST_FAIL_STEP = None
     ok(mc.execute("PRAGMA user_version").fetchone()[0] == 1 and "fee_final" not in store._cols(mc, "request")
        and not mc.execute("SELECT 1 FROM sqlite_master WHERE name='idem'").fetchone(), "이전 단계 중간에 멈춤 → 그 단계 전체 되돌림(1단계까지만 기록)")
-    ok(store.run_migrations(mc) == [2, 3, 4, 5, 6, 7, 8] and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
-       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST == 8, "다시 열면 멈춘 단계부터 다시 실행(2~8단계)")
+    ok(store.run_migrations(mc) == list(range(2, store.LATEST + 1)) and "fee_final" in store._cols(mc, "request") and "reduction_round_unit" in store._cols(mc, "request")
+       and mc.execute("PRAGMA user_version").fetchone()[0] == store.LATEST, "다시 열면 멈춘 단계부터 현재 단계까지 다시 실행")
     # 5단계(주소 위치 자료 식별 번호)·6단계(카카오 이동시간 보관 중단): 4단계까지의 DB에 옛 자료를 넣고 올린다
     m4 = sqlcipher3.connect(str(mp.parent / "m4.db"), isolation_level=None)
     m4.execute("PRAGMA key = 'test-db-key-not-for-production'")
@@ -2025,7 +2025,7 @@ def v13():
     m4.execute("CREATE TABLE travel_cache (origin TEXT NOT NULL, dest TEXT NOT NULL, seconds INTEGER NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY (origin, dest))")
     m4.execute("INSERT INTO travel_cache VALUES ('35.15000,126.92000','35.15100,126.92100',120,'2026-11-01T00:00:00+00:00')")
     old_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
-    ok(store.run_migrations(m4) == [5, 6, 7, 8], "4단계 DB → 5·6·7·8단계 실행")
+    ok(store.run_migrations(m4) == list(range(5, store.LATEST + 1)), "4단계 DB → 현재 단계까지 실행")
     a4 = m4.execute("SELECT sigungu, road, main, lat, dong_h, bname, jibun_main, underground, road_cd, bjd_cd, entr_sn FROM addr_point").fetchall()
     new_pk = [r[1] for r in m4.execute("PRAGMA table_info(addr_point)").fetchall() if r[5]]
     ok(a4 == [("동구", "옛로", 3, 35.15, "가상1동", "옛빌라", 12, 0, None, None, None)] and "underground" in new_pk and "underground" not in old_pk
@@ -2677,15 +2677,16 @@ def v13_refactor():
     # 정리 전 권한 스냅샷은 유지하고, 새 기능의 허용 역할을 명시적으로 추가한다.
     for method, paths, roles in (
         ("GET", ("reports/daily", "reports/monthly", "reports/daily.csv", "reports/monthly.csv",
-                 "numbered-labels", "numbered-labels/{id}/history"), ("ADMIN", "INTAKE", "LEAD")),
+                 "numbered-labels", "numbered-labels/{id}/history", "label-usage", "label-auto", "reports/forms"), ("ADMIN", "INTAKE", "LEAD")),
         ("POST", ("numbered-labels/receive", "numbered-labels/distribute", "numbered-labels/{id}/use",
-                  "numbered-labels/{id}/void"), ("ADMIN", "INTAKE")),
+                  "numbered-labels/{id}/void", "numbered-labels/stock-dong", "label-auto/sync", "reports/forms/download", "requests/{id}/collection"), ("ADMIN", "INTAKE")),
         ("POST", ("numbered-labels/{id}/print", "reports/print"), ("ADMIN", "INTAKE", "LEAD")),
         ("GET", ("dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
                  "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
         ("POST", ("dong-work/requests", "dong-work/requests/{id}", "dong-work/requests/{id}/cancel",
-                  "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
-        ("POST", ("users/{id}/dongs",), ("ADMIN",)),
+                  "dong-work/requests/{id}/collection", "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
+        ("POST", ("users/{id}/dongs", "dongs/order"), ("ADMIN",)),
+        ("POST", ("vworld/locate",), ("ADMIN", "INTAKE")),
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}
@@ -2693,7 +2694,7 @@ def v13_refactor():
         if (entry["method"], entry["path"]) in self_routes:
             entry["roles"] = (*entry["roles"], "DONG")
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
     ok(not diff, f"기존 권한과 명시한 동별 업무·자기 정보 권한만 허용 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
@@ -2707,8 +2708,8 @@ def v13_refactor():
     ok(all(r.lock == ("write" if r.pattern in scoped_reads else "read") for r in SV.ROUTES if r.method == "GET") and
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
                                                              "external/test", "route", "backup", "backup/auto", "backup/retention", "privacy/purge",
-                                                             "photo-purge", "refunds/sync", "integrity/full", "dong-work/route"},
-       "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 POST 16개는 잠금 밖")
+                                                             "photo-purge", "refunds/sync", "integrity/full", "dong-work/route", "vworld/locate"},
+       "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 POST 17개는 잠금 밖")
     ok(not SV.allowed("FIELD", "GET", "nothing-here") and SV.allowed("ADMIN", "GET", "nothing-here") and SV.allowed("INTAKE", "GET", "requests/a/b/c"),
        "경로 표에 없는 주소: 관리자·같은 첫 마디를 쓸 수 있는 역할은 404, 그 밖은 403")
     # 설정 등록표

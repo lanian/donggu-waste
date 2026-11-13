@@ -1,0 +1,125 @@
+{
+  "schema": "dg.dong-centers/1",
+  "checked_on": "2026-11-13",
+  "coordinate_reference": "WGS84",
+  "note": "동구청 공식 찾아오시는 길에 게시된 지도 표식. 차량 출입 위치는 현장에서 확인 후 조정할 수 있습니다.",
+  "centers": [
+    {
+      "dong": "충장동",
+      "label": "충장동 행정복지센터",
+      "address": "전남광주통합특별시 동구 충장로58번길 16",
+      "lat": 35.149141,
+      "lon": 126.912838,
+      "source": "https://www.donggu.kr/menu.es?mid=a10605010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "동명동",
+      "label": "동명동 행정복지센터",
+      "address": "전남광주통합특별시 동구 동계천로 172",
+      "lat": 35.148874,
+      "lon": 126.928018,
+      "source": "https://www.donggu.kr/menu.es?mid=a10606010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "계림1동",
+      "label": "계림1동 행정복지센터",
+      "address": "전남광주통합특별시 동구 경양로247번길 26(계림동)",
+      "lat": 35.158528,
+      "lon": 126.919672,
+      "source": "https://www.donggu.kr/menu.es?mid=a10607010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "계림2동",
+      "label": "계림2동 행정복지센터",
+      "address": "전남광주통합특별시 동구 동계로 68",
+      "lat": 35.15795,
+      "lon": 126.923602,
+      "source": "https://www.donggu.kr/menu.es?mid=a10608010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "산수1동",
+      "label": "산수1동 행정복지센터",
+      "address": "전남광주통합특별시 동구 무등로449번길 12(산수동)",
+      "lat": 35.157308,
+      "lon": 126.930723,
+      "source": "https://www.donggu.kr/menu.es?mid=a10609010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "산수2동",
+      "label": "산수2동 행정복지센터",
+      "address": "전남광주통합특별시 동구 필문대로191번길 43-24(산수동)",
+      "lat": 35.154582,
+      "lon": 126.936121,
+      "source": "https://www.donggu.kr/menu.es?mid=a10610010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "지산1동",
+      "label": "지산1동 행정복지센터",
+      "address": "전남광주통합특별시 동구 지산로 57(지산동)",
+      "lat": 35.148995,
+      "lon": 126.932715,
+      "source": "https://www.donggu.kr/menu.es?mid=a10611010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "지산2동",
+      "label": "지산2동 행정복지센터",
+      "address": "전남광주통합특별시 동구 지호로 51(지산동)",
+      "lat": 35.147983,
+      "lon": 126.934471,
+      "source": "https://www.donggu.kr/menu.es?mid=a10612010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "서남동",
+      "label": "서남동 행정복지센터",
+      "address": "전남광주통합특별시 동구 서남로 14(서석동)",
+      "lat": 35.144945,
+      "lon": 126.923241,
+      "source": "https://www.donggu.kr/menu.es?mid=a10613010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "학동",
+      "label": "학동 행정복지센터",
+      "address": "전남광주통합특별시 동구 남문로753번길 20, 상가 A동 102호(학동, 무등산 아이파크)",
+      "lat": 35.136349,
+      "lon": 126.922622,
+      "source": "https://www.donggu.kr/menu.es?mid=a10614010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "학운동",
+      "label": "학운동 행정복지센터",
+      "address": "전남광주통합특별시 동구 의재로 53(학동)",
+      "lat": 35.13249,
+      "lon": 126.933553,
+      "source": "https://www.donggu.kr/menu.es?mid=a10615010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "지원1동",
+      "label": "지원1동 행정복지센터",
+      "address": "전남광주통합특별시 동구 지원로 31-9(소태동)",
+      "lat": 35.125302,
+      "lon": 126.935179,
+      "source": "https://www.donggu.kr/menu.es?mid=a10616010300",
+      "checked_on": "2026-11-13"
+    },
+    {
+      "dong": "지원2동",
+      "label": "지원2동 행정복지센터",
+      "address": "전남광주통합특별시 동구 화산로 361(용산동)",
+      "lat": 35.120473,
+      "lon": 126.932839,
+      "source": "https://www.donggu.kr/menu.es?mid=a10617010300",
+      "checked_on": "2026-11-13"
+    }
+  ]
+}

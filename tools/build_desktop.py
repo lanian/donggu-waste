@@ -19,7 +19,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build" / "desktop"
 DIST = ROOT / "dist" / "desktop"
-DATA_JSON = ("fee_table.json", "labels.json", "item_handling.json")
+DATA_JSON = ("fee_table.json", "labels.json", "item_handling.json", "dong_centers.json")
 PUBLIC_ICONS = ("icon.svg", "icon-180.png", "icon-192.png", "icon-512.png")
 PRIVATE_DIRS = {"state", "out", "logs", "backups", "pre-migration", "tests", "shots", ".git", ".venv", "__pycache__"}
 PRIVATE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".dgr", ".dgp", ".dgb", ".dgbak", ".dgabk",
@@ -44,6 +44,7 @@ def asset_files() -> list[Path]:
     files += [ROOT / "web" / name for name in sorted(allowed_web_files())]
     files += [ROOT / "web/icons" / name for name in PUBLIC_ICONS]
     files += [ROOT / "data" / name for name in DATA_JSON]
+    files += [ROOT / "data/report_templates" / name for name in ("monthly.xlsx", "ledger.odt")]
     for path in files:
         if not path.resolve().is_relative_to(ROOT) or not path.is_file():
             raise ValueError("배포 자산이 없거나 저장소 바깥을 가리킵니다: " + str(path))

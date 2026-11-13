@@ -378,6 +378,8 @@ def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dic
         counts = json.loads(r.pop("summary_json") or "{}")
         if r["kind"] == "RESULT" and counts.get("source") == "SOLO":
             r["kind"] = "SOLO"
+        if r['kind'] == 'RESULT' and counts.get('source') == 'PC':
+            r['kind'] = 'PC'
         auto = None
         if r["kind"] == "RESULT":
             auto = _rel_covered(con, r["id"], r["device_id"], r["imported_at"])

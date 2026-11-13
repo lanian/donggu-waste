@@ -245,6 +245,7 @@ export function expandDaylist(p, feeTable) {
     seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a, dong: c.d || '',
     spot_note: c.o || '', memo: c.m || '', lat: c.y ? c.y[0] : null, lon: c.y ? c.y[1] : null, eta: c.e || '',
     appt: c.t || null, revisit: !!c.rv, assign_ver: p.assign_ver,
+    ...(c.pcv ? { pc_collection_ver: c.pcv } : {}),
     // v0.11: 선택 키 "rd" 감면율(%), "lv" 부과번호. 없으면 감면 없음·부과번호 없음(이전 목록 그대로).
     // v0.13: 선택 키 "ru" 감면액 끝수 단위(원, 10만 — 1원이면 싣지 않음). 감면이 있을 때만 뜻이 있음. 없으면 1원(이전 목록 그대로).
     levy_no: c.lv || '', reduction: c.rd ? { rate: Number(c.rd), ...(Number(c.ru) === 10 ? { round_unit: 10 } : {}) } : null,

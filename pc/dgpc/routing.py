@@ -30,6 +30,7 @@ from pathlib import Path
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from dgpc import external as X
+from dgpc.core import UserError
 from dgpc.paths import resource_root
 
 # 품목별 적재 기준(1단위당 부피 m³·무게 kg·작업 분·취급 표시): data/item_handling.json 을 PC·휴대폰이 함께 쓴다.
@@ -304,18 +305,45 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
          unload_site: dict | None = None, unload_min: int = 20, max_unloads: int = 2, end_site: dict | None = None,
          crew_pref: dict | None = None, pref_penalty: int = 30, travel_method: str | None = None, kakao_key: str = "",
          unload_hours: dict | None = None, lunch: dict | None = None,
-         base_first: bool = True) -> dict:
+         base_first: bool = True, crew_depots: dict | None = None, crew_required: dict | None = None,
+         fixed_plan: dict | None = None) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
     crews: id, name, capacity_m3, capacity_kg(0·없음 = 무게 안 따짐), shift_start, shift_end
     crew_pref: {request_id: 선호 팀 id} (행정동 기본 담당 팀, 약한 선호)
     unload_hours: {"start","end"} 반입지가 받는 시간 / lunch: {"start","end","minutes"} 그 사이에 쉬는 시간"""
-    unassigned = [{"request_id": r["id"], "reason": "배출 위치 좌표가 없음 (위치 지정 필요)"} for r in requests if r.get("lat") is None]
-    reqs = [r for r in requests if r.get("lat") is not None]
+    fixed_crews = {}
+    excluded = []
+    if fixed_plan is not None:
+        by_id = {r['id']: r for r in requests}
+        crew_ids = {c['id'] for c in crews}
+        if not isinstance(fixed_plan, dict) or not fixed_plan:
+            raise UserError('순서 재계산에 사용할 팀과 접수를 확인하세요.')
+        for cid, ids in fixed_plan.items():
+            if cid not in crew_ids or not isinstance(ids, list):
+                raise UserError('선택한 수거팀과 접수 순서를 확인하세요.')
+            for rid in ids:
+                if not isinstance(rid, str) or rid not in by_id or rid in fixed_crews:
+                    raise UserError('없는 접수 또는 중복 접수가 포함되어 있습니다. 목록을 다시 확인하세요.')
+                if by_id[rid].get('lat') is None or by_id[rid].get('lon') is None:
+                    raise UserError('위치 없는 접수는 먼저 배출 위치를 지정하세요.')
+                if (crew_required or {}).get(rid, cid) != cid:
+                    raise UserError('이 동의 고정 담당 수거팀으로 배정하세요.')
+                fixed_crews[rid] = cid
+        if not fixed_crews:
+            raise UserError('재계산할 접수를 하나 이상 배정하세요.')
+        excluded = [{'request_id': r['id'], 'reason': '담당자가 이번 추천안에서 제외', 'must_today': bool(r.get('must_today'))} for r in requests if r['id'] not in fixed_crews]
+        requests = [r for r in requests if r['id'] in fixed_crews]
+    unassigned = excluded + [{"request_id": r["id"], "reason": "배출 위치 좌표가 없음 (위치 지정 필요)"} for r in requests if r.get("lat") is None]
+    selected = {c['id'] for c in crews}
+    unavailable = {r['id'] for r in requests if (crew_required or {}).get(r['id']) and crew_required[r['id']] not in selected}
+    unassigned.extend({'request_id': r['id'], 'reason': '이 동의 담당 수거팀이 선택되지 않았거나 사용 중지 상태입니다.'} for r in requests if r['id'] in unavailable and r.get('lat') is not None)
+    reqs = [r for r in requests if r.get("lat") is not None and r['id'] not in unavailable]
+    depots = {c['id']: dict((crew_depots or {}).get(c['id']) or depot) for c in crews}
     if not crews:
         return {"routes": [], "unassigned": unassigned + [{"request_id": r["id"], "reason": "선택한 팀이 없음"} for r in reqs],
                 "matrix_source": None}
     if not reqs:
-        return {"routes": [{"crew_id": c["id"], "crew_name": c["name"], "stops": [], "end": None} for c in crews],
+        return {"routes": [{"crew_id": c["id"], "crew_name": c["name"], "stops": [], "end": None, "depot": depots[c['id']]} for c in crews],
                 "unassigned": unassigned, "matrix_source": None}
     starts = [to_min(c.get("shift_start"), 540) for c in crews]
     ends = [to_min(c.get("shift_end"), 1020) for c in crews]
@@ -329,20 +357,36 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     min_kg = min(kg_caps) if all(kg_caps) else 0
     # 같은 장소(25m 이내)이고 방문 시간창이 겹치는 접수는 한 지점으로 묶어 연속 방문한다
     groups: list[dict] = []
+    by_crew = {c['id']: c for c in crews}
     for r in reqs:
         lo, hi = to_min(r.get("appt_start"), min(starts)), to_min(r.get("appt_end"), max(ends))
         x = info[r["id"]]
         # 묶음 합계가 가장 작은 차량 1대에 들어갈 때만 묶는다(넘으면 따로 방문 → 반입지 경유로 나눠 실을 수 있게)
-        g = next((g for g in groups if haversine_km((g["lat"], g["lon"]), (r["lat"], r["lon"])) <= SAME_PLACE_KM
-                  and max(g["lo"], lo) < min(g["hi"], hi) and g["volume"] + x["m3"] <= min_cap and (not min_kg or g["kg"] + x["kg"] <= min_kg)), None)
+        required = fixed_crews.get(r['id']) if fixed_plan is not None else (crew_required or {}).get(r['id'])
+        vehicle = by_crew.get(required)
+        group_cap = max(0.01, float(vehicle.get('capacity_m3', 8))) if vehicle else min_cap
+        group_kg = float(vehicle.get('capacity_kg') or 0) if vehicle else min_kg
+        g = next((g for g in groups if fixed_plan is None and g['required'] == required and haversine_km((g["lat"], g["lon"]), (r["lat"], r["lon"])) <= SAME_PLACE_KM
+                  and max(g["lo"], lo) + g['service'] + x['svc'] <= min(g["hi"], hi) and g["volume"] + x["m3"] <= group_cap and (not group_kg or g["kg"] + x["kg"] <= group_kg)), None)
         if g:
             g["members"].append((r, x["svc"])); g["lo"], g["hi"] = max(g["lo"], lo), min(g["hi"], hi)
             g["service"] += x["svc"]; g["volume"] += x["m3"]; g["kg"] += x["kg"]; g["must"] = g["must"] or bool(r.get("must_today"))
             g["base"] = g["base"] or "BASE" in x["tags"]
         else:
-            groups.append({"lat": r["lat"], "lon": r["lon"], "members": [(r, x["svc"])], "lo": lo, "hi": hi, "service": x["svc"],
+            groups.append({"lat": r["lat"], "lon": r["lon"], "required": required, "members": [(r, x["svc"])], "lo": lo, "hi": hi, "service": x["svc"],
                            "volume": x["m3"], "kg": x["kg"], "must": bool(r.get("must_today")), "base": "BASE" in x["tags"]})
-    points = [(depot["lat"], depot["lon"])] + [(g["lat"], g["lon"]) for g in groups]
+    invalid = [g for g in groups if g['hi'] - g['lo'] < g['service']]
+    if invalid:
+        invalid_ids = {r['id'] for g in invalid for r, _ in g['members']}
+        unassigned += [{'request_id': r['id'], 'reason': '방문 약속 시간보다 작업 시간이 깁니다. 시간을 조정하세요.', 'must_today': bool(r.get('must_today'))} for r in reqs if r['id'] in invalid_ids]
+        if fixed_plan is not None:
+            return {'routes': [], 'infeasible': True, 'matrix_source': None, 'unassigned': unassigned}
+        groups = [g for g in groups if g not in invalid]
+        reqs = [r for r in reqs if r['id'] not in invalid_ids]
+        if not groups:
+            return {'routes': [], 'matrix_source': None, 'unassigned': unassigned}
+    first_depot = depots[crews[0]['id']]
+    points = [(first_depot['lat'], first_depot['lon'])] + [(g["lat"], g["lon"]) for g in groups]
     scale = 100  # 부피를 정수로 (0.01m³ 단위)
     caps = [max(1, int(float(c.get("capacity_m3", 8)) * scale)) for c in crews]  # 0·음수 용량은 계산기를 멈추게 하므로 막는다
     use_kg = any(float(c.get("capacity_kg") or 0) > 0 for c in crews)
@@ -356,17 +400,28 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     end_node = len(points) if use_end else 0
     if use_end:  # 일을 마치고 돌아갈 곳이 출발지와 다를 때 (예: 반입지에서 마감 후 차고지 아닌 곳)
         points.append((float(end_site["lat"]), float(end_site["lon"])))
-    tmat, source, minfo = build_matrix(points, osrm_url, travel_method, kakao_key)
     tail = [0] if use_end else []
     service = [0] + [g["service"] for g in groups] + [int(unload_min)] * len(unload_nodes) + tail
     demand = [0] + [int(round(g["volume"] * scale)) for g in groups] + [-max(caps)] * len(unload_nodes) + tail
     kdemand = [0] + [int(round(g["kg"])) for g in groups] + [-max(kcaps)] * len(unload_nodes) + tail
+    depot_nodes = {points[0]: 0}
+    start_nodes = []
+    for crew in crews:
+        point = depots[crew['id']]
+        coords = (point['lat'], point['lon'])
+        if coords not in depot_nodes:
+            depot_nodes[coords] = len(points)
+            points.append(coords)
+            service.append(0); demand.append(0); kdemand.append(0)
+        start_nodes.append(depot_nodes[coords])
+    end_nodes = [end_node] * len(crews) if use_end else start_nodes
+    tmat, source, minfo = build_matrix(points, osrm_url, travel_method, kakao_key)
     brk = _break_window(lunch)
     uh = (to_min((unload_hours or {}).get("start"), 0), to_min((unload_hours or {}).get("end"), 24 * 60)) if unload_hours else None
 
     def solve(must_hard: bool):
         n, v = len(points), len(crews)
-        mgr = pywrapcp.RoutingIndexManager(n, v, [0] * v, [end_node] * v)
+        mgr = pywrapcp.RoutingIndexManager(n, v, start_nodes, end_nodes)
         model = pywrapcp.RoutingModel(mgr)
 
         def transit(i, j):
@@ -377,6 +432,8 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         crew_idx = {c["id"]: k for k, c in enumerate(crews)}
         node_pref: list[int | None] = [None] * n
         for node, g in enumerate(groups, start=1):
+            if g['required'] is not None:
+                model.VehicleVar(mgr.NodeToIndex(node)).SetValues([-1, crew_idx[g['required']]])
             prefs = [crew_idx[(crew_pref or {}).get(r["id"])] for r, _ in g["members"] if (crew_pref or {}).get(r["id"]) in crew_idx]
             if prefs:
                 node_pref[node] = max(set(prefs), key=prefs.count)
@@ -390,6 +447,13 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             model.SetArcCostEvaluatorOfVehicle(model.RegisterTransitCallback(cost), k)
         model.AddDimension(tcb, 600, 24 * 60, False, "Time")
         tdim = model.GetDimensionOrDie("Time")
+        if fixed_plan is not None:
+            model.AddConstantDimension(1, len(points) + 1, True, 'VisitOrder')
+            rank = model.GetDimensionOrDie('VisitOrder')
+            indices = {g['members'][0][0]['id']: mgr.NodeToIndex(node) for node, g in enumerate(groups, start=1)}
+            for ids in fixed_plan.values():
+                for first, second in zip(ids, ids[1:]):
+                    model.solver().Add(rank.CumulVar(indices[first]) < rank.CumulVar(indices[second]))
         for k in range(v):
             tdim.CumulVar(model.Start(k)).SetRange(starts[k], ends[k])
             tdim.CumulVar(model.End(k)).SetRange(starts[k], ends[k])
@@ -397,7 +461,10 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             tdim.CumulVar(mgr.NodeToIndex(node)).SetRange(g["lo"], max(g["lo"], g["hi"] - service[node]))
         if uh:  # 반입지가 받는 시간 안에 도착·하차를 마치도록
             for node in unload_nodes:
-                tdim.CumulVar(mgr.NodeToIndex(node)).SetRange(uh[0], max(uh[0], uh[1] - int(unload_min)))
+                if uh[1] - uh[0] < int(unload_min):
+                    model.ActiveVar(mgr.NodeToIndex(node)).SetValue(0)
+                else:
+                    tdim.CumulVar(mgr.NodeToIndex(node)).SetRange(uh[0], uh[1] - int(unload_min))
         breaks = []
         if brk:
             visit = [0] * model.Size()
@@ -435,6 +502,8 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                 if g["base"]:
                     ldim.SetCumulVarSoftUpperBound(mgr.NodeToIndex(node), ub, 1)
         for node, g in enumerate(groups, start=1):
+            if fixed_plan is not None:
+                continue  # 수동으로 넣은 접수를 적재·시간 때문에 조용히 누락하지 않는다.
             if g["must"] and must_hard:
                 continue
             penalty = sum(10_000 + 3_000 * int(r.get("priority") or 0) + 300 * int(r.get("waiting_days") or 0) + (20_000 if r.get("urgent") else 0)
@@ -454,7 +523,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     has_must = any(g["must"] for g in groups)
     sol, mgr, model, tdim, breaks = solve(True)
     relaxed = False
-    if not sol and has_must:  # 오늘 필수가 다 들어가지 않으면 전체를 버리지 않고, 필수도 빠질 수 있게(아주 큰 벌점) 다시 푼다
+    if not sol and has_must and fixed_plan is None:  # 자동 추천에서만 필수 건 일부 누락을 경고하며 허용한다.
         sol, mgr, model, tdim, breaks = solve(False)
         relaxed = bool(sol)
     if not sol:
@@ -472,6 +541,8 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                 lunch_by[int(nm[5:])] = el.StartValue()
     for k, c in enumerate(crews):
         idx, stops, load, kg, unloads = model.Start(k), [], 0, 0, 0
+        start_min = sol.Min(tdim.CumulVar(idx))
+        drive_min, distance_km, work_minutes = 0, 0.0, 0
         while not model.IsEnd(idx):
             node = mgr.IndexToNode(idx)
             if node in unload_set:
@@ -481,8 +552,9 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                     stops[-1]["unload_kg"] = int(kg)
                     unloads += 1
                 load, kg = 0, 0
-            elif node:
+            elif 1 <= node <= n_groups:
                 g = groups[node - 1]
+                work_minutes += g['service']
                 t = sol.Min(tdim.CumulVar(idx))
                 for r, svc in g["members"]:
                     x = info[r["id"]]
@@ -493,9 +565,15 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                                   "same_place": len(g["members"]), **({"pref_crew_id": pc, "off_pref": pc != c["id"]} if pc else {})})
                     visited.add(r["id"])
                     t += svc
-            idx = sol.Value(model.NextVar(idx))
+            next_idx = sol.Value(model.NextVar(idx))
+            next_node = mgr.IndexToNode(next_idx)
+            drive_min += tmat[node][next_node]
+            distance_km += haversine_km(points[node], points[next_node])
+            idx = next_idx
         lunch_at = hhmm(lunch_by[k]) if k in lunch_by else None
-        routes.append({"crew_id": c["id"], "crew_name": c["name"], "stops": stops, "end": hhmm(sol.Min(tdim.CumulVar(idx))),
+        routes.append({"crew_id": c["id"], "crew_name": c["name"], "stops": stops, "end": hhmm(sol.Min(tdim.CumulVar(idx))), "depot": depots[c['id']],
+                       'start': hhmm(start_min), 'drive_min': drive_min, 'work_min': work_minutes,
+                       'duration_min': sol.Min(tdim.CumulVar(idx)) - start_min, 'distance_km': round(distance_km, 2),
                        "capacity_m3": c.get("capacity_m3", 8), "capacity_kg": int(float(c.get("capacity_kg") or 0)), "unloads": unloads,
                        "end_load_m3": round(load / scale, 2), "end_load_kg": int(kg),
                        **({"lunch": {"start": lunch_at, "minutes": brk[2]}} if lunch_at else {})})
@@ -504,8 +582,11 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     for r in reqs:
         if r["id"] not in visited:
             vol, wkg = info[r["id"]]["m3"], info[r["id"]]["kg"]
-            reason = ("적재 추정치(%.1fm³)가 차량 1대 용량(%.1fm³)보다 큼" % (vol, cap_max) if vol > cap_max
-                      else "무게 추정치(%dkg)가 차량 최대 적재 중량(%dkg)보다 큼" % (wkg, kcap_max) if kcap_max and wkg > kcap_max
+            vehicle = by_crew.get((crew_required or {}).get(r['id']))
+            max_m3 = float(vehicle.get('capacity_m3', 8)) if vehicle else cap_max
+            max_kg = float(vehicle.get('capacity_kg') or 0) if vehicle else kcap_max
+            reason = ("적재 추정치(%.1fm³)가 차량 1대 용량(%.1fm³)보다 큼" % (vol, max_m3) if vol > max_m3
+                      else "무게 추정치(%dkg)가 차량 최대 적재 중량(%dkg)보다 큼" % (wkg, max_kg) if max_kg and wkg > max_kg
                       else "적재 추정치(%.1fm³)가 남은 차량 용량을 넘음" % vol if vol > min(float(c.get("capacity_m3", 8)) for c in crews) / 2 and not use_unload
                       else "근무시간·방문 약속 시간 안에 들어가지 않음 (우선순위가 낮아 제외)")
             if r.get("must_today"):

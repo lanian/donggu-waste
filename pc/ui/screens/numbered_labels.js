@@ -1,5 +1,7 @@
 // PC 화면: 숫자 배출표 원장. 번호는 문자열로 다루며 인쇄와 사용 기록을 구분한다.
 import { api, boot, btn, canWork, chip, grid, h, kst, modal, pagehead, postOnce, routeEpoch, searchbox, toast, wrap, STATUS } from '../core.js';
+import { collectionLabelUsage } from './label_usage.js';
+import { labelStock } from './label_stock.js';
 
 const STATES = { AVAILABLE: '보관 중', DISTRIBUTED: '배부', USED: '사용', VOID: '무효' };
 const ACTIONS = { RECEIVE: '입고', DISTRIBUTE: '배부', USE: '사용', VOID: '무효' };
@@ -16,15 +18,16 @@ function rangeValues(start, end) {
 }
 
 async function screenNumberedLabels() {
-  if (!['ADMIN', 'INTAKE', 'LEAD'].includes(boot.me.role)) return h('div', {}, pagehead('숫자 배출표'), h('p', { class: 'notice' }, '숫자 배출표 원장을 조회할 권한이 없습니다.'));
+  if (!['ADMIN', 'INTAKE', 'LEAD'].includes(boot.me.role)) return h('div', {}, pagehead('배출표 관리'), h('p', { class: 'notice' }, '배출표를 조회할 권한이 없습니다.'));
   if (screenNumberedLabels.owner !== boot.me.username) {
     screenNumberedLabels.owner = boot.me.username;
-    screenNumberedLabels.s = { q: '', status: '', destination: '', page: 1, receive: { start: '', end: '' }, distribute: { start: '', end: '', destination: '' }, details: {} };
+    screenNumberedLabels.s = { q: '', status: '', destination: '', page: 1, receive: { start: '', end: '' }, distribute: { start: '', end: '', destination: '' }, 'stock-dong': { start: '', end: '' }, details: {} };
   }
   const s = screenNumberedLabels.s, work = canWork();
   const myRoute = routeEpoch, myHash = location.hash;
   let view, loadSeq = 0, detailSeq = 0, loadingKey = '', result = null;
   const current = () => view?.isConnected && myRoute === routeEpoch && location.hash === myHash;
+  const stockPanel = labelStock(current);
   const q = numberInput('번호 찾기', s.q);
   q.placeholder = '번호 일부 · 앞 0 포함';
   const status = h('select', { 'aria-label': '번호 상태' }, h('option', { value: '', selected: !s.status }, '전체'), ...Object.entries(STATES).map(([v, t]) => h('option', { value: v, selected: v === s.status }, t)));
@@ -71,30 +74,41 @@ async function screenNumberedLabels() {
   };
   const rangeDialog = async (type) => {
     if (!current() || !work) return;
-    const distribute = type === 'distribute', draft = s[type];
+    const distribute = type === 'distribute', scoping = type === 'stock-dong', draft = s[type];
     const start = numberInput('시작 번호', draft.start), end = numberInput('끝 번호', draft.end);
     const dest = h('input', { value: draft.destination || '', maxlength: 100, 'aria-label': '배부처', placeholder: '예: 가상1동 행정복지센터' });
+    const dong = h('select', { 'aria-label': '재고 행정동' }, h('option', { value: '', selected: !draft.dong_id }, scoping ? '행정동 선택' : '공용 보관 · 자동 배정 안 함'),
+      ...(boot.dongs || []).map((d) => h('option', { value: d.id, selected: draft.dong_id === d.id }, d.name)));
+    const dayLabel = distribute ? '배부일' : '수령일';
+    const day = h('input', { type: 'date', value: draft.day || boot.today, max: boot.today, 'aria-label': dayLabel });
     const rangeMessage = h('p', { class: 'muted small', 'aria-live': 'polite' });
     const remember = () => {
       draft.start = start.value; draft.end = end.value;
       if (distribute) draft.destination = dest.value;
+      draft.dong_id = dong.value; draft.day = day.value;
       try { rangeMessage.textContent = `번호 ${rangeValues(start.value, end.value).count.toLocaleString('ko-KR')}개`; }
       catch (e) { rangeMessage.textContent = start.value || end.value ? e.message : '같은 자릿수의 시작·끝 번호를 적어 주세요. 한 번에 최대 5,000개입니다.'; }
     };
-    [start, end, dest].forEach((input) => input.addEventListener('input', remember));
+    [start, end, dest, dong, day].forEach((input) => input.addEventListener('input', remember));
     remember();
-    await modal({ title: distribute ? '번호 구간 배부' : '번호 구간 입고', ok: distribute ? '배부 기록' : '입고 기록', body: [
-      h('p', { class: 'muted' }, distribute ? '보관 중인 번호 구간을 배부처에 넘긴 기록을 남깁니다.' : '실물로 받은 번호 구간을 원장에 등록합니다. 앞의 0을 포함해 적어 주세요.'),
+    await modal({ title: scoping ? '기존 번호 재고 동 지정' : distribute ? '번호 구간 배부' : '번호 구간 입고', ok: scoping ? '재고 동 저장' : distribute ? '배부 기록' : '입고 기록', body: [
+      h('p', { class: 'muted' }, scoping ? '기존 공용 번호 구간에 재고 행정동을 지정합니다. 이미 사용한 번호의 접수 연결과 이력은 유지됩니다.' : distribute ? '보관 중인 번호 구간을 배부처에 넘긴 기록을 남깁니다.' : '실물로 받은 번호 구간을 원장에 등록합니다. 앞의 0을 포함해 적어 주세요.'),
       h('div', { class: 'grid2' }, h('label', { class: 'f' }, '시작 번호', start), h('label', { class: 'f' }, '끝 번호', end)),
+      h('div', { class: 'grid2' }, h('label', { class: 'f' }, '재고 행정동', dong), h('label', { class: 'f' }, dayLabel, day)),
+      h('p', { class: 'muted small' }, '동을 지정하면 해당 동의 수거분에 자동 배정합니다. 수령·배부일보다 앞선 수거분에는 배정하지 않습니다.'),
       distribute ? h('label', { class: 'f' }, '배부처', dest) : null, rangeMessage,
       btn('입력 초기화', () => { start.value = ''; end.value = ''; dest.value = ''; remember(); start.focus(); }, 'small')],
       onOk: async () => {
         if (!current()) throw new Error('화면을 다시 열어 기록해 주세요.');
         const { start: a, end: b } = rangeValues(start.value, end.value);
         const body = { start: a, end: b };
-        if (distribute) { if (!dest.value.trim()) throw new Error('배부처를 적어 주세요.'); body.destination = dest.value.trim(); }
+        if (scoping && !dong.value) throw new Error('재고 행정동을 골라 주세요.');
+        if (!day.value) throw new Error(dayLabel + '을 골라 주세요.');
+        if (dong.value) body.dong_id = dong.value;
+        body[distribute ? 'distributed_on' : 'received_on'] = day.value;
+        if (distribute) { if (!dest.value.trim() && !dong.value) throw new Error('행정동을 고르거나 배부처를 적어 주세요.'); body.destination = dest.value.trim() || dong.selectedOptions[0].textContent; }
         const r = await postOnce(`numbered-labels:${type}`, `numbered-labels/${type}`, body);
-        if (current()) { toast(`${r.count.toLocaleString('ko-KR')}개 ${distribute ? '배부' : '입고'}를 기록했습니다`); load(true); }
+        if (current()) { toast(`${r.count.toLocaleString('ko-KR')}개 ${scoping ? '재고 동 지정' : distribute ? '배부' : '입고'}를 기록했습니다`); load(true); stockPanel.refresh(); }
         return true;
       } });
   };
@@ -143,6 +157,7 @@ async function screenNumberedLabels() {
         // 상세창을 닫아도 같은 목록 화면이면 저장 결과를 반영한다. 다른 화면은 변경하지 않는다.
         if (current()) {
           load(true);
+          stockPanel.refresh();
           toast(`${number}: ` + (action === 'use' ? (saved.unchanged ? '같은 접수에 이미 연결된 사용 기록입니다' : '접수에 연결하고 사용을 기록했습니다') : '무효를 기록했습니다'));
         }
         if (!detailCurrent() || seq !== historySeq) return;
@@ -220,7 +235,9 @@ async function screenNumberedLabels() {
   const reset = btn('조회 초기화', () => { q.value = ''; status.value = ''; destination.value = ''; invalidate(); load(); }, 'small');
   [q, destination].forEach((input) => { input.addEventListener('input', invalidate); input.addEventListener('keydown', (event) => { if (event.key === 'Enter') query.click(); }); });
   status.addEventListener('change', () => { invalidate(); load(); });
-  view = h('div', {}, pagehead('숫자 배출표', ...(work ? [btn('번호 구간 배부', () => rangeDialog('distribute'), 'small'), btn('번호 구간 입고', () => rangeDialog('receive'), 'primary small')] : [])),
+  view = h('div', {}, pagehead('배출표 관리', ...(work ? [btn('기존 번호 재고 동 지정', () => rangeDialog('stock-dong'), 'small'), btn('번호 구간 배부', () => rangeDialog('distribute'), 'small'), btn('번호 구간 입고', () => rangeDialog('receive'), 'primary small')] : [])),
+    stockPanel,
+    collectionLabelUsage(current), h('h2', {}, '숫자 배출표 원장'),
     h('p', { class: 'muted' }, '실물 배출표의 입고·배부·사용·무효를 번호별로 관리합니다. 번호를 누르면 접수 연결과 변경 내역을 볼 수 있습니다.'), summary,
     searchbox([['번호', q], ['상태', status], ['배부처', destination]], query, reset), message,
     h('div', { class: 'gridbar' }, h('span', { class: 'cnt' }, '조회 ', count, '개'), h('span', { class: 'grow' }), h('span', { class: 'muted small' }, '번호를 눌러 상세·인쇄')), rows, pager);

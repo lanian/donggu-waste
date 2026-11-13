@@ -45,7 +45,7 @@ def frozen_server(exe):
                         time.sleep(.1)
                 else:
                     raise AssertionError("배포 서버 준비 시간 초과")
-                for name in ("pc.js", "pc.css", "doc.css", "screens/home.js", "screens/request.js", "screens/reports.js", "screens/numbered_labels.js"):
+                for name in ("pc.js", "pc.css", "doc.css", "screens/home.js", "screens/request.js", "screens/reports.js", "screens/numbered_labels.js", "screens/label_usage.js", "screens/label_stock.js", "screens/official_forms.js"):
                     with opener.open(url + name, timeout=10) as response:
                         assert response.read() == (flow.ROOT / "pc/ui" / name).read_bytes(), "과거 배포 자산: " + name
                 yield url

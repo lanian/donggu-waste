@@ -29,6 +29,7 @@ def main():
 
     import tkinter as tk
     from tkinter import filedialog, messagebox, simpledialog
+    from desktop_tray import DesktopTray
     from desktop_view import DesktopView
     from dgpc import __version__
 
@@ -70,9 +71,12 @@ def main():
     existing_probe = False
     existing_failures = 0
     next_existing_check = 0.0
+    tray = DesktopTray(root, APP_TITLE, on_exit=lambda: stop(True),
+                       on_error=lambda detail: messagebox.showerror(APP_TITLE, detail, parent=root))
     view = DesktopView(root, __version__, callbacks={
         "open": lambda: open_work(), "retry": lambda: begin(), "reconnect": lambda: reconnect(), "password": lambda: begin(True),
         "stop": lambda: stop(), "folder": lambda: select_folder(), "shortcut": lambda: shortcut(),
+        "minimize": tray.minimize,
     })
     view.pack(fill="both", expand=True)
     view.set_path(state)
@@ -147,6 +151,9 @@ def main():
         nonlocal busy, closing, stop_requested
         if close:
             closing = True
+            modal = root.grab_current()
+            if isinstance(modal, simpledialog.Dialog):
+                modal.cancel()
         if busy:
             view.show_state("stopping" if stop_requested else "closing_start", owned=controller.owned)
             return
@@ -193,6 +200,7 @@ def main():
                     _, new, done, result = item
                     value = None
                     if not closing:
+                        tray.restore()
                         view.show_state("password")
                         while True:
                             value = simpledialog.askstring(APP_TITLE, "새 DB 비밀번호 (12자 이상)" if new else "DB 비밀번호",
@@ -293,6 +301,7 @@ def main():
     try:
         root.mainloop()
     finally:
+        tray.close()
         if mutex:
             ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(mutex))
     return 0
