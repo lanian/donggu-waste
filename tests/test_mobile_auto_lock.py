@@ -145,7 +145,9 @@ def main():
                     break
                 page.wait_for_timeout(30)
             assert page.evaluate('typeof window.__releaseAutoLock === "function"')
-            page.evaluate("async()=>{const S=await import('./store.js');await S.wipeAll();window.__holdAutoLock=false;window.__releaseAutoLock();}")
+            # 해시 변경만으로도 PIN 화면이 먼저 보인다. 실제 새 문서의 load까지 기다린다.
+            with page.expect_event('load'):
+                page.evaluate("async()=>{const S=await import('./store.js');await S.wipeAll();window.__holdAutoLock=false;window.__releaseAutoLock();}")
             # 초기화 알림은 앱을 새로 연다. 새 저장소에 이전 OFF 요청이 살아나지 않는다.
             expect(page.get_by_role('button', name='PIN 설정', exact=True)).to_be_visible()
             assert page.evaluate("import('./store.js').then(S=>S.getRaw('auto-lock'))") is None
