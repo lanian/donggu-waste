@@ -2685,7 +2685,7 @@ def v13_refactor():
                  "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
         ("POST", ("dong-work/requests", "dong-work/requests/{id}", "dong-work/requests/{id}/cancel",
                   "dong-work/requests/{id}/collection", "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
-        ("POST", ("users/{id}/dongs", "dongs/order"), ("ADMIN",)),
+        ("POST", ("users/{id}/dongs", "dongs/order", "dongs/centers"), ("ADMIN",)),
         ("POST", ("vworld/locate",), ("ADMIN", "INTAKE")),
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
@@ -2694,7 +2694,7 @@ def v13_refactor():
         if (entry["method"], entry["path"]) in self_routes:
             entry["roles"] = (*entry["roles"], "DONG")
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서·센터 차고지")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
     ok(not diff, f"기존 권한과 명시한 동별 업무·자기 정보 권한만 허용 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
