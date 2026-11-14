@@ -2,7 +2,7 @@
 // 업무 데이터는 이 기기 안에서만 암호화해 보관한다. 외부로 보내는 통신 코드는 없다.
 // 화면은 screens/*.js, 공통은 core.js·widgets.js. 새 화면 파일은 sw.js 의 FILES 에도 넣는다(오프라인 실행). APP_VERSION 은 sw.js VERSION 과 같게.
 import * as S from './store.js';
-import { $app, appLogo, applyPrefs, btn, clearLiveMap, clearPhotoUrls, fieldEditable, flushSteps, h, isSolo, mergePrefs, prefs, setRegisteredNow, setRender, setSt, st, stepFlush, stopCamera, ui, wakeRoute, wantWake } from './core.js';
+import { $app, appLogo, applyPrefs, btn, clearLiveMap, clearPhotoUrls, fieldEditable, flushSteps, h, isSolo, mergePrefs, prefs, setRegisteredNow, setRender, setSt, st, stepFlush, stopCamera, todayKST, ui, wakeRoute, wantWake } from './core.js';
 import { screenAdd } from './screens/add.js';
 import { screenBackup } from './screens/backupview.js';
 import { screenCheck } from './screens/check.js';
@@ -25,6 +25,37 @@ import { screenUnload } from './screens/unload.js';
 setRender(render);  // 화면 모듈이 core 의 render() 로 다시 그릴 수 있게
 export const APP_VERSION = '0.14.17';
 let renderSeq = 0;
+const listRoutes = ['#/home', '#/find'];
+const detailRoutes = ['stop', 'add', 'fix', 'intake', 'map', 'pick', 'pc-input'];
+let renderedList = null, listReturn = null; // 위치·검색 조건은 저장소나 URL에 남기지 않는다.
+const listIdentity = () => ({ source: st, mode: st.mode, daylist: st.daylist, workDate: st.daylist?.work_date, today: todayKST() });
+const sameListIdentity = (saved) => S.isUnlocked() && st && saved.source === st && saved.mode === st.mode
+  && saved.daylist === st.daylist && saved.workDate === st.daylist?.work_date && saved.today === todayKST();
+const listConditions = (route, view) => JSON.stringify(route === '#/find'
+  ? ['찾을 접수', '찾기 날짜 범위', '찾기 예정일', '찾기 처리 상태'].map((label) => view.querySelector(`[aria-label="${label}"]`)?.value || '')
+  : [ui.filter, ui.soloView, ui.stopQ || '', ui.dong || '', !!ui.reorder]);
+
+function rememberList(id) {
+  if (!renderedList || !renderedList.view.isConnected || !sameListIdentity(renderedList)) return;
+  const cards = [...renderedList.view.querySelectorAll('.stops .stop')];
+  const index = cards.findIndex((card) => card.getAttribute('href') === `#/stop/${id}`);
+  if (index < 0) return;
+  listReturn = { ...renderedList, view: null, conditions: listConditions(renderedList.route, renderedList.view),
+    id, index, top: cards[index].getBoundingClientRect().top };
+}
+
+function restoreList(view) {
+  const saved = listReturn;
+  listReturn = null; // 복귀 뒤 다시 그리거나 다른 조건으로 조회할 때 재사용하지 않는다.
+  if (!saved || !sameListIdentity(saved) || saved.route !== location.hash || saved.conditions !== listConditions(saved.route, view)) return;
+  const cards = [...view.querySelectorAll('.stops .stop')];
+  const card = cards.find((el) => el.getAttribute('href') === `#/stop/${saved.id}`) || cards[Math.min(saved.index, cards.length - 1)];
+  if (card) {
+    card.focus({ preventScroll: true });
+    scrollTo(0, scrollY + card.getBoundingClientRect().top - saved.top);
+  }
+}
+
 async function render() {
   const my = ++renderSeq;
   stopCamera();
@@ -41,17 +72,22 @@ async function render() {
   } else if (!(await S.hasPin())) view = screenSetup();
   else if (!S.isUnlocked()) view = screenLock();
   else {
+    if (my !== renderSeq) return;
     let [, route, arg] = (location.hash || '#/home').split('/');
     if (!st.mode && route !== 'mode') route = 'mode';
     if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
     if (!isSolo() && route === 'intake' && arg && !fieldEditable(arg)) route = 'home';  // PC 연결 방식: 보내기 전 휴대폰 접수만 고침, 그 밖은 정정 요청
     if (isSolo() && route === 'fix') route = 'home';
     const previous = (ui.lastRoute || '').split('/');
-    const related = ['stop', 'add', 'fix', 'intake', 'map', 'pick', 'pc-input'].includes(route) && arg === ui.stopBackId;
+    if (listReturn && !sameListIdentity(listReturn)) listReturn = null;
+    if (route === 'stop' && ui.lastRoute !== location.hash && listRoutes.includes(ui.lastRoute)) rememberList(arg);
+    const continuesDetail = detailRoutes.includes(previous[1]) && previous[2] === ui.stopBackId;
+    const related = detailRoutes.includes(route) && (arg === ui.stopBackId || route === 'stop' && continuesDetail && !!listReturn);
+    if (listReturn && !(listReturn.route === location.hash || related || route === 'stop' && listRoutes.includes(ui.lastRoute))) listReturn = null;
     if (route === 'stop' && ui.lastRoute !== location.hash) {
-      const sameDetail = ['add', 'fix', 'intake', 'map', 'pick', 'pc-input'].includes(previous[1]) && previous[2] === arg && ui.stopBackId === arg;
+      const sameDetail = detailRoutes.includes(previous[1]) && previous[2] === arg && ui.stopBackId === arg;
       if (ui.lastRoute === '#/find') ui.stopBackTo = '#/find';
-      else if (!sameDetail) ui.stopBackTo = '#/home';
+      else if (!sameDetail && !(continuesDetail && listReturn)) ui.stopBackTo = '#/home';
       ui.stopBackId = arg;
     } else if (route !== 'find' && !related) { ui.stopBackTo = '#/home'; ui.stopBackId = null; }
     view = await ({
@@ -62,6 +98,7 @@ async function render() {
   }
   } catch (e) { view = errorScreen(e); }
   if (my !== renderSeq) return; // 그 사이 다른 화면으로 이동
+  if (!S.isUnlocked() || !st) listReturn = null;
   wantWake(S.isUnlocked() && wakeRoute());
   const sameRoute = ui.lastRoute === location.hash, y = scrollY; // 같은 화면을 다시 그릴 때는 스크롤 유지
   $app.replaceChildren(view);
@@ -72,6 +109,9 @@ async function render() {
   } else if (!sameRoute && location.hash.startsWith('#/pc-input/')) {
     const heading = view.querySelector('h1'); if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
   }
+  if (!sameRoute && listRoutes.includes(location.hash)) restoreList(view);
+  renderedList = S.isUnlocked() && st && listRoutes.includes(location.hash)
+    ? { ...listIdentity(), route: location.hash, view } : null;
   ui.lastRoute = location.hash;
 }
 addEventListener('hashchange', render);

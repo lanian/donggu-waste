@@ -8,11 +8,16 @@ import { matchText } from '../fees.js';
 import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dongOf, flushPhotos, go, h, isSolo, pendingPhotos, render, st, toast, ui, unsent, workerName } from '../core.js';
 import { CHECKS, doInstall, installEvt, runningAsApp } from '../widgets.js';
 
+// 수량 입력만 끝난 상태와 방문 결과까지 저장한 완료를 구분한다.
+const isStopDone = (s, d) => !d.resultNeedsConfirmation && (d.outcome ? d.outcome === 'DONE' && d.progress === 'DONE' : s.status === 'DONE');
+
 // 오늘 진행 요약 띠: 완료/전체와 진행 막대 (0%여도 막대 바탕이 보이게)
 function daySummary(items) {
-  const n = items.length, done = items.filter((x) => x.d.progress === 'DONE' && !x.d.resultNeedsConfirmation).length;
-  const hold = items.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome)).length;
-  const pend = items.filter((x) => x.d.fee.pendingCount).length;
+  const active = items.filter((x) => !x.s.removed && x.s.status !== 'CANCELLED');
+  const n = active.length, done = active.filter((x) => isStopDone(x.s, x.d)).length;
+  const hold = active.filter((x) => !x.s.pii_purged && !isStopDone(x.s, x.d)
+    && (x.d.resultNeedsConfirmation || ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK')).length;
+  const pend = active.filter((x) => x.d.fee.pendingCount).length;
   return h('section', { class: 'summary', 'aria-label': '오늘 진행' },
     h('div', { class: 'sum-top', 'aria-hidden': 'true' }, h('span', {}, '오늘 진행'), h('span', { class: 'sum-pct' }, `${n ? Math.round((done / n) * 100) : 0}%`)),
     h('div', { class: 'sum-main' }, h('b', {}, done), h('span', {}, ` / ${n}곳 완료`)),
@@ -21,17 +26,32 @@ function daySummary(items) {
 }
 // 목록 찾기: 이름·연락처·주소·품목, 초성과 전화번호 뒷자리도 됨.
 function stopSearch(total) {
-  const q = h('input', { type: 'search', class: 'search', placeholder: '이름·연락처·주소·품목 (초성·번호 뒷자리)', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
-  q.addEventListener('input', () => { ui.stopQ = q.value; clearTimeout(stopSearch.t); stopSearch.t = setTimeout(() => { render().then(() => { const el = document.querySelector('input[aria-label="목록에서 찾기"]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 250); });
+  const source = st, mode = st.mode, route = location.hash;
+  const q = h('input', { type: 'search', class: 'search', placeholder: '접수번호·이름·연락처·주소·품목', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
+  const owner = () => st === source && st.mode === mode && location.hash === route;
+  q.addEventListener('input', () => {
+    if (!owner() || !q.isConnected) return;
+    const query = q.value;
+    ui.stopQ = query; clearTimeout(stopSearch.t);
+    stopSearch.t = setTimeout(async () => {
+      if (!owner() || ui.stopQ !== query) return;
+      await render();
+      if (!owner() || ui.stopQ !== query) return;
+      const el = document.querySelector('input[aria-label="목록에서 찾기"]');
+      if (el) { el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length); }
+    }, 250);
+  });
   return q;
 }
-const stopHay = (s) => {
+const stopHay = (s, d) => {
+  const items = (d?.lines || s.items || []).map((i) => `${i.name || ''} ${i.spec || ''}`).join(' ');
+  if (s.pii_purged) return `${s.receipt_no || ''} ${items}`;
   const phone = s.pii_purged ? '' : String(s.phone || ''), number = phone.replace(/\D/g, '');
   const formatted = /^02\d{7,8}$/.test(number) ? `${number.slice(0, 2)}-${number.slice(2, -4)}-${number.slice(-4)}`
     : /^\d{10,11}$/.test(number) ? `${number.slice(0, 3)}-${number.slice(3, -4)}-${number.slice(-4)}` : '';
-  return `${s.name} ${s.address} ${s.dong || ''} ${s.spot_note || ''} ${s.receipt_no || ''} ${phone} ${number} ${formatted} ${s.items.map((i) => i.name + ' ' + (i.spec || '')).join(' ')}`;
+  return `${s.name || ''} ${s.address || ''} ${s.dong || ''} ${s.spot_note || ''} ${s.receipt_no || ''} ${phone} ${number} ${formatted} ${items}`;
 };
-const filterQ = (list) => (ui.stopQ ? list.filter((x) => matchText(stopHay(x.s), ui.stopQ)) : list);
+const filterQ = (list) => (ui.stopQ ? list.filter((x) => matchText(stopHay(x.s, x.d), ui.stopQ)) : list);
 
 // 동(행정동): 2개 동 이상이면 거르기 단추, 노선 시간표는 동이 바뀌는 곳에 머리글
 function dongChips(items) {
@@ -46,28 +66,45 @@ const filterDong = (list) => (ui.dong ? list.filter((x) => dongOf(x.s) === ui.do
 
 // 방문 카드 한 장 (PC 목록·단독 목록 공용). 개인정보를 지운 곳은 접수번호만 보인다.
 function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
-  const cancelled = s.status === 'CANCELLED';
+  const cancelled = s.status === 'CANCELLED', excluded = cancelled || s.removed;
   const purged = !!s.pii_purged;
-  const review = !!d.resultNeedsConfirmation, finished = d.progress === 'DONE' && !review;
+  const review = !!d.resultNeedsConfirmation, finished = !excluded && isStopDone(s, d);
+  const unsaved = !excluded && !review && !finished && !d.outcome && d.progress === 'DONE';
+  const progress = excluded ? 'CANCELLED' : review || unsaved ? 'STARTED' : finished ? 'DONE' : d.outcome || d.progress;
+  const state = s.removed ? '목록에서 제외됨' : cancelled ? '취소' : review ? '결과 재확인' : unsaved ? '결과 미저장'
+    : finished ? LABEL.progress.DONE : d.outcome && d.outcome !== 'DONE' ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress];
+  const lines = d.lines || s.items;
+  const remaining = new Map();
+  for (const line of lines) {
+    const qty = Math.max(0, line.remaining ?? (line.qty_confirmed ?? line.qty) - (line.qty_collected || 0));
+    if (!qty) continue;
+    const label = line.unit_label || '', key = `${line.unit || ''}:${label}`;
+    const previous = remaining.get(key);
+    remaining.set(key, { label, qty: (previous?.qty || 0) + qty });
+  }
+  const left = [...remaining.values()].map((x) => `${x.qty}${x.label}`).join(' · ') || '없음';
   const changes = (st.listChanges || {})[s.request_id] || [];
-  const isNow = s.request_id === nowId;
-  return h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${cancelled ? 'CANCELLED' : review ? 'STARTED' : d.outcome || d.progress} c-${d.contact}` + (finished || cancelled ? ' done' : '') + (isNow ? ' now' : '') + (changes.length ? ' changed' : ''), 'aria-current': isNow ? 'step' : null },
+  const isNow = !excluded && s.request_id === nowId;
+  return h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${progress} c-${d.contact}` + (finished || excluded ? ' done' : '') + (isNow ? ' now' : '') + (changes.length ? ' changed' : ''), 'aria-current': isNow ? 'step' : null },
     h('span', { class: 'seq' }, s.seq, isNow ? h('small', { class: 'now-tag' }, '지금') : null),
     h('span', { class: 'body' },
-      h('strong', {}, purged ? '개인정보 정리됨' : s.name), h('span', { class: 'addr' }, purged ? s.receipt_no || '' : s.address),
-      h('span', { class: 'items' }, s.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', ')),
+      h('span', { class: 'stop-heading' }, h('strong', {}, purged ? '개인정보 정리됨' : s.name),
+        h('em', { class: 'chip state stop-state ' + (review || unsaved ? 'warn' : 'p-' + progress) }, state)),
+      h('span', { class: 'stop-meta' }, h('span', { class: 'receipt' }, s.receipt_no ? `접수 ${s.receipt_no}` : '접수번호 없음'),
+        s.eta ? h('span', { class: 'eta' }, `예정 ${s.eta}`) : null),
+      !purged ? h('span', { class: 'addr' }, s.address) : null,
+      h('span', { class: 'items' }, lines.map((i) => `${i.name} ${i.spec || ''} ${i.qty_confirmed ?? i.qty}${i.unit_label || ''}`.trim()).join(', ')),
+      !excluded && !finished ? h('span', { class: 'stop-quantity' }, `남음 ${left}`) : null,
       h('span', { class: 'chips' },
         ...changes.map((c) => h('em', { class: 'chip new' }, F.DIFF_LABEL[c] || c)),
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
-        dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
-        ...(cancelled || finished ? [] : L.tagsOf(s.items).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
+        !purged && dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
+        ...(excluded || finished ? [] : L.tagsOf(lines.map((line) => ({ ...line, qty: line.qty_confirmed ?? line.qty }))).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
         !solo && s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
         !solo && s.field ? h('em', { class: 'chip new' }, `${s.channel || '현장'} 접수`) : null,
         !solo && cancelAsked(s.request_id) ? h('em', { class: 'chip warn' }, '취소 요청') : null,
         h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
-        h('em', { class: 'chip ' + (review ? 'warn' : 'p-' + d.progress) }, s.removed ? '목록에서 제외됨' : cancelled ? '취소' : review ? '결과 재확인' : LABEL.progress[d.progress]),
-        d.fee.pendingCount ? h('em', { class: 'chip warn' }, '금액 확인 대기') : null)),
-    h('span', { class: 'eta' }, s.eta || ''));
+        d.fee.pendingCount ? h('em', { class: 'chip warn' }, '금액 확인 대기') : null)));
 }
 // 노선 시간표: 동이 바뀌는 곳에 동 이름 머리글
 function routeItems(list, renderOne, heads = {}) {
@@ -188,6 +225,6 @@ async function homeBanners() {
 }
 
 export {
-  batteryInfo, daySummary, dongChips, filterDong, filterQ, homeBanners, kstHour, routeItems,
+  batteryInfo, daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, kstHour, routeItems,
   setupCard, setupSteps, stopCard, stopHay, stopSearch, tripHeads, workerBar,
 };

@@ -7,7 +7,7 @@ import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
 import { screenHomeSolo } from './solo.js';
 import { openFinder } from './find.js';
-import { daySummary, dongChips, filterDong, filterQ, homeBanners, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
+import { daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
 
 async function screenHome() {
   await flushSteps();
@@ -35,6 +35,10 @@ async function screenHome() {
   ui.scanAck = false;
   const otherDay = !!dl && dl.work_date !== todayKST();
   const out = [top, workerBar()];
+  if (every.length) out.push(btn('수거 목록 바로 보기', () => {
+    const title = document.getElementById('collection-list');
+    title?.focus({ preventScroll: true }); title?.scrollIntoView({ block: 'start' });
+  }, 'ghost big'));
   // 지난(또는 다음) 날짜 목록: 오늘 할 일로 보이지 않게 맨 위 큰 띠, '지금 갈 곳'·진행 띠는 숨김
   if (otherDay) out.push(h('section', { class: 'card day-banner' + (dl.work_date < todayKST() ? ' past' : ''), role: 'alert' },
     h('h2', {}, dl.work_date < todayKST() ? `${mdOf(dl.work_date)} 목록입니다 — 결과를 보내고 오늘 목록을 받으세요` : `${mdOf(dl.work_date)} 목록입니다 — 그날 업무용 목록입니다`),
@@ -51,7 +55,7 @@ async function screenHome() {
   const photos = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body), ...(st.keptPhotos || [])];
   const photoN = photos.filter((p) => !recovered.has(p.photo_id)).length;
   // 수량을 다 입력해도 방문 결과를 저장하지 않았으면 상세로 이어 간다.
-  const unrecorded = stops.filter(({ s, d }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && (!d.outcome || d.resultNeedsConfirmation));
+  const unrecorded = stops.filter(({ s, d }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation));
   const reconfirm = unrecorded.find(({ d }) => d.resultNeedsConfirmation);
   const nextStop = unrecorded[0];
   let next = { title: '오늘 배정 목록을 받으세요', detail: 'PC 담당자가 준비한 QR을 읽고, 받은 뒤 수신 코드를 알려 주세요.', label: '배정 목록 수신', run: () => go('#/scan') };
@@ -88,11 +92,13 @@ async function screenHome() {
   if (!registered) out.push(h('section', { class: 'card notice' }, h('p', {}, '먼저 관리자와 함께 기기 등록을 해 주세요.'), btn('기기 등록', () => go('#/register'), 'primary')));
   else out.push(setupCard());
   out.push(actions);
+  out.push(h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'));
   const moreBtns = btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big');
   if (!today.length) { out.push(h('p', { class: 'empty' }, '받은 목록이 없습니다.')); out.push(moreBtns); }
   else {
-    const remain = stops.filter((x) => (x.d.progress !== 'DONE' || x.d.resultNeedsConfirmation) && !x.s.removed);
-    const hold = stops.filter((x) => x.d.resultNeedsConfirmation || ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
+    const active = stops.filter(({ s }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged);
+    const remain = active.filter(({ s, d }) => !isStopDone(s, d));
+    const hold = active.filter(({ s, d }) => !isStopDone(s, d) && (d.resultNeedsConfirmation || ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(d.outcome) || d.contact === 'CALLBACK'));
     const changed = Object.keys(st.listChanges || {}).length;
     const reordered = !!(st.localOrder && st.localOrder.work_date === wd && st.localOrder.assign_ver === (dl ? dl.assign_ver : 0));
     const fieldN = today.filter((s) => s.field).length;
@@ -105,11 +111,12 @@ async function screenHome() {
     out.push(dongChips(stops));
     out.push(stopSearch(stops.length));
     const list = filterDong(filterQ({ ALL: stops, REMAIN: remain, HOLD: hold }[ui.filter]));
+    out.push(h('p', { class: 'small', role: 'status', 'aria-label': '목록 조회 결과' }, `${list.length}건 표시${ui.dong ? ` · ${ui.dong}` : ''}${ui.stopQ ? ' · 검색 적용' : ''}`));
     if (!list.length) {
       out.push(h('p', { class: 'empty' }, ui.stopQ ? `'${ui.stopQ}'에 맞는 곳이 없습니다.` : '해당하는 곳이 없습니다.'));
       if (ui.stopQ) out.push(btn('다른 날짜에서도 찾기', () => openFinder({ q: ui.stopQ }), 'big'));
     }
-    const nowId = otherDay ? null : (stops.find((x) => x.d.progress !== 'DONE' && !x.d.outcome && !x.s.removed) || {}).s?.request_id;  // 지금 갈 곳 (오늘 목록만)
+    const nowId = otherDay ? null : nextStop?.s.request_id;  // 지금 갈 곳 (오늘 목록만)
     // 방문 순서 바꾸기(이 휴대폰만): 골목 사정 등으로 순서를 바꿔 다닐 때. PC 노선·배정은 그대로이고, 새 목록을 받으면 PC 순서로 돌아간다.
     const canReorder = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && stops.length > 1;
     if (canReorder) out.push(h('div', { class: 'row reorder-bar' },

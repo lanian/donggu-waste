@@ -125,6 +125,9 @@ jobs:
           - test_mobile_collection_save
           - test_mobile_auto_lock
           - test_mobile_home_ui
+          - test_mobile_list_cards
+          - test_mobile_list_filters
+          - test_mobile_list_return
           - test_mobile_personal_worker
           - test_mobile_phone_search
           - test_mobile_photo_viewer

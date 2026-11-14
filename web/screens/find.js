@@ -1,7 +1,7 @@
 // 날짜와 상태에 가려진 접수 찾기. 현재 휴대폰에 보관 중인 자료만 읽는다.
 import { deriveStop, matchText } from '../fees.js';
 import { allStops, appLogo, btn, go, h, isSolo, render, st, tabBar } from '../core.js';
-import { stopCard, stopHay } from './stoplist.js';
+import { isStopDone, stopCard, stopHay } from './stoplist.js';
 
 const filtersByState = new WeakMap();
 const defaults = () => ({ q: '', range: 'ALL', day: '', status: 'ALL' });
@@ -39,10 +39,10 @@ export function screenFind() {
   const status = h('select', { 'aria-label': '찾기 처리 상태', onchange: (e) => change('status', e.target.value) },
     ...[['ALL', '모든 상태'], ['OPEN', '미완료'], ['DONE', '완료'], ['CANCELLED', '취소']].map(([value, text]) => h('option', { value, selected: f.status === value }, text)));
   const found = every.filter(({ s, d, date }) => {
-    const cancelled = s.status === 'CANCELLED', done = s.status === 'DONE' || d.progress === 'DONE';
+    const cancelled = s.status === 'CANCELLED', done = isStopDone(s, d);
     if (f.range === 'UNDATED' && date || f.range === 'DAY' && (!f.day || date !== f.day)) return false;
     if (f.status === 'DONE' && (!done || cancelled) || f.status === 'OPEN' && (done || cancelled) || f.status === 'CANCELLED' && !cancelled) return false;
-    const hay = s.pii_purged ? `${s.receipt_no || ''} ${(s.items || []).map((i) => `${i.name} ${i.spec || ''}`).join(' ')}` : stopHay(s);
+    const hay = stopHay(s, d);
     return !f.q.trim() || matchText(hay, f.q.trim());
   }).sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || a.s.seq - b.s.seq);
   const period = f.range === 'ALL' ? '전체 기간' : f.range === 'UNDATED' ? '예정일 없음' : f.day ? `예정일 ${f.day}` : '예정일을 선택하세요';
