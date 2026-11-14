@@ -309,6 +309,15 @@ input[type=file]::file-selector-button { min-height: 48px; font: inherit; font-w
 .thumbs figure:has(.photo-preview-error) { width: min(100%, 320px); text-align: left; }
 .thumbs figure { margin: 0; width: 88px; } .thumbs img { width: 88px; height: 88px; object-fit: cover; border-radius: 12px; background: var(--chip); }
 .thumbs figcaption { font-size: 0.7333rem; text-align: center; color: var(--muted); }
+.photo-thumb { display: flex; flex-direction: column; align-items: center; width: 88px; min-height: var(--tap); padding: 0; border: 0; border-radius: 12px; background: var(--chip); color: var(--ink); font: inherit; cursor: pointer; }
+.photo-thumb span { font-size: .7333rem; padding: 4px 2px; }
+.photo-thumb:focus-visible { outline: 3px solid var(--brand); outline-offset: 3px; }
+dialog.sheet.photo-sheet { max-width: 960px; }
+.photo-view-stage { height: min(48vh, 560px); min-height: 140px; overflow: auto; border-radius: 12px; background: var(--bg); }
+.photo-view-stage img { display: block; width: 100%; height: 100%; object-fit: contain; margin: 0 auto; }
+.photo-view-stage.zoomed img { width: 200%; max-width: none; height: auto; margin: 0; }
+.photo-view-tools .btn { min-height: var(--tap); }
+.photo-viewer [hidden], .memo-box [hidden] { display: none !important; }
 
 /* ---- 품목 고르기 ---- */
 .results { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; max-height: 45vh; overflow-y: auto; }

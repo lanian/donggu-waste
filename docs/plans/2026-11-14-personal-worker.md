@@ -29,3 +29,11 @@
 - Cheap checks: `node --check` edited JS, Python compilation, `tools/check_version.py`, `tools/check_generated.py`, `git diff --check`.
 - Evidence root: `D:/Temp/dg-personal-worker-20261114`. Use `DG_TEST_DIR/shots` for browser screenshots, never commit state/keys or resident data.
 - Distinguish synthetic Chromium/PIN/IndexedDB and protocol checks from actual phone, packaged EXE and production deployment evidence.
+
+## Completed
+
+The single name field, read-only current-name display, legacy selected-name/backup fallback, explicit clear and future-event attribution are implemented. Name saving checks the actual encrypted write result and updates only its connected controls, preserving unrelated or reentered settings drafts. Historical event names and the existing PC/device/crew protocol remain unchanged.
+
+Root independently ran `npm run test:worker` against the final source (PASS, `D:/Temp/dg-mobile-gaps-20261114/worker-final.log`), plus the mobile home/layout/automatic-lock, backup/cleanup and full 186-check mobile flow. The final core also forwards the existing `addCrewEvent` persistence result for the separately planned unload recovery; event content is unchanged.
+
+Representative 360/430px very-large-text and settings/home screenshots are under `D:/Temp/dg-personal-worker-20261114/green/shots`. Independent read-only source review found no remaining Critical/Important issues. Physical phones and release deployment remain outside this local implementation. The user's follow-up mobile-function audit and additions are recorded in [the workflow gaps plan](2026-11-14-mobile-workflow-gaps.md).

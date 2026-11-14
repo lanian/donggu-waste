@@ -5,7 +5,7 @@ import * as S from '../store.js';
 import { LABEL } from '../fees.js';
 import { deriveStop } from '../fees.js';
 import { matchText } from '../fees.js';
-import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dongOf, flushPhotos, go, h, isSolo, pendingPhotos, render, st, toast, ui, unsent } from '../core.js';
+import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dongOf, flushPhotos, go, h, isSolo, pendingPhotos, render, st, toast, ui, unsent, workerName } from '../core.js';
 import { CHECKS, doInstall, installEvt, runningAsApp } from '../widgets.js';
 
 // 오늘 진행 요약 띠: 완료/전체와 진행 막대 (0%여도 막대 바탕이 보이게)
@@ -19,13 +19,18 @@ function daySummary(items) {
     h('div', { class: 'progress track', role: 'progressbar', 'aria-label': `완료 ${done}/${n}`, 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done }, h('div', { class: 'fill', style: `width:${n ? (done / n) * 100 : 0}%` })),
     h('div', { class: 'sum-sub' }, hold ? h('span', { class: 'chip warn' }, `재방문·보류 ${hold}`) : null, pend ? h('span', { class: 'chip warn' }, `금액 확인 대기 ${pend}`) : null));
 }
-// 목록 찾기: 이름·주소·품목, 초성도 됨 (예: ㄱㅅ)
+// 목록 찾기: 이름·연락처·주소·품목, 초성과 전화번호 뒷자리도 됨.
 function stopSearch(total) {
-  const q = h('input', { type: 'search', class: 'search', placeholder: '이름·주소·품목 찾기 (초성 가능)', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
+  const q = h('input', { type: 'search', class: 'search', placeholder: '이름·연락처·주소·품목 (초성·번호 뒷자리)', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
   q.addEventListener('input', () => { ui.stopQ = q.value; clearTimeout(stopSearch.t); stopSearch.t = setTimeout(() => { render().then(() => { const el = document.querySelector('input[aria-label="목록에서 찾기"]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 250); });
   return q;
 }
-const stopHay = (s) => `${s.name} ${s.address} ${s.dong || ''} ${s.spot_note || ''} ${s.receipt_no || ''} ${s.items.map((i) => i.name + ' ' + (i.spec || '')).join(' ')}`;
+const stopHay = (s) => {
+  const phone = s.pii_purged ? '' : String(s.phone || ''), number = phone.replace(/\D/g, '');
+  const formatted = /^02\d{7,8}$/.test(number) ? `${number.slice(0, 2)}-${number.slice(2, -4)}-${number.slice(-4)}`
+    : /^\d{10,11}$/.test(number) ? `${number.slice(0, 3)}-${number.slice(3, -4)}-${number.slice(-4)}` : '';
+  return `${s.name} ${s.address} ${s.dong || ''} ${s.spot_note || ''} ${s.receipt_no || ''} ${phone} ${number} ${formatted} ${s.items.map((i) => i.name + ' ' + (i.spec || '')).join(' ')}`;
+};
 const filterQ = (list) => (ui.stopQ ? list.filter((x) => matchText(stopHay(x.s), ui.stopQ)) : list);
 
 // 동(행정동): 2개 동 이상이면 거르기 단추, 노선 시간표는 동이 바뀌는 곳에 머리글
@@ -95,12 +100,10 @@ function tripHeads(stops) {
   return out;
 }
 
-// 작업자 바꾸기 (교대): PIN을 다시 넣지 않고 고르기만 한다. 이후 모든 기록에 이 이름이 남는다.
+// 개인폰은 작업자를 고르지 않고 현재 이름만 확인한다. 변경은 설정에서 한다.
 function workerBar() {
-  const ws = (st.workers || []).filter(Boolean);
-  if (!ws.length) return null;
-  return h('div', { class: 'workers', role: 'group', 'aria-label': '작업자 바꾸기' }, h('span', { class: 'wl' }, '작업자'),
-    ...ws.map((w) => btn(w, async () => { if (st.worker === w) return; st.worker = w; await commit(); toast(`작업자를 ${w}(으)로 바꿨습니다`); render(); }, 'opt chipbtn' + (st.worker === w ? ' on' : ''))));
+  const name = workerName();
+  return name ? h('p', { class: 'small', role: 'group', 'aria-label': '현재 작업자' }, '작업자 ', h('strong', {}, name), ' · ', h('a', { href: '#/settings' }, '이름 변경')) : null;
 }
 const kstHour = () => Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', hour12: false }).format(new Date()));
 async function batteryInfo() {
@@ -113,7 +116,7 @@ async function batteryInfo() {
 function setupSteps() {
   const chk = st.deviceCheck || {};
   return [
-    ['worker', '작업자', '이 휴대폰을 쓰는 사람 이름', (st.workers || []).length > 0, '#/settings'],
+    ['worker', '작업자', '이 휴대폰을 쓰는 사람 이름', !!workerName(), '#/settings'],
     ['nav', '길안내 앱', '카카오맵·T맵·네이버지도·기본 지도 중 고르기', !!st.navAppSet, '#/settings'],
     ['map', '지도 받기', '인터넷이 약한 곳에 대비해 동구 지도 미리 받기', !st.mapEnabled || !!st.mapPrefetchedAt, '#/settings'],
     ['check', '현장 점검', '길안내·카메라·전화가 이 휴대폰에서 되는지', CHECKS.every(([k]) => chk[k] && chk[k].result), '#/check'],

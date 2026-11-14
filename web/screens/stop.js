@@ -18,6 +18,61 @@ const collectionWrites = new WeakMap();
 const settledStateWrites = new WeakSet();
 const collectionPending = () => saveFailed || S.hasPendingSecure('state');
 const priorQty = (stop, line) => Math.max(0, Number(stop.items.find((item) => item.line_id === line.line_id)?.prior_collected) || 0);
+let photoViewerController = null;
+const memoOperations = new WeakMap(), memoRecoveries = new Map();
+
+// 원본 암호문을 읽기만 한다. 창을 벗어나거나 잠그면 사진 URL과 읽기 결과를 버린다.
+async function viewPhoto(photo, detail, current) {
+  if (!current() || photoViewerController) return;
+  const owner = st, route = location.hash, controller = new AbortController();
+  photoViewerController = controller;
+  let imageUrl = null, generation = 0;
+  const image = h('img', { alt: detail, hidden: true });
+  const stage = h('div', { class: 'photo-view-stage' }, image);
+  const message = h('p', { class: 'small', role: 'status' });
+  const retry = btn('사진 다시 불러오기', () => load(), 'opt', { hidden: true });
+  const zoom = btn('확대', () => {
+    const expanded = stage.classList.toggle('zoomed');
+    zoom.textContent = expanded ? '맞춤 보기' : '확대'; zoom.setAttribute('aria-pressed', String(expanded));
+  }, 'opt', { 'aria-pressed': 'false', disabled: true });
+  const body = h('div', { class: 'photo-viewer' }, h('p', { class: 'small' }, detail), stage, message,
+    h('div', { class: 'grid2 photo-view-tools' }, zoom, retry));
+  const owned = () => st === owner && S.isUnlocked() && location.hash === route && current();
+  const active = () => owned() && body.isConnected && !controller.signal.aborted;
+  const releaseUrl = () => { if (imageUrl) URL.revokeObjectURL(imageUrl); imageUrl = null; image.removeAttribute('src'); };
+  const load = async () => {
+    if (!active()) return;
+    const mine = ++generation;
+    releaseUrl(); image.hidden = true; zoom.disabled = true; retry.hidden = true;
+    stage.classList.remove('zoomed'); zoom.textContent = '확대'; zoom.setAttribute('aria-pressed', 'false');
+    message.textContent = '사진을 불러오는 중…'; message.className = 'small';
+    try {
+      const bytes = await S.getSecureBytes('ph:' + photo.photo_id);
+      if (mine !== generation || !active()) return;
+      if (!bytes) throw new Error('사진 파일이 이 휴대폰에 없습니다. 사진 기록은 유지됩니다.');
+      imageUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' })); image.src = imageUrl;
+      await image.decode();
+      if (mine !== generation || !active()) return;
+      image.hidden = false; zoom.disabled = false; message.textContent = '확대하면 사진을 밀어 자세히 볼 수 있습니다.';
+    } catch (error) {
+      if (mine !== generation || !active()) return;
+      releaseUrl(); message.textContent = error?.message?.includes('사진 파일') ? error.message : '사진을 불러오지 못했습니다. 다시 시도해 주세요.';
+      message.className = 'small err'; retry.hidden = false;
+    }
+  };
+  const leave = () => controller.abort();
+  addEventListener('hashchange', leave);
+  const observer = new MutationObserver(() => { if (!owned()) leave(); });
+  observer.observe(document.body, { childList: true, subtree: true });
+  try {
+    const closed = sheet({ title: '현장 사진 크게 보기', body, cancel: '사진 닫기', signal: controller.signal });
+    body.closest('dialog')?.classList.add('photo-sheet');
+    load(); await closed;
+  } finally {
+    generation++; controller.abort(); observer.disconnect(); removeEventListener('hashchange', leave); releaseUrl();
+    if (photoViewerController === controller) photoViewerController = null;
+  }
+}
 
 // 화면/복사 전용: 주민 정보나 전송 동작을 포함하지 않고 PC의 수거 입력을 돕는다.
 async function screenPcInputHelp(id) {
@@ -320,7 +375,11 @@ async function screenStop(id) {
   const thumbs = h('div', { class: 'thumbs' });
   for (const p of d.photos) {
     const img = h('img', { alt: p.phase === 'BEFORE' ? '수거 전' : '수거 후' });
-    const figure = h('figure', {}, img, h('figcaption', {}, (p.phase === 'BEFORE' ? '전' : '후') + (p.line_id ? ` · ${lineName(p.line_id)}` : '') + (p.taken_at ? ` · ${hhmm(p.taken_at)}` : '')));
+    const phase = p.phase === 'BEFORE' ? '수거 전' : '수거 후', instant = new Date(p.taken_at || '');
+    const detail = [phase, p.line_id ? lineName(p.line_id) : '접수 전체', Number.isFinite(instant.getTime())
+      ? '촬영 ' + new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Seoul' }).format(instant) : '촬영 시각 없음'].join(' · ');
+    const open = h('button', { type: 'button', class: 'photo-thumb', 'aria-label': `${phase} 사진 크게 보기`, onclick: () => viewPhoto(p, detail, current) }, img, h('span', {}, '크게 보기'));
+    const figure = h('figure', {}, open, h('figcaption', {}, (p.phase === 'BEFORE' ? '전' : '후') + (p.line_id ? ` · ${lineName(p.line_id)}` : '') + (Number.isFinite(instant.getTime()) ? ` · ${hhmm(p.taken_at)}` : '')));
     const previewCurrent = () => current() && img.isConnected && S.isUnlocked();
     const previewFailed = () => {
       if (!previewCurrent()) return;
@@ -569,14 +628,88 @@ function screenFix(id) {
 // 현장 메모: 짧게 남기고 고치지 않는다(새 메모를 더함). 결과 파일로 PC에 전달.
 // 적는 중인 글은 화면을 다시 그려도(사진 저장·통화 뒤 등) 남는다: ui.memo[지점]에 두고, 남기면 비운다(메모리에만, 잠그면 사라짐).
 function fieldMemo(stop, d) {
-  const id = stop.request_id;
+  const id = stop.request_id, source = st, route = location.hash;
+  if (!memoOperations.has(source)) memoOperations.set(source, new Map());
+  const operations = memoOperations.get(source);
+  const matches = (op) => source.events.some((event) => event.event_id === op.eventId && event.request_id === id && event.kind === 'FIELD_MEMO' && event.body.text === op.text);
+  for (const [eventId] of memoRecoveries) if (!source.events.some((event) => event.event_id === eventId)) memoRecoveries.delete(eventId);
+  let operation = operations.get(id) || [...memoRecoveries.values()].find(matches);
+  if (operation) operations.set(id, operation);
   ui.memo = ui.memo || {};
+  ui.memoVersion = ui.memoVersion || {};
+  const clearSubmitted = (op) => {
+    if (st === source && S.isUnlocked() && ui.memo[id] === op.draft && (ui.memoVersion[id] || 0) === op.version) delete ui.memo[id];
+  };
+  // 잠금 해제에서 대기 암호문을 이미 복구했으면 같은 메모를 다시 남기지 않는다.
+  if (operation?.failed && !operation.busy && !collectionPending()) {
+    clearSubmitted(operation); operations.delete(id); memoRecoveries.delete(operation.eventId); operation = null;
+  }
   const ta = h('textarea', { rows: 2, placeholder: '현장 메모 (예: 현관 앞 아님, 지하주차장 입구에 배출)', 'aria-label': '현장 메모' });
   ta.value = ui.memo[id] || '';
-  ta.addEventListener('input', () => { if (ta.value) ui.memo[id] = ta.value; else delete ui.memo[id]; });
-  return h('div', { class: 'memo-box' },
+  ta.addEventListener('input', () => { ui.memoVersion[id] = (ui.memoVersion[id] || 0) + 1; if (ta.value) ui.memo[id] = ta.value; else delete ui.memo[id]; });
+  const message = h('p', { class: 'small', role: 'status' });
+  const current = () => st === source && S.isUnlocked() && box.isConnected && location.hash === route && findStop(id) === stop;
+  const sync = () => {
+    const busy = !!operation?.busy, failed = !!operation?.failed;
+    send.disabled = busy || failed || collectionPending(); retry.hidden = !failed; retry.disabled = busy;
+    send.textContent = busy ? '메모 저장 중…' : '메모 남기기';
+    message.textContent = busy ? '메모를 저장하고 있습니다.' : failed ? '메모 저장 대기' : collectionPending() ? '다른 기록의 저장 대기를 먼저 해결해 주세요.' : '';
+    message.className = failed ? 'small err' : 'small';
+  };
+  const refresh = async (returnFocus = false) => {
+    if (!current()) return;
+    const editing = document.activeElement === ta;
+    const focusMemo = editing || document.activeElement === send || document.activeElement === retry || returnFocus && document.activeElement === document.body;
+    const selection = editing ? [ta.selectionStart, ta.selectionEnd] : null;
+    let navigated = false;
+    const leave = () => { navigated = true; };
+    addEventListener('hashchange', leave);
+    try {
+      await render();
+      if (focusMemo && !navigated && st === source && S.isUnlocked() && location.hash === route && document.activeElement === document.body) {
+        const input = document.querySelector('.memo-box textarea'); input?.focus({ preventScroll: true });
+        if (selection) input?.setSelectionRange(...selection);
+      }
+    } finally { removeEventListener('hashchange', leave); }
+  };
+  const run = async (retrying) => {
+    if (!current() || operation?.busy || (!retrying && (operation?.failed || collectionPending()))) return;
+    if (!retrying) {
+      const text = ta.value.trim().slice(0, 300); if (!text) return;
+      operation = { text, draft: ta.value, version: ui.memoVersion[id] || 0, eventId: null, busy: false, failed: false };
+      operations.set(id, operation);
+    }
+    if (!operation || retrying && !matches(operation)) return;
+    const returnFocus = document.activeElement === send || document.activeElement === retry;
+    const op = operation; op.busy = true; sync();
+    op.promise = (async () => {
+      let saved = false;
+      try {
+        if (op.eventId) saved = await commit();
+        else {
+          const before = source.seq, pending = addEvent(stop, 'FIELD_MEMO', { text: op.text });
+          op.eventId = source.events.find((event) => event.seq > before && event.request_id === id && event.kind === 'FIELD_MEMO')?.event_id;
+          saved = await pending;
+        }
+      } catch { saved = false; }
+      op.busy = false; op.failed = !saved;
+      if (saved) {
+        clearSubmitted(op); operations.delete(id); memoRecoveries.delete(op.eventId);
+      } else if (st === source && S.isUnlocked() && op.eventId) memoRecoveries.set(op.eventId, op);
+      if (!current()) return;
+      if (saved) toast('메모를 남겼습니다');
+      await refresh(returnFocus);
+    })();
+    return op.promise;
+  };
+  const send = btn('메모 남기기', () => run(false), 'opt');
+  const retry = btn('메모 저장 다시 시도', () => run(true), 'primary', { hidden: true });
+  const box = h('div', { class: 'memo-box' },
     (d.memos || []).length ? h('ul', { class: 'small list' }, ...d.memos.map((m) => h('li', {}, m.text))) : null,
-    ta, btn('메모 남기기', async () => { const t = ta.value.trim(); if (!t) return; await addEvent(stop, 'FIELD_MEMO', { text: t.slice(0, 300) }); delete ui.memo[id]; toast('메모를 남겼습니다'); render(); }, 'opt'));
+    ta, message, send, retry);
+  sync();
+  if (operation?.busy) operation.promise?.then(() => { setTimeout(() => { if (current()) refresh(); }, 0); });
+  return box;
 }
 
 // 통화로 약속한 재방문 날짜·시간: PC에서는 그 날짜 노선 후보와 방문 시간창이 된다

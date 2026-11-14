@@ -23,7 +23,7 @@ export function screenFind() {
   const solo = isSolo(), received = new Set(solo ? [] : (source.daylist?.stops || []).map((s) => s.request_id));
   const every = allStops().map((s) => ({ s, d: deriveStop(s, source.events), received: received.has(s.request_id),
     date: received.has(s.request_id) ? source.daylist.work_date || '' : s.planned_date || '' }));
-  const q = h('input', { type: 'search', class: 'search', value: f.q, placeholder: '접수번호·이름·주소·품목', 'aria-label': '찾을 접수' });
+  const q = h('input', { type: 'search', class: 'search', value: f.q, placeholder: '접수번호·이름·연락처·주소·품목', 'aria-label': '찾을 접수' });
   q.addEventListener('input', () => {
     f.q = q.value; clearTimeout(timer);
     timer = setTimeout(async () => { if (!current()) return; await render();
@@ -50,7 +50,7 @@ export function screenFind() {
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), appLogo(), h('h1', { class: 'bar-title' }, '날짜·접수 찾기')),
     h('section', { class: 'card' },
       h('p', { class: 'small', 'aria-label': '찾기 자료 범위' }, solo ? '이 휴대폰에 보관 중인 전체 접수입니다.' : '이 휴대폰의 받은 목록과 현장 접수에서 찾습니다. 받은 목록은 목록일, 현장 접수는 예정일 기준입니다. PC 전체 과거 내역은 PC에서 조회하세요.'),
-      h('label', { class: 'fld' }, h('span', {}, '접수번호·이름·주소·품목'), q),
+      h('label', { class: 'fld' }, h('span', {}, '접수번호·이름·연락처·주소·품목'), q),
       h('div', { class: 'grid2' }, h('label', { class: 'fld' }, h('span', {}, solo ? '예정일 기준' : '목록일·예정일 기준'), range), h('label', { class: 'fld' }, h('span', {}, '날짜'), date)),
       h('label', { class: 'fld' }, h('span', {}, '처리 상태'), status),
       btn('조회조건 초기화', () => { Object.assign(f, defaults()); render(); }, 'big'),

@@ -274,8 +274,11 @@ function commit() {
   });
   return saving;
 }
-// 모든 기록에 지금 작업자(설정의 이름 중 고른 사람)를 남긴다
-const withWorker = (body) => (st.worker ? { ...body, worker: st.worker } : body);
+// 개인폰 이름. 이전 백업의 선택 이름을 우선하고, 선택이 없으면 옛 목록의 첫 이름을 읽는다.
+const workerName = () => (typeof st?.worker === 'string' ? st.worker.trim() : '')
+  || (Array.isArray(st?.workers) ? st.workers.find((w) => typeof w === 'string' && w.trim())?.trim() : '') || '';
+// 이름 변경은 이후 기록에만 적용한다. 이미 남긴 기록의 작업자는 바꾸지 않는다.
+const withWorker = (body) => (workerName() ? { ...body, worker: workerName() } : body);
 async function addEvent(stop, kind, body) {
   if (!st) throw Object.assign(new Error('잠겨 있습니다'), { code: 'LOCKED' });
   st.seq += 1;
@@ -308,7 +311,7 @@ function handoff() { handoffUntil = Date.now() + HANDOFF_MS; }
 async function addCrewEvent(kind, body) {
   st.seq += 1;
   st.events.push({ event_id: crypto.randomUUID(), seq: st.seq, gen: F.ensureGen(st), request_id: '', assign_ver: st.daylist ? st.daylist.assign_ver : 0, base_req_ver: null, kind, body: withWorker(body), ts: new Date().toISOString() });
-  await commit();
+  return commit();
 }
 const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
 
@@ -688,6 +691,6 @@ export {
   routeStopId, saveBanner, saveFailed, savePhoto, saving, sessionChan, setLiveMap, setLockMs,
   setAutoLockEnabled, setPrefs, setRegisteredNow, setRender, setSt, settleWrites, sheet, smsTemplates, st,
   startCamera, stepFlush, stepper, stopCamera, storageLeft, tabBar, themeToggle, toast,
-  todayKST, ui, unsent, wakeLock, wakeRoute, wantWake, withOverrides, withWorker,
+  todayKST, ui, unsent, wakeLock, wakeRoute, wantWake, withOverrides, withWorker, workerName,
   writesPending,
 };

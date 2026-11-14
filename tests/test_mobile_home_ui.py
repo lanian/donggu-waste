@@ -71,11 +71,11 @@ def main():
             headings = page.locator('main > section.card > h2').all_text_contents()
             assert headings[:3] == ['화면', '잠금', '작업자'], headings
             assert headings.index('작업자') < headings.index('도움말') < headings.index('현장 기록'), headings
-            page.get_by_label('작업자 1 이름', exact=True).fill('가상 임시수정')
+            page.get_by_label('작업자 이름', exact=True).fill('가상 임시수정')
             toggle.click()
             expect(toggle).not_to_be_checked()
             expect(toggle).to_be_enabled()
-            expect(page.get_by_label('작업자 1 이름', exact=True)).to_have_value('가상 임시수정')
+            expect(page.get_by_label('작업자 이름', exact=True)).to_have_value('가상 임시수정')
             page.screenshot(path=str(shots / 'settings-common-first.png'), full_page=True)
             assert not errors, errors
             print('모바일 홈/UI: PC·단독 360/390/430px 보통·아주큰글씨 도구2열/동작/유일한주행동·설정화면/잠금/작업자우선·설정초안보존 통과')

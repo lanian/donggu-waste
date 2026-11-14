@@ -8,7 +8,7 @@ import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
-import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, unsent } from '../core.js';
+import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, unsent, workerName } from '../core.js';
 import { CHECKS, installCard, runningAsApp } from '../widgets.js';
 import { APP_VERSION } from '../app.js';
 
@@ -38,6 +38,31 @@ function autoLockControls(times) {
   // 저장을 기다리며 설정 화면을 다시 열어도 이 부분만 갱신해 다른 입력 초안을 보존한다.
   const pending = autoLockStatus().pending;
   if (pending) pending.then(() => { if (root.isConnected && st === owner) sync(); });
+  return root;
+}
+
+function workerControls() {
+  const owner = st;
+  const name = h('input', { type: 'text', class: 'search', value: workerName(), 'aria-label': '작업자 이름', placeholder: '본인 이름 (예: 김수거)', maxlength: 10 });
+  const result = h('p', { class: 'small', role: 'status' }), error = h('p', { class: 'msg err', role: 'alert' });
+  let pending = false;
+  const save = btn('작업자 저장', async () => {
+    if (pending || st !== owner || !S.isUnlocked()) return;
+    const value = name.value.trim().slice(0, 10), returnFocus = document.activeElement === save;
+    pending = true; save.disabled = name.disabled = true; root.setAttribute('aria-busy', 'true');
+    result.textContent = ''; error.textContent = '';
+    // 저장 실패 시에도 기존 저장 큐의 대기 암호문과 메모리 설정 의도를 함께 유지한다.
+    owner.worker = value; owner.workers = value ? [value] : [];
+    const saved = await commit();
+    if (!root.isConnected || st !== owner || !S.isUnlocked()) return;
+    pending = false; save.disabled = name.disabled = false; root.setAttribute('aria-busy', 'false');
+    if (saved) { name.value = value; result.textContent = value ? '작업자 이름을 저장했습니다.' : '작업자 이름을 비웠습니다.'; }
+    else error.textContent = '작업자 이름을 저장하지 못했습니다. 입력한 이름을 유지했으니 다시 저장해 주세요.';
+    if (returnFocus && document.activeElement === document.body) save.focus();
+  }, 'big');
+  const root = h('section', { class: 'card', 'aria-label': '작업자 설정' }, h('h2', {}, '작업자'),
+    h('p', { class: 'small' }, '이 휴대폰을 사용하는 본인 이름을 적으세요. 이후 현장 기록에 자동으로 남습니다. 이름을 바꿔도 이전 기록은 그대로입니다.'),
+    h('label', { class: 'fld' }, h('span', {}, '작업자 이름'), name), save, result, error);
   return root;
 }
 
@@ -89,14 +114,7 @@ async function screenSettings() {
     !bio && st.bioLastError ? h('details', { class: 'small bio-err' }, h('summary', {}, `마지막 등록 오류 (${st.bioLastError.at.slice(0, 16).replace('T', ' ')}) — 담당자에게 알려 주세요`),
       h('pre', { class: 'small' }, [`단계: ${st.bioLastError.step}`, `오류: ${st.bioLastError.name} ${st.bioLastError.code}`.trim(), st.bioLastError.message, `앱 ${APP_VERSION} · ${st.bioLastError.ua}`].filter(Boolean).join('\n'))) : null);
 
-  // 작업자
-  const wIns = [0, 1, 2, 3, 4].map((i) => h('input', { type: 'text', class: 'search', placeholder: `작업자 ${i + 1} (예: 김수거)`, value: (st.workers || [])[i] || '', 'aria-label': `작업자 ${i + 1} 이름`, maxlength: 10 }));
-  const workerCard = h('section', { class: 'card' }, h('h2', {}, '작업자'),
-    h('p', { class: 'small' }, '이 휴대폰을 함께 쓰는 수거팀 이름(짧게). 첫 화면에서 고른 작업자가 모든 현장 기록에 남습니다. 교대할 때 PIN 없이 바꿀 수 있습니다.'),
-    ...wIns, btn('작업자 저장', async () => {
-      const ws = [...new Set(wIns.map((x) => x.value.trim().slice(0, 10)).filter(Boolean))];
-      await set({ workers: ws, worker: ws.includes(st.worker) ? st.worker : ws[0] || '' }, ws.length ? `작업자 ${ws.length}명을 저장했습니다` : '작업자 목록을 비웠습니다');
-    }, 'big'));
+  const workerCard = workerControls();
 
   // 문자 문구
   const tpls = smsTemplates();
