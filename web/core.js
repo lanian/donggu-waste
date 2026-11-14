@@ -636,6 +636,7 @@ async function reloadWhenSafe() {
   location.reload();
 }
 if ('serviceWorker' in navigator) {
+  let updateRequested = false;
   navigator.serviceWorker.register('./sw.js').then((reg) => {
     const offer = (w) => {
       if (document.querySelector('.update')) return;
@@ -645,6 +646,7 @@ if ('serviceWorker' in navigator) {
         msg.textContent = '저장을 마치는 중… ';
         await settleWrites();
         if (writesPending()) { msg.textContent = '새 버전이 있습니다. '; return toast(saveFailed ? '저장되지 않은 기록이 있어 지금은 업데이트하지 않습니다. 결과를 먼저 보내 주세요.' : '사진·기록 저장이 끝난 뒤 다시 눌러 주세요.', 'bad'); }
+        updateRequested = true;
         w.postMessage('SKIP_WAITING');
       }, 'primary'));
       document.body.append(bar);
@@ -658,7 +660,7 @@ if ('serviceWorker' in navigator) {
   // 첫 설치 때는 새로고침하지 않는다(입력 중인 화면 보호). 사용자가 [업데이트]를 눌렀을 때만 새로고침.
   const hadController = !!navigator.serviceWorker.controller;
   let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; reloadWhenSafe(); } });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if ((hadController || updateRequested) && !reloaded) { reloaded = true; reloadWhenSafe(); } });
 }
 
 // 저장소 열림 기다리기: 대개 바로 열린다. 다른 창(특히 이전 버전 앱 창)이 붙잡고 있으면 놓는 즉시 저절로 계속한다.

@@ -124,6 +124,7 @@ jobs:
           - test_collection_quick_ui
           - test_mobile_collection_save
           - test_mobile_auto_lock
+          - test_mobile_update
           - test_mobile_home_ui
           - test_mobile_list_cards
           - test_mobile_list_filters

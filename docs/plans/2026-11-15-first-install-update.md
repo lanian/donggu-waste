@@ -23,3 +23,9 @@ Independent real-SW diagnostics with actual 18/19 Git assets confirmed: first-in
 4. Run focused update/mobile/lock checks, source review, a fresh versioned desktop build and full CI/Pages gates. Verify public 19→20 through a real old client if possible, new cached code and offline PIN. Clearly separate initial failed continuous-18 evidence, synthetic reproduction and later public checks.
 
 No production data/process or existing release files are modified. The user's deployment authorization covers this necessary update correction; no new business feature is included.
+
+## Local correction verified
+
+The permanent current-filesystem fixture regression failed against the original implementation at the missing post-update PIN screen, then passed after adding the explicit-request flag and OR condition. `web/core.js` has three insertions and one condition replacement; encrypted storage, event data and safe-write routines are unchanged. Fixture versions 99.0.1/99.0.2 are not public-release proof.
+
+Root independently ran `npm run test:update` and `npm run test:lock`: both passed. First automatic claim retains entered PIN, same-document and initially controlled explicit updates reach the new PIN/version, and lock/pending-photo/actual delayed encrypted-write guards and saved request/event/photo/preference preservation pass. Version20/tag, generated files, syntax and whitespace checks passed; E2E52 includes the new suite. Independent mobile expert source/test review is GO. Final 20 CI, package and live checks are recorded separately.
