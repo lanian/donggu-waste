@@ -265,7 +265,8 @@ async function screenStop(id) {
       l.kind === 'RECEIVED' ? h('div', { class: 'row' }, h('span', {}, '접수 수량'), h('span', { class: 'val' }, l.qty_received)) : null,
       h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }, true), priorQty(stop, l), 9999, 350, `${l.name} 현장 수량`)),
       h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`)),
-      priorQty(stop, l) ? h('p', { class: 'small' }, `이전 수거 ${priorQty(stop, l)}${l.unit_label} · 이번 추가 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label} · 누적 ${l.qty_collected}${l.unit_label}`) : null,
+      priorQty(stop, l) ? h('p', { class: 'small quantity-history' }, `이전 수거 ${priorQty(stop, l)}${l.unit_label} · `,
+        h('strong', {}, `이번 추가 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`), ` · 누적 ${l.qty_collected}${l.unit_label}`) : null,
       showLeft(l) ? h('div', { class: 'row' + (l.remaining ? ' left' : '') }, h('span', {}, '못 실은 수량'), h('span', { class: 'val' }, `${l.remaining} ${l.unit_label}`)) : null,
       l.remaining && showLeft(l) ? (() => {
         const sel = h('select', { class: 'reason' + (l.reason || ui.tried !== id ? '' : ' need'), 'aria-label': `${l.name} 못 실은 사유`, onchange: (e) => setLine(l, { reason: e.target.value }) },
@@ -411,6 +412,7 @@ async function screenStop(id) {
       d.noPhotoReason ? h('p', {}, `사진 불가 사유: ${LABEL.noPhoto[d.noPhotoReason] || d.noPhotoReason}`) : null,
       Object.values(d.stickers).some((x) => x.result !== 'OK') ? h('p', {}, '스티커·필증 문제 품목 있음') : null) : null,
     btn('품목 수량을 모두 실음으로 채우기', runCollection(async () => { await fillAll(); }), 'ghost link', { disabled: pendingSave || busySave }),
+    h('p', { class: 'small quantity-fill-hint' }, '수량 채우기 뒤에도 수거 결과를 선택해 저장하세요.'),
     msg, fieldMemo(stop, d));
 
   const manage = isSolo() ? h('section', { class: 'card' }, h('h2', {}, '접수 관리'),
@@ -429,7 +431,7 @@ async function screenStop(id) {
   const seqList = (isSolo() ? st.requests.filter((r) => r.planned_date === stop.planned_date && r.status !== 'CANCELLED').sort((a, b) => a.seq - b.seq)
     : pcStops().filter((x) => !x.removed && !(x.field && x.planned_date !== pcWorkDate())));
   const next = seqList.slice(seqList.indexOf(stop) + 1).find((x) => deriveStop(x, st.events).progress !== 'DONE');
-  // 결과를 저장하기 전에는 "결과 저장 ↓", 저장한 뒤에는 "다음 N번 ▶" — 기록 없이 건너뛰지 않게
+  // 결과 선택 영역으로 이동하는 버튼은 실제 저장과 구분한다. 저장한 뒤에만 다음 지점으로 이동한다.
   // 길안내는 전화 옆: 결과 저장 전에는 이 지점, 저장한 뒤에는 다음 미완료 지점
   const saved = !resultUnsaved && (d.outcome || stop.status === 'CANCELLED');
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
@@ -441,7 +443,7 @@ async function screenStop(id) {
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
       : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
       ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
-      : btn('결과 저장 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
+      : btn('수거 결과 선택 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
   contact.id = 'st-contact'; lines.id = 'st-items'; photos.id = 'st-photos'; outcome.id = 'st-result';
   const itemsDone = d.lines.length > 0 && st.events.some((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT');

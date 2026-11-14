@@ -48,11 +48,13 @@ async function screenHomeSolo() {
       h('p', {}, `마지막 백업: ${ago(st.lastBackupAt)}. 휴대폰을 잃어버리거나 고장 나면 접수 원본이 사라집니다.`),
       btn('지금 백업', () => go('#/backup'), 'primary')) : null,
     nextCard, setupCard(),
-    h('section', { class: 'actions' },
-      btn('+ 전화 접수 등록', () => { ui.form = null; go('#/intake'); }, 'primary huge'),
-      btn('날짜·접수 찾기', openFinder, 'big'),
-      btn('빠른 수수료 계산', () => go('#/calculator'), 'big'),
-      h('div', { class: 'grid2' }, btn('백업·복원', () => go('#/backup'), 'big'), btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
+    h('section', { class: 'actions home-tools', 'aria-label': '자주 쓰는 기능' },
+      h('h2', {}, '자주 쓰는 기능'), h('div', { class: 'grid2' },
+        btn('+ 전화 접수 등록', () => { ui.form = null; go('#/intake'); }, 'big'),
+        btn('날짜·접수 찾기', openFinder, 'big'),
+        btn('빠른 수수료 계산', () => go('#/calculator'), 'big'),
+        btn('백업·복원', () => go('#/backup'), 'big'),
+        btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
     h('div', { class: 'tabs', role: 'group', 'aria-label': '목록 거르기' }, ...[['TODAY', `오늘 ${lists.TODAY.length}`], ['TOMORROW', `내일 ${lists.TOMORROW.length}`], ['OPEN', `미처리 ${open.length}`], ['CANCELLED', `취소 ${lists.CANCELLED.length}`]]
       .map(([k, t]) => btn(t, () => { ui.soloView = k; ui.reorder = false; render(); }, view === k ? 'tab on' : 'tab'))),
   ];

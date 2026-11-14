@@ -21,19 +21,16 @@ async function screenHome() {
   const today = every.filter((s) => !later.includes(s));
   const stops = today.map((s) => ({ s, d: deriveStop(s, st.events) }));
   const top = h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), themeToggle(), btn('잠금', lockNow, 'ghost'));
-  // 목록이 있으면 하루 한두 번 쓰는 버튼은 작게, 방문 순서가 먼저 보이게
+  // 주 동작은 '지금 할 일'에 두고, 자주 쓰는 도구는 두 열로 묶는다.
   const stale = n && dl && dl.work_date < todayKST();
   // 접수 등록(현장·전화)은 기기 등록 전에도 받아 둘 수 있다(PC로 보내는 것만 등록 뒤에)
   const intakeBtn = btn('+ 접수 등록 (현장·전화)', () => { ui.form = null; go('#/intake'); }, 'big intake-btn');
-  const actions = dl
-    ? h('section', { class: 'actions' }, h('div', { class: 'grid2' },
+  const actions = h('section', { class: 'actions home-tools', 'aria-label': '자주 쓰는 기능' },
+    h('h2', {}, '자주 쓰는 기능'), h('div', { class: 'grid2' },
       btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered }),
-      btn(n ? `결과 보내기 ${n}건` : '결과 보내기', () => go('#/export'), 'big' + (stale ? ' warn' : ''))), intakeBtn)
-    : h('section', { class: 'actions' },
-      btn('오늘 목록 받기', () => go('#/scan'), 'primary huge', { disabled: !registered }),
-      btn(n ? `결과 보내기 (미전송 ${n}건)` : '결과 보내기', () => go('#/export'), 'huge ' + (stale ? 'warn' : '')), intakeBtn);
-  actions.append(btn('날짜·접수 찾기', openFinder, 'big'));
-  actions.append(btn('빠른 수수료 계산', () => go('#/calculator'), 'big'));
+      btn(n ? (dl ? `결과 보내기 ${n}건` : `결과 보내기 (미전송 ${n}건)`) : '결과 보내기', () => go('#/export'), 'big' + (stale ? ' warn' : '')),
+      intakeBtn, btn('날짜·접수 찾기', openFinder, 'big'),
+      btn('빠른 수수료 계산', () => go('#/calculator'), 'big')));
   ui.scanAck = false;
   const otherDay = !!dl && dl.work_date !== todayKST();
   const out = [top, workerBar()];
