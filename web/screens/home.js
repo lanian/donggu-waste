@@ -2,7 +2,7 @@
 import * as NAV from '../nav.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
-import { appLogo, btn, commit, go, h, isSolo, lockNow, mdOf, pcStops, pcWorkDate, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, toast, todayKST, ui, unsent } from '../core.js';
+import { appLogo, btn, commit, flushSteps, go, h, isSolo, lockNow, mdOf, pcStops, pcWorkDate, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, toast, todayKST, ui, unsent } from '../core.js';
 import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
 import { screenHomeSolo } from './solo.js';
@@ -10,6 +10,7 @@ import { openFinder } from './find.js';
 import { daySummary, dongChips, filterDong, filterQ, homeBanners, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
 
 async function screenHome() {
+  await flushSteps();
   if (!st.mode) return screenMode();
   if (isSolo()) return screenHomeSolo();
   const registered = !!(await S.getRaw('pc')) && !!(await S.getRaw('device'));
@@ -50,7 +51,8 @@ async function screenHome() {
   const photos = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body), ...(st.keptPhotos || [])];
   const photoN = photos.filter((p) => !recovered.has(p.photo_id)).length;
   // 수량을 다 입력해도 방문 결과를 저장하지 않았으면 상세로 이어 간다.
-  const unrecorded = stops.filter(({ s, d }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !d.outcome);
+  const unrecorded = stops.filter(({ s, d }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && (!d.outcome || d.resultNeedsConfirmation));
+  const reconfirm = unrecorded.find(({ d }) => d.resultNeedsConfirmation);
   const nextStop = unrecorded[0];
   let next = { title: '오늘 배정 목록을 받으세요', detail: 'PC 담당자가 준비한 QR을 읽고, 받은 뒤 수신 코드를 알려 주세요.', label: '배정 목록 수신', run: () => go('#/scan') };
   if (pendingPhotos.length) next = {
@@ -61,6 +63,7 @@ async function screenHome() {
     title: '저장하지 못한 기록부터 보호하세요', detail: '앱을 닫지 말고 이 창의 기록을 먼저 내보내 주세요. 저장 실패 알림은 실제 저장이 끝나야 사라집니다.',
     label: registered ? '기록 보호용 내보내기' : '기록 보호용 백업', run: () => go(registered ? '#/export' : '#/backup'),
   };
+  else if (reconfirm) next = { title: `${reconfirm.s.seq}번 수거 결과를 재확인하세요`, detail: '결과 저장 뒤 수량이 바뀌었습니다. 현재 수량에 맞는 결과를 다시 선택해 저장하세요.', label: `${reconfirm.s.seq}번 결과 재확인`, run: () => go(`#/stop/${reconfirm.s.request_id}`) };
   else if (!registered) next = { title: '관리자와 기기를 연결하세요', detail: '목록 수신과 결과 전달에 필요한 등록입니다. 현장·전화 접수는 아래에서 먼저 받을 수 있습니다.', label: 'PC 연결 등록하기', run: () => go('#/register') };
   else if (dl && dl.work_date < todayKST() && (n || waitingResult)) next = {
     title: '지난 목록의 PC 반영을 먼저 확인하세요', detail: `${mdOf(dl.work_date)} 목록의 기록이 남아 있습니다. 결과를 전달하고 반영을 확인한 뒤 오늘 목록을 받으세요.`, label: '결과 전달·반영 확인', run: () => go('#/export'),
@@ -88,8 +91,8 @@ async function screenHome() {
   const moreBtns = btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big');
   if (!today.length) { out.push(h('p', { class: 'empty' }, '받은 목록이 없습니다.')); out.push(moreBtns); }
   else {
-    const remain = stops.filter((x) => x.d.progress !== 'DONE' && !x.s.removed);
-    const hold = stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
+    const remain = stops.filter((x) => (x.d.progress !== 'DONE' || x.d.resultNeedsConfirmation) && !x.s.removed);
+    const hold = stops.filter((x) => x.d.resultNeedsConfirmation || ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK');
     const changed = Object.keys(st.listChanges || {}).length;
     const reordered = !!(st.localOrder && st.localOrder.work_date === wd && st.localOrder.assign_ver === (dl ? dl.assign_ver : 0));
     const fieldN = today.filter((s) => s.field).length;

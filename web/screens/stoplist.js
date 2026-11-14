@@ -10,7 +10,7 @@ import { CHECKS, doInstall, installEvt, runningAsApp } from '../widgets.js';
 
 // 오늘 진행 요약 띠: 완료/전체와 진행 막대 (0%여도 막대 바탕이 보이게)
 function daySummary(items) {
-  const n = items.length, done = items.filter((x) => x.d.progress === 'DONE').length;
+  const n = items.length, done = items.filter((x) => x.d.progress === 'DONE' && !x.d.resultNeedsConfirmation).length;
   const hold = items.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome)).length;
   const pend = items.filter((x) => x.d.fee.pendingCount).length;
   return h('section', { class: 'summary', 'aria-label': '오늘 진행' },
@@ -43,9 +43,10 @@ const filterDong = (list) => (ui.dong ? list.filter((x) => dongOf(x.s) === ui.do
 function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
   const cancelled = s.status === 'CANCELLED';
   const purged = !!s.pii_purged;
+  const review = !!d.resultNeedsConfirmation, finished = d.progress === 'DONE' && !review;
   const changes = (st.listChanges || {})[s.request_id] || [];
   const isNow = s.request_id === nowId;
-  return h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${cancelled ? 'CANCELLED' : d.outcome || d.progress} c-${d.contact}` + (d.progress === 'DONE' || cancelled ? ' done' : '') + (isNow ? ' now' : '') + (changes.length ? ' changed' : ''), 'aria-current': isNow ? 'step' : null },
+  return h('a', { href: `#/stop/${s.request_id}`, class: `stop p-${cancelled ? 'CANCELLED' : review ? 'STARTED' : d.outcome || d.progress} c-${d.contact}` + (finished || cancelled ? ' done' : '') + (isNow ? ' now' : '') + (changes.length ? ' changed' : ''), 'aria-current': isNow ? 'step' : null },
     h('span', { class: 'seq' }, s.seq, isNow ? h('small', { class: 'now-tag' }, '지금') : null),
     h('span', { class: 'body' },
       h('strong', {}, purged ? '개인정보 정리됨' : s.name), h('span', { class: 'addr' }, purged ? s.receipt_no || '' : s.address),
@@ -54,12 +55,12 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
         ...changes.map((c) => h('em', { class: 'chip new' }, F.DIFF_LABEL[c] || c)),
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
         dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
-        ...(cancelled || d.progress === 'DONE' ? [] : L.tagsOf(s.items).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
+        ...(cancelled || finished ? [] : L.tagsOf(s.items).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
         !solo && s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
         !solo && s.field ? h('em', { class: 'chip new' }, `${s.channel || '현장'} 접수`) : null,
         !solo && cancelAsked(s.request_id) ? h('em', { class: 'chip warn' }, '취소 요청') : null,
         h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
-        h('em', { class: 'chip p-' + d.progress }, s.removed ? '목록에서 제외됨' : cancelled ? '취소' : LABEL.progress[d.progress]),
+        h('em', { class: 'chip ' + (review ? 'warn' : 'p-' + d.progress) }, s.removed ? '목록에서 제외됨' : cancelled ? '취소' : review ? '결과 재확인' : LABEL.progress[d.progress]),
         d.fee.pendingCount ? h('em', { class: 'chip warn' }, '금액 확인 대기') : null)),
     h('span', { class: 'eta' }, s.eta || ''));
 }
@@ -160,7 +161,10 @@ async function homeBanners() {
       btn(isSolo() ? '지금 백업' : '결과 보내기', () => go(isSolo() ? '#/backup' : '#/export'), 'primary big')));
   }
   if (isSolo()) {
-    const cand = F.retentionCandidates(st.requests, st.events, st.retentionDays || 90, (r) => r.status === 'CANCELLED' || deriveStop(r, st.events).progress === 'DONE');
+    const cand = F.retentionCandidates(st.requests, st.events, st.retentionDays || 90, (r) => {
+      const d = deriveStop(r, st.events);
+      return r.status === 'CANCELLED' || d.progress === 'DONE' && !d.resultNeedsConfirmation;
+    });
     if (cand.length) {
       const ready = cand.filter((c) => st.lastBackupAt && Date.parse(st.lastBackupAt) > c.doneAt);
       out.push(h('section', { class: 'card notice retention', role: 'status' },

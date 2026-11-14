@@ -123,6 +123,10 @@ jobs:
           - test_mobile_auto_lock
           - test_mobile_home_ui
           - test_mobile_layout
+          - test_mobile_intake_save
+          - test_mobile_result_confirmation
+          - test_mobile_field_layout
+          - test_mobile_photo_preview
           - test_dispatch_workflow_ui
           - test_collection_help_mobile
           - test_date_visibility_ui

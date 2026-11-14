@@ -1,16 +1,17 @@
 // 휴대폰 화면: 단독 모드 홈
 import { deriveStop } from '../fees.js';
 import * as S from '../store.js';
-import { BACKUP_WARN_MS, ago, appLogo, btn, commit, go, h, lockNow, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, todayKST, ui } from '../core.js';
+import { BACKUP_WARN_MS, ago, appLogo, btn, commit, flushSteps, go, h, lockNow, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, todayKST, ui } from '../core.js';
 import { daySummary, dongChips, filterDong, filterQ, homeBanners, routeItems, setupCard, stopCard, stopSearch, workerBar } from './stoplist.js';
 import { openFinder } from './find.js';
 
 async function screenHomeSolo() {
+  await flushSteps();
   const today = todayKST(), tomorrow = todayKST(1);
   const view = ui.soloView || 'TODAY';
   const all = st.requests.map((s) => ({ s, d: deriveStop(s, st.events) }));
   const live = all.filter((x) => x.s.status !== 'CANCELLED');
-  const open = live.filter((x) => x.d.progress !== 'DONE');
+  const open = live.filter((x) => x.d.progress !== 'DONE' || x.d.resultNeedsConfirmation);
   const lists = {
     TODAY: live.filter((x) => x.s.planned_date === today),
     TOMORROW: live.filter((x) => x.s.planned_date === tomorrow),
@@ -19,7 +20,8 @@ async function screenHomeSolo() {
   };
   const list = filterDong(filterQ(lists[view].slice().sort((a, b) => (a.s.planned_date || '').localeCompare(b.s.planned_date || '') || a.s.seq - b.s.seq)));
   const needBackup = st.requests.length && (!st.lastBackupAt || Date.now() - Date.parse(st.lastBackupAt) > BACKUP_WARN_MS);
-  const actionable = live.filter(({ s, d }) => !s.removed && !s.pii_purged && !d.outcome);
+  const actionable = live.filter(({ s, d }) => !s.removed && !s.pii_purged && (!d.outcome || d.resultNeedsConfirmation));
+  const reconfirm = actionable.find(({ d }) => d.resultNeedsConfirmation);
   const nextToday = actionable.filter(({ s }) => s.planned_date === today).sort((a, b) => a.s.seq - b.s.seq)[0];
   const overdue = actionable.filter(({ s }) => s.planned_date && s.planned_date < today)
     .sort((a, b) => a.s.planned_date.localeCompare(b.s.planned_date) || a.s.seq - b.s.seq)[0];
@@ -29,6 +31,7 @@ async function screenHomeSolo() {
     run: () => { const el = document.querySelector('.pending-photo'); if (el) { el.scrollIntoView({ block: 'center' }); el.querySelector('button')?.focus({ preventScroll: true }); } },
   };
   else if (saveFailed || S.hasPendingSecure('state')) next = { title: '저장하지 못한 기록부터 보호하세요', detail: '앱을 닫지 말고 이 창의 기록을 암호화 백업으로 보관하세요. 실제 저장이 끝나기 전에는 저장 실패 상태입니다.', label: '기록 보호용 백업', run: () => go('#/backup') };
+  else if (reconfirm) next = { title: `${reconfirm.s.seq}번 수거 결과를 재확인하세요`, detail: '결과 저장 뒤 수량이 바뀌었습니다. 현재 수량에 맞는 결과를 다시 선택해 저장하세요.', label: `${reconfirm.s.seq}번 결과 재확인`, run: () => go(`#/stop/${reconfirm.s.request_id}`) };
   else if (nextToday) next = { title: `${nextToday.s.seq}번 방문 결과를 이어서 기록하세요`, detail: `오늘 방문 결과를 기록하지 않은 접수 ${actionable.filter(({ s }) => s.planned_date === today).length}건 · 취소 접수는 제외합니다.`, label: `${nextToday.s.seq}번 수거 이어가기`, run: () => go(`#/stop/${nextToday.s.request_id}`) };
   else if (overdue) next = { title: '지난 날짜의 미처리 접수가 남아 있습니다', detail: `${overdue.s.planned_date} 예정 접수입니다. 원래 접수에서 결과와 재방문 일정을 확인하세요.`, label: '미처리 접수 이어가기', run: () => go(`#/stop/${overdue.s.request_id}`) };
   else if (st.requests.length && (needBackup || lists.TODAY.length)) next = { title: '접수와 현장 기록을 백업해 두세요', detail: '이 휴대폰이 원본입니다. 사진을 포함한 암호화 백업을 승인된 보안 매체에 보관하세요.', label: '오늘 기록 백업하기', run: () => go('#/backup') };

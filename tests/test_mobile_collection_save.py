@@ -335,7 +335,9 @@ def queued_failure_case(browser, url, output):
         assert page.evaluate('()=>window.__collectionCore.st.events.filter(e=>e.kind==="ATTEMPT").length') == 1
         page.evaluate('()=>{IDBObjectStore.prototype.put=window.__realQueuedPut;}')
         page.locator('#st-result').get_by_role('button', name='저장 다시 시도', exact=True).click()
-        expect(page.get_by_text('저장된 결과: 수거 완료', exact=True)).to_be_visible()
+        expect(page.get_by_text('이전 저장 결과: 수거 완료', exact=True)).to_be_visible()
+        expect(page.locator('.dock-next')).to_have_text('수거 결과 재확인 ↓')
+        assert page.evaluate('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).resultNeedsConfirmation')
         assert page.evaluate('()=>window.__collectionCore.st.events.map(e=>e.event_id)') == before
         saved = disk_state(page)
         assert [event['event_id'] for event in saved['events']] == before

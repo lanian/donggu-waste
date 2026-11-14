@@ -28,7 +28,7 @@
 
 ## Task 3: Shared Quantity and Short Screens
 
-**Root files:** `web/core.js`, `web/widgets.js`, `web/style.css`, `web/screens/home.js`, `web/screens/solo.js`, `web/screens/export.js`; new `tests/test_mobile_field_layout.py` owned by a test agent.
+**Root files:** `web/core.js`, `web/widgets.js`, `web/style.css`, `web/screens/home.js`, `web/screens/solo.js`, `web/screens/stoplist.js`, `web/screens/export.js`; new `tests/test_mobile_field_layout.py` owned by a test agent.
 
 1. Establish RED for numeric entry and unreachable buttons in 360×480/400 with large text and actual storage failure. Use synthetic viewport evidence explicitly.
 2. Add optional `stepper(..., label, { editable: true })`: tap value → existing sheet with integer/min/max validation → apply/cancel. Preserve debounce/flush/lock and source-view ownership, with useful focus return. Reuse `quantityInput(value,min,max,label)` in picker controls and enforce 1..9999 bounds.
@@ -44,3 +44,19 @@
 **Parallel ownership:** Intake and collection agents edit only their owner files/tests. Layout test agent edits only its new test. Root owns core/widgets/CSS/home/export/package/CI/docs. Agents do not commit, push, build or deploy.
 
 **Evidence:** `D:/Temp/dg-field-fixes-20261114`.
+
+## Implementation and Review Evidence
+
+- Intake RED reproduced false success, 150→99, repeated pending saves and reentry gaps. New five groups pass PC/solo new/edit failure and same-ID retry, receipt/version preservation, 150→149/fee, pending triple-tap and stale navigation/PIN ownership. Seven existing draft-lifetime tests pass. Source ownership remains screen-local.
+- Collection RED reproduced stale completion/next and partial overwrite. New result-confirmation groups pass recorded-outcome preservation, reload, helper protection, explicit partial overwrite/cancel, stale confirmation and both home/export consumers. All eleven legacy collection-save cases pass; the queued-failure expectation now requires reconfirmation after persisting post-ATTEMPT edits while retaining every event-ID/data assertion.
+- Numeric/short-screen RED reproduced missing input, unreachable controls, nested-dialog focus loss, intake warning over retry and locked-quantity total 4 becoming 6. Five new layout groups pass numeric integer/range/prior-floor/cancel/ownership, 400/480px error access, picker/nested-sheet focus, intake CTA separation and locked+editable total/ID preservation. Per-editable-line limits remain 1..9999 even when the displayed total includes locked lines.
+- Independent source review found the picker total bug; it is corrected by subtracting fixed quantities before changing the editable line. The final follow-up review found no remaining Critical/Important issue in saving, identity, reconfirmation, export/cleanup/backup, quantity ownership or compact layout.
+- The first full E2E run exposed two unhandled LOCKED photo-preview reads after durable photo/quantity writes. Stacks identified `getSecureBytes` completing after key lock. UI callbacks now require the original unlocked view before publishing URLs; stale/locked reads are discarded and current genuine failures show an accessible preview notice. No key lifetime or store contract changes. New `test_mobile_photo_preview.py` passes three held-read/lock/route/error/healthy-recovery cases with ciphertext/metadata preservation; focused lock/WebAuthn/photo/quantity flow passes with `stacks.json=[]`.
+- Existing workflow 25, cleanup 14, automatic-lock, help copy/fallback, date search/return, mobile UI theme/layout checks and npm fee/protocol/WebCrypto checks pass. New tests are registered in `test:field`, `test:e2e` and CI.
+
+## Completion
+
+- Final full mobile E2E passes all 186 checks with no script errors, including virtual WebAuthn/PIN, immediate photo/quantity locking, PC merge and backup restoration (`e2e-final.log`, exit 0).
+- Root `npm run test:field` passes all four new scripts against frozen implementation (`integrated-final.log`, exit 0). The scoped photo-error readability CSS is also verified by the current-read failure/recovery case (`photo-final-style.log`, exit 0).
+- Independent final source review reports no remaining Critical/Important issue. Version/generated checks, strict Python compilation, all changed JavaScript syntax and diff checks pass. Final screenshots of retry access, partial overwrite summary, quantity entry and reconfirmation were inspected.
+- The four reviewed P1 defects and the three P2 improvement areas are implemented. Store/protocol/schema/release versions remain unchanged. Root AGENTS.md, production state, running desktop app and published release are preserved; evidence is isolated browser/virtual-device verification rather than physical-phone field testing.

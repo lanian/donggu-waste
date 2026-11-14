@@ -4,14 +4,21 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
-import { addrRoute, ask, btn, commit, emptyState, errMsg, flowSteps, footBar, go, h, render, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
+import { addrRoute, allStops, ask, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, render, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
 import { APP_VERSION } from '../app.js';
 
 async function screenExport() {
+  await flushSteps();
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
   const targetState = st, targetList = st.daylist, targetHash = location.hash;
   let view, cleaning = false;
   const pending = unsent();
+  const unconfirmedResults = () => allStops().filter((s) => !s.removed && !s.pii_purged && s.status !== 'CANCELLED' && deriveStop(s, st.events).resultNeedsConfirmation);
+  const unresolved = unconfirmedResults();
+  const checkResultReady = () => {
+    if (st !== targetState || !S.isUnlocked() || !view?.isConnected) throw new Error('현재 화면에서 다시 시도해 주세요.');
+    if (unconfirmedResults().length) throw new Error('수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요. 기록 보호가 필요하면 암호화 백업을 사용하세요.');
+  };
   const photoMetas = st.events.filter((e) => e.kind === 'PHOTO_META');
   const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
   ui.exportMsg = '';
@@ -24,6 +31,7 @@ async function screenExport() {
   };
   // 결과 파일: 이름·연락처·주소·메모 없이 이벤트만, PC 공개키로 암호화 + 기기 서명
   const buildResult = async () => {
+    checkResultReady();
     const from = pending[0].seq, to = pending[pending.length - 1].seq;
     const payload = {
       schema: 'dg.result/1', work_date: st.daylist ? st.daylist.work_date : null, app_version: APP_VERSION,
@@ -35,6 +43,7 @@ async function screenExport() {
     const signRaw = await P.exportRaw(dev.sign.publicKey);
     const header = { btype: P.TYPE_RESULT, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: st.daylist ? st.daylist.assign_ver : 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
     const sealed = await P.seal(payload, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
+    checkResultReady();
     const name = `DG_R_${P.uuidStr(dev.id).slice(0, 8)}_${from}-${to}.dgr`;
     st.exports.push({ from, to, code: sealed.receipt, name, at: new Date().toISOString(), confirmed: false });
     await commit();
@@ -47,7 +56,7 @@ async function screenExport() {
       ui.resultQr = { frames: P.splitFrames(sealed.bytes, bundleId, 600), name };
       go('#/resultqr');
     } catch (e) { say('QR을 만들지 못했습니다: ' + errMsg(e)); showQr.disabled = false; }
-  }, 'big', { disabled: !pending.length });
+  }, 'big', { disabled: !pending.length || !!unresolved.length });
   const make = btn(pending.length ? `결과 파일 만들어 보내기 (${pending.length}건)` : '보낼 결과 없음', async () => {
     make.disabled = true; msg.textContent = '암호화하는 중…';
     try {
@@ -64,7 +73,7 @@ async function screenExport() {
       }
     } catch (e) { say('파일을 만들지 못했습니다: ' + errMsg(e)); }
     make.disabled = false; render();
-  }, 'primary huge', { disabled: !pending.length });
+  }, 'primary huge', { disabled: !pending.length || !!unresolved.length });
 
   // PC → 휴대폰 코드 두 가지(결과 반영 코드 D-, 사진 회수 코드 P-)는 칸이 따로다. 다른 칸 코드나 수신 코드(R-)를 넣으면 알려 준다.
   const knownCodes = () => ({ RESULT: st.exports.map((x) => x.code), PHOTO: (st.photoExports || []).map((x) => x.code), RECEIPT: st.lastReceipt ? [st.lastReceipt.code] : [] });
@@ -123,7 +132,7 @@ async function screenExport() {
   const allConfirmed = !unsent().length && st.exports.every((x) => x.confirmed);
   const cleanupCurrent = () => view?.isConnected && location.hash === targetHash && st === targetState && st.daylist === targetList;
   const cleanupReady = () => st === targetState && st.daylist === targetList && !!targetList && S.isUnlocked()
-    && !writesPending() && !S.hasPendingSecure('state') && !unsent().length && st.exports.every((x) => x.confirmed);
+    && !unconfirmedResults().length && !writesPending() && !S.hasPendingSecure('state') && !unsent().length && st.exports.every((x) => x.confirmed);
   const cleanupBlocked = () => { toast('저장 중인 사진이나 새 기록이 있습니다. PC 반영을 확인한 뒤 다시 정리해 주세요.', 'bad'); render(); };
   const cleanup = btn('오늘 자료 정리', async () => {
     if (cleaning || !cleanupCurrent()) return;
@@ -158,7 +167,7 @@ async function screenExport() {
   const cleanupHint = h('p', { class: 'small' });
   const syncCleanup = () => {
     cleanup.disabled = cleaning || !cleanupReady();
-    cleanupHint.textContent = unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
+    cleanupHint.textContent = unconfirmedResults().length ? '수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요.' : unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
       : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.' : '';
     cleanupHint.hidden = !cleanupHint.textContent;
   };
@@ -181,6 +190,10 @@ async function screenExport() {
     h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.superseded ? '뒤 파일로 반영됨' : x.via === 'list' ? '반영 확인됨(새 목록)' : x.confirmed ? '반영 확인됨' : '확인 대기'}`))));
   const sendCard = h('section', { class: 'card' },
     h('h2', {}, h('span', { class: 'stepno' }, '1'), pending.length ? `결과 보내기 · 미전송 ${pending.length}건` : '결과 보내기'),
+    unresolved.length ? h('section', { class: 'notice', 'aria-label': '수거 결과 재확인 필요' },
+      h('strong', {}, `수거 결과 재확인 ${unresolved.length}건`), h('p', {}, '결과 저장 뒤 수량이 바뀐 접수가 있습니다. 현재 수량에 맞는 결과를 다시 저장한 뒤 보내세요.'),
+      ...unresolved.map((s) => btn(`${s.seq}번 결과 재확인`, () => go(`#/stop/${s.request_id}`), 'big')),
+      btn('기록 보호용 백업', () => go('#/backup'), 'big')) : null,
     h('p', {}, '결과 파일에는 이름·연락처·주소·메모가 들어가지 않으며, PC에서만 열 수 있게 암호화됩니다. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(중간 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다.'),
     pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'notice' },
       `이번 파일에는 현장 접수·정정 요청 ${pending.filter((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION').length}건의 이름·연락처·주소가 들어갑니다(PC가 원본을 만들거나 고치려면 필요). PC 전용 암호화는 같으며, 업무 메일이나 PC 화면 카메라로만 보내세요.`) : null,
@@ -206,7 +219,7 @@ function purgeReleased() {
     if (s.pii_purged) continue;
     const mine = st.events.filter((e) => e.request_id === s.request_id);
     const d = deriveStop(s, st.events);
-    if (!['DONE', 'PARTIAL', 'NOT_COLLECTED'].includes(d.outcome) || mine.some((e) => e.seq > st.releasedSeq)) continue;
+    if (d.resultNeedsConfirmation || !['DONE', 'PARTIAL', 'NOT_COLLECTED'].includes(d.outcome) || mine.some((e) => e.seq > st.releasedSeq)) continue;
     // 오늘 다시 가기로 약속했거나 재연락 예정이면 연락처·주소가 아직 필요하다
     if (d.outcome !== 'DONE' && (d.contact === 'CALLBACK' || (d.appt && (!d.appt.date || d.appt.date === todayKST())))) continue;
     F.purgeStopPII(s, at);

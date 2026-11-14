@@ -63,13 +63,21 @@ const toast = (msg, kind = '') => {
 // 아래에서 올라오는 확인 창 (window.prompt·confirm 대신). 큰 단추, 큰 글씨 설정을 따른다.
 // choices: [{label, value, cls, needInput}] → 고른 value (입력칸이 있으면 {value, text}), 취소·뒤로 가기는 null
 const openSheets = new Set();
-function sheet({ title, text = '', body = null, choices = [], input = null, cancel = '취소', cancelCls = 'ghost big' }) {
+function sheet({ title, text = '', body = null, choices = [], input = null, cancel = '취소', cancelCls = 'ghost big', signal = null }) {
   return new Promise((resolve) => {
+    const opener = document.activeElement, ownerState = st, ownerHash = location.hash;
     const dlg = h('dialog', { class: 'sheet', 'aria-label': title });
-    const inp = input ? h(input.multiline ? 'textarea' : 'input', { type: input.type || 'text', class: 'search', placeholder: input.placeholder || '', 'aria-label': input.label || input.placeholder || title, autocomplete: 'off', rows: input.multiline ? 3 : null }) : null;
-    if (inp && input.value) inp.value = input.value;
+    const inp = input ? h(input.multiline ? 'textarea' : 'input', { type: input.type || 'text', class: 'search', placeholder: input.placeholder || '', 'aria-label': input.label || input.placeholder || title, autocomplete: 'off', rows: input.multiline ? 3 : null,
+      min: input.min ?? null, max: input.max ?? null, step: input.step ?? null, inputmode: input.inputmode || null }) : null;
+    if (inp && input.value != null) inp.value = input.value;
     const msg = h('p', { class: 'msg err', role: 'alert' });
-    const done = (v) => { openSheets.delete(done); try { dlg.close(); } catch {} dlg.remove(); resolve(v); };
+    const abort = () => done(null);
+    const done = (v) => {
+      openSheets.delete(done); signal?.removeEventListener('abort', abort);
+      try { dlg.close(); } catch {} dlg.remove();
+      if (st === ownerState && location.hash === ownerHash && opener?.isConnected) opener.focus({ preventScroll: true });
+      resolve(v);
+    };
     openSheets.add(done);
     // 닫기 쉽게(취소할 수 있는 창만): 위 ✕, 바깥(어두운 곳) 누르기, 손잡이·제목을 아래로 끌기, 뒤로 가기
     const grip = h('div', { class: 'grip', 'aria-hidden': 'true' });
@@ -78,6 +86,11 @@ function sheet({ title, text = '', body = null, choices = [], input = null, canc
       inp ? h('label', { class: 'fld' }, h('span', {}, input.label || ''), inp) : null, msg,
       h('div', { class: 'sheet-actions' }, ...choices.map((c) => btn(c.label, () => {
         if (inp && c.needInput && !inp.value.trim()) { msg.textContent = input.required || '내용을 적어 주세요.'; inp.focus(); return; }
+        if (inp && input.validate) {
+          const error = input.validate(inp.value.trim());
+          if (error) { msg.textContent = error; inp.setAttribute('aria-invalid', 'true'); inp.focus(); return; }
+          inp.removeAttribute('aria-invalid');
+        }
         done(inp ? { value: c.value, text: inp.value.trim() } : c.value);
       }, 'huge ' + (c.cls || ''))), cancel ? btn(cancel, () => done(null), cancelCls) : null)];
     dlg.append(...kids.filter(Boolean));
@@ -96,8 +109,10 @@ function sheet({ title, text = '', body = null, choices = [], input = null, canc
       dlg.addEventListener('pointermove', moveDrag); dlg.addEventListener('pointerup', endDrag); dlg.addEventListener('pointercancel', endDrag);
     }
     document.body.append(dlg);
+    if (signal?.aborted) { done(null); return; }
+    signal?.addEventListener('abort', abort, { once: true });
     try { dlg.showModal(); } catch { dlg.setAttribute('open', ''); }
-    setTimeout(() => (inp || dlg.querySelector('.sheet-actions .btn') || dlg.querySelector('.btn')).focus(), 30);
+    setTimeout(() => { if (dlg.isConnected) (inp || dlg.querySelector('.sheet-actions .btn') || dlg.querySelector('.btn')).focus(); }, 30);
   });
 }
 const ask = async (text, ok = '계속', { title = '확인해 주세요', danger = false } = {}) =>
@@ -234,13 +249,18 @@ const feeTable = () => {
 };
 const todayKST = (offsetDays = 0) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul' }).format(new Date(Date.now() + offsetDays * 864e5));
 const ago = (iso) => { if (!iso) return '없음'; const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 60 ? `${m}분 전` : m < 1440 ? `${Math.round(m / 60)}시간 전` : `${Math.round(m / 1440)}일 전`; };
-// 저장 실패는 알림 한 번으로 끝내지 않는다: 다시 저장될 때까지 화면 위에 계속 띄운다(메모리에만 있는 기록이 앱 종료로 사라지지 않게)
+// 저장 실패는 알림 한 번으로 끝내지 않는다: 다시 저장될 때까지 화면에 계속 띄운다(메모리에만 있는 기록이 앱 종료로 사라지지 않게)
 let saveFailed = false;
 function saveBanner(msg) {
   let b = document.getElementById('save-fail');
   if (!msg) { if (b) b.remove(); return; }
-  if (!b) { b = h('div', { id: 'save-fail', class: 'save-fail', role: 'alert' }); document.body.append(b); }
-  b.textContent = `${msg} 앱을 닫지 말고 이 창의 기록을 [결과 보내기] 또는 백업으로 먼저 내보내 주세요.`;
+  if (!b) {
+    b = h('div', { id: 'save-fail', class: 'save-fail', role: 'alert' },
+      h('details', {}, h('summary'), h('p', { class: 'save-fail-detail' })));
+    document.body.append(b);
+  }
+  b.querySelector('summary').textContent = `${msg.includes('공간') ? '저장 공간 부족' : '기록 저장 실패'} · 앱을 닫지 마세요`;
+  b.querySelector('.save-fail-detail').textContent = `${msg} 앱을 닫지 말고 이 창의 기록을 [결과 보내기] 또는 백업으로 먼저 내보내 주세요.`;
 }
 function commit() {
   const snapshot = JSON.parse(JSON.stringify(st));
@@ -459,19 +479,66 @@ const mdOf = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); retur
 // 빠르게 여러 번 눌러도 수량이 빠지지 않게: 화면 숫자는 바로 바꾸고 저장은 잠깐 모아서 한 번
 const stepFlush = new Map();  // 모아 두었다 저장할 수량 변경: 다른 동작(결과 저장·화면 이동) 전에 먼저 저장
 async function flushSteps() { for (const f of [...stepFlush.values()]) await f(); }
-function stepper(value, onChange, min = 0, max = 99, delay = 0, label = '') {
+async function quantityInput(value, min = 0, max = 9999, label = '수량') {
+  if (!st || !S.isUnlocked()) return null;
+  const ownerState = st, ownerHash = location.hash, controller = new AbortController();
+  const leave = () => controller.abort();
+  window.addEventListener('hashchange', leave, { once: true });
+  try {
+    const result = await sheet({ title: '수량 직접 입력', text: `${min}~${max} 사이의 정수를 입력하세요.`, signal: controller.signal,
+      input: { type: 'number', inputmode: 'numeric', label, value, min, max, step: 1,
+        validate: (raw) => /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw)) && Number(raw) >= min && Number(raw) <= max ? '' : `${min}~${max} 사이의 정수를 입력해 주세요.` },
+      choices: [{ label: '적용', value: true, cls: 'primary' }] });
+    return result && st === ownerState && location.hash === ownerHash && S.isUnlocked() ? Number(result.text) : null;
+  } finally { window.removeEventListener('hashchange', leave); }
+}
+function quantityValue(value, onChange, min = 0, max = 9999, label = '수량') {
+  const ownerState = st, ownerHash = location.hash, ownerForm = ui.form;
+  let ownerDialog = null;
+  const name = `${label} 직접 입력`;
+  const restore = () => {
+    if (st !== ownerState || location.hash !== ownerHash || ui.form !== ownerForm || !S.isUnlocked()) return;
+    const topDialog = [...document.querySelectorAll('dialog[open]')].at(-1);
+    if (topDialog && topDialog !== ownerDialog) return;
+    if (document.activeElement !== document.body && document.activeElement !== v && document.activeElement !== ownerDialog && document.activeElement?.isConnected) return;
+    const matches = [...(ownerDialog?.isConnected ? ownerDialog : document).querySelectorAll('.qty-value')].filter((e) => e.getAttribute('aria-label') === name && !e.disabled);
+    if (matches.length === 1) matches[0].focus({ preventScroll: true });
+  };
+  const v = btn(String(value), async () => {
+    ownerDialog = v.closest('dialog[open]');
+    const n = await quantityInput(Number(v.textContent), min, max, label);
+    if (n == null || !v.isConnected || st !== ownerState || location.hash !== ownerHash || ui.form !== ownerForm) return;
+    await onChange(n);
+    restore();
+  }, 'val qty-value', { 'aria-label': name });
+  v.restoreQuantityFocus = restore;
+  return v;
+}
+function stepper(value, onChange, min = 0, max = 99, delay = 0, label = '', options = {}) {
   let cur = value, timer = null;
+  let restoreValueFocus = false;
   const key = Symbol('step');
-  const v = h('span', { class: 'val', 'aria-live': 'polite' }, value);
+  const v = options.editable ? quantityValue(value, (n) => change(n, true), min, max, label) : h('span', { class: 'val', 'aria-live': 'polite' }, value);
   const minus = btn('−', () => bump(-1), 'step', { 'aria-label': `${label} 빼기`.trim(), disabled: value <= min });
   const plus = btn('+', () => bump(1), 'step', { 'aria-label': `${label} 더하기`.trim(), disabled: value >= max });
   function bump(dlt) {
     const n = Math.min(max, Math.max(min, cur + dlt));
+    return change(n);
+  }
+  function change(n, direct = false) {
     if (n === cur) return;
     cur = n; v.textContent = n; minus.disabled = n <= min; plus.disabled = n >= max;
     if (!delay) return onChange(cur);
+    restoreValueFocus = direct;
+    if (options.editable) v.disabled = true;
     clearTimeout(timer);
-    const fire = () => { clearTimeout(timer); stepFlush.delete(key); return onChange(cur); };
+    const fire = () => {
+      clearTimeout(timer); stepFlush.delete(key);
+      const result = onChange(cur), restore = restoreValueFocus;
+      const settled = () => { if (v.isConnected) v.disabled = false; if (restore) v.restoreQuantityFocus?.(); };
+      Promise.resolve(result).then(settled, settled);
+      return result;
+    };
     stepFlush.set(key, fire); timer = setTimeout(fire, delay);
   }
   return h('span', { class: 'stepper' }, minus, v, plus);
@@ -617,6 +684,7 @@ export {
   lineFromRow, liveMap, loadState, lockMs, lockNow, locking, lowSpaceWarned, mdOf,
   mergePrefs, nextSeq, normAddr, openExternal, openSheets, pcStops, pcWorkDate, pendingPhotos,
   photoFlushing, photoUrls, prefs, reduceMotion, registeredNow, reloadWanted, reloadWhenSafe, render,
+  quantityInput, quantityValue,
   routeStopId, saveBanner, saveFailed, savePhoto, saving, sessionChan, setLiveMap, setLockMs,
   setAutoLockEnabled, setPrefs, setRegisteredNow, setRender, setSt, settleWrites, sheet, smsTemplates, st,
   startCamera, stepFlush, stepper, stopCamera, storageLeft, tabBar, themeToggle, toast,

@@ -4,7 +4,7 @@ import * as P from './proto.js';
 import * as S from './store.js';
 import { searchFees } from './fees.js';
 import { won } from './fees.js';
-import { addEvent, btn, camera, commit, go, h, isIOS, launchApp, lineFromRow, render, sheet, st, toast, ui } from './core.js';
+import { addEvent, btn, camera, commit, go, h, isIOS, launchApp, lineFromRow, quantityValue, render, sheet, st, toast, ui } from './core.js';
 
 // [길안내]: 설정에서 고른 지도 앱(기본 카카오맵)을 목적지 좌표로 연다. 넘기는 것은 좌표와 "N번 수거지"(반입지는 "반입지")뿐 —
 // 이름·연락처·주소·접수번호는 넘기지 않는다(nav.js). 앱이 없으면(1.5초 안에 다른 앱으로 넘어가지 않으면) 웹 지도 또는 기본 지도 앱으로.
@@ -41,8 +41,19 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   const lineOf = (rid) => items.find((x) => x.fee_rate_id === rid && !locked.has(x.line_id));
   const qtyOf = (rid) => items.filter((x) => x.fee_rate_id === rid).reduce((a, x) => a + x.qty, 0);
   const setLine = (l, n) => {
+    if (!Number.isInteger(n) || n > 9999) { toast('수량은 1~9999 사이의 정수로 입력해 주세요.', 'bad'); return; }
     if (n <= 0) items.splice(items.indexOf(l), 1);
     else { l.qty = n; l.amount = l.price_status === 'CONFIRMED' ? l.unit_price * n : null; }
+  };
+  const setTotal = (r, total) => {
+    const editable = lineOf(r.id);
+    const fixed = qtyOf(r.id) - (editable?.qty || 0), n = total - fixed;
+    if (n < 0 || n > 9999 || !Number.isInteger(n)) return;
+    if (editable) setLine(editable, n);
+    else if (n) {
+      items.push(lineFromRow(r, n, table));
+      st.feeUsage = { ...(st.feeUsage || {}), [r.id]: ((st.feeUsage || {})[r.id] || 0) + 1 };
+    }
   };
   const bump = (r, d) => {
     const l = lineOf(r.id);
@@ -76,8 +87,8 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
         () => openSpecs(cat, nm), 'name-chip' + (n ? ' on' : ''), { 'aria-label': `${nm}${n ? ` (${n}개 담김)` : ''}${multi ? ' 규격 고르기' : ' 1개 담기'}` });
     }));
   };
-  const ctl = (n, onMinus, onPlus, name) => (n
-    ? h('span', { class: 'pick-ctl' }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), h('b', { class: 'val' }, n), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기` }))
+  const ctl = (n, onMinus, onPlus, name, onSet, min = 1, max = 9999) => (n
+    ? h('span', { class: 'pick-ctl' }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), quantityValue(n, onSet, min, max, `${name} 수량`), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기`, disabled: n >= max }))
     : btn('+ 담기', onPlus, 'opt pick-add', { ...keep, 'aria-label': `${name} 담기` }));
   // 즐겨찾기(☆): [자주 쓴] 맨 앞에 늘 나온다(이 휴대폰 안에서만)
   const toggleFav = async (rid) => {
@@ -87,17 +98,18 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   };
   const row = (r, specOnly = false) => {
     const n = qtyOf(r.id), name = `${r.name} ${r.spec}`.trim();
+    const fixed = n - (lineOf(r.id)?.qty || 0);
     const fav = (st.feeFavs || []).includes(r.id);
     return h('div', { class: 'pick-row' + (n ? ' on' : '') },
       specOnly ? null : btn(fav ? '★' : '☆', () => toggleFav(r.id), 'star pick-star' + (fav ? ' on' : ''), { ...keep, 'aria-label': fav ? `${name} 즐겨찾기 해제` : `${name} 즐겨찾기` }),
       h('div', { class: 'pick-info' }, h('strong', {}, specOnly && r.spec ? r.spec : name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
         r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 담김') : null),
-      ctl(n, () => bump(r, -1), () => bump(r, 1), name));
+      ctl(n, () => bump(r, -1), () => bump(r, 1), name, (value) => { setTotal(r, value); onChange(); draw(); redrawSheet(); }, Math.max(1, fixed), fixed + 9999));
   };
   const picked = () => items.map((l) => h('div', { class: 'pick-row on' },
     h('div', { class: 'pick-info' }, h('strong', {}, `${l.name} ${l.spec || ''}`.trim()),
       h('span', { class: 'p' }, l.price_status === 'CONFIRMED' ? `${won(l.unit_price)} / ${l.unit_label}` : '금액 확인 대기')),
-    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); onChange(); draw(); }, () => { setLine(l, l.qty + 1); onChange(); draw(); }, l.name)));
+    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); onChange(); draw(); }, () => { setLine(l, l.qty + 1); onChange(); draw(); }, l.name, (value) => { setLine(l, value); onChange(); draw(); })));
   const draw = () => {
     const out = [];
     drawTabs();

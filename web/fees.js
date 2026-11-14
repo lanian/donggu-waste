@@ -91,7 +91,8 @@ export function deriveStop(stop, events) {
   const byId = Object.fromEntries(lines.map((l) => [l.line_id, l]));
   let contact = 'NOT_CONTACTED', outcome = null, photos = [], loc = null, appt = null;
   const memos = [], stickers = {}, notices = [];
-  let arrive = null, noPhotoReason = null;
+  // 이전 결과 이력은 보존하고, 그 뒤 품목 변경은 화면에서 재확정하도록 표시한다.
+  let arrive = null, noPhotoReason = null, resultNeedsConfirmation = false;
   for (const e of mine) {
     const b = e.body || {};
     if (e.kind === 'CONTACT') contact = b.result;
@@ -100,9 +101,11 @@ export function deriveStop(stop, events) {
         fee_rate_id: b.fee_rate_id || null, price: b.price_status === 'CONFIRMED' ? b.unit_price : null,
         qty_received: 0, amount_received: 0, qty_confirmed: b.qty, qty_collected: 0, reason: '' };
       lines.push(l); byId[l.line_id] = l;
+      if (outcome) resultNeedsConfirmation = true;
     } else if (e.kind === 'ITEM_RESULT' && byId[b.line_id]) {
       Object.assign(byId[b.line_id], { qty_confirmed: b.qty_confirmed, qty_collected: b.qty_collected, reason: b.reason || '' });
-    } else if (e.kind === 'ATTEMPT') { outcome = b.outcome; noPhotoReason = b.no_photo_reason || null; }
+      if (outcome) resultNeedsConfirmation = true;
+    } else if (e.kind === 'ATTEMPT') { outcome = b.outcome; noPhotoReason = b.no_photo_reason || null; resultNeedsConfirmation = false; }
     else if (e.kind === 'STICKER_CHECK') stickers[b.line_id] = { result: b.result, number: b.number || '', decision: b.decision || null };
     else if (e.kind === 'FEE_NOTICE') notices.push({ ...b, ts: e.ts });
     else if (e.kind === 'ARRIVE') arrive = { ts: e.ts, lat: b.lat ?? null, lon: b.lon ?? null, acc: b.acc ?? null };
@@ -116,7 +119,7 @@ export function deriveStop(stop, events) {
   if (!loc && stop.lat != null && stop.lon != null) loc = { lat: stop.lat, lon: stop.lon };
   const fee = calcFee(lines, stop.reduction ? stop.reduction.rate : 0, stop.reduction ? stop.reduction.round_unit : 1);
   const notice = notices.length ? notices[notices.length - 1] : null;
-  return { lines, contact, outcome, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
+  return { lines, contact, outcome, resultNeedsConfirmation, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
     progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
 }
 // 수거 진행으로 세지 않는 기록 (연락·안내·위치 같은 것)
