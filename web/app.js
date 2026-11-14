@@ -23,7 +23,7 @@ import { screenFix, screenPcInputHelp, screenStop } from './screens/stop.js';
 import { screenUnload } from './screens/unload.js';
 
 setRender(render);  // 화면 모듈이 core 의 render() 로 다시 그릴 수 있게
-export const APP_VERSION = '0.14.17';
+export const APP_VERSION = '0.14.18';
 let renderSeq = 0;
 const listRoutes = ['#/home', '#/find'];
 const detailRoutes = ['stop', 'add', 'fix', 'intake', 'map', 'pick', 'pc-input'];
