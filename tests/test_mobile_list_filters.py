@@ -8,6 +8,37 @@ from test_review_ui import mobile_server
 from test_workflow_mobile import daylist, event, open_mobile, seed, stop
 
 
+def filter_targets(page, today):
+    records = [stop(21, today), stop(22, today, status='CANCELLED')]
+    for width in (360, 390, 430):
+        for text_size in ('xl', ''):
+            for mode in ('SOLO', 'PC'):
+                page.set_viewport_size({'width': width, 'height': 844})
+                patch = {'mode': mode, 'textSize': text_size}
+                patch.update({'requests': records} if mode == 'SOLO' else {'daylist': daylist(today, records)})
+                seed(page, patch, registered=mode == 'PC')
+                page.evaluate("async()=>{const C=await import('./core.js');C.applyTextSize();await C.render()}")
+                group = page.get_by_role('group', name='목록 거르기', exact=True)
+                group.scroll_into_view_if_needed()
+                bounds = group.evaluate("""el=>{
+                    const parent=el.getBoundingClientRect();
+                    return [...el.querySelectorAll('button')].map(button=>{
+                        const r=button.getBoundingClientRect();
+                        return {name:button.textContent,left:r.left,right:r.right,height:r.height,
+                            parentLeft:parent.left,parentRight:parent.right};
+                    });
+                }""")
+                assert all(b['left'] >= b['parentLeft'] and b['right'] <= b['parentRight'] + 1 for b in bounds), \
+                    f'{mode}/{width}/{text_size or "normal"}: 상태 선택지가 가로 스크롤 없이 모두 보여야 한다: {bounds}'
+                assert all(b['height'] >= 56 for b in bounds), bounds
+                last = group.get_by_role('button').last
+                last.click()
+                expect(page.get_by_role('group', name='목록 거르기', exact=True).get_by_role('button').last).to_have_attribute('aria-pressed', 'true')
+                assert page.get_by_role('group', name='목록 거르기', exact=True).evaluate('el=>el.scrollLeft') == 0
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    print('PASS: PC·단독 360/390/430 일반·XL 상태 필터 전체 노출·56px 터치·선택·가로 이동 없음', flush=True)
+
+
 def main():
     output = Path(os.environ.get('DG_TEST_DIR') or tempfile.mkdtemp(prefix='dg-list-filters-')) / 'shots'
     output.mkdir(parents=True, exist_ok=True)
@@ -19,6 +50,9 @@ def main():
         try:
             dates = seed(page)
             today, tomorrow = dates['today'], dates['tomorrow']
+            filter_targets(page, today)
+            page.set_viewport_size({'width': 390, 'height': 844})
+            page.evaluate("import('./core.js').then(C=>{C.st.textSize='';C.applyTextSize()})")
             records = [stop(i, today) for i in range(1, 6)]
             records[3]['status'] = 'CANCELLED'
             events = [event(1, 'ITEM_RESULT', line_id='line-1', qty_confirmed=1, qty_collected=1),

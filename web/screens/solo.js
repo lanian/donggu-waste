@@ -52,7 +52,7 @@ async function screenHomeSolo() {
     workerBar(), st.requests.length ? btn('수거 목록 바로 보기', () => {
       const title = document.getElementById('collection-list');
       title?.focus({ preventScroll: true }); title?.scrollIntoView({ block: 'start' });
-    }, 'ghost big') : null, ...(await homeBanners()),
+    }, 'ghost big list-jump') : null, ...(await homeBanners()),
     needBackup ? h('section', { class: 'card notice' },
       h('p', {}, `마지막 백업: ${ago(st.lastBackupAt)}. 휴대폰을 잃어버리거나 고장 나면 접수 원본이 사라집니다.`),
       btn('지금 백업', () => go('#/backup'), 'primary')) : null,
@@ -65,10 +65,10 @@ async function screenHomeSolo() {
         btn('백업·복원', () => go('#/backup'), 'big'),
         btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
     h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'),
+    view === 'TODAY' && lists.TODAY.length ? daySummary(lists.TODAY) : null,
     h('div', { class: 'tabs', role: 'group', 'aria-label': '목록 거르기' }, ...[['TODAY', `오늘 ${lists.TODAY.length}`], ['TOMORROW', `내일 ${lists.TOMORROW.length}`], ['OPEN', `미처리 ${open.length}`], ['CANCELLED', `취소 ${lists.CANCELLED.length}`]]
       .map(([k, t]) => btn(t, () => { ui.soloView = k; ui.reorder = false; render(); }, view === k ? 'tab on' : 'tab'))),
   ];
-  if (view === 'TODAY' && lists.TODAY.length) out.splice(out.indexOf(out.find((x) => x && x.classList && x.classList.contains('actions'))), 0, daySummary(lists.TODAY));
   out.push(dongs);
   out.push(stopSearch(lists[view].length));
   out.push(h('p', { class: 'small', role: 'status', 'aria-label': '목록 조회 결과' }, `${list.length}건 표시${ui.dong ? ` · ${ui.dong}` : ''}${ui.stopQ ? ' · 검색 적용' : ''}`));

@@ -27,7 +27,7 @@ function daySummary(items) {
 // 목록 찾기: 이름·연락처·주소·품목, 초성과 전화번호 뒷자리도 됨.
 function stopSearch(total) {
   const source = st, mode = st.mode, route = location.hash;
-  const q = h('input', { type: 'search', class: 'search', placeholder: '접수번호·이름·연락처·주소·품목', value: ui.stopQ || '', 'aria-label': '목록에서 찾기' });
+  const q = h('input', { type: 'search', class: 'search', id: 'stop-list-search', placeholder: '접수번호 또는 이름', value: ui.stopQ || '', 'aria-label': '목록에서 찾기', 'aria-describedby': 'stop-search-help' });
   const owner = () => st === source && st.mode === mode && location.hash === route;
   q.addEventListener('input', () => {
     if (!owner() || !q.isConnected) return;
@@ -41,7 +41,8 @@ function stopSearch(total) {
       if (el) { el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length); }
     }, 250);
   });
-  return q;
+  return h('div', { class: 'stop-search' }, h('label', { for: 'stop-list-search' }, '목록에서 찾기'), q,
+    h('p', { class: 'search-help', id: 'stop-search-help' }, '주소·품목·연락처 뒷자리·초성 지원'));
 }
 const stopHay = (s, d) => {
   const items = (d?.lines || s.items || []).map((i) => `${i.name || ''} ${i.spec || ''}`).join(' ');

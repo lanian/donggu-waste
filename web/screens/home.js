@@ -38,7 +38,7 @@ async function screenHome() {
   if (every.length) out.push(btn('수거 목록 바로 보기', () => {
     const title = document.getElementById('collection-list');
     title?.focus({ preventScroll: true }); title?.scrollIntoView({ block: 'start' });
-  }, 'ghost big'));
+  }, 'ghost big list-jump'));
   // 지난(또는 다음) 날짜 목록: 오늘 할 일로 보이지 않게 맨 위 큰 띠, '지금 갈 곳'·진행 띠는 숨김
   if (otherDay) out.push(h('section', { class: 'card day-banner' + (dl.work_date < todayKST() ? ' past' : ''), role: 'alert' },
     h('h2', {}, dl.work_date < todayKST() ? `${mdOf(dl.work_date)} 목록입니다 — 결과를 보내고 오늘 목록을 받으세요` : `${mdOf(dl.work_date)} 목록입니다 — 그날 업무용 목록입니다`),
@@ -77,7 +77,7 @@ async function screenHome() {
     title: '받은 목록의 수신 코드를 알려 주세요', detail: 'PC 담당자가 R-코드를 받아 적었는지 확인하세요. 알렸음 처리는 기존 수신 카드에서 직접 합니다.', label: '수신 코드 확인하기', run: () => { ui.receipt = null; go('#/received'); },
   };
   else if (nextStop) next = {
-    title: `${nextStop.s.seq}번 방문 결과를 이어서 기록하세요`, detail: `아직 방문 결과를 기록하지 않은 곳 ${unrecorded.length}곳 · 휴대폰의 방문 순서를 따릅니다.`,
+    title: `${nextStop.s.seq}번 방문 결과를 이어서 기록하세요`, detail: `방문 결과 미기록 ${unrecorded.length}곳 · 휴대폰 방문 순서 기준`,
     label: `${nextStop.s.seq}번 수거 이어가기`, run: () => go(`#/stop/${nextStop.s.request_id}`),
   };
   else if (n || waitingResult) next = {
@@ -105,7 +105,7 @@ async function screenHome() {
     out.push(h('p', { class: 'meta' }, (dl ? `${dl.work_date} ${dl.crew}` + (dl.assign_ver > 1 ? ` · 목록 ${dl.assign_ver}차` : '') : `${wd} · PC 목록 없음`) + (changed ? ` · 바뀐 곳 ${changed}` : '')
       + (fieldN ? ` · 현장 접수 ${fieldN}` : '') + (reordered ? ' · 순서 바꿈(이 휴대폰만)' : '')));
     if (!otherDay) out.push(daySummary(stops.filter((x) => !x.s.removed)));
-    out.push(h('div', { class: 'tabs', role: 'group', 'aria-label': '목록 거르기' },
+    out.push(h('div', { class: 'tabs pc-list-filters', role: 'group', 'aria-label': '목록 거르기' },
       ...[['ALL', `전체 ${stops.length}`], ['REMAIN', `남음 ${remain.length}`], ['HOLD', `재방문·보류 ${hold.length}`]].map(([k, t]) =>
         btn(t, () => { ui.filter = k; render(); }, ui.filter === k ? 'tab on' : 'tab'))));
     out.push(dongChips(stops));

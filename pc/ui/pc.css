@@ -1402,3 +1402,61 @@ table.conflicts tr.grp .row { gap: 6px; align-items: center; }
   .dong-workspace .dw-item-row { gap: 6px; flex-wrap: wrap; }
   .dong-workspace .dw-item-row > span:first-child { flex-basis: 100%; }
 }
+
+/* 공통 작업 컨트롤: 마우스 표 밀도는 유지하고 선택·입력·주동작의 역할을 구분한다. */
+@media screen {
+  :root {
+    --pc-control-height: 36px; --pc-control-compact: 30px; --pc-control-touch: 44px;
+    --pc-control-radius: 8px; --pc-support-size: .8667rem;
+  }
+  button, .btnlike { min-height: var(--pc-control-height); border-radius: var(--pc-control-radius); }
+  button.small { min-height: var(--pc-control-compact); }
+  .qchip.on { background: var(--navy-tint); color: var(--navy-ink); border: 2px solid var(--navy-2); padding: 2px 11px; font-weight: 700; }
+  .qchip.on b { color: inherit; }
+  button:disabled, button:disabled:hover,
+  .btnlike:has(input:disabled) {
+    opacity: 1; color: var(--muted); background: var(--disabled-bg); border-color: var(--line);
+    box-shadow: none; cursor: not-allowed;
+  }
+  button[aria-busy="true"]:disabled { cursor: progress; }
+  :is(input, select, textarea):disabled { opacity: 1; color: var(--muted); background: var(--disabled-bg); border-color: var(--line); }
+  :is(button, .btnlike):focus-visible,
+  :is(input, select, textarea):focus-visible {
+    outline: 3px solid var(--focus); outline-offset: 2px; box-shadow: 0 0 0 5px var(--focus-halo);
+  }
+  .today-dashboard .workflow-step p,
+  .today-dashboard .workflow-link,
+  .today-dashboard .kpi .k,
+  .today-dashboard .kpi .s,
+  .intake-form .intake-field-help,
+  .intake-form .intake-schedule > p.muted,
+  .intake-form .intake-location > p.muted {
+    font-size: var(--pc-support-size); line-height: 1.6;
+  }
+  @media (hover: hover) {
+    .qchip:not(.on):not(:disabled):hover { background: var(--hover-2); border-color: var(--navy-2); }
+    .qchip.on:not(:disabled):hover { background: var(--navy-tint); color: var(--navy-ink); }
+  }
+  /* 터치 환경의 주요 동작만 확대한다. 표 정렬·작은 달력·수량 스테퍼의 밀도는 보존한다. */
+  @media (pointer: coarse) {
+    .pagehead > button, .pagehead > .row > button,
+    .searchbox > .cond-btns > button,
+    .dlg-btns > button, .collection-footer button,
+    .intake-actionbar > button.primary, .login button.primary,
+    .waste-picker .wp-add-row > button.primary,
+    .dong-workspace .dw-actions > button,
+    .dispatch-tools > button, .dispatch-final button,
+    .workflow .workflow-primary, .btnlike {
+      min-height: var(--pc-control-touch); min-width: var(--pc-control-touch); touch-action: manipulation;
+    }
+    .searchbox .cond-v > :is(input:not([type="checkbox"]):not([type="radio"]), select),
+    .intake-form :is(input:not([type="checkbox"]):not([type="radio"]):not([type="number"]), select),
+    .collection-entry :is(input:not([type="checkbox"]):not([type="radio"]), select),
+    .login :is(input, select), .dong-workspace .dw-filters :is(input, select) {
+      min-height: var(--pc-control-touch);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :is(button, input, select, textarea, .btnlike) { transition: none; }
+  }
+}
