@@ -46,6 +46,8 @@
 /* ---- 바탕 ---- */
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; font-size: var(--fs); }
+/* 문서 경계의 세로 당김이 브라우저 새로고침으로 이어지지 않게 한다. */
+html, body { overscroll-behavior-y: contain; }
 body { word-break: keep-all; overflow-wrap: anywhere; margin: 0; background: var(--bg); color: var(--ink);
   font: 1rem/1.5 "Pretendard", system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
   font-variant-numeric: tabular-nums; -webkit-tap-highlight-color: transparent; }

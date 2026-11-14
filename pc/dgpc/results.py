@@ -59,9 +59,9 @@ CANCELLED_OK_KINDS = ("CONTACT", "DIAL_INTENT", "PHOTO_META", "ARRIVE", "SMS_INT
 def prepare_result(con, data: bytes) -> dict:
     """결과 파일 검증·복호(시간이 걸리는 서명 확인)만. 서버는 이 단계를 DB 잠금 밖(조회 전용 연결)에서 한다."""
     sha = hashlib.sha256(data).hexdigest()
-    prev = one(con, "SELECT summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
+    prev = one(con, "SELECT id, summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
     if prev:
-        return {"sha": sha, "duplicate": {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"]}}
+        return {"sha": sha, "duplicate": {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"], "import_id": prev["id"]}}
     dev_id, head, payload, release = _open_from_device(con, data, P.TYPE_RESULT)
     if payload.get("schema") != "dg.result/1":
         raise UserError("결과 파일 형식이 아닙니다.")
@@ -74,8 +74,8 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
         return prep["duplicate"]
     sha, dev_id, payload, release = prep["sha"], prep["dev_id"], prep["payload"], prep["release"]
     if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):  # 잠금 밖에서 검증하는 사이 같은 파일이 먼저 들어옴
-        prev = one(con, "SELECT summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
-        return {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"]}
+        prev = one(con, "SELECT id, summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
+        return {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"], "import_id": prev["id"]}
     crew = one(con, "SELECT id FROM crew WHERE device_id=?", (dev_id,))
     imp = str(uuid.uuid4())
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}

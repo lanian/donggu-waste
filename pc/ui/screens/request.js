@@ -2,7 +2,7 @@
 import * as M from '/web/map.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, sessionOwner, statusChip, toast, wrap } from '../core.js';
 import { itemPicker, mapIn } from '../widgets.js';
 import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
@@ -15,6 +15,12 @@ let intakeT0 = null, intakeSeen = 0;
 let dupAckKey = null;  // 중복 경고를 확인한 새 접수의 "연락처|주소"
 let justSaved = null;  // 방금 등록한 접수 id: 상세 위에 [+ 다음 접수]·[주민 안내 문구 복사]
 const staleMine = new Map();  // 409(다른 곳에서 바뀜) 뒤 [다시 열기]: 접수 id → 내가 적었던 값(다시 넣기용)
+// 같은 인증 세션에서 화면을 다시 열어도 저장·확인 작업을 이어서 보호한다(메모리에만 보관).
+const requestSessions = new WeakMap();
+const requestSessionTasks = (owner) => {
+  if (!requestSessions.has(owner)) requestSessions.set(owner, { saves: new Map(), reviews: new Map(), uncertain: new Set(), failed: new Map() });
+  return requestSessions.get(owner);
+};
 const FORM_LABEL = { name: '이름', phone: '연락처', address: '배출 주소', spot_note: '상세 배출 위치', memo: '요청 메모', planned_date: '수거 예정일', appt_start: '방문 약속 시작', appt_end: '방문 약속 끝', dong: '행정동', channel: '접수 경로' };
 const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
@@ -25,6 +31,8 @@ async function screenRequest(id) {
   const fromDraft = isNew && intakeDraft;
   if (isNew && !fromDraft) dupAckKey = null;  // 중복 경고 확인은 같은 작성 중 접수에만 유효 (새로 쓰기·다른 접수에는 다시 확인)
   const r = isNew ? { ...blank, ...(intakeDraft ? intakeDraft.r : {}), items: intakeDraft ? intakeDraft.items : [] } : await api('requests/' + id);
+  const reviewOwner = boot.me.username, reviewSession = sessionOwner(), reviewKey = id, reviewHash = location.hash;
+  const { saves: requestSaveTasks, reviews: fieldReviewTasks, uncertain: fieldReviewUncertain, failed: requestSaveFailures } = requestSessionTasks(reviewSession);
   let baseVer = r.req_ver;  // 이 화면이 연 접수 버전: 수정·취소·감면에 함께 보내고, 다르면 서버가 409
   const showDone = !isNew && justSaved === id; if (showDone) justSaved = null;
   const items = r.items.map((i) => ({ ...i }));
@@ -72,7 +80,7 @@ async function screenRequest(id) {
   F.phone.addEventListener('blur', () => { const d = F.phone.value.replace(/\D/g, ''); if (d.length === 11) F.phone.value = fmtPhone(d); });
   const lab = (t, el) => h('label', { class: 'f' }, t, el);
   const itemsBox = h('div', { class: 'items' });
-  let saveDraft = () => {};
+  let saveDraft = () => {}, syncFieldReview = () => {}, savingRequest = false;
   const total = h('p', { class: 'muted' + (isNew ? ' intake-total' : '') });
   const barTotal = h('span', { class: 'bar-total' });
   const drawItems = () => {
@@ -216,30 +224,47 @@ async function screenRequest(id) {
     staleNote.scrollIntoView({ block: 'center' });
   };
   const save = wrap(async () => {
-    if (isNew) {
-      if (dupAckKey !== dupKey()) {
-        await checkDup();
-        if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
+    if (savingRequest || requestSaveTasks.has(reviewKey) || fieldReviewTasks.has(reviewKey)) return;
+    let finishSave = () => {};
+    const saveSnapshot = isNew ? null : { data: data(), base: JSON.parse(baseSnap), reason: reason.value, ver: baseVer };
+    let saveOutcome = { ok: true };
+    const saveTask = isNew ? null : new Promise((resolve) => { finishSave = resolve; });
+    if (saveTask) requestSaveTasks.set(reviewKey, saveTask);
+    savingRequest = true; syncFieldReview();
+    try {
+      if (isNew) {
+        if (dupAckKey !== dupKey()) {
+          await checkDup();
+          if (dupBox.childNodes.length) { dupAckKey = dupKey(); msg.textContent = '비슷한 접수가 있습니다. 별개 접수가 맞으면 [접수 등록]을 한 번 더 누르세요.'; return; }
+        }
+        // 예정일을 비워 두면 가장 빠른 가능일을 권한다(예정일 없는 접수는 배정·마감에서 빠지기 쉽다)
+        if (!F.planned_date.value) {
+          if (earliest == null) await loadCal();
+          const e = earliest;
+          const v = await modal({ title: '수거 예정일이 비어 있습니다', ok: e ? '이 날로 정하고 등록' : '예정일 없이 등록', cancel: '돌아가기',
+            extra: e ? [{ label: '예정일 없이 등록', value: 'NONE' }] : [],
+            body: [h('p', {}, e ? `가장 빠른 가능일은 ${e.slice(5).replace('-', '월 ')}일입니다(${F.dong.value || '전체'} 기준). 이 날로 정할까요?` : '120일 안에 여유 있는 날이 없습니다. 예정일 없이 등록할까요?'),
+              h('p', { class: 'muted small' }, '예정일 없는 접수는 오늘 현황의 [예정일 없음]에 모입니다.')] });
+          if (!v) return;
+          if (v === true && e) { F.planned_date.value = e; saveDraft(); loadCal(); }
+        }
+        const res = await postOnce('intake', 'requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
+        intakeDraft = null; dupAckKey = null; intakeT0 = null; justSaved = res.id;
+        toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
+      } else {
+        let res;
+        try { res = await post('requests/' + id, { ...data(), reason: reason.value, req_ver: baseVer }); } catch (e) { if (isStale(e)) { if (sameReview()) showStale(); throw new Error('다른 곳에서 바뀌어 저장하지 않았습니다.'); } throw e; }
+        if (sessionOwner() === reviewSession) staleMine.delete(id);
+        requestSaveFailures.delete(id);
+        if (sameReview()) { toast(res.resend_needed ? '수정했습니다. 이미 배정된 건이라 목록 재전송이 필요합니다.' : '수정했습니다'); (res.warnings || []).forEach((w) => toast(w, true)); render(); }
       }
-      // 예정일을 비워 두면 가장 빠른 가능일을 권한다(예정일 없는 접수는 배정·마감에서 빠지기 쉽다)
-      if (!F.planned_date.value) {
-        if (earliest == null) await loadCal();
-        const e = earliest;
-        const v = await modal({ title: '수거 예정일이 비어 있습니다', ok: e ? '이 날로 정하고 등록' : '예정일 없이 등록', cancel: '돌아가기',
-          extra: e ? [{ label: '예정일 없이 등록', value: 'NONE' }] : [],
-          body: [h('p', {}, e ? `가장 빠른 가능일은 ${e.slice(5).replace('-', '월 ')}일입니다(${F.dong.value || '전체'} 기준). 이 날로 정할까요?` : '120일 안에 여유 있는 날이 없습니다. 예정일 없이 등록할까요?'),
-            h('p', { class: 'muted small' }, '예정일 없는 접수는 오늘 현황의 [예정일 없음]에 모입니다.')] });
-        if (!v) return;
-        if (v === true && e) { F.planned_date.value = e; saveDraft(); loadCal(); }
-      }
-      const res = await postOnce('intake', 'requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
-      intakeDraft = null; dupAckKey = null; intakeT0 = null; justSaved = res.id;
-      toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
-    } else {
-      let res;
-      try { res = await post('requests/' + id, { ...data(), reason: reason.value, req_ver: baseVer }); } catch (e) { if (isStale(e)) { showStale(); throw new Error('다른 곳에서 바뀌어 저장하지 않았습니다.'); } throw e; }
-      staleMine.delete(id);
-      toast(res.resend_needed ? '수정했습니다. 이미 배정된 건이라 목록 재전송이 필요합니다.' : '수정했습니다'); (res.warnings || []).forEach((w) => toast(w, true)); render();
+    } catch (e) {
+      saveOutcome = { ok: false, ...saveSnapshot, error: e.message };
+      if (saveTask && !sameReview()) requestSaveFailures.set(reviewKey, saveOutcome);
+      throw e;
+    } finally {
+      if (saveTask && requestSaveTasks.get(reviewKey) === saveTask) requestSaveTasks.delete(reviewKey);
+      savingRequest = false; finishSave(saveOutcome); syncFieldReview();
     }
   }, msg);
   const cancel = wrap(async () => {
@@ -254,14 +279,14 @@ async function screenRequest(id) {
   }, msg);
   const editable = r.status !== 'CANCELLED' && canWork();
   // 작성 중인 새 접수는 메모리에 담아 둔다
-  saveDraft = () => { if (isNew) intakeDraft = { r: { ...data(), must_today: F.must_today.checked ? 1 : 0, urgent: F.urgent.checked ? 1 : 0 }, items: items.map((i) => ({ ...i })) }; };
+  saveDraft = () => { if (isNew) intakeDraft = { r: { ...data(), must_today: F.must_today.checked ? 1 : 0, urgent: F.urgent.checked ? 1 : 0 }, items: items.map((i) => ({ ...i })) }; syncFieldReview(); };
 
   // 유사 품목 적용: 표에 없는 품목(확인 대기)을 단가가 확정된 수수료표 행에 연결 (근거·확인자 기록)
   let linkOpen = null;
   const linkBox = (l) => {
     document.querySelectorAll('tr.linkrow').forEach((tr) => { tr.hidden = tr.dataset.line !== linkOpen; });
     const tr = document.querySelector(`tr.linkrow[data-line="${l.line_id}"]`); if (!tr || tr.hidden) return;
-    const q = h('input', { type: 'search', placeholder: `${l.name}와 비슷한 품목 찾기 (단위: ${l.unit_label})`, style: 'width:320px' });
+    const q = h('input', { type: 'search', 'aria-label': '유사 품목 검색', value: [l.name, l.spec].filter(Boolean).join(' '), placeholder: `${l.name}와 비슷한 품목 찾기 (단위: ${l.unit_label})`, style: 'width:320px' });
     const res = h('div', { class: 'results' }); let sel = null;
     const why = h('input', { placeholder: '적용 근거 (예: 같은 재질·크기, 담당 부서 확인)', style: 'flex:1;min-width:260px' });
     const who = h('input', { placeholder: '확인자', value: boot.me.display_name, style: 'width:140px' });
@@ -270,6 +295,7 @@ async function screenRequest(id) {
       h('button', { type: 'button', class: sel === x.id ? 'on' : '', onclick: () => { sel = x.id; draw(); } }, `${x.name} ${x.spec}`, h('span', { class: 'p' }, `${won(x.price)} / ${x.unit_label}`),
         x.unit_label !== l.unit_label ? h('span', { class: 'w' }, '단위 다름') : null)));
     q.addEventListener('input', () => { sel = null; draw(); });
+    draw();
     tr.firstChild.replaceChildren(h('div', { class: 'linkbox' }, q, res, h('div', { class: 'row' }, why, who,
       btn('적용', wrap(async () => { if (!sel) throw new Error('적용할 품목 행을 고르세요.'); await post(`requests/${id}/link`, { line_id: l.line_id, fee_rate_id: sel, reason: why.value, confirmed_by: who.value }); toast('유사 품목 단가를 적용했습니다'); linkOpen = null; afterAction(); }, m), 'primary'), m),
       h('p', { class: 'small muted' }, '단가가 확정된 행만, 부과단위가 같은 행만 적용됩니다. 원래 품목 이름은 그대로 두고 적용 기록을 따로 남깁니다.')));
@@ -278,6 +304,7 @@ async function screenRequest(id) {
 
   // 현장 결과 (아래 카드들은 수정 양식과 따로 다시 그린다: 수납·통화 기록을 남겨도 적던 수정 내용이 지워지지 않게)
   const fieldCard = (r) => { const st = r.state; return !isNew && st ? h('div', { class: 'card' }, h('h2', {}, '현장 결과'),
+    st.fee.pending_count ? h('div', { class: 'notice warn', role: 'status', 'aria-label': '금액 확인 대기' }, `금액 확인 대기 ${st.fee.pending_count}건 — 사무실 확인과 단가 확정은 별도입니다. 아래 [유사 품목 적용]에서 품목을 직접 고르고 근거·확인자를 기록하세요.`) : null,
     canWork() && r.status !== 'CANCELLED' && !r.pii_purged_at ? collectionButton(r, { current: () => form.isConnected,
       before: () => unchangedCollectionItems(items, r.items),
       after: async (result, authOwner) => {
@@ -310,6 +337,64 @@ async function screenRequest(id) {
   // 수정 양식에 저장하지 않은 내용이 있는지(처음 그린 값과 비교)
   let baseSnap = null;
   const dirty = () => !isNew && baseSnap != null && JSON.stringify(data()) !== baseSnap;
+  let checkedAt = r.field_checked_at, checkedBy = r.field_checked_by, frozenReviewInputs = null, reviewReturnFocus = false, saveNeedsReview = false;
+  const fieldReviewText = h('span', { role: 'status', tabindex: '-1' }), fieldReviewHint = h('p', { class: 'small', role: 'status' }), fieldReviewMsg = h('span', { class: 'msg' });
+  const sameReview = () => form.isConnected && location.hash === reviewHash && sessionOwner() === reviewSession && boot?.me?.username === reviewOwner;
+  const freezeReviewInputs = (freeze) => {
+    if (freeze && !frozenReviewInputs) {
+      frozenReviewInputs = [...form.querySelectorAll('input, select, textarea, button')].map((el) => [el, el.disabled]);
+      frozenReviewInputs.forEach(([el]) => { el.disabled = true; });
+    } else if (!freeze && frozenReviewInputs) {
+      frozenReviewInputs.forEach(([el, disabled]) => { el.disabled = disabled; }); frozenReviewInputs = null;
+    }
+  };
+  const settleReview = (result) => {
+    if (!sameReview()) return;
+    freezeReviewInputs(false);
+    if (result.fresh?.field_checked_at) {
+      checkedAt = result.fresh.field_checked_at; checkedBy = result.fresh.field_checked_by;
+      fieldReviewMsg.textContent = ''; fieldReviewMsg.className = 'msg';
+    } else if (result.error) { fieldReviewMsg.textContent = result.error.message; fieldReviewMsg.className = 'err'; }
+    syncFieldReview();
+    if (reviewReturnFocus && (document.activeElement === document.body || document.activeElement === fieldReviewButton)) (checkedAt ? fieldReviewText : fieldReviewButton)?.focus();
+  };
+  const fieldReviewButton = !isNew && r.origin_device && !checkedAt && canWork() ? btn('확인 완료', async () => {
+    if (!sameReview() || savingRequest || requestSaveTasks.has(reviewKey) || saveNeedsReview || fieldReviewTasks.has(reviewKey)) return;
+    if (dirty()) { syncFieldReview(); form.querySelector('[data-save]')?.focus(); return; }
+    reviewReturnFocus = document.activeElement === fieldReviewButton;
+    fieldReviewMsg.textContent = ''; fieldReviewMsg.className = 'msg';
+    const task = (async () => {
+      let failure = null;
+      try {
+        // 응답 유실 뒤에는 저장 여부부터 확인한다. 확인 단추가 접수 수정 버전을 만들지는 않는다.
+        if (fieldReviewUncertain.has(reviewKey)) {
+          const fresh = await api('requests/' + id, { _prefsOwner: reviewSession, timeoutMs: 15000 });
+          if (fresh.field_checked_at) { fieldReviewUncertain.delete(reviewKey); return { fresh }; }
+          if (boot?.me?.username !== reviewOwner) throw new Error('접속 계정이 바뀌었습니다.');
+        }
+        fieldReviewUncertain.add(reviewKey);
+        try { await api(`requests/${id}/field-check`, { method: 'POST', _prefsOwner: reviewSession }); } catch (e) { failure = e; }
+        const fresh = await api('requests/' + id, { _prefsOwner: reviewSession, timeoutMs: 15000 });
+        if (fresh.field_checked_at) { fieldReviewUncertain.delete(reviewKey); return { fresh }; }
+        if (failure?.status) fieldReviewUncertain.delete(reviewKey);
+        return { error: failure || new Error('사무실 확인 상태를 다시 확인해 주세요.') };
+      } catch (e) { return { error: new Error(failure ? `${failure.message} · 확인 상태를 불러오지 못했습니다. 다시 누르면 저장 여부부터 조회합니다.` : e.message) }; }
+    })();
+    fieldReviewTasks.set(reviewKey, task); freezeReviewInputs(true); syncFieldReview();
+    const result = await task;
+    if (fieldReviewTasks.get(reviewKey) === task) fieldReviewTasks.delete(reviewKey);
+    settleReview(result);
+  }, 'small primary') : null;
+  syncFieldReview = () => {
+    if (isNew || !r.origin_device) return;
+    const pending = fieldReviewTasks.has(reviewKey);
+    const saving = savingRequest || requestSaveTasks.has(reviewKey);
+    fieldReviewText.textContent = checkedAt ? `— ${kst(checkedAt)} 사무실 확인 (${checkedBy || '-'})` : '— 주소·동·품목을 검토하고, 고친 내용은 [수정 저장]한 뒤 [확인 완료]를 누르세요. 단가 확정은 아래 금액 확인 대기에서 따로 처리합니다.';
+    fieldReviewText.parentElement?.classList.toggle('warn', !checkedAt);
+    fieldReviewText.parentElement?.classList.toggle('info', !!checkedAt);
+    fieldReviewHint.textContent = pending ? '사무실 확인 처리 중입니다. 중복 전송하지 않고 저장 여부를 확인합니다.' : saving ? '수정 내용을 저장하고 있습니다. 저장이 끝나면 최신 내용을 불러옵니다.' : saveNeedsReview ? (requestSaveFailures.has(id) ? '수정 저장에 실패했습니다. [내 값 다시 넣기]로 복구해 저장하거나 [버리기]를 선택하세요.' : '다른 화면의 저장이 끝났습니다. [다시 열기]로 최신 내용을 확인하세요.') : dirty() && !checkedAt ? '수정 내용을 먼저 저장한 뒤 확인 완료를 누르세요.' : '';
+    if (fieldReviewButton) { fieldReviewButton.hidden = !!checkedAt; fieldReviewButton.disabled = !!checkedAt || pending || saving || saveNeedsReview || dirty(); fieldReviewButton.setAttribute('aria-busy', String(pending || saving)); }
+  };
   const lower = h('div', { class: 'req-lower' });
   const versionsCard = (rr) => (rr.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...rr.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${kst(v.at)} · ${v.reason}`)))) : null);
   const ctx = { ver: () => baseVer, stale: () => showStale(), after: () => afterAction() };
@@ -357,10 +442,7 @@ async function screenRequest(id) {
     fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; reqDone('intake'); intakeT0 = Date.now(); render(true); }, 'small')) : null,
     showDone ? h('div', { class: 'notice ok-note', role: 'status' }, h('strong', {}, `${r.receipt_no} 등록을 마쳤습니다. `), r.levy_no ? `부과번호 ${r.levy_no} · ` : '', '주민에게 안내 문구를 보내거나 다음 전화를 받으세요. ',
       btn('+ 다음 접수', () => { intakeDraft = null; dupAckKey = null; go('#/request/new'); }, 'small primary'), ' ', btn('주민 안내 문구 복사', wrap(() => copyNotice(id)), 'small')) : null,
-    !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn') }, h('strong', {}, '휴대폰 현장 접수 '),
-      r.field_checked_at ? `— ${kst(r.field_checked_at)} 사무실 확인 (${r.field_checked_by || '-'})` : '— 수거팀이 현장에서 받은 접수입니다. 주소·동·품목·금액을 확인하고 필요하면 고친 뒤 [확인 완료]를 누르세요. ',
-      !r.field_checked_at && canWork() ? btn('확인 완료', wrap(async (e) => { const b = e.currentTarget; await post(`requests/${id}/field-check`); toast('현장 접수를 확인했습니다');
-        if (dirty()) { b.replaceWith(h('span', {}, `— 방금 사무실 확인 (${boot.me.display_name})`)); } else render(true); }), 'small primary') : null) : null,
+    !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn'), 'aria-label': '현장 접수 사무실 확인' }, h('strong', {}, '휴대폰 현장 접수 '), fieldReviewText, ' ', fieldReviewButton, fieldReviewHint, fieldReviewMsg) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
     r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
     h('div', { class: 'grid2' + (isNew ? ' intake-grid' : '') },
@@ -398,14 +480,31 @@ async function screenRequest(id) {
     lower);
   lower.replaceChildren(...lowerCards(r).filter(Boolean));
   baseSnap = JSON.stringify(data());
+  syncFieldReview();
+  const previousReview = fieldReviewTasks.get(reviewKey);
+  if (previousReview) { freezeReviewInputs(true); previousReview.then((result) => {
+    if (fieldReviewTasks.get(reviewKey) === previousReview) fieldReviewTasks.delete(reviewKey);
+    settleReview(result);
+  }); }
+  const previousSave = requestSaveTasks.get(reviewKey);
+  if (previousSave) { freezeReviewInputs(true); previousSave.then((result) => {
+    if (!sameReview()) return;
+    // 재진입 양식은 저장이 끝날 때까지 읽기 전용이다. 프로그램으로 바뀐 값도 강제로 덮지 않는다.
+    if (dirty()) { freezeReviewInputs(false); saveNeedsReview = true; if (result.error) { fieldReviewMsg.textContent = result.error; fieldReviewMsg.className = 'err'; } showStale(); syncFieldReview(); }
+    else render(true);
+  }); }
   // 409 뒤 다시 연 화면: 내가 적었던 값을 보여 주고 [내 값 다시 넣기]
-  const mine = !isNew && staleMine.get(id);
+  let failedMine = !isNew && requestSaveFailures.get(id);
+  // 응답만 유실되고 제출 내용이 이미 저장됐으면 같은 수정을 다시 저장하도록 안내하지 않는다.
+  if (failedMine && r.req_ver > failedMine.ver && JSON.stringify(data()) === JSON.stringify(failedMine.data)) { requestSaveFailures.delete(id); failedMine = null; }
+  const mine = !isNew && (failedMine || staleMine.get(id));
   if (mine) {
+    if (failedMine) { saveNeedsReview = true; fieldReviewMsg.textContent = failedMine.error; fieldReviewMsg.className = 'err'; syncFieldReview(); }
     const norm = (k, v) => (k === 'phone' ? digitsOnly(v) : String(v ?? ''));
     // 내가 고친 칸만(처음 연 값과 다른 칸): 다른 사람이 바꾼 칸은 그대로 둔다
     const diffs = Object.keys(FORM_LABEL).filter((k) => norm(k, mine.data[k]) !== norm(k, mine.base[k]));
     const itemsTxt = (arr) => arr.map((i) => `${i.name} ${i.spec || ''} ${i.qty}`).join(', ');
-    const itemsDiff = itemsTxt(mine.data.items) !== itemsTxt(mine.base.items);
+    const itemsDiff = JSON.stringify(mine.data.items) !== JSON.stringify(mine.base.items);
     const flagDiff = ['must_today', 'urgent', 'priority'].filter((k) => String(mine.data[k]) !== String(mine.base[k]));
     const geoDiff = String(mine.data.lat) !== String(mine.base.lat) || String(mine.data.lon) !== String(mine.base.lon);
     const refill = () => {
@@ -415,12 +514,12 @@ async function screenRequest(id) {
       if (flagDiff.includes('priority')) F.priority.value = String(mine.data.priority ?? 0);
       if (geoDiff && mine.data.lat != null) { F.lat.value = mine.data.lat; F.lon.value = mine.data.lon; geoSource = mine.data.geo_source; }
       if (itemsDiff) { items.splice(0, items.length, ...mine.data.items.map((i) => ({ ...(r.items.find((x) => x.line_id && x.line_id === i.line_id) || {}), ...i }))); drawItems(); }
-      reason.value = mine.reason || ''; staleMine.delete(id); mineBox.remove(); loadCal(); toast('내가 적었던 값을 다시 넣었습니다. 확인하고 [수정 저장]을 누르세요.');
+      reason.value = mine.reason || ''; staleMine.delete(id); requestSaveFailures.delete(id); saveNeedsReview = false; mineBox.remove(); loadCal(); saveDraft(); toast('내가 적었던 값을 다시 넣었습니다. 확인하고 [수정 저장]을 누르세요.');
     };
-    const mineBox = h('div', { class: 'notice info mine-box' }, h('strong', {}, '바뀐 내용을 다시 불러왔습니다. '), diffs.length || itemsDiff || flagDiff.length || geoDiff ? '내가 고쳤던 값(아직 저장 안 됨):' : '내가 고친 칸은 없었습니다.',
+    const mineBox = h('div', { class: 'notice info mine-box' }, h('strong', {}, failedMine ? '수정 저장에 실패했습니다. 적었던 내용을 보관했습니다. ' : '바뀐 내용을 다시 불러왔습니다. '), diffs.length || itemsDiff || flagDiff.length || geoDiff ? '내가 고쳤던 값(아직 저장 안 됨):' : '내가 고친 칸은 없었습니다.',
       h('ul', {}, ...diffs.map((k) => h('li', {}, `${FORM_LABEL[k]}: `, h('b', {}, mine.data[k] || '(비움)'), h('span', { class: 'muted' }, ` (지금 ${r[k] || '(비움)'})`))),
         itemsDiff ? h('li', {}, '품목: ', h('b', {}, itemsTxt(mine.data.items) || '(없음)')) : null),
-      h('div', { class: 'row' }, btn('내 값 다시 넣기', refill, 'small primary'), btn('버리기', () => { staleMine.delete(id); mineBox.remove(); }, 'small')));
+      h('div', { class: 'row' }, btn('내 값 다시 넣기', refill, 'small primary'), btn('버리기', () => { staleMine.delete(id); requestSaveFailures.delete(id); saveNeedsReview = false; mineBox.remove(); fieldReviewMsg.textContent = ''; syncFieldReview(); }, 'small')));
     form.insertBefore(mineBox, form.children[1] || null);
   }
   return form;

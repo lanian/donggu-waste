@@ -357,6 +357,46 @@ def diag(con, state_dir: Path | None = None) -> dict:
                      "refund_sync": g("last_refund_sync").get("at")}}
 
 
+# ------------------------------------------------------------------ 가져온 현장 접수·추가 품목의 사무실 확인
+def import_field_review(con, import_id: str) -> dict | None:
+    """기존 가져오기/접수에 연결하는 조회. 새 접수나 이벤트를 만들지 않는다."""
+    if not S.one(con, "SELECT id FROM result_import WHERE id=?", (import_id,)):
+        return None
+    events = S.rows(con, """SELECT event_id,request_id,kind,body_json,apply_status FROM result_event
+        WHERE import_id=? AND kind IN ('FIELD_INTAKE','FIELD_ITEM_ADD') ORDER BY rowid""", (import_id,))
+    grouped = {}
+    for event in events:
+        rid = event['request_id']
+        if rid not in grouped:
+            request = S.one(con, 'SELECT id,receipt_no,status,field_checked_at FROM request WHERE id=?', (rid,))
+            pending = S.get_request(con, rid)['state']['fee']['pending_count'] if request else 0
+            grouped[rid] = {'request_id': rid, 'receipt_no': request['receipt_no'] if request else None,
+                            'status': request['status'] if request else None, 'exists': bool(request),
+                            'field_checked_at': request['field_checked_at'] if request else None,
+                            'has_field_intake': False, 'added_items': [], 'has_conflict': False,
+                            'has_rejected': False, 'price_pending': pending, 'event_ids': []}
+        item = grouped[rid]
+        item['event_ids'].append(event['event_id'])
+        item['has_conflict'] |= event['apply_status'] == 'CONFLICT'
+        item['has_rejected'] |= event['apply_status'] == 'REJECTED'
+        if event['kind'] == 'FIELD_INTAKE':
+            item['has_field_intake'] = True
+        else:
+            body = json.loads(event['body_json'] or '{}')
+            item['added_items'].append({'name': body.get('name') or '', 'spec': body.get('spec') or '',
+                                       'qty': body.get('qty'), 'unit_label': body.get('unit_label') or '',
+                                       'apply_status': event['apply_status'], 'event_id': event['event_id']})
+    items = list(grouped.values())
+    return {'import_id': import_id, 'items': items, 'counts': {
+        'requests': len(items),
+        'field_intakes': len({event['request_id'] for event in events if event['kind'] == 'FIELD_INTAKE'
+                              and event['apply_status'] == 'APPLIED' and grouped[event['request_id']]['exists']}),
+        'added_items': sum(event['kind'] == 'FIELD_ITEM_ADD' and event['apply_status'] == 'APPLIED' for event in events),
+        'conflicts': sum(event['apply_status'] == 'CONFLICT' for event in events),
+        'pending_prices': sum(bool(item['price_pending']) for item in items),
+    }}
+
+
 # ------------------------------------------------------------------ 최근 가져오기 (확인 코드 다시 보기)
 def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dict]:
     """최근 결과·사진 가져오기: 팀·기기·시각·건수·휴대폰 확인 코드(결과/사진)·휴대폰이 받았는지(phone_confirmed).

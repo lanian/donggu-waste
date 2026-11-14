@@ -85,6 +85,7 @@ jobs:
       - run: python tests/test_pc_collection.py
       - run: python tests/test_pc_collection_api.py
       - run: python tests/test_date_visibility_api.py
+      - run: python tests/test_pc_import_field_review_api.py
       - run: python tests/test_vworld.py
       - run: python tests/test_pc_reports.py
       - run: python tests/test_pc_labels.py
@@ -118,6 +119,8 @@ jobs:
           - test_dong_centers_ui
           - test_fee_calculator_ui
           - test_pc_collection_ui
+          - test_pc_field_import_ui
+          - test_pc_field_review_ui
           - test_collection_quick_ui
           - test_mobile_collection_save
           - test_mobile_auto_lock

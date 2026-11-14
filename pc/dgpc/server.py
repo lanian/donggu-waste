@@ -1147,6 +1147,12 @@ class Handler(BaseHTTPRequestHandler):
         """최근 가져오기(수거팀은 자기 팀 휴대폰만)."""
         return OPS.recent_imports(self.c, int(qs.get("limit") or 30), self.crew_scope())
 
+    @endpoint("GET", "imports/{id}/field-review", VIEW)
+    def ep_import_field_review(self, qs, iid):
+        """가져온 현장 접수·추가 품목 확인(사무실 조회 전용, 개인정보 본문 제외)."""
+        result = OPS.import_field_review(self.c, iid)
+        return result if result is not None else json_status({"error": "결과 가져오기를 찾을 수 없습니다."}, 404)
+
     @endpoint("GET", "pending", VIEW)
     def ep_pending(self, qs):
         """처리할 일(대시보드)."""

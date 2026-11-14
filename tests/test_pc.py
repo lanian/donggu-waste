@@ -2677,7 +2677,8 @@ def v13_refactor():
     # 정리 전 권한 스냅샷은 유지하고, 새 기능의 허용 역할을 명시적으로 추가한다.
     for method, paths, roles in (
         ("GET", ("reports/daily", "reports/monthly", "reports/daily.csv", "reports/monthly.csv",
-                 "numbered-labels", "numbered-labels/{id}/history", "label-usage", "label-auto", "reports/forms"), ("ADMIN", "INTAKE", "LEAD")),
+                 "numbered-labels", "numbered-labels/{id}/history", "label-usage", "label-auto", "reports/forms",
+                 "imports/{id}/field-review"), ("ADMIN", "INTAKE", "LEAD")),
         ("POST", ("numbered-labels/receive", "numbered-labels/distribute", "numbered-labels/{id}/use",
                   "numbered-labels/{id}/void", "numbered-labels/stock-dong", "label-auto/sync", "reports/forms/download", "requests/{id}/collection"), ("ADMIN", "INTAKE")),
         ("POST", ("numbered-labels/{id}/print", "reports/print"), ("ADMIN", "INTAKE", "LEAD")),
@@ -2694,7 +2695,7 @@ def v13_refactor():
         if (entry["method"], entry["path"]) in self_routes:
             entry["roles"] = (*entry["roles"], "DONG")
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서·센터 차고지")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서·센터 차고지·가져온 현장 확인")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
     ok(not diff, f"기존 권한과 명시한 동별 업무·자기 정보 권한만 허용 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")

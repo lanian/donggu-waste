@@ -1,6 +1,6 @@
 // PC 화면: 결과·사진 가져오기·충돌함·단독 휴대폰 옮기기
 import { Collector } from '/web/proto.js';
-import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, statusChip, toast, wrap } from '../core.js';
 import { loadJsQR } from '../widgets.js';
 import { refreshBadges } from './home.js';
 
@@ -12,6 +12,56 @@ const IMP_LABEL = { applied: '반영', skipped_duplicate: '중복 건너뜀', co
 const impSummary = (r) => Object.entries(r || {}).filter(([k, v]) => IMP_LABEL[k] && typeof v === 'number' && v).map(([k, v]) => `${IMP_LABEL[k]} ${v}`).join(' · ') || '변경 없음';
 const IMP_KIND = { RESULT: '결과', PHOTO: '사진', SOLO: '단독 옮김', PC: 'PC 수거 입력' };
 async function screenResults() {
+  const screen = h('div');
+  const owner = sessionOwner(), username = boot.me.username;
+  const canReviewField = ['ADMIN', 'INTAKE', 'LEAD'].includes(boot.me.role);
+  const active = () => screen.isConnected && location.hash.split('?')[0] === '#/results'
+    && sessionOwner() === owner && boot?.me?.username === username;
+  const openConflicts = (importId) => async (e) => {
+    e.preventDefault();
+    if (!conf.querySelector(`tr.ev[data-import="${CSS.escape(importId)}"]`)) {
+      confTab = 'ALL';
+      await loadConf();
+    }
+    if (!active()) return;
+    const choice = conf.querySelector('select');
+    if (choice && [...choice.options].some((x) => x.value === importId)) choice.value = importId;
+    (conf.querySelector(`tr.ev[data-import="${CSS.escape(importId)}"]`) || conf).scrollIntoView({ block: 'center' });
+  };
+  // 가져오기별 실제 접수 ID만 사용한다. 현장 접수·품목은 이미 반영되므로 두 번째 접수를 만들지 않는다.
+  const fieldReview = (importId) => {
+    const body = h('div', { 'aria-live': 'polite' });
+    const el = h('section', { class: 'field-review', 'data-import': importId, 'aria-label': '가져온 현장 내용 확인' },
+      h('h3', {}, '가져온 현장 내용 확인'), body);
+    let generation = 0;
+    const load = async () => {
+      const mine = ++generation;
+      body.replaceChildren(h('p', { class: 'muted small', role: 'status' }, '현장 내용을 불러오는 중…'));
+      try {
+        const result = await api(`imports/${encodeURIComponent(importId)}/field-review`);
+        if (mine !== generation || !active() || !el.isConnected) return;
+        body.replaceChildren(h('p', { class: 'muted small' }, result.items.length
+          ? '접수를 다시 만들지 말고 아래 접수에서 확인하세요. 충돌 기록은 충돌함에서 판단합니다.'
+          : '이 가져오기에는 새 현장 접수나 추가 품목이 없습니다.'),
+          ...result.items.map((x) => h('div', { class: 'notice small field-review-item', 'data-request': x.request_id },
+            h('div', { class: 'row' }, x.exists ? h('a', { href: `#/request/${encodeURIComponent(x.request_id)}`, class: 'btnlike small' }, `${x.receipt_no || x.request_id.slice(0, 8)} · 접수 확인`) : h('b', {}, 'PC 접수 없음'),
+              x.has_field_intake ? chip('새 현장 접수', 'info') : null,
+              x.added_items.length ? chip(`추가 품목 ${x.added_items.length}종`, 'info') : null,
+              x.has_conflict ? chip('충돌 확인 필요', 'warn') : null,
+              x.has_rejected ? chip('거부된 기록 있음', 'neutral') : null,
+              x.has_field_intake && x.exists ? chip(x.field_checked_at ? '사무실 확인 완료' : '사무실 확인 필요', x.field_checked_at ? 'ok' : 'warn') : null,
+              x.exists && x.price_pending && (x.added_items.some((item) => item.apply_status === 'APPLIED') || (x.has_field_intake && !x.has_conflict && !x.has_rejected)) ? chip('단가 확인 대기', 'warn') : null),
+            x.added_items.length ? h('ul', {}, ...x.added_items.map((item) => h('li', {}, `${item.name || '품목'}${item.spec ? ' · ' + item.spec : ''} · ${item.qty}${item.unit_label || '개'}`,
+              item.apply_status === 'CONFLICT' ? ' (충돌 확인 필요)' : item.apply_status === 'REJECTED' ? ' (거부됨)' : ''))) : null,
+            x.has_conflict ? h('a', { href: '#conflicts', onclick: openConflicts(importId) }, '충돌함에서 확인') : null)));
+      } catch (e) {
+        if (mine !== generation || !active() || !el.isConnected) return;
+        body.replaceChildren(h('p', { class: 'err small', role: 'alert' }, `현장 확인 목록을 불러오지 못했습니다: ${e.message}`),
+          btn('다시 불러오기', load, 'small'));
+      }
+    };
+    return { el, load };
+  };
   // 1) 파일 넣기: 결과(.dgr)·사진(.dgp)을 여러 개 한꺼번에(고르기·끌어 놓기). 결과를 먼저, 사진을 나중에 가져온다.
   const runBody = h('tbody');
   const runCard = h('div', { class: 'card', id: 'import-run', hidden: true }, h('h2', {}, '방금 가져온 파일'),
@@ -29,6 +79,11 @@ async function screenResults() {
         r.seq_reused ? h('div', { class: 'notice warn small' }, `휴대폰 복원으로 순번이 겹친 기록 ${r.seq_reused}건 — 반영했고 확인만 하면 됩니다.`) : null]),
       h('td', {}, code));
     runBody.prepend(tr);
+    if (canReviewField && !isPhoto && r && r.import_id && !err) {
+      const review = fieldReview(r.import_id);
+      tr.after(h('tr', {}, h('td', { colspan: 5 }, review.el)));
+      review.load();
+    }
   };
   const fill = () => runBody.querySelectorAll('tr[data-import]').forEach((tr) => { const t = teamOf(tr.dataset.import); if (t) tr.querySelector('.team').textContent = t; });
   const importFiles = wrap(async (files) => {
@@ -55,7 +110,13 @@ async function screenResults() {
     recent = await api('imports/recent?limit=30');
     recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, h('td', { class: 'nowrap' }, kst(x.imported_at)), h('td', {}, IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
       h('td', {}, x.crew || h('span', { class: 'muted' }, '(팀 없음)'), h('span', { class: 'muted small block' }, x.device_label || (x.device_id || '').slice(0, 8))),
-      h('td', {}, impSummary(x.counts)),
+      h('td', {}, impSummary(x.counts), canReviewField && x.kind === 'RESULT' ? btn('현장 내용 확인', (e) => {
+        const cell = e.currentTarget.parentElement;
+        const previous = cell.querySelector('.field-review');
+        if (previous) { previous.remove(); e.currentTarget.setAttribute('aria-expanded', 'false'); return; }
+        const review = fieldReview(x.id);
+        cell.append(review.el); e.currentTarget.setAttribute('aria-expanded', 'true'); review.load();
+      }, 'small', { 'aria-expanded': 'false' }) : null),
       h('td', {}, x.release_code && x.kind !== 'SOLO' ? [h('small', { class: 'block muted' }, x.kind === 'PHOTO' ? '사진 회수 코드' : '결과 반영 코드'), codeEl(x.kind === 'PHOTO' ? 'P' : 'D', x.release_code)] : h('span', { class: 'muted' }, '—')),
       h('td', {}, x.phone_confirmed ? chip(x.phone_confirmed_by === 'MANUAL' ? '휴대폰 입력함' : '휴대폰 확인됨(다음 목록)', 'ok')
         : x.release_code && x.kind !== 'SOLO' ? [chip('휴대폰 입력 전', 'warn'), ' ', btn('휴대폰에 입력함', wrap(async () => { await post(`imports/${x.id}/confirm`); toast('휴대폰에 코드를 입력했다고 표시했습니다'); loadRecent(); }), 'small')] : '')))
@@ -66,6 +127,8 @@ async function screenResults() {
     h('p', { class: 'muted small' }, '결과 반영 코드(D-)를 휴대폰에 넣으면 그 접수들의 이름·연락처·주소가 휴대폰에서 지워지고, 사진 회수 코드(P-)를 넣어야 휴대폰에서 사진을 지울 수 있습니다. 코드를 넣지 않아도 휴대폰이 다음 목록을 받으면 저절로 확인됩니다.'));
   // 3) 충돌함: 접수별로 묶고, 접수 하나·가져오기 하나의 기록을 한 사유로 [모두 반영/거부]
   const conf = h('div', { class: 'card', id: 'conflicts' });
+  const confReasons = new Map();
+  let confGeneration = 0;
   const REQ_KINDS = ['FIELD_INTAKE', 'CORRECTION', 'CANCEL_REQUEST'];
   let confTab = 'ALL';
   const bulk = (what, id, action, n, label) => wrap(async () => {
@@ -78,7 +141,13 @@ async function screenResults() {
     loadConf(); refreshBadges(true);
   });
   const loadConf = wrap(async () => {
-    const all = await api('conflicts');
+    const mine = ++confGeneration;
+    let all;
+    try { all = await api('conflicts'); }
+    catch (e) { if (mine === confGeneration && active()) throw e; return; }
+    if (mine !== confGeneration || !active()) return;
+    const present = new Set(all.map((c) => c.event_id));
+    for (const id of confReasons.keys()) if (!present.has(id)) confReasons.delete(id);
     const nReq = all.filter((c) => REQ_KINDS.includes(c.kind)).length;
     const list = all.filter((c) => confTab === 'ALL' || (confTab === 'REQ') === REQ_KINDS.includes(c.kind));
     const tabs = h('div', { class: 'quick conf-tabs' }, ...[['ALL', '전체', all.length], ['REQ', '현장 요청', nReq], ['CONFLICT', '충돌', all.length - nReq]].map(([k, t, n]) =>
@@ -102,8 +171,9 @@ async function screenResults() {
         rid !== '-' && cs.length > 1 ? btn('이 접수 기록 모두 반영', (e) => bulk('request_id', rid, 'APPLY', cs.length, c0.receipt_no || '이 접수')(e), 'small') : null,
         rid !== '-' && cs.length > 1 ? btn('이 접수 기록 모두 거부', (e) => bulk('request_id', rid, 'REJECT', cs.length, c0.receipt_no || '이 접수')(e), 'small danger') : null))));
       cs.forEach((c) => {
-        const why = h('input', { placeholder: '판단 사유', class: 'w-m', 'aria-label': '판단 사유' });
-        rowsEl.push(h('tr', { class: 'ev' }, h('td', { class: 'muted small' }, c.import_id ? teamOf(c.import_id) || '' : ''),
+        const why = h('input', { placeholder: '판단 사유', class: 'w-m', 'aria-label': '판단 사유', value: confReasons.get(c.event_id) || '',
+          oninput: (e) => confReasons.set(c.event_id, e.target.value) });
+        rowsEl.push(h('tr', { class: 'ev', 'data-import': c.import_id }, h('td', { class: 'muted small' }, c.import_id ? teamOf(c.import_id) || '' : ''),
           h('td', {}, EVENT_KIND[c.kind] || c.kind), h('td', {}, c.kind === 'CORRECTION' ? correctionBody(c) : eventBody(c.kind, c.body_json)), h('td', { class: 'nowrap' }, kst(c.device_ts)),
           h('td', {}, c.conflict_reason, c.warning ? h('div', {}, chip(c.warning, 'warn')) : null),
           h('td', {}, h('span', { class: 'row' }, why, btn('반영', wrap(async () => { await post('conflicts/' + c.event_id, { action: 'APPLY', reason: why.value }); toast('반영했습니다'); loadConf(); refreshBadges(true); }), 'small'),
@@ -116,14 +186,15 @@ async function screenResults() {
   });
   const field = boot.me.role === 'FIELD';  // 수거팀 계정은 충돌함을 보지 않는다(사무실 판단)
   loadRecent().then(() => { fill(); if (!field) loadConf(); });
-  return h('div', {}, pagehead('결과 가져오기', h('a', { href: '#conflicts', class: 'small', onclick: (e) => { e.preventDefault(); conf.scrollIntoView(); } }, '충돌함으로 ↓')),
+  screen.append(h('div', {}, pagehead('결과 가져오기', field ? null : h('a', { href: '#conflicts', class: 'small', onclick: (e) => { e.preventDefault(); conf.scrollIntoView(); } }, '충돌함으로 ↓')),
     h('div', { class: 'card' }, h('h2', {}, '결과·사진 파일 넣기'), drop,
       h('p', { class: 'muted small' }, '결과 파일은 업무 메일 첨부, 사진 파일은 승인된 보안 매체로 받습니다. 같은 파일을 여러 번 넣어도 한 번만 반영됩니다.')),
     runCard,
     recentCard,
-    webcamCard((r) => { addRun('휴대폰 화면 QR (웹캠)', 'RESULT', r); loadRecent().then(fill); loadConf(); }),
+    webcamCard((r) => { addRun('휴대폰 화면 QR (웹캠)', 'RESULT', r); loadRecent().then(fill); if (!field) loadConf(); }),
     soloCard(),
-    field ? null : conf, h('p', { class: 'muted' }, '오래된 배정·다른 팀·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.'));
+    field ? null : conf, h('p', { class: 'muted' }, '오래된 배정·다른 팀·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.')));
+  return screen;
 }
 
 // 휴대폰 기록 종류·내용을 사람이 읽는 표로 (충돌함)
