@@ -101,3 +101,16 @@ GitHub Actions 결과와 실제 EXE 빌드·시험은 이 기록 뒤에 수행�
 - **응답 없는 처리 중 대화상자:** 30초 뒤 [기다리지 않고 닫기]와 새로 고쳐 확인하라는 안내를 보인다. 시험은 Playwright 가상 시계로 시간을 건너뛴다.
 
 로컬 전체 시험(`check_generated`, `check:version`, `test`, `test:pc`, `test:desktop`, `test:e2e`) 모두 종료 코드 0. `test:desktop`은 처음에 새 시험이 연 조회 전용 연결 때문에 Windows에서 임시 폴더를 지우지 못해 실패했고, 시험 정리에서 연결 풀을 닫도록 고친 뒤 다시 돌려 통과했다.
+
+### 0.14.25 배포 기록
+
+- **소스:** `e30ead2`를 `main`에 fast-forward로 반영해 push했다.
+- **CI:** [실행 43708412734](https://github.com/lanian/donggu-waste/actions/runs/43708412734) 63개 작업 모두 성공(Pages 배포 포함). 공개된 `app.js`·`sw.js`가 0.14.25인 것을 확인했다. 실제 휴대폰의 [업데이트]는 확인하지 않았다.
+- **PC 패키지:** `dist/desktop/v0.14.25/`. 실제 EXE로 기본·옛 동 자료·접속 점검기·기관망 HTTPS·동별 업무·보고서·배출표 시험 6종을 통과했다.
+
+| 파일 | SHA256 |
+| --- | --- |
+| `Donggu-PC-windows-x64.zip` | `1b8583510bc316ec74f7e4b25f0912cb4aaa3e20dac0b3cafd108f010e4e8172` |
+| `Donggu-PC/Donggu-PC.exe` | `d95dd4bb73f6e5f5b8475d6726bdfa929b799f244bc708000881b2609026730d` |
+
+- **바로가기:** `E:/Projects/waste/동구 PC 실행.lnk`의 대상과 작업 폴더를 0.14.25로 바꿨다(`--port 8766`·아이콘·설명·창 방식 유지). 이전 바로가기는 `D:/Temp/dg-release-01425-20261115/shortcut-before-v0.14.25-e30ead2.lnk`에 보관했다. 교체 때 0.14.24 프로그램이 실행 중이었고 그대로 두었다.
