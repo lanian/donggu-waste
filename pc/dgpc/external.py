@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from dgpc import geo
+from dgpc import __version__, geo
 
 TIMEOUT_S = 5
 JUSO_DEFAULT = "https://business.juso.go.kr"
@@ -71,7 +71,7 @@ def urlopen(req: urllib.request.Request, timeout: float):
 
 
 def http_json(url: str, *, data: dict | None = None, headers: dict | None = None, timeout: float = TIMEOUT_S) -> dict:
-    h = {"Accept": "application/json", "User-Agent": "donggu-waste-pc/0.11"}
+    h = {"Accept": "application/json", "User-Agent": f"donggu-waste-pc/{__version__}"}
     h.update(headers or {})
     body = None
     if data is not None:

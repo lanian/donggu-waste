@@ -18,7 +18,7 @@ def fake_vworld():
         def do_GET(self):
             url = urllib.parse.urlsplit(self.path)
             state["calls"].append({"path": url.path, "params": dict(urllib.parse.parse_qsl(url.query)),
-                                   "referer": self.headers.get("Referer")})
+                                   "referer": self.headers.get("Referer"), "user_agent": self.headers.get("User-Agent")})
             state["entered"].set()
             if state["gate"]:
                 state["gate"].wait(8)

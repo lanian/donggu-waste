@@ -69,6 +69,8 @@ class VWorldTest(SessionHTTPTestCase):
         self.assertEqual(call["params"]["crs"], "EPSG:4326")
         self.assertEqual(call["params"]["domain"], "http://127.0.0.1:8765")
         self.assertIsNone(call["referer"])
+        from dgpc import __version__
+        self.assertEqual(call["user_agent"], f"donggu-waste-pc/{__version__}")  # 요청 식별자는 현재 프로그램 버전(프로젝트·기관 정보 없음)
         self.assertEqual(set(call["params"]), {"service", "request", "version", "format", "errorFormat", "crs", "address", "type", "refine", "simple", "key", "domain"})
         self.assertEqual(self.snapshot(), before)
 
