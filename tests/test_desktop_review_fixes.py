@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import errno
 import gc
 import ipaddress
 import json
@@ -184,7 +185,7 @@ def defect2_child_error_classification(directory: Path):
        and classify(SystemExit("PC 자료가 없습니다. 먼저 'python pc_tool.py init'을 실행하세요.")) == "db_missing"
        and classify(SystemExit("가상 주민 홍길동 010-0000-0000")) == "unexpected",
        "store의 우리 안내문(SystemExit)을 분류하고 모르는 문구는 그대로 쓰지 않음")
-    inuse = OSError(10048 if os.name == "nt" else 98, "address in use")
+    inuse = OSError(10048 if os.name == "nt" else errno.EADDRINUSE, "address in use")  # 번호는 운영체제마다 다르다(Linux 98, macOS 48)
     if os.name == "nt":
         inuse.winerror = 10048
     ok(classify(inuse) == "port_in_use", "주소 사용 중 OSError → port_in_use")

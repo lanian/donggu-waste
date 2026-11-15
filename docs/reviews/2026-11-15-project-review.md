@@ -75,3 +75,18 @@
 | `npm run test:e2e` | 통과 (휴대폰·PC 화면 전체, 새 회귀 시험 2종과 `test_pc_design.py` 포함) |
 
 GitHub Actions 결과와 실제 EXE 빌드·시험은 이 기록 뒤에 수행한다.
+
+## 8. 배포 기록 (2026-11-15)
+
+- **소스:** `dd818bc`를 `main`에 fast-forward로 반영해 push했다.
+- **CI:** [실행 43693573792](https://github.com/lanian/donggu-waste/actions/runs/43693573792) 성공. 63개 작업 중 62개 통과, Pages 배포 포함. 참고용 macOS 작업 하나가 실패했다. 원인은 새 시험이 "주소 사용 중" 오류 번호를 Linux 값(98)으로 적은 것이다(macOS는 48). 제품 코드는 `errno` 모듈을 써서 영향이 없고, 시험을 `errno.EADDRINUSE`로 고쳤다.
+- **휴대폰 앱:** 공개된 `app.js`·`sw.js`의 버전이 0.14.24인 것을 확인했다. 실제 휴대폰에서의 [업데이트]·PIN 확인은 하지 않았다.
+- **PC 패키지:** `dist/desktop/v0.14.24/`. 실제 EXE로 기본·옛 동 자료·접속 점검기·기관망 HTTPS·동별 업무·보고서·배출표 시험 6종을 통과했다.
+
+| 파일 | SHA256 |
+| --- | --- |
+| `Donggu-PC-windows-x64.zip` | `78af8c6a43e9f2d5544cfd393f77e289fb0ae2e0054383c7a510bf70eb6e62ff` |
+| `Donggu-PC/Donggu-PC.exe` | `487311f8de0d047240163eb1ee3526049e2b0958a3c6726891317f8a6618ba8d` |
+
+- **바로가기:** `E:/Projects/waste/동구 PC 실행.lnk`의 대상과 작업 폴더를 0.14.24로 바꿨다. `--port 8766`·아이콘·설명·창 방식은 그대로다. 이전 바로가기는 `D:/Temp/dg-release-01424-20261115/shortcut-before-v0.14.24-dd818bc.lnk`에 보관했다. 교체할 때 실행 중인 PC 프로그램은 없었다.
+- 운영 DB는 열지 않았고, 이전 패키지(`dist/desktop/v0.14.23` 이하)는 그대로 두었다.
