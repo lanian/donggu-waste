@@ -49,12 +49,25 @@ def main(exe=None):
             plus = region.get_by_role('button', name='1번 수거 수량 늘리기', exact=True)
             remaining = region.get_by_role('button', name='1번 남은 수량 채우기', exact=True)
             expect(minus).to_be_disabled()
+            comparison = {
+                'summary_keeps_distinct_units': '남음 150개 · 2쪽' in region.get_by_label('수거 입력 요약', exact=True).inner_text(),
+                'projected_cumulative_is_visible': region.get_by_label('1번 입력 후 누적', exact=True).count() == 1
+                    and region.get_by_label('1번 입력 후 누적', exact=True).inner_text() == '입력 후 누적 0개',
+            }
+            assert all(comparison.values()), comparison
+            expect(first).to_have_accessible_description('입력 후 누적 0개')
+            expect(region.locator('thead th')).to_have_count(4)
+            expect(region).to_contain_text('품목명·규격·단위')
+            expect(region).to_contain_text('이미 입력')
             plus.click()
             expect(first).to_have_value('1')
+            expect(region.get_by_label('1번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 1개')
+            expect(first).to_have_accessible_description('입력 후 누적 1개')
             first.fill('')
             expect(minus).to_be_disabled()
             expect(plus).to_be_disabled()
             expect(first).to_have_attribute('aria-invalid', 'true')
+            expect(region.get_by_label('1번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 확인 필요')
             first.fill('151')
             expect(plus).to_be_disabled()
             remaining.click()
@@ -65,6 +78,9 @@ def main(exe=None):
             region.get_by_role('button', name='2번 남은 수량 채우기', exact=True).click()
             region.get_by_role('button', name='2번 수거 수량 줄이기', exact=True).click()
             expect(second).to_have_value('1')
+            expect(region.get_by_label('1번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 149개')
+            expect(region.get_by_label('2번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 1쪽')
+            expect(region.get_by_label('수거 입력 요약', exact=True)).to_contain_text('이번 수거 149개 · 1쪽')
             expect(first.locator('..')).to_contain_text('개')
             expect(second.locator('..')).to_contain_text('쪽')
             region.get_by_label('실제 수거일', exact=True).fill(day)
@@ -88,6 +104,8 @@ def main(exe=None):
             expect(retry).to_be_enabled()
             retry.click()
             expect(region).to_have_count(0)
+            expect(page.locator('.toast')).to_contain_text('수거 결과를 저장했습니다.')
+            expect(page.locator('.toast')).not_to_contain_text('이번 150개')
             assert len(sent) == 2 and sent[0] == sent[1], sent
             assert sent[0]['collected_on'] == day
             assert [i['qty'] for i in sent[0]['items']] == [149, 1]
@@ -97,9 +115,13 @@ def main(exe=None):
             expect(page.get_by_label('요청 메모', exact=True)).to_have_value('수량 입력 중에도 보존할 초안')
             page.get_by_role('button', name='수거 처리', exact=True).click()
             expect(region.get_by_label('1번 이번 수거 개수', exact=True)).to_have_value('0')
+            expect(region.get_by_label('수거 입력 요약', exact=True)).to_contain_text('이전 수거 149개 · 1쪽')
+            expect(region.get_by_label('1번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 149개')
             region.get_by_role('button', name='남은 수량 전부', exact=True).click()
             expect(region.get_by_label('1번 이번 수거 개수', exact=True)).to_have_value('1')
             expect(region.get_by_label('2번 이번 수거 개수', exact=True)).to_have_value('1')
+            expect(region.get_by_label('1번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 150개')
+            expect(region.get_by_label('2번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 2쪽')
             page.screenshot(path=str(output / 'pc-collection-quick.png'), full_page=True)
             region.screenshot(path=str(output / 'pc-collection-quick-panel.png'))
             # 확정적인 거절은 새 입력을 허용하며 증감 상한을 다시 적용한다.
@@ -114,8 +136,24 @@ def main(exe=None):
             expect(region).to_have_count(0)
             assert sent[-2]['client_req_id'] != sent[-1]['client_req_id']
             assert api('label-auto?dong_id=' + dong['id'])['assigned'] == 152
+            mixed = api('requests', {'name': '가상 혼합 단위 주민', 'phone': '01000000001', 'address': '가상구 비교길 2',
+                'dong': dong['name'], 'planned_date': boot['today'], 'items': [{'fee_rate_id': chair['id'], 'qty': 3},
+                    {'fee_rate_id': wardrobe['id'], 'qty': 2}, {'name': '가상 면적 품목', 'qty': 2, 'unit': 'M2', 'unit_label': '㎡'}]})
+            before_preview = api('requests/' + mixed['id'])
+            page.goto(url + '#/request/' + mixed['id'])
+            page.get_by_role('button', name='수거 처리', exact=True).click()
+            for number in range(1, 4):
+                region.get_by_label(f'{number}번 이번 수거 개수', exact=True).fill('1')
+            expect(region.get_by_label('수거 입력 요약', exact=True)).to_contain_text('이번 수거 1개 · 1쪽 · 1㎡')
+            expect(region.get_by_label('3번 입력 후 누적', exact=True)).to_have_text('입력 후 누적 1㎡')
+            expect(region.locator('thead th')).to_have_count(4)
+            page.screenshot(path=str(output / 'pc-collection-mixed-preview.png'), full_page=True)
+            after_preview = api('requests/' + mixed['id'])
+            assert after_preview['req_ver'] == before_preview['req_ver'] and after_preview['state'] == before_preview['state'], '미리보기는 수거 기록을 바꾸지 않는다'
+            assert api('label-auto?dong_id=' + dong['id'])['assigned'] == 152, '미리보기는 배출표를 차감하지 않는다'
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), '입력 후 누적이 페이지 밖으로 넘치지 않는다'
             assert not errors, errors
-            print('PC 수거 빠른 입력: 품목별 증감/남은 수량·0~잔량/잘못된 입력·개/쪽 단위·날짜/부모 초안·응답 유실 동결 본문/요청번호 재확인·확정 거절 후 입력 복구·배출표150+2장 중복 차감 방지 통과')
+            print('PC 수거 빠른 입력: 개/쪽/㎡ 단위별 요약·입력 후 누적/접근 가능한 설명·미리보기 DB/배출표 불변·품목별 증감/잔량/잘못된 입력·날짜/부모 초안·응답 유실 동일 요청·확정 거절 후 복구·배출표150+2장 중복 차감 방지 통과')
         except Exception:
             page.screenshot(path=str(output / 'pc-collection-failure.png'), full_page=True)
             print('페이지 오류:', errors)

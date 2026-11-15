@@ -142,6 +142,7 @@ jobs:
           - test_mobile_photo_preview
           - test_dispatch_workflow_ui
           - test_collection_help_mobile
+          - test_mobile_pc_input_help
           - test_date_visibility_ui
           - test_date_visibility_mobile
           - test_vworld_ui

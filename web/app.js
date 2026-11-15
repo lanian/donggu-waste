@@ -2,7 +2,7 @@
 // 업무 데이터는 이 기기 안에서만 암호화해 보관한다. 외부로 보내는 통신 코드는 없다.
 // 화면은 screens/*.js, 공통은 core.js·widgets.js. 새 화면 파일은 sw.js 의 FILES 에도 넣는다(오프라인 실행). APP_VERSION 은 sw.js VERSION 과 같게.
 import * as S from './store.js';
-import { $app, appLogo, applyPrefs, btn, clearLiveMap, clearPhotoUrls, fieldEditable, flushSteps, h, isSolo, mergePrefs, prefs, setRegisteredNow, setRender, setSt, st, stepFlush, stopCamera, todayKST, ui, wakeRoute, wantWake } from './core.js';
+import { $app, appLogo, applyPrefs, btn, clearLiveMap, clearPhotoUrls, fieldEditable, findStop, flushSteps, h, isSolo, mergePrefs, prefs, setRegisteredNow, setRender, setSt, st, stepFlush, stopCamera, todayKST, ui, wakeRoute, wantWake } from './core.js';
 import { screenAdd } from './screens/add.js';
 import { screenBackup } from './screens/backupview.js';
 import { screenCheck } from './screens/check.js';
@@ -101,9 +101,15 @@ async function render() {
   if (!S.isUnlocked() || !st) listReturn = null;
   wantWake(S.isUnlocked() && wakeRoute());
   const sameRoute = ui.lastRoute === location.hash, y = scrollY; // 같은 화면을 다시 그릴 때는 스크롤 유지
+  const helperBack = ui.pcInputBack;
+  const helperOwned = helperBack && S.isUnlocked() && st && helperBack.source === st && helperBack.mode === st.mode
+    && helperBack.stop === findStop(helperBack.id) && !helperBack.stop?.pii_purged;
+  const helperRoute = helperBack && '#/pc-input/' + helperBack.id;
+  const returningFromHelper = helperOwned && ui.lastRoute === helperRoute && location.hash === '#/stop/' + helperBack.id;
+  if (helperBack && !(helperOwned && location.hash === helperRoute || returningFromHelper)) ui.pcInputBack = null;
   $app.replaceChildren(view);
   scrollTo(0, sameRoute ? y : 0);
-  if (ui.pcInputBack && location.hash === '#/stop/' + ui.pcInputBack.id) {
+  if (returningFromHelper) {
     const help = [...view.querySelectorAll('button')].find((button) => button.textContent === 'PC 입력 도움');
     help?.focus({ preventScroll: true }); scrollTo(0, ui.pcInputBack.y); ui.pcInputBack = null;
   } else if (!sameRoute && location.hash.startsWith('#/pc-input/')) {

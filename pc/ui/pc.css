@@ -1341,6 +1341,8 @@ table.conflicts tr.grp .row { gap: 6px; align-items: center; }
 .collection-heading h3 { margin: 0; }
 .collection-footer { margin-top: 14px; }
 .collection-footer [role="alert"] { color: var(--bad); }
+.collection-entry .collection-projection { display: block; margin-top: 7px; color: var(--navy-ink); font-size: .8929rem; font-weight: 600; line-height: 1.5; }
+.collection-entry .collection-comparison { line-height: 1.6; }
 .dispatch-steps { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 .dispatch-steps > span { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-2); border-radius: 6px; }
 .dispatch-steps > .on { background: var(--navy-tint); color: var(--navy-ink); border-color: var(--link); }

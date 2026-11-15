@@ -38,7 +38,7 @@ export function collectionButton(request, { path = 'requests', current = () => t
         editor = collectionForm(fresh, path, alive, owner, before, collapse, async (result) => {
           panel.hidden = true; panel.replaceChildren(); editor = null; button.setAttribute('aria-expanded', 'false');
           button.disabled = true;
-          toast(`수거 결과를 저장했습니다. 이번 ${result.added}개 · 누적 ${result.total}개${result.labels_pending ? ` · 배출표 번호 미배정 ${result.labels_pending}장` : ''}`);
+          toast(`수거 결과를 저장했습니다.${result.labels_pending ? ` 배출표 번호 미배정 ${result.labels_pending}장` : ''}`);
           await refresh(result);
         });
         panel.replaceChildren(editor);
@@ -57,8 +57,21 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
   const day = h('input', { type: 'date', value: boot.today, max: boot.today, 'aria-label': '실제 수거일' });
   const reason = h('input', { maxlength: 200, 'aria-label': '일부 수거·미수거 사유', placeholder: '예: 의자 1개 수거, 나머지는 미배출' });
   const summary = h('p', { class: 'notice info', role: 'status', 'aria-label': '수거 입력 요약' });
-  const quantities = info.lines.map((line, i) => h('input', { type: 'number', min: 0, max: line.remaining, step: 1, value: 0,
+  const quantityIds = info.lines.map(() => `collection-quantity-${uuid()}`);
+  const quantities = info.lines.map((line, i) => h('input', { id: quantityIds[i], type: 'number', min: 0, max: line.remaining, step: 1, value: 0,
     inputmode: 'numeric', class: 'w-xs', 'aria-label': `${i + 1}번 이번 수거 개수` }));
+  const projectedText = info.lines.map(() => h('span', { id: `collection-projection-${uuid()}` }));
+  const projected = info.lines.map((line, i) => h('output', { for: quantityIds[i],
+    class: 'collection-projection', 'aria-label': `${i + 1}번 입력 후 누적`, 'aria-live': 'off' }, projectedText[i]));
+  quantities.forEach((input, i) => input.setAttribute('aria-describedby', projectedText[i].id));
+  const byUnit = (valueOf) => {
+    const totals = new Map();
+    info.lines.forEach((line, i) => {
+      const unit = line.unit_label || '(단위 미확인)';
+      totals.set(unit, (totals.get(unit) || 0) + valueOf(line, i));
+    });
+    return [...totals].map(([unit, qty]) => `${qty}${unit}`).join(' · ');
+  };
   const left = info.lines.map(() => h('span'));
   let submitted = null, id = uuid();
   const setQuantity = (i, value) => {
@@ -76,7 +89,7 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
     remaining: btn('남은 수량', () => setQuantity(i, line.remaining), 'small', { 'aria-label': `${i + 1}번 남은 수량 채우기` }),
   }));
   const rows = info.lines.map((line, i) => h('tr', {}, h('th', { scope: 'row' }, `${i + 1}. ${line.name} ${line.spec || ''}`, h('small', { class: 'block muted' }, `확인 수량 ${line.confirmed}${line.unit_label}`)),
-    h('td', {}, `${line.previous}${line.unit_label}`), h('td', {}, h('div', { class: 'row' }, quick[i].minus, quantities[i], quick[i].plus, h('span', {}, line.unit_label), quick[i].remaining)), h('td', {}, left[i])));
+    h('td', {}, `${line.previous}${line.unit_label}`), h('td', {}, h('div', { class: 'row' }, quick[i].minus, quantities[i], quick[i].plus, h('span', {}, line.unit_label), quick[i].remaining), projected[i]), h('td', {}, left[i])));
   const draw = () => {
     let added = 0, invalid = false;
     info.lines.forEach((line, i) => {
@@ -86,13 +99,19 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
       quick[i].plus.disabled = !!submitted || bad || n === line.remaining;
       quick[i].remaining.disabled = !!submitted || (!bad && n === line.remaining);
       added += n; left[i].textContent = bad ? '확인 필요' : `${line.remaining - n}${line.unit_label}`;
+      projectedText[i].textContent = bad ? '입력 후 누적 확인 필요' : `입력 후 누적 ${line.previous + n}${line.unit_label}`;
     });
     const rest = info.lines.reduce((sum, line) => sum + line.remaining, 0) - added;
-    summary.textContent = invalid ? '수량을 확인해 주세요.' : `이전 수거 ${info.previous_total}개 · 이번 수거 ${added}개 · 남음 ${rest}개 → ${rest === 0 ? '수거 완료' : info.previous_total + added ? '일부 수거' : '미수거'}`;
+    summary.textContent = invalid ? '수량을 확인해 주세요.' : [
+      `이전 수거 ${byUnit((line) => line.previous)}`,
+      `이번 수거 ${byUnit((line, i) => Number(quantities[i].value))}`,
+      `입력 후 누적 ${byUnit((line, i) => line.previous + Number(quantities[i].value))}`,
+      `남음 ${byUnit((line, i) => line.remaining - Number(quantities[i].value))}`,
+    ].join(' / ') + ` → ${rest === 0 ? '수거 완료' : info.previous_total + added ? '일부 수거' : '미수거'}`;
   };
   quantities.forEach((input) => input.addEventListener('input', draw));
   const all = btn('남은 수량 전부', () => { quantities.forEach((input, i) => { input.value = info.lines[i].remaining; }); draw(); }, 'small');
-  const zero = btn('이번 수거 0개', () => { quantities.forEach((input) => { input.value = 0; }); draw(); }, 'small');
+  const zero = btn('이번 수거 모두 0', () => { quantities.forEach((input) => { input.value = 0; }); draw(); }, 'small');
   const controls = [day, reason, ...quantities, all, zero, ...quick.flatMap((row) => [row.minus, row.plus, row.remaining])];
   const freeze = (value) => { controls.forEach((el) => { el.disabled = value; }); if (!value) draw(); };
   const close = btn('입력 접기', collapse, 'small');
@@ -101,7 +120,8 @@ function collectionForm(request, path, parentAlive, owner, before, collapse, aft
   const box = h('section', { class: 'collection-entry', role: 'region', 'aria-label': 'PC 수거 처리', 'data-ux-dirty': 'true' },
     h('div', { class: 'collection-heading' }, heading, close),
     h('p', {}, h('strong', {}, request.receipt_no), ` · ${request.dong || '동 미지정'}`),
-    h('p', { class: 'muted' }, '휴대폰의 [PC 입력 도움]에서 같은 접수번호와 품목을 확인하세요. 이미 수거한 수량을 빼고 이번에 추가로 수거한 개수만 입력합니다.'),
+    h('p', { class: 'muted' }, '휴대폰과 PC의 행 번호는 다를 수 있습니다. 같은 접수번호에서 품목명·규격·단위를 맞추고, 입력 후 누적을 휴대폰의 목표 누적과 대조하세요.'),
+    h('p', { class: 'notice info collection-comparison' }, '휴대폰 기준 이전 수거와 PC의 이전 수거가 같은지 확인하세요. 이미 입력했거나 결과를 가져온 수량은 다시 추가하지 마세요. 기준이 다르면 수거 이력을 먼저 대조하세요.'),
     h('label', { class: 'f' }, '실제 수거일', day), h('div', { class: 'row' }, all, zero),
     h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['품목', '이전 수거', '이번 수거 개수', '남음'].map((v) => h('th', {}, v)))), h('tbody', {}, ...rows))),
     summary, h('label', { class: 'f' }, '일부 수거·미수거 사유', reason),

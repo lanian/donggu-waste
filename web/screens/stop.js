@@ -74,6 +74,7 @@ async function viewPhoto(photo, detail, current) {
   }
 }
 
+let pcHelpCopy = null;
 // 화면/복사 전용: 주민 정보나 전송 동작을 포함하지 않고 PC의 수거 입력을 돕는다.
 async function screenPcInputHelp(id) {
   const source = st, entryRoute = location.hash;
@@ -83,64 +84,108 @@ async function screenPcInputHelp(id) {
   const stop = source && findStop(id);
   const back = () => go('/stop/' + id);
   if (!source || !stop || stop.pii_purged) return h('main', {}, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'), h('p', {}, '이 접수의 입력 도움을 표시할 수 없습니다.'));
-  const activeWrite = collectionWrites.get(source)?.get(id), route = location.hash;
+  const activeWrite = collectionWrites.get(source)?.get(id), route = location.hash, mode = source.mode;
   const stateWrite = saving, waitingStateWrite = !settledStateWrites.has(stateWrite);
   const busySave = !!activeWrite || waitingStateWrite;
-  const eventsKey = () => JSON.stringify(source.events.filter((event) => event.request_id === id));
-  const snapshot = eventsKey();
+  const referenceKey = () => JSON.stringify({ stop, events: source.events.filter((event) => event.request_id === id) });
+  const snapshot = referenceKey();
   const d = deriveStop(stop, source.events);
-  const last = [...source.events].reverse().find((e) => e.request_id === stop.request_id && e.kind === 'ATTEMPT'
+  const relevant = source.events.filter((e) => e.request_id === stop.request_id && ['ITEM_RESULT', 'ATTEMPT'].includes(e.kind)
     && !(e.seq <= (stop.since_seq || 0)) && (!stop.pc_collection_ver || e.base_req_ver >= stop.pc_collection_ver && e.body?.pc_collection_ver === stop.pc_collection_ver));
+  const last = [...relevant].reverse().find((e) => e.kind === 'ATTEMPT');
   const instant = last && new Date(last.ts);
   const day = instant && Number.isFinite(instant.getTime()) ? new Date(instant.getTime() + 9 * 3600000).toISOString().slice(0, 10) : todayKST();
+  const recordedDays = relevant.map((event) => {
+    const at = new Date(event.ts);
+    return Number.isFinite(at.getTime()) ? new Date(at.getTime() + 9 * 3600000).toISOString().slice(0, 10) : null;
+  });
+  const days = [...new Set(recordedDays.filter(Boolean))].sort(), mixedDays = days.length > 1, unknownDay = recordedDays.includes(null);
+  const dateText = mixedDays ? `기록일 ${days[0]} ~ ${days[days.length - 1]} · ${days.length}일` : unknownDay ? '수거일 확인 필요' : `수거일 ${day}`;
+  const dateNote = mixedDays ? '여러 날짜의 추가 수거 합계입니다. PC 입력 전 원래 수거 기록에서 일자별 수량을 확인하세요.'
+    : unknownDay ? '날짜가 확인되지 않은 기록이 있습니다. 실제 수거일을 확인한 뒤 PC에 입력하세요.' : '';
   const status = busySave ? '저장 중 · 저장 결과를 확인한 뒤 PC에 전달하세요'
     : collectionPending() ? '저장 대기 · 수거 기록을 다시 저장한 뒤 PC에 전달하세요'
     : d.resultNeedsConfirmation ? '결과 재확인 필요 · 수거 결과를 다시 선택해 저장한 뒤 PC에 전달하세요'
+    : stop.removed ? '참고용 · 목록에서 제외된 접수입니다. PC 처리 상태를 먼저 확인하세요'
+    : stop.status === 'CANCELLED' ? '참고용 · 취소된 접수입니다. PC 처리 상태를 먼저 확인하세요'
     : d.outcome ? LABEL.outcome[d.outcome] : '결과 미확정 · 실제 수거 여부를 확인하세요';
+  const reference = busySave || collectionPending() || d.resultNeedsConfirmation || !d.outcome || stop.removed || stop.status === 'CANCELLED' || mixedDays || unknownDay;
   const rows = d.lines.map((line) => {
     const previous = (stop.items.find((i) => i.line_id === line.line_id)?.prior_collected || 0);
-    return { ...line, previous, added: Math.max(0, line.qty_collected - previous) };
+    return { ...line, unit_label: line.unit_label || line.unit || '', previous, added: Math.max(0, line.qty_collected - previous) };
   });
-  const note = [`접수번호 ${stop.receipt_no}`, `수거일 ${day}`, status,
-    ...rows.map((line, i) => `${i + 1}. ${line.name} ${line.spec || ''}: 이전 수거 ${line.previous}${line.unit_label} · 이번 수거 ${line.added}${line.unit_label} · 누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}`),
-    'PC에서 같은 접수를 찾아 실제 수거일·이번 수거 개수를 확인하고 저장하세요.'].join('\n');
+  const addedLabel = mixedDays ? '추가 수거 합계 (참고)' : '이번 수거';
+  const matching = '품목명·규격·단위로 맞추세요. 휴대폰과 PC의 품목 순번은 다를 수 있습니다.';
+  const duplicate = 'PC 기존 수거량을 이전 수거와 대조하세요. 이미 목표 누적과 같으면 다시 입력하지 마세요.';
+  const note = [`접수번호 ${stop.receipt_no}`, dateText, mixedDays ? `전체 기록일 ${days.join(' · ')}` : '', status, dateNote,
+    ...rows.map((line, i) => `${i + 1}. ${line.name} ${line.spec || ''}${line.kind === 'FIELD' ? ' [현장 추가 · PC 품목 확인]' : ''}: 이전 수거 ${line.previous}${line.unit_label} · ${addedLabel} ${line.added}${line.unit_label} · 목표 누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}${line.reason ? ` · 사유 ${LABEL.reason[line.reason] || line.reason}` : ''}`),
+    matching, duplicate, 'PC에서 실제 수거일과 대조한 수량을 확인한 뒤 저장하세요.'].filter(Boolean).join('\n');
   const fallback = h('textarea', { readonly: true, hidden: true, rows: 6, class: 'search', 'aria-label': 'PC 전달 내용' }, note);
   const message = h('p', { class: 'small', role: 'status' });
-  const current = () => st === source && body.isConnected && location.hash === route && findStop(id) === stop;
-  const canCopy = () => current() && !collectionPending() && !collectionWrites.get(source)?.has(id)
+  const current = () => st === source && source.mode === mode && body.isConnected && location.hash === route && findStop(id) === stop;
+  const canCopy = () => current() && !stop.pii_purged && !collectionPending() && !collectionWrites.get(source)?.has(id)
     && !deriveStop(stop, source.events).resultNeedsConfirmation
-    && stateWrite === saving && settledStateWrites.has(saving) && snapshot === eventsKey();
+    && stateWrite === saving && settledStateWrites.has(saving) && snapshot === referenceKey();
   const refresh = () => { if (current()) render(); };
-  const body = h('section', { class: 'pc-input-help' },
-    h('p', { class: 'small' }, 'PC에서 찾을 접수번호'),
-    h('strong', { class: 'pc-help-receipt', 'aria-label': 'PC에서 찾을 접수번호' }, stop.receipt_no),
-    h('p', {}, `수거일 ${day} · ${status}`),
-    ...rows.map((line, i) => h('div', { class: 'card' }, h('h3', {}, `${i + 1}. ${line.name} ${line.spec || ''}`),
-      h('p', {}, `이전 수거 ${line.previous}${line.unit_label}`),
-      h('p', {}, h('strong', { class: 'pc-help-quantity' }, `이번 수거 ${line.added}${line.unit_label}`)),
-      h('p', {}, `누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}`))),
-    h('p', { class: 'small' }, 'PC: 접수 검색 → 같은 접수번호 → 수거 처리. PC의 이전 수거 수량을 확인하고 이번에 추가 수거한 개수만 입력하세요.'),
-    btn('전달 내용 복사', async () => {
+  const blocked = busySave || collectionPending() || d.resultNeedsConfirmation || !!pcHelpCopy;
+  const receiptCopy = btn('접수번호 복사', () => copy(true), 'big', { disabled: blocked });
+  const fullCopy = btn('전달 내용 복사', () => copy(false), 'big primary', { disabled: blocked });
+  const actions = h('div', { class: 'grid2 pc-help-copy', 'aria-label': 'PC 입력 참고 복사' }, receiptCopy, fullCopy);
+  const pendingCopy = pcHelpCopy;
+  if (pendingCopy) message.textContent = '앞선 복사 요청을 마치는 중입니다.';
+  const syncCopy = () => {
+    receiptCopy.disabled = fullCopy.disabled = !!pcHelpCopy || !canCopy();
+    if (pcHelpCopy) actions.setAttribute('aria-busy', 'true'); else actions.removeAttribute('aria-busy');
+  };
+  async function copy(receiptOnly) {
+    if (pcHelpCopy) return;
+    if (!canCopy()) { refresh(); return; }
+    let finish;
+    const operation = { done: new Promise((resolve) => { finish = resolve; }) };
+    pcHelpCopy = operation; syncCopy(); fallback.hidden = true; message.textContent = '복사 중…';
+    const text = receiptOnly ? stop.receipt_no : note;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (canCopy()) message.textContent = receiptOnly ? '접수번호를 복사했습니다.' : '전달 내용을 복사했습니다.'; else refresh();
+    } catch {
       if (!canCopy()) { refresh(); return; }
-      try {
-        await navigator.clipboard.writeText(note);
-        if (canCopy()) message.textContent = '전달 내용을 복사했습니다.'; else refresh();
-      } catch {
-        if (!canCopy()) { refresh(); return; }
-        fallback.hidden = false; fallback.focus(); fallback.select(); message.textContent = '선택된 내용을 길게 눌러 복사하세요.';
-      }
-    }, 'big primary', { disabled: busySave || collectionPending() || d.resultNeedsConfirmation }), fallback, message);
+      fallback.value = text; fallback.hidden = false; fallback.focus(); fallback.select();
+      message.textContent = '선택된 내용을 길게 눌러 복사하세요.';
+    } finally {
+      if (pcHelpCopy === operation) pcHelpCopy = null;
+      if (current()) syncCopy();
+      finish();
+    }
+  }
+  const body = h('section', { class: 'pc-input-help' + (reference ? ' reference' : '') },
+    h('div', { class: 'pc-help-identity' }, h('p', { class: 'small' }, 'PC에서 찾을 접수번호'),
+      h('strong', { class: 'pc-help-receipt', 'aria-label': 'PC에서 찾을 접수번호' }, stop.receipt_no),
+      h('p', { class: 'pc-help-date' }, dateText)),
+    h('p', { class: 'pc-help-status small' + (reference ? ' notice' : ''), role: 'status' }, status),
+    dateNote ? h('p', { class: 'notice small pc-help-date-note' }, dateNote) : null,
+    actions, fallback, message,
+    h('p', { class: 'small pc-help-matching' }, matching), h('p', { class: 'small pc-help-duplicate' }, duplicate),
+    h('section', { class: 'pc-help-items', 'aria-label': '품목별 수량 대조' },
+      ...rows.map((line, i) => h('article', { class: 'card pc-help-item' },
+        h('h3', {}, `${i + 1}. ${line.name}`),
+        h('p', { class: 'small pc-help-spec' }, `규격 ${line.spec || '미지정'} · 단위 ${line.unit_label}`),
+        line.kind === 'FIELD' ? h('p', { class: 'chip new pc-help-field' }, '현장 추가 · PC 품목 확인') : null,
+        h('strong', { class: 'pc-help-quantity' + (!line.added ? ' zero' : '') }, `${addedLabel} ${line.added}${line.unit_label}`),
+        h('p', { class: 'small pc-help-compare' }, h('span', {}, `이전 수거 ${line.previous}${line.unit_label}`),
+          h('span', {}, `목표 누적 ${line.qty_collected}${line.unit_label}`), h('span', {}, `남음 ${line.remaining}${line.unit_label}`)),
+        line.reason ? h('p', { class: 'small pc-help-reason' }, `사유 ${LABEL.reason[line.reason] || line.reason}`) : null))));
   if (activeWrite) activeWrite.promise.then(refresh, refresh);
+  if (pendingCopy) pendingCopy.done.then(refresh);
   // 스티커/추가 금액처럼 직접 기록을 쓰는 경로도 암호화 저장 응답까지 확인한다.
   if (waitingStateWrite) {
     const settled = () => { settledStateWrites.add(stateWrite); setTimeout(refresh, 0); };
     stateWrite.then(settled, settled);
   }
-  return h('main', { class: 'pc-help-page' }, btn('접수 상세로', back, 'ghost'), h('h1', {}, 'PC 입력 도움'),
-    h('p', { class: 'small' }, '휴대폰 내용을 보면서 PC에 입력하세요. 이 화면에서는 수거 결과를 변경하지 않습니다.'), body);
+  return h('main', { class: 'pc-help-page' }, h('header', { class: 'bar' }, btn('접수 상세로', back, 'ghost'), h('h1', { class: 'bar-title' }, 'PC 입력 도움')),
+    h('p', { class: 'small pc-help-intro' }, '휴대폰 기준을 보며 PC의 같은 접수에 입력하세요.'), body);
 }
 function pcInputHelp(stop) {
-  ui.pcInputBack = { id: stop.request_id, y: scrollY };
+  ui.pcInputBack = { id: stop.request_id, y: scrollY, source: st, mode: st.mode, stop };
   go('/pc-input/' + stop.request_id);
 }
 // [도착]: 시각과(허용했으면) 휴대폰 위치·정확도. 위치는 결과 파일로만 PC에 가고 지도 서버로는 보내지 않는다.

@@ -52,6 +52,53 @@ def no_restore(page, route='#/home'):
     assert page.evaluate('scrollY') <= 2
 
 
+def helper_return_boundaries(page):
+    for mode in ('PC', 'SOLO'):
+        prepare(page, mode)
+        enter(page)
+        opening = page.get_by_role('button', name='PC 입력 도움', exact=True)
+        page.evaluate('scrollTo(0,100)')
+        opening.click()
+        page.evaluate("async()=>{location.hash='#/home';await(await import('./core.js')).render()}")
+        enter(page)
+        expect(opening).not_to_be_focused()
+        assert page.evaluate('scrollY') <= 2, '무관한 목록을 거친 새 상세에 옛 도움 위치를 쓰지 않는다'
+
+        for change in ('state', 'stop', 'mode', 'lock'):
+            prepare(page, mode)
+            enter(page)
+            opening.click()
+            if change == 'lock':
+                page.evaluate("import('./core.js').then(C=>C.lockNow())")
+                page.get_by_placeholder('PIN', exact=True).fill(PIN)
+                page.get_by_role('button', name='잠금 해제', exact=True).click()
+                expect(page.get_by_role('button', name='접수 상세로', exact=True)).to_be_visible()
+            else:
+                page.evaluate("""async ({change,mode})=>{
+                    const C=await import('./core.js');
+                    if(change==='state')C.setSt({...C.st});
+                    if(change==='stop'){
+                        if(mode==='PC')C.st.daylist.stops=C.st.daylist.stops.map(s=>({...s}));
+                        else C.st.requests=C.st.requests.map(s=>({...s}));
+                    }
+                    if(change==='mode'){
+                        if(mode==='PC'){C.st.requests=C.st.daylist.stops;C.st.mode='SOLO';}
+                        else{C.st.daylist={work_date:C.todayKST(),crew:'가상팀',assign_ver:1,stops:C.st.requests};C.st.mode='PC';}
+                    }
+                }""", {'change': change, 'mode': mode})
+            page.get_by_role('button', name='접수 상세로', exact=True).click()
+            expect(opening).not_to_be_focused()
+            assert page.evaluate('scrollY') <= 2, f'{change}: 다른 자료/잠금의 도움 위치를 폐기한다'
+
+        prepare(page, mode)
+        enter(page)
+        opening.click()
+        expect(page.get_by_role('heading', name='PC 입력 도움', exact=True)).to_be_visible()
+        page.go_back()
+        expect(opening).to_be_focused()
+    print('PASS: PC 입력 도움의 직접 뒤로 초점·무관 이동/자료·접수·모드/잠금 복귀 경계', flush=True)
+
+
 def main():
     output = Path(os.environ.get('DG_TEST_DIR') or tempfile.mkdtemp(prefix='dg-list-return-'))
     output.mkdir(parents=True, exist_ok=True)
@@ -61,6 +108,7 @@ def main():
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         try:
+            helper_return_boundaries(page)
             for mode in ('PC', 'SOLO'):
                 for finder in (False, True):
                     route = prepare(page, mode, finder)
