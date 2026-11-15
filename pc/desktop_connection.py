@@ -386,6 +386,7 @@ def probe_url(url, *, ssl_context=None):
                 while True:
                     budget.remaining()
                     part = response.read1(min(8192, limit + 1 - len(data)))
+                    budget.remaining()
                     data.extend(part)
                     if len(data) > limit:
                         raise ValueError("response too large")

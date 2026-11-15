@@ -16,6 +16,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -347,6 +348,58 @@ def local_startup_deadlines(api, directory):
                   and not selected.exists(), slow.__name__ + " cannot stall local startup or request keys/create state")
 
 
+def expired_eof_cases(api):
+    """Some platforms return EOF instead of raising after deadline socket close."""
+    from dgpc import __version__
+    bodies = {
+        "/api/state": b'{"setup_needed":true,"logged_in":false}',
+        "/": '<title>동구 대형폐기물 PC 업무</title><script src="start.js"></script>'.encode(),
+        "/start.js": b"import './pc.js'", "/pc.js": b"import './core.js'", "/core.js": b"export const ready=true",
+    }
+    context = ssl.create_default_context()
+    for case, expected in (("partial_api_eof", "unreachable"), ("partial_asset_eof", "unreachable"), ("completed_before_expiry", "ready")):
+        class Response:
+            status = 200
+
+            def __init__(self, path, budget):
+                self.path, self.budget, self.read = path, budget, False
+                self.headers = Message()
+                self.headers["Server"] = "dgpc"
+                self.headers["X-DG-Version"] = __version__
+                self.headers["Content-Type"] = "application/json" if path == "/api/state" else "text/html" if path == "/" else "text/javascript"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                if case == "completed_before_expiry" and self.path == "/core.js":
+                    self.budget.close()  # response EOF was already checked while in budget
+
+            def read1(self, _limit):
+                if not self.read:
+                    self.read = True
+                    return b'{"setup_needed":' if case == "partial_api_eof" and self.path == "/api/state" else bodies[self.path]
+                if ((case == "partial_api_eof" and self.path == "/api/state")
+                        or (case == "partial_asset_eof" and self.path == "/core.js")):
+                    self.budget.close()  # deterministic deadline closes a blocked read with EOF
+                return b""
+
+        class Opener:
+            def __init__(self, budget):
+                self.budget = budget
+
+            def open(self, request, timeout):
+                path = request.full_url.removeprefix("http://127.0.0.1:19876")
+                assert path in bodies and timeout > 0
+                return Response(path, self.budget)
+
+        before = time.monotonic()
+        with patch.object(api, "_opener", side_effect=lambda budget, context: Opener(budget)):
+            result = api.probe_url("http://127.0.0.1:19876/", ssl_context=context)
+        check(result["code"] == expected and time.monotonic() - before < 1.5,
+              case + " preserves deadline/completed-response classification: " + result["code"])
+
+
 def main():
     check(importlib.util.find_spec("desktop_connection") is not None, "connection profiles and safe probe module exist")
     import desktop_connection as api
@@ -356,6 +409,7 @@ def main():
         profile_cases(api, directory, certs)
         probe_cases(api, directory, certs)
         local_startup_deadlines(api, directory)
+        expired_eof_cases(api)
         actual_tls_child(api, directory, certs)
     print(f"Desktop connection: {PASSED} checks passed; isolated fixtures only, other-device reachability unconfirmed")
 
