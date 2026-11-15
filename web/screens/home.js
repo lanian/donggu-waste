@@ -7,7 +7,7 @@ import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
 import { screenHomeSolo } from './solo.js';
 import { openFinder } from './find.js';
-import { daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
+import { daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, needsResult, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
 
 async function screenHome() {
   await flushSteps();
@@ -55,7 +55,7 @@ async function screenHome() {
   const photos = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body), ...(st.keptPhotos || [])];
   const photoN = photos.filter((p) => !recovered.has(p.photo_id)).length;
   // 수량을 다 입력해도 방문 결과를 저장하지 않았으면 상세로 이어 간다.
-  const unrecorded = stops.filter(({ s, d }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation));
+  const unrecorded = stops.filter(({ s, d }) => needsResult(s, d));
   const reconfirm = unrecorded.find(({ d }) => d.resultNeedsConfirmation);
   const nextStop = unrecorded[0];
   let next = { title: '오늘 배정 목록을 받으세요', detail: 'PC 담당자가 준비한 QR을 읽고, 받은 뒤 수신 코드를 알려 주세요.', label: '배정 목록 수신', run: () => go('#/scan') };

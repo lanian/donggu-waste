@@ -2,7 +2,7 @@
 import { deriveStop } from '../fees.js';
 import * as S from '../store.js';
 import { BACKUP_WARN_MS, ago, appLogo, btn, commit, flushSteps, go, h, lockNow, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, todayKST, ui } from '../core.js';
-import { daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, routeItems, setupCard, stopCard, stopSearch, workerBar } from './stoplist.js';
+import { daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, needsResult, routeItems, setupCard, stopCard, stopSearch, workerBar } from './stoplist.js';
 import { openFinder } from './find.js';
 
 async function screenHomeSolo() {
@@ -23,7 +23,7 @@ async function screenHomeSolo() {
   const route = view === 'TODAY' || view === 'TOMORROW';
   const canReorder = route && !ui.stopQ && !ui.dong && list.length > 1;
   const needBackup = st.requests.length && (!st.lastBackupAt || Date.now() - Date.parse(st.lastBackupAt) > BACKUP_WARN_MS);
-  const actionable = live.filter(({ s, d }) => !s.removed && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation));
+  const actionable = live.filter(({ s, d }) => needsResult(s, d));
   const reconfirm = actionable.find(({ d }) => d.resultNeedsConfirmation);
   const nextToday = actionable.filter(({ s }) => s.planned_date === today).sort((a, b) => a.s.seq - b.s.seq)[0];
   const overdue = actionable.filter(({ s }) => s.planned_date && s.planned_date < today)

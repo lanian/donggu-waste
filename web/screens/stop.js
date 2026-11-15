@@ -12,6 +12,7 @@ import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
 import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, saveFailed, saving, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
+import { nextToVisit, stopState } from './stoplist.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
 const collectionWrites = new WeakMap();
@@ -25,6 +26,11 @@ const memoOperations = new WeakMap(), memoRecoveries = new Map();
 onLock(() => {
   for (const [eventId] of memoRecoveries) memoRecoveries.set(eventId, { eventId, version: 0, busy: false, failed: true });
 });
+// 결과 저장 띠: 저장 직후 5초 동안 하단 바 바로 위에 "{N}번 · {결과}로 저장됨 [결과 바꾸기]". 화면을 옮기거나 잠그면 사라진다.
+const SAVED_BAND_MS = 5000;
+let savedBand = null; // { source, id, route, text, until } — 방문 번호·결과 이름만(개인정보 없음)
+onLock(() => { savedBand = null; });
+addEventListener('hashchange', () => { savedBand = null; });
 
 // 원본 암호문을 읽기만 한다. 창을 벗어나거나 잠그면 사진 URL과 읽기 결과를 버린다.
 async function viewPhoto(photo, detail, current) {
@@ -377,7 +383,7 @@ async function screenStop(id) {
       btn(d.loc ? '위치 고치기' : '위치 지정', () => go(`#/pick/${id}`), 'opt')) : null);
 
   const contact = h('section', { class: 'card' + (ui.afterCall === id && d.contact === 'NOT_CONTACTED' ? ' ask' : '') },
-    h('h2', {}, '연락 결과', ui.afterCall === id ? h('span', { class: 'hint' }, ' — 통화 결과를 골라 주세요') : null),
+    h('h2', {}, '연락 결과', ui.afterCall === id ? h('span', { class: 'hint warn' }, ' — 통화 결과를 골라 주세요') : null),
     h('div', { class: 'grid2' }, ...['REACHED', 'NO_ANSWER', 'CALLBACK', 'WRONG_NUMBER'].map((k) =>
       btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt'))),
     d.appt ? h('p', { class: 'notice' }, `재방문 약속: ${d.appt.date} ${d.appt.start || ''}${d.appt.end ? '~' + d.appt.end : ''}`) : null,
@@ -409,9 +415,12 @@ async function screenStop(id) {
         h('strong', {}, `이번 추가 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`), ` · 누적 ${l.qty_collected}${l.unit_label}`) : null,
       showLeft(l) ? h('div', { class: 'row' + (l.remaining ? ' left' : '') }, h('span', {}, '못 실은 수량'), h('span', { class: 'val' }, `${l.remaining} ${l.unit_label}`)) : null,
       l.remaining && showLeft(l) ? (() => {
-        const sel = h('select', { class: 'reason' + (l.reason || ui.tried !== id ? '' : ' need'), 'aria-label': `${l.name} 못 실은 사유`, onchange: (e) => setLine(l, { reason: e.target.value }) },
+        // 사유를 고르라고 한 뒤(ui.tried)에도 비어 있으면: 두꺼운 경고 테두리 + aria-invalid + 바로 아래 안내 글
+        const need = !l.reason && ui.tried === id, noteId = `reason-need-${l.line_id}`;
+        const sel = h('select', { class: 'reason' + (need ? ' need' : ''), 'aria-label': `${l.name} 못 실은 사유`, 'aria-invalid': need ? 'true' : null,
+          'aria-describedby': need ? noteId : null, onchange: (e) => setLine(l, { reason: e.target.value }) },
           ...Object.entries(LABEL.reason).map(([k, t]) => h('option', { value: k, selected: k === l.reason }, t)));
-        return sel;
+        return need ? [sel, h('p', { class: 'reason-need-note', id: noteId }, '사유를 고르세요')] : sel;
       })() : null,
       stickerRow(l))),
     btn('+ 현장 품목 추가', () => { ui.add = { stop: id, q: '', cat: '', items: [] }; go(`#/add/${id}`); }, 'big'));
@@ -504,10 +513,14 @@ async function screenStop(id) {
     writes.set(id, operation); freezeCollection();
     return operation.promise;
   };
-  const savedResult = (saved, text) => {
+  // 결과(ATTEMPT)를 저장하면 알림 대신 결과 저장 띠, 다시 저장 같은 것은 기존 알림
+  const savedResult = (saved, text, outcomeKey = null) => {
     if (!current()) return;
-    if (saved) { ui.tried = null; ui.outcomeMsg = ''; toast(text); }
-    else { ui.tried = id; ui.outcomeMsg = '수거 기록을 저장하지 못했습니다. 앱을 닫지 말고 저장 다시 시도를 눌러 주세요.'; }
+    if (saved) {
+      ui.tried = null; ui.outcomeMsg = '';
+      if (outcomeKey) savedBand = { source, id, route, text: `${stop.seq}번 · ${LABEL.outcome[outcomeKey]}로 저장됨${text ? ` ${text}` : ''}`, until: Date.now() + SAVED_BAND_MS };
+      else toast(text);
+    } else { ui.tried = id; ui.outcomeMsg = '수거 기록을 저장하지 못했습니다. 앱을 닫지 말고 저장 다시 시도를 눌러 주세요.'; }
   };
   const retryCollection = runCollection(async () => {
     const saved = await commit();
@@ -528,14 +541,18 @@ async function screenStop(id) {
   };
   const fail = (t) => { ui.tried = id; ui.outcomeMsg = t; };
   const outMsg = h('p', { class: 'msg err', role: 'alert' }, ui.outcomeMsg && ui.tried === id ? ui.outcomeMsg : '');
-  const outcome = h('section', { class: 'card' }, h('h2', {}, '수거 결과', d.outcome ? h('span', { class: 'hint' },
+  // 저장한 결과가 지금 기록과 맞으면 결과 단추 4개를 선택형으로 그린다: 저장된 것만 ✓ + 선택 모양(aria-pressed), 큰 주 단추 없음.
+  // ✓는 읽지 않게(aria-hidden) 해서 단추 이름은 그대로 두고, 선택 여부는 aria-pressed로 알린다.
+  const chosen = d.outcome && resultConfirmed ? d.outcome : null;
+  const choiceLabel = (k, text) => (chosen === k ? [h('span', { 'aria-hidden': 'true' }, '✓ '), text] : text);
+  const outcome = h('section', { class: 'card' }, h('h2', { id: 'st-result-title', tabindex: '-1' }, '수거 결과', d.outcome ? h('span', { class: 'hint ' + (chosen ? 'ok' : 'warn') },
     (resultUnsaved ? ' — 저장 대기: ' : d.resultNeedsConfirmation ? ' — 결과 재확인 필요: ' : ' — 저장됨: ') + LABEL.outcome[d.outcome]) : null),
     d.resultNeedsConfirmation ? h('p', { class: 'notice', role: 'status' }, '수량이나 품목이 바뀌었습니다. 실제 수거 결과를 다시 선택해 저장하세요.') : null,
     pendingSave ? h('div', { class: 'notice', role: 'status' }, h('strong', {}, '수거 기록 저장 대기'),
       h('p', { class: 'small' }, '이 창의 수량·결과는 남아 있습니다. 같은 기록을 다시 저장하며 새 수거 기록을 만들지 않습니다.'),
       btn('저장 다시 시도', retryCollection, 'primary big')) : null,
     // 가장 흔한 경우를 한 번에: 모든 품목을 실은 것으로 채우고 완료 저장
-    btn('전부 실음 · 수거 완료', runCollection(async () => {
+    btn(choiceLabel('DONE', '전부 실음 · 수거 완료'), runCollection(async () => {
       await flushSteps();
       if (!current()) return;
       const d = deriveStop(stop, st.events);
@@ -552,11 +569,11 @@ async function screenStop(id) {
       const after = await fillAll();
       if (!after || !current()) return;
       const left = after.lines.filter((l) => l.qty_collected < l.qty_confirmed);
-      if (left.length) { savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'PARTIAL' }), `일부 수거로 저장했습니다 (안 싣기로 한 품목 ${left.length}개는 남김)`); return; }
-      savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'DONE' }), '수거 완료로 저장했습니다');
-    }), d.outcome === 'DONE' && resultConfirmed ? 'primary huge on' : 'primary huge', { disabled: pendingSave || busySave }),
+      if (left.length) { savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'PARTIAL' }), `(안 싣기로 한 품목 ${left.length}개는 남김)`, 'PARTIAL'); return; }
+      savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'DONE' }), '', 'DONE');
+    }), chosen ? 'opt big' + (chosen === 'DONE' ? ' on' : '') : 'primary huge', { disabled: pendingSave || busySave }),
     outMsg,
-    h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(LABEL.outcome[k], runCollection(async () => {
+    h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(choiceLabel(k, LABEL.outcome[k]), runCollection(async () => {
       // 사유·수량을 고른 직후 누르면 화면이 아직 다시 그려지기 전일 수 있다: 모아 둔 수량을 먼저 저장하고 지금 기록으로 판단
       await flushSteps();
       if (!current()) return;
@@ -574,10 +591,12 @@ async function screenStop(id) {
         body.no_photo_reason = why;
       }
       if (k === 'PARTIAL' && needsFeeNotice(d) && !(await feeNotice(stop, d))) return;
+      // 보류는 남은 품목을 모두 재방문 대상으로 넘기므로 저장 전에 한 번 확인한다
+      if (k === 'ON_HOLD' && !(await ask(`${stop.seq}번을 보류로 저장합니다. 남은 품목은 재방문 대상이 됩니다.`, '보류로 저장', { title: '보류로 저장' }))) return;
       if (!current()) return;
       ui.tried = null; ui.outcomeMsg = '';
-      savedResult(await addEvent(stop, 'ATTEMPT', body), '저장했습니다');
-    }), d.outcome === k && resultConfirmed ? 'opt on' : 'opt', { disabled: pendingSave || busySave }))),
+      savedResult(await addEvent(stop, 'ATTEMPT', body), '', k);
+    }), chosen === k ? 'opt on' : 'opt', { disabled: pendingSave || busySave }))),
     d.outcome ? h('div', { class: 'result-sum' },
       h('p', {}, `${resultUnsaved ? '저장 대기 결과' : d.resultNeedsConfirmation ? '이전 저장 결과' : '저장된 결과'}: ${LABEL.outcome[d.outcome]}`),
       h('p', { class: 'small' }, d.resultNeedsConfirmation ? '변경한 수량에 맞게 수거 결과를 다시 저장해야 합니다.' : '수량을 다시 바꿨다면 수거 결과도 다시 골라 저장하세요.'),
@@ -603,18 +622,18 @@ async function screenStop(id) {
   // 아래 고정 영역: 장갑 낀 손으로도 누르기 쉬운 전화·다음 지점
   const seqList = (isSolo() ? st.requests.filter((r) => r.planned_date === stop.planned_date && r.status !== 'CANCELLED').sort((a, b) => a.seq - b.seq)
     : pcStops().filter((x) => !x.removed && !(x.field && x.planned_date !== pcWorkDate())));
-  const next = seqList.slice(seqList.indexOf(stop) + 1).find((x) => {
-    const derived = deriveStop(x, st.events);
-    return derived.progress !== 'DONE' || derived.resultNeedsConfirmation;
-  });
+  // 다음 지점: 홈 '지금 할 일'과 같은 기준(결과 미기록·재확인 필요)으로 뒤 번호부터, 없으면 앞 번호로 돌아가 찾는다.
+  const next = nextToVisit(seqList, stop, st.events);
   // 결과 선택 영역으로 이동하는 버튼은 실제 저장과 구분한다. 저장한 뒤에만 다음 지점으로 이동한다.
-  // 길안내는 전화 옆: 결과 저장 전에는 이 지점, 저장한 뒤에는 다음 미완료 지점
+  // 결과 저장 전에는 전화·길안내 모두 이 지점, 저장한 뒤에는 모두 다음 지점: [← · N번 전화 · N번 길안내 · 다음 N번 ▶].
+  // 다음 지점이 없으면 [목록으로]이고 전화는 이 지점 그대로.
   const saved = resultConfirmed && (d.outcome || stop.status === 'CANCELLED');
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
     btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': '목록으로' }),
-    btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
-    saved ? (next ? navBtn('다음 길안내', next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
+    saved && next ? btn(`${next.seq}번 전화`, () => dial(next), 'dock-call', { disabled: !!next.pii_purged || !next.phone })
+      : btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
+    saved ? (next ? navBtn(`${next.seq}번 길안내`, next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
       : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
@@ -629,10 +648,24 @@ async function screenStop(id) {
     h('a', { href: '#', class: 'step' + (done ? ' done' : '') + (nextStep && nextStep[0] === sid ? ' next' : ''), 'aria-current': nextStep && nextStep[0] === sid ? 'step' : null,
       onclick: (e) => { e.preventDefault(); document.getElementById(sid).scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); } },
       h('span', { class: 'n' }, done ? '✓' : String(i + 1)), h('span', {}, label))));
+  // 머리 칩: 저장 대기·재확인은 그대로, 그 밖은 목록과 같은 판정(stopState) — 결과 없이 수량만 넣었으면 '결과 미저장'(경고색)과 실은 양
+  const state = stopState(stop, d);
+  const headChip = resultUnsaved || d.resultNeedsConfirmation
+    ? h('span', { class: 'chip state p-STARTED' }, resultUnsaved ? '저장 대기' : '결과 재확인 필요')
+    : h('span', { class: 'chip state ' + (state.warn ? 'warn' : 'p-' + state.progress) }, state.label, state.loaded ? h('small', { class: 'chip-sub' }, state.loaded) : null);
+  // 결과 저장 띠(5초): 이 창·이 화면에서 방금 저장한 결과만. 저장 대기·저장 중에는 띄우지 않는다.
+  const bandLeft = savedBand && savedBand.source === source && savedBand.id === id && savedBand.route === route && !resultUnsaved ? savedBand.until - Date.now() : 0;
+  if (savedBand && savedBand.id === id && savedBand.until <= Date.now()) savedBand = null;
+  const band = bandLeft > 0 ? h('div', { class: 'saved-band', role: 'status' }, h('span', { class: 'saved-band-text' }, savedBand.text),
+    btn('결과 바꾸기', () => {
+      band.remove(); savedBand = null;
+      document.getElementById('st-result')?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' });
+      document.getElementById('st-result-title')?.focus({ preventScroll: true });
+    }, 'ghost saved-band-change')) : null;
+  if (band) setTimeout(() => { band.remove(); if (savedBand && savedBand.until <= Date.now()) savedBand = null; }, bandLeft);
   view = h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go(ui.stopBackTo || '#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`),
-      h('span', { class: `chip state p-${resultUnsaved || d.resultNeedsConfirmation ? 'STARTED' : d.outcome || d.progress}` }, resultUnsaved ? '저장 대기' : d.resultNeedsConfirmation ? '결과 재확인 필요' : stop.status === 'CANCELLED' ? '취소' : d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress])),
-    stepNav, info, contact, lines, fee, photos, outcome, manage, dock);
+    h('header', { class: 'bar' }, btn('← 목록', () => go(ui.stopBackTo || '#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`), headChip),
+    stepNav, info, contact, lines, fee, photos, outcome, manage, band, dock);
   if (pendingSave || busySave) lines.querySelectorAll('button,input,select,textarea').forEach((element) => { element.disabled = true; });
   if (activeWrite) activeWrite.promise.then(() => { if (current()) render(); }, () => { if (current()) render(); });
   return view;

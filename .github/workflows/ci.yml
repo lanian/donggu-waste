@@ -173,6 +173,7 @@ jobs:
           - test_pc_design
           - test_pc_review_fixes_ui
           - test_mobile_review_fixes
+          - test_mobile_ui_phase1
     steps:
       - uses: actions/checkout@v7
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)

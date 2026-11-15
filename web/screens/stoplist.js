@@ -10,6 +10,39 @@ import { CHECKS, doInstall, installEvt, runningAsApp } from '../widgets.js';
 
 // 수량 입력만 끝난 상태와 방문 결과까지 저장한 완료를 구분한다.
 const isStopDone = (s, d) => !d.resultNeedsConfirmation && (d.outcome ? d.outcome === 'DONE' && d.progress === 'DONE' : s.status === 'DONE');
+// 방문 결과를 기록해야 할 곳: 취소·제외·개인정보 정리 아님, 완료 아님, 결과 없음 또는 재확인 필요.
+// 홈·단독 홈의 '지금 할 일'과 상세 하단 바의 '다음 N번'이 같은 기준을 쓴다.
+const needsResult = (s, d) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation);
+// 방문 순서 목록에서 지금 지점 다음의 기록할 곳. 뒤쪽에 없으면 앞 번호로 돌아가 찾는다(지금 지점은 빼고).
+function nextToVisit(list, current, events) {
+  const i = list.indexOf(current);
+  const order = i < 0 ? list : [...list.slice(i + 1), ...list.slice(0, i)];
+  return order.find((x) => x !== current && needsResult(x, deriveStop(x, events))) || null;
+}
+// 실은 양 요약: 실은 수량 합/현장 수량 합. 단위가 섞이면 단위별로 "1/4개 · 0/2세트 실음".
+function loadedSummary(lines) {
+  const groups = new Map();
+  for (const l of lines) {
+    const label = l.unit_label || '', key = `${l.unit || ''}:${label}`;
+    const g = groups.get(key) || { label, got: 0, all: 0 };
+    g.got += Math.max(0, Number(l.qty_collected) || 0); g.all += Math.max(0, Number(l.qty_confirmed ?? l.qty) || 0);
+    groups.set(key, g);
+  }
+  const list = [...groups.values()].filter((g) => g.all || g.got);
+  if (!list.length) return '';
+  return (list.length === 1 ? `${list[0].got}/${list[0].all}` : list.map((g) => `${g.got}/${g.all}${g.label}`).join(' · ')) + ' 실음';
+}
+// 접수 상태 판정 하나(목록 카드·찾기·단독 목록·상세 머리 칩 공용). 진행(입력한 수량)과 저장한 결과를 같은 글자로 보이지 않는다:
+// 결과 없이 수량만 넣었으면(진행 PARTIAL·DONE) "결과 미저장"(경고색)과 실은 양, "일부 수거"는 저장한 결과(outcome PARTIAL)에만 쓴다.
+function stopState(s, d) {
+  const cancelled = s.status === 'CANCELLED', excluded = cancelled || !!s.removed;
+  const review = !excluded && !!d.resultNeedsConfirmation, finished = !excluded && isStopDone(s, d);
+  const unsaved = !excluded && !review && !finished && !d.outcome && ['PARTIAL', 'DONE'].includes(d.progress);
+  const progress = excluded ? 'CANCELLED' : review || unsaved ? 'STARTED' : finished ? 'DONE' : d.outcome || d.progress;
+  const label = s.removed ? '목록에서 제외됨' : cancelled ? '취소' : review ? '결과 재확인' : unsaved ? '결과 미저장'
+    : finished ? LABEL.progress.DONE : d.outcome ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress];
+  return { label, progress, warn: review || unsaved, excluded, cancelled, review, unsaved, finished, loaded: unsaved ? loadedSummary(d.lines || []) : '' };
+}
 
 // 오늘 진행 요약 띠: 완료/전체와 진행 막대 (0%여도 막대 바탕이 보이게)
 function daySummary(items) {
@@ -67,13 +100,8 @@ const filterDong = (list) => (ui.dong ? list.filter((x) => dongOf(x.s) === ui.do
 
 // 방문 카드 한 장 (PC 목록·단독 목록 공용). 개인정보를 지운 곳은 접수번호만 보인다.
 function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
-  const cancelled = s.status === 'CANCELLED', excluded = cancelled || s.removed;
   const purged = !!s.pii_purged;
-  const review = !!d.resultNeedsConfirmation, finished = !excluded && isStopDone(s, d);
-  const unsaved = !excluded && !review && !finished && !d.outcome && d.progress === 'DONE';
-  const progress = excluded ? 'CANCELLED' : review || unsaved ? 'STARTED' : finished ? 'DONE' : d.outcome || d.progress;
-  const state = s.removed ? '목록에서 제외됨' : cancelled ? '취소' : review ? '결과 재확인' : unsaved ? '결과 미저장'
-    : finished ? LABEL.progress.DONE : d.outcome && d.outcome !== 'DONE' ? LABEL.outcome[d.outcome] : LABEL.progress[d.progress];
+  const { label: state, progress, warn, excluded, finished, loaded } = stopState(s, d);
   const lines = d.lines || s.items;
   const remaining = new Map();
   for (const line of lines) {
@@ -90,12 +118,13 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
     h('span', { class: 'seq' }, s.seq, isNow ? h('small', { class: 'now-tag' }, '지금') : null),
     h('span', { class: 'body' },
       h('span', { class: 'stop-heading' }, h('strong', {}, purged ? '개인정보 정리됨' : s.name),
-        h('em', { class: 'chip state stop-state ' + (review || unsaved ? 'warn' : 'p-' + progress) }, state)),
+        h('em', { class: 'chip state stop-state ' + (warn ? 'warn' : 'p-' + progress) }, state)),
+      loaded ? h('span', { class: 'stop-loaded' }, loaded) : null,
       h('span', { class: 'stop-meta' }, h('span', { class: 'receipt' }, s.receipt_no ? `접수 ${s.receipt_no}` : '접수번호 없음'),
         s.eta ? h('span', { class: 'eta' }, `예정 ${s.eta}`) : null),
       !purged ? h('span', { class: 'addr' }, s.address) : null,
       h('span', { class: 'items' }, lines.map((i) => `${i.name} ${i.spec || ''} ${i.qty_confirmed ?? i.qty}${i.unit_label || ''}`.trim()).join(', ')),
-      !excluded && !finished ? h('span', { class: 'stop-quantity' }, `남음 ${left}`) : null,
+      !excluded && !finished ? h('span', { class: 'stop-quantity' + (d.outcome === 'PARTIAL' || s.revisit ? ' warn' : '') }, `남음 ${left}`) : null,
       h('span', { class: 'chips' },
         ...changes.map((c) => h('em', { class: 'chip new' }, F.DIFF_LABEL[c] || c)),
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
@@ -226,6 +255,6 @@ async function homeBanners() {
 }
 
 export {
-  batteryInfo, daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, kstHour, routeItems,
-  setupCard, setupSteps, stopCard, stopHay, stopSearch, tripHeads, workerBar,
+  batteryInfo, daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextToVisit, routeItems,
+  setupCard, setupSteps, stopCard, stopHay, stopSearch, stopState, tripHeads, workerBar,
 };

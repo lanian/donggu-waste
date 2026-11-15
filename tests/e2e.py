@@ -365,13 +365,14 @@ def main():
             ok("9,000원" in page.get_by_role("dialog").inner_text(), "현장 금액이 늘면 저장 전 '추가 금액 9,000원' 고지 창")
             page.get_by_role("button", name="동의", exact=True).click()
             expect(page.get_by_text("저장됨: 일부 수거")).to_be_visible()
-            # 결과를 저장하면 아래 고정 영역의 길안내가 '다음 지점 길안내'로 (다음 미완료 지점, 좌표와 '2번 수거지'만)
+            # 결과를 저장하면 아래 고정 영역의 전화·길안내가 모두 다음 지점으로 (다음 결과 미기록 지점, 좌표와 '2번 수거지'만)
             n0 = len(page.evaluate("window.__dgOpened"))
-            page.locator(".dock").get_by_role("button", name=re.compile("^다음 길안내")).click()
+            ok(page.locator(".dock .dock-call").inner_text() == "2번 전화", "결과 저장 뒤 아래 고정 영역 [2번 전화]도 다음 지점")
+            page.locator(".dock").get_by_role("button", name=re.compile("^2번 길안내")).click()
             page.wait_for_timeout(2200)
             nx = page.evaluate("window.__dgOpened")[n0:]
             ok(len(nx) == 2 and nx[0].startswith("kakaomap://route?ep=") and "2번 수거지" in unquote(nx[1]) and name not in unquote(" ".join(nx)),
-               "결과 저장 뒤 아래 고정 영역 [다음 길안내] → 다음 미완료 지점(2번)으로 카카오맵, 앱 없으면 웹")
+               "결과 저장 뒤 아래 고정 영역 [2번 길안내] → 다음 결과 미기록 지점(2번)으로 카카오맵, 앱 없으면 웹")
             ok(page.locator(".result-sum").get_by_text("추가 금액 9,000원: 동의").is_visible(), "고지 결과(동의)가 결과 요약에 표시")
             ok(page.locator(".line.field").last.locator(".row.left .val").inner_text().startswith("1"),
                "현장 추가 품목의 남은 대상 1 유지 (다른 품목 수거로 상쇄 안 됨)")
@@ -1292,7 +1293,8 @@ def solo(pw, url, video):
     # 위치 지정 (승인키가 없으면 주소 검색 대신 지도·내 위치)
     page.locator(".stop", has_text="가상일").click()
     expect(page.locator(".nav-none")).to_contain_text("위치 없음 — 위치 지정 필요")
-    ok(page.locator(".dock .nav-btn").count() == 0, "위치 없는 곳: 이유 '위치 없음 — 위치 지정 필요' 표시 (마지막 곳·저장 뒤라 다음 길안내 없음)")
+    ok(page.locator(".dock .dock-next").inner_text() == "다음 1번 ▶" and page.locator(".dock .nav-btn.no-loc").inner_text() == "1번 길안내",
+       "위치 없는 곳: 이유 '위치 없음 — 위치 지정 필요' 표시 (마지막 곳·저장 뒤라 앞 번호 미기록 1번으로 돌아가 길안내, 1번도 위치 없음)")
     page.get_by_role("button", name="← 목록").first.click()
     page.locator(".stop", has_text="가상이").click()
     page.locator(".dock .nav-btn").click()
