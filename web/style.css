@@ -503,11 +503,19 @@ dialog.sheet h2 { font-size: 1.2rem; } dialog.sheet .sheet-text { font-size: 1re
 /* ---- 상세: 현장 동작·스티커 확인 ---- */
 .field-acts { margin-top: 12px; } .field-acts .btn.arrive.on { font-size: 0.9333rem; }
 .chk { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line-strong); }
-.chk-label { display: block; font-size: 0.8rem; font-weight: 750; color: var(--muted); margin-bottom: 6px; }
+.chk-label { display: block; font-size: 0.9333rem; font-weight: 750; color: var(--muted); margin-bottom: 6px; }
 .chk-opts { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 6px; }
-.chk-opts .btn { min-height: 48px; padding: 6px 4px; font-size: 0.8667rem; white-space: nowrap; }
+.chk-opts .btn { min-height: 56px; padding: 8px 4px; font-size: 1.067rem; white-space: normal; overflow-wrap: anywhere; }
 .chk-opts .btn.sk-bad.on { background: var(--warn-bg); border: 2px solid var(--sticker); color: var(--warn); box-shadow: none; }
-.sk-note { margin: 6px 0 0; font-weight: 650; }
+.sk-note { margin: 8px 0 0; font-size: 1.067rem; font-weight: 650; overflow-wrap: anywhere; }
+.sk-review { margin: 6px 0 0; color: var(--warn); }
+.sticker-summary { margin: 0 0 12px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg); font-size: 0.9333rem; font-weight: 650; }
+.sticker-sheet .sheet-head h2 { font-size: 1.067rem; }
+.sticker-context p { margin: 6px 0; line-height: 1.4; }
+.sticker-context .sticker-item { overflow-wrap: anywhere; }
+.sticker-context .small { font-size: 0.9333rem; }
+.sticker-sheet .fld { margin-top: 8px; margin-bottom: 8px; }
+.sticker-sheet .sheet-actions { margin-top: 4px; }
 .result-sum { margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg); font-size: 0.8667rem; }
 .result-sum p { margin: 2px 0; }
 .pending-photo { font-weight: 700; }

@@ -209,23 +209,45 @@ async function smsSheet(stop, d) {
 }
 // 스티커·신고필증 확인 (품목별 3가지). 없음·불일치면 그 품목을 수거할지 바로 정한다.
 async function stickerCheck(stop, l, result) {
-  const source = st, route = location.hash;
-  const active = () => st === source && location.hash === route && findStop(stop.request_id) === stop;
-  if (result === 'OK') { await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result }); if (active()) return render(); return; }
-  const v = await sheet({ title: `${l.name} — 스티커·필증 ${LABEL.sticker[result]}`,
-    text: '이 품목을 어떻게 할까요? 미수거로 하면 "스티커·필증 없음·불일치" 사유로 남습니다.',
-    input: result === 'MISMATCH' ? { label: '붙어 있는 번호 (선택)', placeholder: '예: 2611-0042' } : null,
-    choices: [{ label: '그래도 수거', value: 'COLLECT', cls: 'primary' }, { label: '미수거 (사유 기록)', value: 'LEAVE' }] });
-  if (v == null || !active()) return;
+  const source = st, route = location.hash, mode = source?.mode, id = stop.request_id;
+  const owned = () => st === source && st?.mode === mode && S.isUnlocked() && location.hash === route && findStop(id) === stop;
+  if (!owned()) return;
   await flushSteps();
-  if (!active()) return;
-  l = deriveStop(stop, st.events).lines.find((line) => line.line_id === l.line_id) || l;
-  const decision = typeof v === 'object' ? v.value : v;
-  const number = typeof v === 'object' ? v.text.slice(0, 30) : '';
-  await addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result, ...(number ? { number } : {}), decision });
-  if (!active()) return;
-  if (decision === 'LEAVE') await addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: Math.max(priorQty(stop, l), l.qty_confirmed), qty_collected: priorQty(stop, l), reason: 'NO_STICKER' });
-  if (active()) render();
+  if (!owned() || collectionPending()) return;
+  let decision, number = '';
+  if (result !== 'OK') {
+    const controller = new AbortController();
+    const leave = () => controller.abort();
+    const observer = new MutationObserver(() => { if (!owned()) leave(); });
+    addEventListener('hashchange', leave);
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      const now = deriveStop(stop, source.events), line = now.lines.find((x) => x.line_id === l.line_id) || l;
+      const previous = priorQty(stop, line), extra = Math.max(0, line.qty_collected - previous);
+      const body = h('div', { class: 'sticker-context' },
+        h('p', { class: 'sticker-item' }, h('strong', {}, line.name), line.spec ? ` · ${line.spec}` : ''),
+        h('p', {}, `이번 추가 ${extra}${line.unit_label} · 이전 수거 ${previous}${line.unit_label}`),
+        h('p', {}, `미수거를 고르면 이번 추가는 0${line.unit_label}로 바꾸고, 이전 수거는 유지합니다.`),
+        h('p', { class: 'small' }, '수거 결정만 기록합니다. 실제 실은 수량과 최종 수거 결과는 별도로 확인·저장하세요.'));
+      const closed = sheet({ title: `스티커·필증 ${LABEL.sticker[result]}`, body, signal: controller.signal,
+        input: result === 'MISMATCH' ? { label: '붙어 있는 번호 (선택)', placeholder: '예: 0011-0042', value: now.stickers[l.line_id]?.number || '',
+          validate: (value) => value.length > 30 ? '번호는 30자 이내로 적어 주세요.' : '' } : null,
+        choices: [{ label: '그래도 수거', value: 'COLLECT' }, { label: '미수거 (사유 기록)', value: 'LEAVE' }] });
+      body.closest('dialog')?.classList.add('sticker-sheet');
+      const value = await closed;
+      if (value == null || controller.signal.aborted || !owned()) return;
+      decision = typeof value === 'object' ? value.value : value;
+      number = typeof value === 'object' ? value.text : '';
+    } finally {
+      observer.disconnect(); removeEventListener('hashchange', leave);
+    }
+  }
+  if (!owned()) return;
+  l = deriveStop(stop, source.events).lines.find((line) => line.line_id === l.line_id) || l;
+  // 확정한 선택은 저장 중 이동해도 같은 원본 상태에 두 기록을 연속으로 남긴다.
+  const check = addEvent(stop, 'STICKER_CHECK', { line_id: l.line_id, result, ...(number ? { number } : {}), ...(decision ? { decision } : {}) });
+  const quantity = decision === 'LEAVE' ? addEvent(stop, 'ITEM_RESULT', { line_id: l.line_id, line_kind: l.kind, qty_confirmed: Math.max(priorQty(stop, l), l.qty_confirmed), qty_collected: priorQty(stop, l), reason: 'NO_STICKER' }) : null;
+  await Promise.all([check, quantity]);
 }
 // 현장 금액 변경 고지: 접수 때보다 금액이 늘면 주민 안내 결과를 기록한다. 거부하면 늘어난 품목은 미수거.
 // 돌려주는 값: true = 계속 저장, false = 저장 멈춤
@@ -360,13 +382,16 @@ async function screenStop(id) {
   const showLeft = (l) => touched.has(l.line_id) || !!d.outcome || ui.tried === id;
   const stickerRow = (l) => {
     const sk = d.stickers[l.line_id];
-    return h('div', { class: 'chk' },
-      h('span', { class: 'chk-label' }, '스티커·필증'),
+    return h('div', { class: 'chk', 'data-line': l.line_id },
+      h('span', { class: 'chk-label' }, `스티커·필증 · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
       h('div', { class: 'chk-opts', role: 'group', 'aria-label': `${l.name} 스티커·신고필증` },
-        ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => stickerCheck(stop, l, k), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : '')))),
-      sk && sk.result !== 'OK' ? h('p', { class: 'small sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''} → ${sk.decision === 'LEAVE' ? '미수거' : sk.decision === 'COLLECT' ? '수거' : '결정 전'}`) : null);
+        ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k }))),
+      sk ? h('p', { class: 'sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''}${sk.result !== 'OK' ? ` → ${sk.decision === 'LEAVE' ? '미수거 결정' : sk.decision === 'COLLECT' ? '수거 결정' : '결정 전'}` : ''} · 이번 실은 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`) : null,
+      sk && l.reason === 'NO_STICKER' && (sk.result === 'OK' || sk.decision === 'COLLECT') ? h('p', { class: 'small sk-review' }, '미수거 사유가 남아 있습니다. 실은 수량·못 실은 사유와 수거 결과를 다시 확인하세요.') : null);
   };
+  const stickerCounts = d.lines.reduce((counts, line) => { const sk = d.stickers[line.line_id]; counts[!sk ? 'unchecked' : sk.result === 'OK' ? 'ok' : 'problem']++; return counts; }, { ok: 0, problem: 0, unchecked: 0 });
   const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
+    h('p', { class: 'sticker-summary' }, `스티커·필증: 확인 ${stickerCounts.ok} · 문제 ${stickerCounts.problem} · 미확인 ${stickerCounts.unchecked}`),
     ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
       h('div', { class: 'lhead' },
         h('div', { class: 'lname' }, h('em', { class: 'tag' }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
@@ -453,7 +478,7 @@ async function screenStop(id) {
     const nextButton = dock.querySelector('.dock-next');
     if (nextButton) { nextButton.disabled = true; nextButton.textContent = '저장 중…'; }
   };
-  const runCollection = (fn, { retry = false } = {}) => () => {
+  const runCollection = (fn, { retry = false, focusSticker = null } = {}) => () => {
     if (!current() || writes.has(id)) return;
     if (collectionPending() && !retry) { ui.tried = id; ui.outcomeMsg = '대기 중인 수거 기록을 먼저 다시 저장하세요.'; render(); return; }
     const operation = { kind: 'collection' };
@@ -462,7 +487,13 @@ async function screenStop(id) {
       catch (error) { if (current()) { ui.tried = id; ui.outcomeMsg = errMsg(error); } }
       finally {
         if (writes.get(id) === operation) writes.delete(id);
-        if (current()) await render();
+        if (current()) {
+          await render();
+          if (focusSticker && owned() && location.hash === route) {
+            const row = [...document.querySelectorAll('.chk')].find((node) => node.dataset.line === focusSticker.line);
+            row?.querySelector(`[data-result="${focusSticker.result}"]`)?.focus({ preventScroll: true });
+          }
+        }
       }
     });
     writes.set(id, operation); freezeCollection();
