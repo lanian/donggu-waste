@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -66,10 +67,12 @@ def main():
             open_menu(page)
             point = page.evaluate("""async () => {
               const C=await import('./core.js'), map=C.liveMaps.find(m=>m.getCanvas()===document.querySelector('main canvas'));
-              const r=map.getCanvas().getBoundingClientRect(), x=Math.round(r.left+r.width*.7), y=Math.round(r.top+r.height*.5);
-              const expected=map.unproject([x-r.left,y-r.top]);
-              map.once('click',e=>{window.__menuMapClick={lat:e.lngLat.lat,lng:e.lngLat.lng,menuWasOpen:document.querySelector('.shell').classList.contains('nav-open')}});
-              return {x,y,lat:expected.lat,lng:expected.lng,rect:{x:r.left,y:r.top,w:r.width,h:r.height}};
+              const r=map.getCanvas().getBoundingClientRect(), container=map.getCanvasContainer(), c=container.getBoundingClientRect();
+              const x=Math.round(r.left+r.width*.7), y=Math.round(r.top+r.height*.5);
+              const pixel={x:x-c.left-container.clientLeft,y:y-c.top-container.clientTop};
+              map.once('click',e=>{window.__menuMapClick={lat:e.lngLat.lat,lng:e.lngLat.lng,projected:map.project(e.lngLat),point:e.point,
+                client:{x:e.originalEvent.clientX,y:e.originalEvent.clientY},menuWasOpen:document.querySelector('.shell').classList.contains('nav-open')}});
+              return {x,y,pixel,rect:{x:r.left,y:r.top,w:r.width,h:r.height}};
             }""")
             page.mouse.click(point["x"], point["y"])
             closed(page)
@@ -77,7 +80,11 @@ def main():
             chosen = page.evaluate("window.__menuMapClick")
             expect(page.get_by_text("지도에서 지정한 위치", exact=True)).to_be_visible()
             ok(chosen["menuWasOpen"], "지도 클릭 처리는 메뉴의 원래 레이아웃 상태에서 먼저 수행")
-            assert abs(chosen["lat"] - point["lat"]) < 1e-7 and abs(chosen["lng"] - point["lng"]) < 1e-7, json.dumps({"point":point,"chosen":chosen})
+            # Integer client coordinates can meet a fractional layout edge (observed drift: 1/32 CSS px).
+            # Compare in input pixels; the separate menuWasOpen assertion still enforces handler order.
+            assert chosen["client"] == {"x": point["x"], "y": point["y"]}, json.dumps({"point":point,"chosen":chosen})
+            pixel_delta = math.hypot(chosen["projected"]["x"] - point["pixel"]["x"], chosen["projected"]["y"] - point["pixel"]["y"])
+            assert pixel_delta <= 1, json.dumps({"pixel_delta":pixel_delta,"point":point,"chosen":chosen})
             ok(True, "지도 바깥 메뉴 닫기가 원래 클릭 위치의 좌표를 바꾸지 않음")
 
             for width in (900, 1000, 390):
