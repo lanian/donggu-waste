@@ -257,6 +257,31 @@ class NumberedLabelsTest(unittest.TestCase):
             for con in connections:
                 con.close()
 
+    def test_dong_with_label_stock_or_allocation_cannot_be_deleted(self):
+        from dgpc import area as A
+        stock_dong = A.save_dong(self.con, {"name": "가상재고동"})
+        self.L.receive_range(self.con, "0301", "0302", dong_id=stock_dong)
+        with self.assertRaisesRegex(C.UserError, "배출표.*'사용' 표시를 끄세요"):
+            A.delete_dong(self.con, stock_dong)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM numbered_label WHERE stock_dong_id=?", (stock_dong,)).fetchone()[0], 2)
+        self.assertIsNotNone(C.one(self.con, "SELECT id FROM dong WHERE id=?", (stock_dong,)))
+
+        # 접수 동이 바뀌어 접수 건수는 0이어도, 예전 동으로 남은 번호 배정 기록이 있으면 지우지 않는다.
+        alloc_dong = A.save_dong(self.con, {"name": "가상배정동"})
+        request = self.request()
+        self.L.receive_range(self.con, "0303", "0303")
+        with C.tx(self.con):
+            self.con.execute("""INSERT INTO numbered_label_allocation (number_key,request_id,line_id,unit_index,dong_id,dong_name,
+                collection_at,source_event,automatic,created_at,updated_at) VALUES ('303',?,?,0,?,'가상배정동',?,'fixture',1,?,?)""",
+                             (request["id"], request["items"][0]["line_id"], alloc_dong, C.now(), C.now(), C.now()))
+        with self.assertRaisesRegex(C.UserError, "배출표.*'사용' 표시를 끄세요"):
+            A.delete_dong(self.con, alloc_dong)
+        self.assertEqual(C.one(self.con, "SELECT dong_id FROM numbered_label_allocation WHERE number_key='303'")["dong_id"], alloc_dong)
+
+        empty = A.save_dong(self.con, {"name": "가상빈동"})
+        A.delete_dong(self.con, empty)
+        self.assertIsNone(C.one(self.con, "SELECT id FROM dong WHERE id=?", (empty,)))
+
     def test_event_failure_rolls_back_numbers_and_audit_together(self):
         self.con.execute("""CREATE TEMP TRIGGER fixture_fail_label BEFORE INSERT ON numbered_label_event
             WHEN NEW.number_key='3' BEGIN SELECT RAISE(ABORT,'fixture event failure'); END""")

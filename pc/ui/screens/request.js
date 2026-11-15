@@ -2,7 +2,7 @@
 import * as M from '/web/map.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, sessionOwner, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, can, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, sessionOwner, statusChip, toast, wrap } from '../core.js';
 import { itemPicker, mapIn } from '../widgets.js';
 import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
@@ -52,6 +52,7 @@ async function screenRequest(id) {
   // 배출 주소 확인(형식·관할·전화번호 섞임 — 막지 않고 알림)
   const addrWarn = h('div', { class: 'addr-warn', 'aria-live': 'polite' });
   const detect = wrap(async () => {
+    if (!can('dongDetect')) return;  // 수거팀은 dong-detect 권한이 없다
     if (!F.address.value.trim()) { addrWarn.replaceChildren(); return; }
     const d = await api('dong-detect?address=' + encodeURIComponent(F.address.value));
     addrWarn.replaceChildren(...(d.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)));
@@ -65,7 +66,9 @@ async function screenRequest(id) {
   const calBox = h('div', { class: 'cal', role: 'group', 'aria-label': '예약 현황' });
   const calWarn = h('div', { 'aria-live': 'polite' });
   let earliest = null;
+  const showCal = can('calendar');  // 수거팀은 calendar 권한이 없어 달력 영역을 두지 않고 부르지도 않는다
   const loadCal = wrap(async () => {
+    if (!showCal) return;
     const qs = new URLSearchParams({ start: boot.today, days: 14, dong: F.dong.value, date: F.planned_date.value, exclude: isNew ? '' : id });
     const c = await api('calendar?' + qs);
     earliest = c.earliest;
@@ -466,8 +469,8 @@ async function screenRequest(id) {
       h('div', isNew ? { class: 'intake-column' } : {},
         h('div', { class: 'card formtable' + (isNew ? ' intake-schedule' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '03') : null, '일정·우선순위'),
           lab('수거 예정일', F.planned_date),
-          h('div', { class: 'calwrap' }, h('div', { class: 'row' }, h('span', { class: 'small muted' }, '다음 업무일 예약/한도'), h('span', { class: 'grow' }),
-            btn('가장 빠른 가능일', () => { if (!earliest) return toast('120일 안에 여유 있는 날이 없습니다.', true); F.planned_date.value = earliest; loadCal(); saveDraft(); }, 'small')), calBox, calWarn),
+          showCal ? h('div', { class: 'calwrap' }, h('div', { class: 'row' }, h('span', { class: 'small muted' }, '다음 업무일 예약/한도'), h('span', { class: 'grow' }),
+            btn('가장 빠른 가능일', () => { if (!earliest) return toast('120일 안에 여유 있는 날이 없습니다.', true); F.planned_date.value = earliest; loadCal(); saveDraft(); }, 'small')), calBox, calWarn) : null,
           h('div', { class: 'grid2' }, lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),

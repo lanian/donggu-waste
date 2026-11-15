@@ -480,6 +480,7 @@ table.dongedit td { padding: 4px 6px; } table.dongtbl td, table.dongtbl th { pad
 .dlg h2 { padding-bottom: 8px; border-bottom: 1px solid var(--line-2); }
 .dlg-b { display: flex; flex-direction: column; gap: 8px; } .dlg-b label.f input, .dlg-b label.f select { width: 100%; }
 .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.dlg-busy { margin-right: auto; align-self: center; color: var(--muted); font-size: 0.8929rem; } .dlg-busy:empty { display: none; }
 .dlg .msg { margin: 6px 0 0; color: var(--bad); }
 /* 세션 만료 알림 */
 .sess-warn { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 70; display: flex; gap: 12px; align-items: center; background: var(--sticker); color: var(--sticker-ink);

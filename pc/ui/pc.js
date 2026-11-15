@@ -1,5 +1,5 @@
 // 동구 대형폐기물 PC 업무 화면 (이 PC의 127.0.0.1 서버만 사용) — 시작점: 라우터(주소 → 화면)·틀(메뉴·머리)·단축키.
-// 화면은 screens/*.js, 공통 도우미는 core.js·widgets.js. 새 화면은 아래 screenImports·screenExports·NAV·GROUPS에 등록한 뒤
+// 화면은 screens/*.js, 공통 도우미는 core.js·widgets.js. 새 화면은 아래 screenImports·screenExports·NAV·GROUPS와 core.js SCREEN_ROLES에 등록한 뒤
 // 서버(pc/dgpc/server.py UI_FILES)에 파일을 더한다.
 // 이전 서버의 정적 파일 허용 목록에서도 열리는 진입점을 유지한다.
 // 첫 파일·연결·화면 준비를 구분한다. 자동 재시도와 업무 상태 변경은 하지 않는다.
@@ -130,13 +130,15 @@ async function startPc() {
     let view;
     try {
       if (!core.boot) {
-        // 재인증을 취소해 로그인으로 돌아갈 때 주민 양식과 메모리 초안을 즉시 비운다.
-        // 같은 계정의 [로그인하고 계속] 경로는 boot를 유지하므로 작성 내용을 보존한다.
-        screenModules.get('dongs')?.resetDongs();
+        // 인증 경계(재인증 취소·로그아웃)로 boot를 비운 때만 주민 양식과 메모리 초안을 즉시 비운다.
+        // 설정 저장 뒤의 일반 재조회(setBoot(null))와 같은 계정의 [로그인하고 계속]은 동별 초안·조건을 보존한다.
+        if (core.takeAuthReset()) screenModules.get('dongs')?.resetDongs();
         startupPhase('session');
         const st = await api('state', { timeoutMs: 10000 });
         if (my !== renderSeq) return;
         if (!st.logged_in) {
+          // 재조회 중 세션이 끝나 로그인 화면으로 가면 주민 초안을 남기지 않는다.
+          screenModules.get('dongs')?.resetDongs();
           setBoot(null, { sessionChanged: true });
           startupPhase('screen');
           const login = await loadScreen('login');
@@ -157,11 +159,12 @@ async function startPc() {
         const role = core.boot.me.role;
         applyPrefs(core.boot.me.prefs);
         // 역할별 메뉴 (서버도 같은 기준으로 막는다)
-        const NAV = [['home', '오늘 현황', 'ADMIN INTAKE FIELD LEAD'], ['dongs', '동별 관리', 'ADMIN INTAKE LEAD DONG'], ['requests', '접수', 'ADMIN INTAKE FIELD LEAD'], ['calculator', '빠른 수수료 계산', 'ADMIN INTAKE FIELD LEAD DONG'], ['labels', '배출표 관리', 'ADMIN INTAKE LEAD'], ['dispatch', '배정·노선', 'ADMIN INTAKE'], ['send', '목록 전송', 'ADMIN INTAKE'],
-          ['results', '결과 가져오기', 'ADMIN INTAKE FIELD'], ['close', '일일 마감', 'ADMIN INTAKE FIELD LEAD'], ['revenue', '세입·대사', 'ADMIN INTAKE LEAD'], ['refunds', '환불', 'ADMIN INTAKE LEAD'],
-          ['qrtest', 'QR 실측', 'ADMIN INTAKE FIELD'], ['stats', '통계·보고서', 'ADMIN INTAKE LEAD'], ['reports', '작업일지·월보', 'ADMIN INTAKE LEAD'], ['pilot', '시범 운영 비교', 'ADMIN INTAKE LEAD'], ['fees', '수수료표', 'ADMIN INTAKE FIELD LEAD'], ['settings', '설정', 'ADMIN'],
-          ['users', role === 'ADMIN' ? '사용자·이력' : '변경 이력', 'ADMIN LEAD'], ['access', '접속기록', 'ADMIN LEAD']];
-        const nav = NAV.filter(([, , r]) => r.split(' ').includes(role));
+        // 화면별 역할은 core.js 의 SCREEN_ROLES(서버 권한표 docs/routes.md 와 대조) 한 곳에서 정한다.
+        const NAV = [['home', '오늘 현황'], ['dongs', '동별 관리'], ['requests', '접수'], ['calculator', '빠른 수수료 계산'], ['labels', '배출표 관리'], ['dispatch', '배정·노선'], ['send', '목록 전송'],
+          ['results', '결과 가져오기'], ['close', '일일 마감'], ['revenue', '세입·대사'], ['refunds', '환불'],
+          ['qrtest', 'QR 실측'], ['stats', '통계·보고서'], ['reports', '작업일지·월보'], ['pilot', '시범 운영 비교'], ['fees', '수수료표'], ['settings', '설정'],
+          ['users', role === 'ADMIN' ? '사용자·이력' : '변경 이력'], ['access', '접속기록']];
+        const nav = NAV.filter(([k]) => core.canOpen(k, role));
         const defaultRoute = role === 'DONG' ? 'dongs' : 'home';
         let cur = route || defaultRoute;
         if (core.boot.me.must_change) cur = 'me';

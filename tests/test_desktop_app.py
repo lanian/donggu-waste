@@ -181,13 +181,14 @@ def shortcut_metadata(root):
                             stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
                             creationflags=subprocess.CREATE_NO_WINDOW, check=True)
     metadata = json.loads(result.stdout.decode("utf-8-sig"))
-    expected_args = subprocess.list2cmdline(["--state", str(state), "--port", str(port)])
+    # 바로가기는 자료 폴더(--state)를 고정하지 않고 저장된 설정을 따른다.
+    expected_args = subprocess.list2cmdline(["--port", str(port)])
     contents = destination.read_bytes()
     ok(Path(metadata["target"]) == artifact and metadata["arguments"] == expected_args
        and Path(metadata["directory"]) == artifact.parent
        and KEY not in json.dumps(metadata) and KEY.encode() not in contents
        and KEY.encode("utf-16le") not in contents,
-       "실제 .lnk COM 메타데이터: frozen EXE 대상·공백 자료 경로·사용자 지정 포트 보존·비밀 미포함")
+       "실제 .lnk COM 메타데이터: frozen EXE 대상·자료 경로 미고정·사용자 지정 포트 보존·비밀 미포함")
 
 
 def main():

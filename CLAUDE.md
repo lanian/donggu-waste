@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-동구 대형폐기물 접수·수거 관리 **시제품** (PC·휴대폰 같은 버전 번호, 현재 0.13.x). 문서·주석·커밋·UI 문구는 모두 한국어다. 기능·운영 절차는 `README.md`, `docs/배포·운영.md`(CI·릴리스·PC 업데이트), `docs/운영매뉴얼.md`. 휴대폰↔PC 이벤트 규격은 `docs/phone-events-v0.10.md`, v0.13 API 변경은 `docs/api-changes-v0.13.md`.
+동구 대형폐기물 접수·수거 관리 **시제품** (PC·휴대폰 같은 버전 번호, 현재 0.14.x — 정확한 값은 `pc/dgpc/__init__.py`). 문서·주석·커밋·UI 문구는 모두 한국어다. 기능·운영 절차는 `README.md`, `docs/배포·운영.md`(CI·릴리스·PC 업데이트), `docs/운영매뉴얼.md`. 휴대폰↔PC 이벤트 규격은 `docs/phone-events-v0.10.md`, v0.13 API 변경은 `docs/api-changes-v0.13.md`.
 
 ## 명령
 
@@ -56,8 +56,8 @@ PC ◀──암호화 결과 파일 .dgr(업무 메일) · 사진 파일 .dgp(�
 
 - `pc_tool.py`: CLI 진입점. `dgpc/server.py`: 표준 라이브러리 `ThreadingHTTPServer`로 `pc/ui/`와 `/api/*` 제공.
 - **API 경로는 `server.py`의 `@endpoint(method, pattern, roles, lock=…, access=…)` 데코레이터로 `ROUTES`에 등록**한다. 역할 권한(ADMIN/LEAD/INTAKE/FIELD)·DB 잠금(GET=read, POST=write)·접속기록이 여기서 같이 정해진다. 경로를 추가·변경하면 `gen_routes_doc.py`로 `docs/routes.md`를 다시 만든다. 모든 API 요청은 `X-DG-CSRF: 1` 필요.
-- **업무 모듈은 계층 구조**(아래 → 위, 위는 아래만 부름). 정확한 순서는 `dgpc/service.py` docstring이 정본:
-  `settings`·`store` → `core` → `fees` → `derive` → `payments`·`devices`·`users`·`auditlog`·`addresses` → `area`·`finance` → `intake` → `results` → `privacy`·`photos` → `assign` → `close`·`reports`·`backup` → `config` → `addrsearch` → `service` → `ops` → `server`
+- **업무 모듈은 계층 구조**(아래 → 위, 모듈 맨 위 import는 아래 계층만 부름). 정확한 순서는 `dgpc/service.py` docstring이 정본이고 `tests/test_module_layers.py`가 검사한다(모듈·import를 바꾸면 그 시험의 `LAYERS`·`LAZY_UP`과 docstring을 함께 고친다):
+  `settings`·`paths`·`geo`·`dong_defaults`·`operation_print` → `store` → `core` → `fees`·`external` → `derive`·`routing` → `collection`·`payments`·`devices`·`users`·`auditlog`·`addresses` → `area`·`finance`·`label_auto`·`photos`·`dong_centers`·`route_depots`·`form_files` → `numbered_labels`·`official_forms` → `intake` → `results` → `privacy`·`pc_collection` → `assign`·`backup` → `close`·`reports` → `config` → `addrsearch`·`vworld` → `dong_work` → `service` → `ops` → `server`
   - `core`는 다른 업무 모듈을 부르지 않는다(위 계층 일은 `on_dirty`로 등록받아 호출).
   - `service.py`는 이제 예전 이름을 다시 내보내는 **겉면(façade)** 일 뿐이다. 새 코드는 해당 업무 모듈을 직접 import한다.
   - `ops.py`: 백그라운드 작업 실행기(작업 번호 반환 → 화면이 `GET /api/jobs/{id}`로 진행 확인)와 예약 작업.
@@ -76,7 +76,7 @@ PC ◀──암호화 결과 파일 .dgr(업무 메일) · 사진 파일 .dgp(�
 
 - **버전 올리기**: `web/app.js`의 `APP_VERSION`, `web/sw.js`의 `VERSION`, `pc/dgpc/__init__.py`의 `__version__` 세 곳을 같은 값으로(`check_version.py`가 셋을 대조, CI 배포 조건). `web/`을 바꾸면 휴대폰이 새 앱을 받도록 반드시 올린다. README "현재 버전"·운영매뉴얼 제목도 맞춘다.
 - 생성물(`web/fees-data.js`, `web/labels-data.js`, `docs/settings.md`, `docs/routes.md`)과 `web/vendor/`는 직접 고치지 않는다. CI가 원본과 대조한다.
-- **개인정보 경계가 기능 요구사항이다**: 이름·연락처는 어떤 외부 서비스로도 나가지 않는다(지도 조각·행안부 검색어·좌표만). 결과 파일엔 원칙적으로 개인정보 없음(현장 접수·정정 요청만 예외). 서버 로그·변경 이력·접속기록에 검색어·이름·주소를 남기지 않는다. CSP(`web/index.html`)의 허용 서버를 늘리지 않는다. e2e 시험이 외부 요청과 반출 내용을 검사하므로 이를 깨면 실패한다.
+- **개인정보 경계가 기능 요구사항이다**: 이름·연락처는 어떤 외부 서비스로도 나가지 않는다(지도 조각·행안부 검색어·좌표, 그리고 관리자가 켠 경우 VWorld 참고 조회의 건물 단위 주소(이름·연락처·동호수 제외)만). 결과 파일엔 원칙적으로 개인정보 없음(현장 접수·정정 요청만 예외). 서버 로그·변경 이력·접속기록에 검색어·이름·주소를 남기지 않는다. CSP(`web/index.html`)의 허용 서버를 늘리지 않는다. e2e 시험이 외부 요청과 반출 내용을 검사하므로 이를 깨면 실패한다.
 - PC가 원본이다. 접수는 지우지 않고 버전으로 보존(수정 사유 필수), 현장 결과는 `event_id`로 한 번만 반영, 오래된 배정·취소된 건의 결과는 자동 반영하지 않고 충돌함으로 보낸다. 한 접수는 활성 배정이 하나뿐.
 - 시험·예시에는 가상 자료만 쓴다(실제 동 이름·주민 정보 금지, 가상 동은 `sample_data.py`).
 

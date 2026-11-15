@@ -129,6 +129,24 @@ class VWorldTest(SessionHTTPTestCase):
         self.assertNotIn(FAKE_KEY, json.dumps(data))
         self.assertNotIn("가상시험로", json.dumps(data))
 
+    def test_redirect_is_not_followed_so_key_and_address_never_reach_other_host(self):
+        self.configure()
+        with fake_vworld() as (other, other_url):
+            other_url = other_url.replace("127.0.0.1", "localhost")
+            for code in (301, 302, 303, 307, 308):
+                with self.subTest(code=code):
+                    self.fake["redirect"] = (code, other_url + "/collect")
+                    status, data, _ = self.locate()
+                    self.assertEqual(status, 200, data)
+                    self.assertTrue(data["none"])
+                    self.assertEqual(data["code"], "REDIRECT")
+                    self.assertNotIn("lat", data)
+                    text = json.dumps(data, ensure_ascii=False)
+                    for secret in (FAKE_KEY, "가상시험로", "collect", "localhost"):
+                        self.assertNotIn(secret, text)
+            self.assertEqual(other["calls"], [], "리다이렉트를 따라가 키·주소를 다른 서버로 보냈습니다")
+        self.assertEqual(len(self.fake["calls"]), 5)
+
     def test_not_found_and_invalid_points_never_return_coordinates(self):
         self.configure()
         responses = [{"response": {"status": "NOT_FOUND"}}, [], {"response": {"status": "OK"}},

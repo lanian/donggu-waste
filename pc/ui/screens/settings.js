@@ -1,6 +1,6 @@
 // PC 화면: 설정(기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소·백업·개인정보)
 import * as M from '/web/map.js';
-import { api, boot, btn, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, sessionOwner, setBoot, toast, wrap } from '../core.js';
+import { api, boot, btn, can, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, sessionOwner, setBoot, toast, wrap } from '../core.js';
 import { mapIn, purgeLogTable, webcamReadOnce } from '../widgets.js';
 
 const WD = '월화수목금토일';
@@ -334,7 +334,8 @@ function unloadCard(d) {
   return h('div', { class: 'card' }, h('h2', {}, `하차 기록 · 합계 ${d.unload_total.volume_m3}m³ · ${d.unload_total.weight_kg}kg`),
     d.unloads.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '시각', '반입지', '부피', '중량', '메모'].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...d.unloads.map((u) => h('tr', {}, h('td', {}, u.crew_name), h('td', {}, u.at_time || ''), h('td', {}, u.place), h('td', {}, u.volume_m3 ?? ''), h('td', {}, u.weight_kg ?? ''), h('td', {}, u.note || ''))))) : h('p', { class: 'muted' }, '기록 없음'),
-    boot.crews.length ? h('div', { class: 'row' }, crew, at, place, vol, kg, note, btn('하차 기록', wrap(async () => {
+    // 입력 줄은 POST unloads 권한(can('unloadWrite'): 관리자·접수·수거팀)만. 팀장은 표만 본다.
+    boot.crews.length && can('unloadWrite') ? h('div', { class: 'row' }, crew, at, place, vol, kg, note, btn('하차 기록', wrap(async () => {
       await postOnce(`unload:${d.work_date}`, 'unloads', { crew_id: crew.value, work_date: d.work_date, at_time: at.value, place: place.value, volume_m3: vol.value, weight_kg: kg.value, note: note.value });
       toast('하차를 기록했습니다'); render();
     }, msg), 'primary'), msg) : null);
@@ -389,15 +390,25 @@ function settingsDevices() {
   }, regMsg);
   // 휴대폰 화면의 기기 코드 QR을 이 PC 웹캠으로 읽어 바로 등록 (코드를 옮겨 적거나 보낼 필요 없음)
   const camVideo = h('video', { playsinline: true, muted: true, class: 'regcam', hidden: true });
-  const camBtn = btn('휴대폰 QR 웹캠으로 읽기', wrap(async () => {
-    if (camVideo._stop) { camVideo._stop(); return; }
+  // 같은 단추가 읽기 시작·멈추기를 함께 한다. 읽는 동안 단추를 끄는 wrap 밖에서 멈추기를 처리해야 두 번째 누름이 닿는다.
+  let camRead = null;  // 읽는 중: AbortController
+  const readCam = wrap(async () => {
+    const ctl = camRead = new AbortController();
     camBtn.textContent = '읽기 멈추기'; regMsg.textContent = '휴대폰 [기기 등록] 2단계의 QR을 웹캠에 비추세요.'; regMsg.className = 'msg';
     try {
-      const text = await webcamReadOnce(camVideo, (t) => /^DGD1\./.test(t.trim()));
+      const text = await webcamReadOnce(camVideo, (t) => /^DGD1\./.test(t.trim()), { signal: ctl.signal });
+      camRead = null; camBtn.textContent = '휴대폰 QR 웹캠으로 읽기';
       code.value = text.trim(); regMsg.textContent = '기기 코드를 읽었습니다. 등록합니다…';
       await register();
-    } finally { camBtn.textContent = '휴대폰 QR 웹캠으로 읽기'; }
-  }, regMsg), 'primary');
+    } catch (e) {
+      if (e.code !== 'STOPPED') throw e;
+      regMsg.textContent = '웹캠 읽기를 멈췄습니다.'; regMsg.className = 'msg';
+    } finally {
+      if (camRead === ctl) camRead = null;
+      if (!camRead) camBtn.textContent = '휴대폰 QR 웹캠으로 읽기';
+    }
+  }, regMsg);
+  const camBtn = btn('휴대폰 QR 웹캠으로 읽기', () => { if (camRead) camRead.abort(); else readCam(); }, 'primary');
   const pending = (d) => d.status === 'ACTIVE' && !d.confirmed_at;
   const devs = grid(['기기', '이름', '상태', '등록', ''], boot.devices.map((d) => [d.id.slice(0, 8), d.label || '',
     pending(d) ? h('span', {}, chip('지문 확인 대기', 'warn'), h('br'), h('b', { class: 'fp-inline' }, fp9(d.fingerprint || ''))) : d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),

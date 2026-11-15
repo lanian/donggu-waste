@@ -126,6 +126,39 @@ class OfficialFormsTests(unittest.TestCase):
         self.assertEqual(self.F.number_ranges(["9" * 30]), "9" * 30)
         self.assertEqual(self.F.number_ranges(["0001", "2"]), "0001, 2")
 
+    def test_continuation_rows_never_split_number_ranges_or_words(self):
+        from dgpc.form_files import _display_rows
+        groups = [[f"{n:04d}", f"{n + 1:04d}"] if n % 3 else [f"{n:04d}"] for n in range(1, 120, 3)]
+        numbers = self.F.number_ranges([x for g in groups for x in g])
+        tokens = set(numbers.split(", "))
+        self.assertGreater(len(numbers), 250)
+        long_range = "1" * 30 + "-" + "1" * 29 + "2"
+        note = "가상 감면 50% · 현장 추가 · " + "가" * 120 + " · 배출표 3장 미배정"
+        address = "가상시 동구 " + " ".join(f"예시로{i}길" for i in range(40)) + " 101"
+        name = "가" * 150
+        rows = _display_rows([{"kind": "COLLECTION", "receipt_no": "가상-1", "numbers": numbers, "note": note, "address": address, "name": name},
+                              {"kind": "COLLECTION", "receipt_no": "가상-2", "numbers": "0001, " + long_range + ", 0009", "note": "", "address": "", "name": ""}])
+        split = next(i for i, x in enumerate(rows) if x["receipt_no"] == "가상-2")
+        first, second = rows[:split], rows[split:]
+        self.assertTrue(all(r["kind"] == "CONTINUATION" for r in first[1:] + second[1:]))
+        for key, original in (("numbers", numbers), ("note", note), ("address", address), ("name", name)):
+            self.assertEqual("".join(r[key] for r in first), original, f"{key}: 이어 붙이면 원문과 같아야 합니다")
+        for chunk in (r["numbers"] for r in first if r["numbers"]):
+            self.assertLessEqual(len(chunk), 100)
+            for piece in chunk.rstrip(", ").split(", "):
+                self.assertIn(piece, tokens, f"번호·구간이 행 경계에서 잘림: {piece!r}")
+        notes = [r["note"] for r in first if r["note"]]
+        self.assertIn("가" * 120 + " · ", notes, "limit보다 긴 비고 항목 하나는 그 한 줄에 온전히 들어가야 합니다")
+        for chunk in notes:
+            for piece in chunk.rstrip(" ·").split(" · "):
+                self.assertIn(piece, note.split(" · "))
+        addresses = [r["address"] for r in first if r["address"]]
+        self.assertGreater(len(addresses), 1)
+        self.assertTrue(all(a.endswith(" ") for a in addresses[:-1]), "주소는 공백 경계에서 잘라야 합니다")
+        self.assertTrue(all(len(a) <= 150 for a in addresses))
+        self.assertTrue(all(len(r["name"]) <= 70 for r in first))
+        self.assertEqual([r["numbers"] for r in second if r["numbers"]], ["0001, " + long_range + ", 0009"])
+
     def test_print_settings_follow_worksheet_order_and_keep_ledger_rows_together(self):
         report = self.monthly()
         with ZipFile(BytesIO(self.F.xlsx_file(report))) as z:

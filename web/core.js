@@ -16,7 +16,7 @@ const END_OF_DAY_H = 17;                 // 이 시각(한국 시간) 뒤에는 
 
 const $app = document.getElementById('app');
 let st = null;               // 복호화된 업무 상태 (잠금 해제 동안만)
-let ui = { filter: 'ALL' };  // 화면 상태
+let ui = { filter: 'ALL' };  // 화면 상태 (적던 글·검색어 등. 잠그면 resetUi()로 비운다)
 let saving = Promise.resolve();
 let lastActive = Date.now(), hiddenAt = 0, handoffUntil = 0;
 const pendingPhotos = []; // 잠긴 사이 찍힌 사진: 메모리에만 두고(평문으로 저장하지 않음) 잠금 해제 뒤 암호화 저장
@@ -174,19 +174,51 @@ async function loadState() {
   lastActive = Date.now();
 }
 // 잠금 해제 직후: 화면 그리기, 기다리던 사진 저장
-// 창(설치한 앱·브라우저 탭)이 둘 이상 열려 있으면 서로 저장을 덮어쓴다: 잠금을 푼 창 하나만 쓰고 나머지는 잠근다
+// 창(설치한 앱·브라우저 탭)이 둘 이상 열려 있으면 서로 저장을 덮어쓴다: 잠금을 푼 창 하나만 쓰고 나머지는 잠근다.
+// 순서: 새 창이 'active'를 알림 → 열려 있던 창은 바로 'busy'로 답하고, 남은 기록(수량·사진 기록)을 다 저장하고 잠근 뒤 'locked'
+// → 새 창은 그 'locked'를 받은 뒤에야(답하는 창이 없으면 잠깐 기다린 뒤) 저장소를 읽는다. 늦게 답하는 창(멈춘 백그라운드 탭 등)은
+// 저장소의 쓰기 직전 대조(store.js)가 막는다: 그 사이 디스크가 바뀌었으면 덮어쓰지 않고 충돌로 알린다.
+const SESSION_DISCOVER_MS = 400;   // 열린 창이 'busy'로 답하기를 기다리는 시간(답이 없으면 다른 창이 없는 것으로 보고 계속)
+const SESSION_ACK_MAX_MS = 15000;  // 답한 창이 저장을 마치고 잠그기를 기다리는 최대 시간
 const WIN_ID = crypto.randomUUID();
-let sessionChan = null;
+let sessionChan = null, claim = null;
+const postSession = (m) => { try { sessionChan && sessionChan.postMessage(m); } catch {} };
 try {
   sessionChan = new BroadcastChannel('dg-session');
   sessionChan.onmessage = async (e) => {
-    if (e.data && e.data.type === 'active' && e.data.id !== WIN_ID && S.isUnlocked()) {
-      await saving; await lockNow(); toast('다른 창에서 앱을 열어 이 창은 잠갔습니다. 기록은 한 창에서만 하세요.', 'bad');
+    const m = e.data || {};
+    if (m.to === WIN_ID) {
+      if (claim && m.type === 'busy') claim.busy.add(m.id);
+      if (claim && m.type === 'locked') claim.locked.add(m.id);
+      claim?.check();
+      return;
     }
+    if (m.type !== 'active' || m.id === WIN_ID || !S.isUnlocked()) return;
+    // 두 창이 거의 같이 잠금을 풀었으면 나중에 푼 창이 남는다(먼저 푼 쪽이 물러남)
+    if (claim && (claim.at > (m.at || 0) || (claim.at === m.at && WIN_ID > m.id))) return;
+    postSession({ type: 'busy', id: WIN_ID, to: m.id });
+    try { await saving; } catch {}
+    await lockNow();
+    postSession({ type: 'locked', id: WIN_ID, to: m.id });
+    toast('다른 창에서 앱을 열어 이 창은 잠갔습니다. 기록은 한 창에서만 하세요.', 'bad');
   };
 } catch {}
+function claimSession() {
+  if (!sessionChan) return Promise.resolve();
+  return new Promise((resolve) => {
+    const c = { at: Date.now(), busy: new Set(), locked: new Set(), discovered: false };
+    let t1 = null, t2 = null;
+    const finish = () => { clearTimeout(t1); clearTimeout(t2); if (claim === c) claim = null; resolve(); };
+    c.check = () => { if (c.discovered && [...c.busy].every((id) => c.locked.has(id))) finish(); };
+    claim = c;
+    t1 = setTimeout(() => { c.discovered = true; c.check(); }, SESSION_DISCOVER_MS);
+    t2 = setTimeout(finish, SESSION_ACK_MAX_MS);
+    postSession({ type: 'active', id: WIN_ID, at: c.at });
+  });
+}
 async function afterUnlock() {
-  try { sessionChan && sessionChan.postMessage({ type: 'active', id: WIN_ID }); } catch {}
+  await claimSession();
+  if (!S.isUnlocked()) { await render(); return; }  // 기다리는 사이 더 나중에 연 창이 있어 이 창은 잠김
   await loadState();
   if (S.hasPendingSecure('state')) await commit();  // 잠금 전에 못 쓴 암호문을 복원했으면 다시 저장한다.
   // 자료 보존(persist) 요청 결과를 상태에 남긴다: 거절되면 첫 화면에 알림(바뀌었을 때만 저장)
@@ -348,11 +380,20 @@ async function settleWrites() {
     if (s0 === saving && p0 === photoFlushing && !stepFlush.size) return;
   }
 }
+// 잠그면 화면 상태(ui)도 비운다: 적던 접수·정정·메모·검색어에 이름·연락처·주소가 평문으로 남지 않게.
+// 남기는 것은 개인정보 없는 표시 설정과 접수 ID뿐(잠긴 사이 카메라에서 돌아온 사진·통화 뒤 돌아갈 곳을 찾는 데 씀).
+// 작성 중인 접수 초안은 draftFor 가 잠그기 전(settleWrites)에 암호화 저장해 두므로 잠금 해제 뒤 그대로 이어 쓴다.
+const UI_KEEP = ['filter', 'soloView', 'lastRoute', 'stopBackTo', 'stopBackId', 'afterCall', 'photoTarget', 'photoLine'];
+function resetUi() {
+  const keep = Object.fromEntries(UI_KEEP.filter((k) => ui[k] != null).map((k) => [k, ui[k]]));
+  for (const k of Object.keys(ui)) delete ui[k];  // 같은 객체를 비운다(다른 모듈이 붙잡은 참조에도 남지 않게)
+  Object.assign(ui, { filter: 'ALL' }, keep);
+}
 function lockNow() {
   if (locking) return locking;
   locking = (async () => {
     try { if (S.isUnlocked() && st) await settleWrites(); } catch {}
-    stopCamera(); S.lock(); st = null; wantWake(false);
+    stopCamera(); S.lock(); st = null; resetUi(); wantWake(false);
     for (const done of [...openSheets]) done(null);
   })().finally(() => { locking = null; });
   return locking.then(() => render());

@@ -1,6 +1,6 @@
 // PC 화면: 오늘 현황(대시보드)·처리할 일 배지
 import * as M from '/web/map.js';
-import { STATUS, afterWork, api, boot, btn, chip, go, grid, h, kst, md, pagehead, render, workEnd } from '../core.js';
+import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, workEnd } from '../core.js';
 import { mapIn } from '../widgets.js';
 import { screenRequests } from './requests.js';
 
@@ -17,7 +17,10 @@ function pendingTodos(pd) {
   add('unclosed_days', x('unclosed_days').count, `마감 안 한 지난 날짜 ${x('unclosed_days').count}일${old(by.unclosed_days)}`, `#/close?date=${x('unclosed_days').oldest}`, 'warn', 'ADMIN INTAKE LEAD');
   add('overdue', x('overdue').count, `지난 예정일 미처리 ${x('overdue').count}건${old(by.overdue)}`, '#/requests?quick=OVERDUE', 'bad', 'ADMIN INTAKE LEAD');
   add('nodate', x('nodate').count, `예정일 없음 ${x('nodate').count}건`, '#/requests?quick=NODATE', 'warn', 'ADMIN INTAKE LEAD');
-  add('no_result_crews', nr.length, `결과 미회수 팀 ${nr.length}곳 (${[...new Set(nr.map((c) => `${c.crew} ${md(c.work_date)}`))].slice(0, 3).join(', ')})`, '#/results', 'bad', 'ADMIN INTAKE LEAD');
+  // 결과 가져오기 화면을 못 여는 역할(팀장)은 가장 오래된 날짜의 일일 마감(결과 미회수 팀 안내가 있는 곳)으로 보낸다.
+  const nrOldest = nr.map((c) => c.work_date).filter(Boolean).sort()[0];
+  const nrHref = canOpen('results') ? '#/results' : nrOldest ? `#/close?date=${nrOldest}` : '#/close';
+  add('no_result_crews', nr.length, `결과 미회수 팀 ${nr.length}곳 (${[...new Set(nr.map((c) => `${c.crew} ${md(c.work_date)}`))].slice(0, 3).join(', ')})`, nrHref, 'bad', 'ADMIN INTAKE LEAD');
   add('conflicts', x('conflicts').count, `충돌함 ${x('conflicts').count}건${old(by.conflicts)}`, '#/results?focus=conflicts', 'bad', 'ADMIN INTAKE');
   return t;
 }

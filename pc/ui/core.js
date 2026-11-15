@@ -255,21 +255,32 @@ async function download(path, filename, opts = {}) {
 let dlgSeq = 0;
 const dlgStack = [];
 // extra: [{ label, value, cls }] — 확인·취소 말고 다른 답(누르면 value로 닫힘). sticky: 화면을 옮겨도 닫지 않음(다시 로그인)
+// onOk 처리 중(서버 요청 진행 중)에는 취소·다른 답·Esc·화면 이동으로 닫지 않는다: 서버는 계속 처리하므로
+// 중간에 닫으면 한 번만 주는 응답(백업 개인키 등)이나 결과 안내를 잃는다. 끝나면 결과로 닫힌다.
 function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false, enterSubmit = true } = {}) {
   return new Promise((resolve) => {
     const id = `dlg${++dlgSeq}`;
     const prev = document.activeElement;
+    let busy = false;
     const msg = h('p', { class: 'msg', role: 'alert' });
+    const busyMsg = h('span', { class: 'dlg-busy', role: 'status', 'aria-live': 'polite' });
     const okB = btn(ok, null, danger ? 'danger' : 'primary', { 'data-dlg-ok': '1' });
-    const noB = cancel ? btn(cancel, () => close(null)) : null;
-    const exB = extra.map((x) => btn(x.label, () => close(x.value), x.cls || ''));
+    const noB = cancel ? btn(cancel, () => { if (!busy) close(null); }) : null;
+    const exB = extra.map((x) => btn(x.label, () => { if (!busy) close(x.value); }, x.cls || ''));
     const box = h('div', { class: 'dlg' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': id + 't', tabindex: '-1' },
-      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, noB, ...exB, okB));
+      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, busyMsg, noB, ...exB, okB));
     const back = h('div', { class: 'dlg-back' }, box);
+    const setBusy = (on) => {
+      busy = on;
+      box.setAttribute('aria-busy', on ? 'true' : 'false');
+      for (const b of [okB, noB, ...exB]) if (b) { b.disabled = on; if (on) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy'); }
+      busyMsg.textContent = on ? '처리 중입니다. 끝날 때까지 기다려 주세요.' : '';
+    };
     const focusables = () => [...box.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')].filter((el) => !el.disabled && !el.hidden && el.offsetParent !== null);
     const key = (e) => {
       if (dlgStack[dlgStack.length - 1] !== back) return;
-      if (e.key === 'Escape' && cancel) { e.preventDefault(); e.stopPropagation(); close(null); }
+      if (e.key === 'Escape' && busy) { e.preventDefault(); e.stopPropagation(); }
+      else if (e.key === 'Escape' && cancel) { e.preventDefault(); e.stopPropagation(); close(null); }
       else if (e.key === 'Tab') {
         const f = focusables(); if (!f.length) return;
         const i = f.indexOf(document.activeElement);
@@ -280,10 +291,11 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
     };
     let closed = false;
     const close = (v) => { if (closed) return; closed = true; back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
-    back._close = close; back._sticky = sticky;
+    back._close = close; back._sticky = sticky; back._busy = () => busy;
     okB.addEventListener('click', async () => {
-      msg.textContent = ''; okB.disabled = true;
-      try { const v = onOk ? await onOk() : true; close(v === undefined ? true : v); } catch (e) { msg.textContent = e.message; } finally { okB.disabled = false; }
+      if (busy) return;
+      msg.textContent = ''; setBusy(true);
+      try { const v = onOk ? await onOk() : true; close(v === undefined ? true : v); } catch (e) { msg.textContent = e.message; } finally { setBusy(false); }
     });
     document.addEventListener('keydown', key, true);
     document.body.append(back); dlgStack.push(back);
@@ -293,7 +305,8 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
 }
 const confirmDlg = (title, text, opts = {}) => modal({ title, body: [h('p', {}, text), ...(opts.more || [])], ok: opts.ok || '확인', danger: !!opts.danger, cancel: opts.cancel || '취소' });
 // 화면을 옮기면(주소 바뀜) 열린 대화 상자를 닫는다(취소로) — 옛 화면의 대화 상자가 새 화면 위에 남지 않게. 다시 로그인 상자는 남긴다.
-addEventListener('hashchange', () => { [...dlgStack].reverse().forEach((b) => { if (!b._sticky && b._close) b._close(null); }); });
+// 처리 중인 상자는 남겨 두었다가 처리가 끝나면 결과로 닫는다(응답을 잃지 않게).
+addEventListener('hashchange', () => { [...dlgStack].reverse().forEach((b) => { if (!b._sticky && b._close && !b._busy?.()) b._close(null); }); });
 function promptDlg(title, label, opts = {}) {
   const inp = h('input', { placeholder: opts.placeholder || '', class: 'fill' });
   return modal({ title, ok: opts.ok || '확인', danger: !!opts.danger, body: [...(opts.lead || []), h('label', { class: 'f' }, label, inp)],
@@ -390,7 +403,37 @@ const crewEnd = (cid) => ((boot.crews.find((c) => c.id === cid) || {}).shift_end
 const workEnd = () => boot.crews.filter((c) => c.active).map((c) => c.shift_end || '17:00').sort().pop() || '17:00';
 const afterWork = (date, cid) => date < boot.today || (date === boot.today && nowHM() >= (cid ? crewEnd(cid) : workEnd()));
 const md = (d) => (d ? `${+d.slice(5, 7)}/${+d.slice(8, 10)}` : '');
-const canWork = () => ['ADMIN', 'INTAKE'].includes(boot.me.role);  // 접수·수정·일괄 처리
+// ------------------------------------------------------------ 역할별 기능: 화면이 단추·조회·링크를 보여 줄지 판단하는 한 곳
+// 정본은 서버 권한표 docs/routes.md(pc/dgpc/server.py 의 @endpoint)다. 화면은 이 표로 쓸 수 없는 것을 숨기고 서버가 다시 막는다.
+// 역할: ADMIN 관리자 · INTAKE 접수 · FIELD 수거팀 · LEAD 팀장 · DONG 지정 동. 경로 권한을 바꾸면 여기도 함께 고친다.
+// 화면 모듈은 boot.me.role 을 직접 비교하지 말고 can('기능')·canOpen('화면')을 쓴다.
+const CAN = {
+  work: 'ADMIN INTAKE',               // POST requests·requests/{id}·requests/bulk (WORK): 접수·수정·일괄 처리
+  calendar: 'ADMIN INTAKE LEAD',      // GET calendar (VIEW): 수거 가능일 달력
+  dongDetect: 'ADMIN INTAKE LEAD',    // GET dong-detect (VIEW): 주소로 행정동 찾기
+  unloadWrite: 'ADMIN INTAKE FIELD',  // POST unloads (CREW): 하차 기록 입력
+  feeReview: 'ADMIN INTAKE',          // POST fee-revisions/{id}/approve·reject (WORK): 수수료표 개정 승인·반려
+  soloImport: 'ADMIN INTAKE',         // POST import/solo (WORK): 단독 휴대폰 백업 옮기기
+};
+// 메뉴 화면별 역할(라우터 pc.js 의 메뉴·이동 기준). 각 화면의 주된 경로 권한과 같게 둔다.
+// 예: results = POST import/result·import/photos (ADMIN·INTAKE·FIELD) — 팀장은 결과 가져오기 화면으로 보내지 않는다.
+const SCREEN_ROLES = {
+  home: 'ADMIN INTAKE FIELD LEAD', dongs: 'ADMIN INTAKE LEAD DONG', requests: 'ADMIN INTAKE FIELD LEAD', calculator: 'ADMIN INTAKE FIELD LEAD DONG',
+  labels: 'ADMIN INTAKE LEAD', dispatch: 'ADMIN INTAKE', send: 'ADMIN INTAKE', results: 'ADMIN INTAKE FIELD', close: 'ADMIN INTAKE FIELD LEAD',
+  revenue: 'ADMIN INTAKE LEAD', refunds: 'ADMIN INTAKE LEAD', qrtest: 'ADMIN INTAKE FIELD', stats: 'ADMIN INTAKE LEAD', reports: 'ADMIN INTAKE LEAD',
+  pilot: 'ADMIN INTAKE LEAD', fees: 'ADMIN INTAKE FIELD LEAD', settings: 'ADMIN', users: 'ADMIN LEAD', access: 'ADMIN LEAD',
+};
+const roleIn = (roles, role) => roles.split(' ').includes(role);
+function can(action, role = boot?.me?.role) {
+  if (!(action in CAN)) throw new Error(`알 수 없는 화면 기능: ${action}`);
+  return !!role && roleIn(CAN[action], role);
+}
+// 화면 주소('results', '#/results?focus=…' 모두 됨)를 이 역할이 열 수 있는지
+function canOpen(route, role = boot?.me?.role) {
+  const key = String(route).replace(/^#?\/?/, '').split(/[\/?]/)[0];
+  return !!role && key in SCREEN_ROLES && roleIn(SCREEN_ROLES[key], role);
+}
+const canWork = () => can('work');  // 접수·수정·일괄 처리
 const dongOpts = (cur, { all = false, none = '(동 미지정)' } = {}) => [h('option', { value: '' }, all ? '전체' : none),
   ...(all ? [h('option', { value: '-', selected: cur === '-' }, '(동 미지정)')] : []),
   ...boot.dongs.filter((d) => d.active || d.name === cur).map((d) => h('option', { value: d.name, selected: d.name === cur }, d.name + (d.active ? '' : ' (사용 안 함)')))];
@@ -439,7 +482,13 @@ let renderFn = () => {};
 const setRender = (fn) => { renderFn = fn; };
 const render = (...a) => renderFn(...a);
 // boot(설정·팀·기기·나)는 여기 한 곳에 둔다. 다른 모듈은 읽기만 하고, 바꿀 때는 setBoot().
+// setBoot(null) = 같은 로그인의 일반 재조회(설정 저장 뒤 등). setBoot(null, { sessionChanged: true }) = 인증 경계
+// (로그아웃·재인증 취소·로그인 직전). 라우터는 인증 경계일 때만 주민 양식·동별 초안을 비운다(takeAuthReset).
+let authReset = false;
+const takeAuthReset = () => { const v = authReset; authReset = false; return v; };
 const setBoot = (b, { sessionChanged = false } = {}) => {
+  if (!b && sessionChanged) authReset = true;
+  else if (b) authReset = false;
   const identity = b?.me ? `${b.me.username}|${b.me.role}` : '';
   if (sessionChanged || (identity && identity !== prefsIdentity)) resetPrefsSession(identity);
   const read = b?.me && bootstrapPrefsReads.get(b);
@@ -459,11 +508,11 @@ export {
   $app, ACCESS, ACTION, CONTACT, ENTITY, FEES, FONT, IDLE_RESET_MS,
   NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, RECON, REFUND_CAUSE, REFUND_ST,
   REQ_IDS, SMS_T, STATUS, STICKER, THEME, afterWork, api, apiRaw,
-  applyPrefs, boot, btn, canWork, chip, clearMaps, confirmDlg, copyNotice,
+  CAN, SCREEN_ROLES, applyPrefs, boot, btn, can, canOpen, canWork, chip, clearMaps, confirmDlg, copyNotice,
   crewEnd, dlgSeq, dlgStack, dongOpts, download, feeMemo, fmtPhone, go,
   grid, gridbar, h, isPlaceholderContact, isStale, jobsPanel, kst, liveMaps,
   mb, md, modal, nowHM, pagehead, pendingActions, post, postOnce,
   prefsControls, promptDlg, reasonDlg, reasonFields, reauth, relogin, render, reqDone,
   reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, sessionOwner, setBoot, setRender, statusChip,
-  stopSessionTimer, toast, touchSession, uuid, workEnd, wrap,
+  stopSessionTimer, takeAuthReset, toast, touchSession, uuid, workEnd, wrap,
 };

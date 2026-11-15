@@ -12,7 +12,7 @@ FAKE_KEY = "VWORLD-TEST-ONLY-NOT-PRODUCTION-1234"
 def fake_vworld():
     state = {"calls": [], "status": 200, "response": {"response": {"status": "OK", "result": {
         "crs": "EPSG:4326", "point": {"x": "126.9233", "y": "35.1462"}}}}, "gate": None,
-             "entered": threading.Event()}
+             "entered": threading.Event(), "redirect": None}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -22,6 +22,13 @@ def fake_vworld():
             state["entered"].set()
             if state["gate"]:
                 state["gate"].wait(8)
+            if state["redirect"]:  # (상태 코드, 이동할 주소): 키 든 주소를 다른 서버로 넘기려는 응답
+                code, location = state["redirect"]
+                self.send_response(code)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             body = json.dumps(state["response"]).encode()
             self.send_response(state["status"])
             self.send_header("Content-Type", "application/json")

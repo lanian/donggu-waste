@@ -175,15 +175,27 @@ function loadJsQR() {
   return (jsqrReady ||= new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = '/web/vendor/jsQR.js'; sc.onload = res; sc.onerror = rej; document.head.append(sc); }));
 }
 // 웹캠으로 QR 한 장 읽기: accept(text)가 참인 QR이 보이면 끝. video._stop()으로 멈춤
-async function webcamReadOnce(video, accept) {
+// signal(AbortSignal)을 주면 카메라를 여는 중이든 읽는 중이든 abort()로 멈춘다: 영상을 끄고 code='STOPPED' 오류로 끝난다.
+async function webcamReadOnce(video, accept, { signal } = {}) {
+  const stopped = () => Object.assign(new Error('읽기를 멈췄습니다.'), { code: 'STOPPED' });
+  if (signal?.aborted) throw stopped();
   await loadJsQR();
+  if (signal?.aborted) throw stopped();
   const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-  video.hidden = false; video.srcObject = stream; await video.play();
   const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
   return new Promise((res, rej) => {
     let done = false;
-    const stop = () => { done = true; stream.getTracks().forEach((t) => t.stop()); video.hidden = true; video._stop = null; };
-    video._stop = () => { stop(); rej(new Error('읽기를 멈췄습니다.')); };
+    const stop = () => {
+      if (done) return; done = true;
+      stream.getTracks().forEach((t) => t.stop()); video.pause(); video.srcObject = null; video.hidden = true; video._stop = null;
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => { stop(); rej(stopped()); };
+    video._stop = onAbort;
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    video.hidden = false; video.srcObject = stream;
+    video.play().catch((e) => { if (!done) { stop(); rej(e); } });
     const loop = () => {
       if (done) return;
       if (!video.isConnected) { stop(); rej(new Error('화면을 떠나 읽기를 멈췄습니다.')); return; }

@@ -12,10 +12,21 @@ import threading
 import time
 import webbrowser
 
-from desktop_runtime import (APP_TITLE, DesktopController, DesktopError, child_main, create_shortcut,
-                             load_state_choice, resolve_db_key, save_state_choice)
+from desktop_runtime import (APP_TITLE, ChildStartError, DesktopController, DesktopError, child_exit_code, child_main,
+                             create_shortcut, has_saved_configuration, load_state_choice, report_child_failure,
+                             resolve_db_key, save_state_choice)
 
-EXISTING_CHECK_SECONDS = 3.0
+# 실행 앱이 띄우지 않은 기존 서버의 주기 점검 간격. 점검은 /api/state 하나만 GET 하며(업무 화면 파일 전체는 시작·수동
+# 재연결 확인 때만), 서버 접속 기록이 점검 요청으로 넘치지 않게 15초 이상으로 둔다.
+EXISTING_CHECK_SECONDS = 15.0
+NEW_DATABASE_DECLINED = ("새 DB를 만들지 않았습니다. 기존 자료 폴더를 옮겼거나 외장 드라이브가 빠졌다면 ‘자료 폴더 선택’에서 "
+                         "기존 자료 폴더를 고르세요. 기존 자료는 바꾸지 않았습니다.")
+
+
+def new_database_allowed(ask, *, directory=None):
+    """pc.db가 없는 폴더에 새 DB를 만들어도 되는지. 첫 설치(실행 앱 설정 파일 없음)는 그대로 허용하고,
+    이미 설정이 저장된 PC면 사용자 확인(ask)을 받아야 한다. 폴더를 옮긴 뒤 빈 새 DB로 조용히 시작하지 않게 한다."""
+    return not has_saved_configuration(directory) or bool(ask())
 
 
 def launcher_command(state, profile):
@@ -77,15 +88,20 @@ def main():
                 return 2
         from desktop_check import connection_check_main
         return connection_check_main(args.check_connection)
-    from desktop_connection import ConnectionProfile, save_profile, validate_profile
+    from desktop_connection import ConfigurationDamaged, ConnectionProfile, save_profile, validate_profile
     from desktop_diagnostics import DiagnosticSnapshot, collect_diagnostics, diagnostics_text, save_report
     profile, profile_error = resolve_initial_profile(args)
     args.port = profile.port
     state = load_state_choice(args.state)
     if args.desktop_child:
         if profile_error:
-            raise DesktopError(profile_error)
-        return child_main(state, args.port, connection=profile)
+            report_child_failure("profile")
+            return child_exit_code("profile")
+        try:
+            return child_main(state, args.port, connection=profile)
+        except ChildStartError as error:
+            # 분류는 child_main이 부모의 오류 로그에 남겼다. 부모는 종료 코드로 안내를 고른다.
+            return child_exit_code(error.code)
 
     import tkinter as tk
     from tkinter import filedialog, messagebox, simpledialog
@@ -267,7 +283,16 @@ def main():
         try:
             selected = ConnectionProfile.from_dict(values)
             validate_profile(selected)
-            save_profile(selected)
+            try:
+                save_profile(selected)
+            except ConfigurationDamaged:
+                # 읽지 못한 설정을 조용히 덮어쓰지 않는다. 사용자가 확인하면 손상 파일을 보관하고 새로 저장한다.
+                if not messagebox.askyesno(APP_TITLE, "저장된 실행 앱 설정 파일이 손상되어 읽지 못했습니다.\n\n"
+                                           "손상된 파일은 그대로 보관하고 지금 입력한 접속 설정으로 새로 저장할까요? "
+                                           "자료 폴더 위치는 다시 확인해야 할 수 있습니다.", icon="warning", default="no", parent=root):
+                    return
+                backup = save_profile(selected, replace_damaged=True)
+                messagebox.showinfo(APP_TITLE, f"손상된 설정 파일을 보관했습니다.\n{backup}\n\n다시 실행한 뒤 자료 폴더 위치를 확인하세요.", parent=root)
         except (ValueError, TypeError, OSError):
             messagebox.showerror(APP_TITLE, "접속 설정을 저장하지 못했습니다. 설정 값과 저장 권한을 확인하세요.", parent=root)
             return
@@ -279,11 +304,34 @@ def main():
             open_browser(controller.url, lambda detail: messagebox.showerror(APP_TITLE, detail, parent=root))
 
     def shortcut():
+        if profile_error:
+            messagebox.showerror(APP_TITLE, profile_error, parent=root)
+            return
         try:
+            if not os.environ.get("DG_STATE"):
+                # 바로가기는 자료 폴더를 고정하지 않고 저장된 설정을 따른다. 지금 쓰는 폴더를 저장해 둔다.
+                save_state_choice(controller.state_dir)
             created = create_shortcut(controller.state_dir, port=controller.port, connection=profile)
             messagebox.showinfo(APP_TITLE, f"바탕화면 바로가기를 만들었습니다.\n{created}", parent=root)
+        except ValueError:
+            messagebox.showerror(APP_TITLE, "저장된 실행 앱 설정을 읽지 못해 바로가기를 만들지 않았습니다. ‘접속 설정’에서 확인하세요.", parent=root)
         except (DesktopError, OSError) as error:
             messagebox.showerror(APP_TITLE, str(error), parent=root)
+
+    def confirm_new_database(folder):
+        done, result = threading.Event(), []
+        events.put(("confirm_create", folder, done, result))
+        while not done.wait(0.2):
+            if closing:
+                return False
+        return result[0]
+
+    def key_provider(selected, force_prompt):
+        def provide(new):
+            if new and not new_database_allowed(lambda: confirm_new_database(selected)):
+                raise DesktopError(NEW_DATABASE_DECLINED, code="db_missing")
+            return resolve_db_key(new, prompt, force_prompt=force_prompt)
+        return provide
 
     def prompt(new):
         done, result = threading.Event(), []
@@ -297,6 +345,11 @@ def main():
         nonlocal busy, stop_requested, operation_epoch
         if busy or closing or stop_requested or controller.owned or view.state in {"connection_lost", "reconnecting"}:
             return
+        if profile_error:
+            # 저장된 접속 설정을 못 읽었으면 기본(로컬) 설정으로 서버를 띄우지 않는다. ‘접속 설정’에서 고친 뒤 다시 실행한다.
+            view.show_state("error", detail=profile_error)
+            refresh_operations()
+            return
         busy = True
         stop_requested = False
         operation_epoch += 1
@@ -309,7 +362,7 @@ def main():
 
         def start():
             try:
-                result = controller.start(lambda new: resolve_db_key(new, prompt, force_prompt=force_prompt),
+                result = controller.start(key_provider(controller.state_dir, force_prompt),
                                           on_progress=lambda stage: events.put(("progress", stage)))
                 events.put(("started", result))
             except Exception as error:
@@ -323,7 +376,9 @@ def main():
 
         def check_existing():
             try:
-                healthy = checked_controller.check_existing()
+                # 주기 점검은 가볍게(/api/state), 사용자가 누른 재연결 확인만 업무 화면 파일까지 본다.
+                healthy = (checked_controller.check_existing(full=True) if event == "reconnected"
+                           else checked_controller.check_existing())
             except Exception:
                 healthy = False
             events.put((event, checked_controller, checked_epoch, healthy))
@@ -372,11 +427,18 @@ def main():
         nonlocal controller
         if busy or closing or stop_requested or controller.owned or controller.status == "existing":
             return
+        if profile_error:
+            view.show_state("error", detail=profile_error)
+            refresh_operations()
+            return
         selected = filedialog.askdirectory(title="업무 자료 폴더 선택", initialdir=controller.state_dir, parent=root)
         if not selected:
             return
         try:
             save_state_choice(selected)
+        except ValueError:
+            messagebox.showerror(APP_TITLE, "저장된 실행 앱 설정을 읽지 못해 자료 위치를 저장하지 않았습니다. 기존 설정은 그대로 두었습니다. ‘접속 설정’에서 확인하세요.", parent=root)
+            return
         except OSError as error:
             messagebox.showerror(APP_TITLE, f"자료 위치를 기억하지 못했습니다: {error}", parent=root)
             return
@@ -426,10 +488,27 @@ def main():
                             messagebox.showerror(APP_TITLE, "두 비밀번호가 다릅니다.", parent=root)
                     result.append(value)
                     done.set()
+                elif item[0] == "confirm_create":
+                    _, folder, done, result = item
+                    answer = False
+                    if not closing:
+                        tray.restore()
+                        answer = messagebox.askyesno(
+                            APP_TITLE, f"선택한 자료 폴더에 업무 DB(pc.db)가 없습니다.\n{folder}\n\n"
+                            "자료 폴더를 옮겼거나 외장 드라이브가 빠졌다면 [아니요]를 누르고 ‘자료 폴더 선택’에서 기존 폴더를 고르세요.\n\n"
+                            "이 폴더에 빈 새 DB를 만들까요?", icon="warning", default="no", parent=root)
+                    result.append(bool(answer))
+                    done.set()
                 elif item[0] == "started":
                     busy = False
                     existing_failures = 0
                     next_existing_check = time.monotonic() + EXISTING_CHECK_SECONDS
+                    if getattr(controller, "created_database", False) and not os.environ.get("DG_STATE"):
+                        # 첫 설치로 새 DB를 만들었으면 그 위치를 기억한다. 이후 이 폴더의 pc.db가 사라지면 확인을 묻는다.
+                        try:
+                            save_state_choice(controller.state_dir)
+                        except (OSError, ValueError):
+                            pass
                     if closing:
                         stop(True)
                         continue

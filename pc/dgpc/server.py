@@ -390,6 +390,30 @@ def ip_allowed(ip: str, nets) -> bool:
     return any(a in n for n in nets)
 
 
+def loopback_client(ip: str) -> bool:
+    """접속한 쪽이 서버 PC 자신(127.0.0.0/8·::1·IPv4 대응 ::ffff:127.x)인지. 첫 관리자 설정처럼 본체에서만 할 일에 쓴다."""
+    try:
+        a = ipaddress.ip_address((ip or "").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(a, "ipv4_mapped", None):
+        a = a.ipv4_mapped
+    return a.is_loopback
+
+
+def same_machine(peer_ip: str, local_ip: str) -> bool:
+    """접속한 쪽이 서버 PC 본체인지: 루프백이거나, 접속한 쪽 주소가 이 접속을 받은 서버 쪽 주소와 같다.
+    기관망 모드는 서버가 기관망 주소로만 열릴 수 있어, 본체의 브라우저도 127.0.0.1이 아닌 자기 기관망 주소로 들어온다."""
+    if loopback_client(peer_ip):
+        return True
+    try:
+        a, b = (ipaddress.ip_address((x or "").split("%")[0]) for x in (peer_ip, local_ip))
+    except ValueError:
+        return False
+    a, b = (getattr(x, "ipv4_mapped", None) or x for x in (a, b))
+    return a == b and not a.is_unspecified
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "dgpc"
     sys_version = ""
@@ -438,9 +462,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def host_ok(self) -> bool:
         host = (self.headers.get("Host") or "").lower()
-        ok_ = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
-        if LAN:
-            ok_ |= {f"{LAN['hostname']}:{PORT}"}
+        names = {"127.0.0.1", "localhost"} | ({LAN["hostname"]} if LAN else set())
+        ok_ = {f"{name}:{PORT}" for name in names}
+        # 브라우저는 주소창의 기본 포트(LAN=https→443, 이 PC 전용=http→80)를 Host에서 뺀다. 그때만 포트 없는 이름도 받는다.
+        # 이름 목록 자체는 그대로라 다른 이름(DNS rebinding)은 계속 거부한다.
+        if PORT == (443 if LAN else 80):
+            ok_ |= names
         return host in ok_
 
     def cookie_flags(self) -> str:
@@ -623,6 +650,9 @@ class Handler(BaseHTTPRequestHandler):
                 need = not S.users_exist(rc)
             return self.send_json({"setup_needed": need, "logged_in": bool(self.session())})
         if p == "setup" and method == "POST":
+            # 사용자가 없을 때는 인증 수단이 없으므로, LAN 모드의 다른 PC가 첫 관리자를 먼저 차지하지 못하게 서버 PC 본체에서만 받는다.
+            if not same_machine(self.client_address[0], self.connection.getsockname()[0]):
+                return self.send_json({"error": "첫 관리자 설정은 PC 본체(서버 PC)에서 하세요. 이 PC에서 업무 화면을 열어 관리자 계정을 만든 뒤 다른 PC에서 로그인하세요."}, 403)
             d = self.json_body()
             with LOCK:
                 if S.users_exist(CON):

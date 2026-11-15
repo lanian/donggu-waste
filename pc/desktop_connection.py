@@ -71,6 +71,10 @@ def _configuration_directory():
     return Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "DongguWaste"
 
 
+class ConfigurationDamaged(ValueError):
+    """저장된 desktop.json을 읽지 못함. 덮어쓰면 다른 설정(LAN·자료 위치)이 사라지므로 쓰기를 멈춘다."""
+
+
 def _read_configuration(directory=None, *, strict=False):
     try:
         value = json.loads(((directory or _configuration_directory()) / "desktop.json").read_text(encoding="utf-8"))
@@ -81,15 +85,26 @@ def _read_configuration(directory=None, *, strict=False):
         return {}
     except (OSError, ValueError, TypeError):
         if strict:
-            raise ValueError("저장된 실행 앱 설정을 읽지 못했습니다. 연결 설정을 확인한 뒤 다시 저장하세요.") from None
+            raise ConfigurationDamaged("저장된 실행 앱 설정을 읽지 못했습니다. 연결 설정을 확인한 뒤 다시 저장하세요.") from None
         return {}
 
 
-def update_configuration(changes, *, directory=None):
-    """Atomically retain state, connection settings and unknown future fields."""
+def update_configuration(changes, *, directory=None, replace_damaged=False):
+    """Atomically retain state, connection settings and unknown future fields.
+
+    읽지 못한 설정을 빈 설정으로 보고 덮어쓰지 않는다(ConfigurationDamaged). replace_damaged=True는 사용자가
+    명시적으로 복구 저장할 때만 쓰며, 손상 파일을 desktop.json.damaged-<시각>으로 보관하고 그 경로를 돌려준다."""
     directory = directory or _configuration_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    current = _read_configuration(directory)
+    backup = None
+    try:
+        current = _read_configuration(directory, strict=True)
+    except ConfigurationDamaged:
+        if not replace_damaged:
+            raise
+        backup = directory / ("desktop.json.damaged-" + time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3))
+        (directory / "desktop.json").replace(backup)
+        current = {}
     for name, value in changes.items():
         if name == "connection" and isinstance(current.get(name), dict):
             current[name] = {**current[name], **value}
@@ -101,6 +116,7 @@ def update_configuration(changes, *, directory=None):
         temporary.replace(directory / "desktop.json")
     finally:
         temporary.unlink(missing_ok=True)
+    return backup
 
 
 def load_profile():
@@ -120,9 +136,9 @@ def resolve_profile(options):
     return ConnectionProfile.from_dict(values)
 
 
-def save_profile(profile):
+def save_profile(profile, *, replace_damaged=False):
     validate_profile(profile)
-    update_configuration({"connection": profile.to_dict()})
+    return update_configuration({"connection": profile.to_dict()}, replace_damaged=replace_damaged)
 
 
 def _hostname(value):
@@ -362,8 +378,20 @@ class _Scripts(HTMLParser):
                     raise ValueError("too many entry scripts")
 
 
-def probe_url(url, *, ssl_context=None):
-    """GET-only root probe, <=12s total, with normal verified TLS and fixed output."""
+def _request_host(url):
+    """브라우저와 같은 Host 값: 기본 포트(https 443·http 80)는 빼고 그 밖의 포트는 붙인다."""
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = "[" + host + "]"
+    default = 443 if parsed.scheme == "https" else 80
+    return host if parsed.port in (None, default) else f"{host}:{parsed.port}"
+
+
+def probe_url(url, *, ssl_context=None, assets=True):
+    """GET-only root probe, <=12s total, with normal verified TLS and fixed output.
+
+    assets=False는 주기 점검용 가벼운 확인: /api/state 한 번으로 서버 정체·버전만 본다(업무 화면 파일은 시작·수동 점검에서)."""
     if ssl_context is not None and (ssl_context.verify_mode != ssl.CERT_REQUIRED or not ssl_context.check_hostname):
         raise ValueError("인증서 신뢰와 접속 이름 검증을 모두 사용해야 합니다.")
     def result(code, safe=""):
@@ -380,7 +408,8 @@ def probe_url(url, *, ssl_context=None):
     stage = "identity"
     try:
         def fetch(target, limit):
-            request = urllib.request.Request(target, headers={"X-DG-CSRF": "1"})
+            # Host는 브라우저처럼 보낸다(기본 포트면 생략). 서버의 Host 검사를 실제 브라우저와 같은 조건으로 점검한다.
+            request = urllib.request.Request(target, headers={"X-DG-CSRF": "1", "Host": _request_host(target)})
             with opener.open(request, timeout=budget.remaining()) as response:
                 data = bytearray()
                 while True:
@@ -400,6 +429,8 @@ def probe_url(url, *, ssl_context=None):
             return result("wrong_service", safe)
         if response.headers.get("X-DG-Version") != __version__:
             return result("version_mismatch", safe)
+        if not assets:
+            return result("ready", safe)
         stage = "assets"
         _, body = fetch(safe, 1024 * 1024)
         html = body.decode("utf-8")
@@ -433,5 +464,5 @@ def probe_url(url, *, ssl_context=None):
         budget.finish()
 
 
-def probe_connection(profile):
-    return probe_url(profile.url)
+def probe_connection(profile, *, assets=True):
+    return probe_url(profile.url, assets=assets)

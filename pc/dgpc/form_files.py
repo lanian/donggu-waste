@@ -125,12 +125,36 @@ def _date_style(styles, original, code):
     return len(xfs) - 1
 
 
+# 이어 쓰는 열: (한 줄 글자 수, 끊어도 되는 자리, 경계가 없을 때 글자 단위로 자를지)
+# 번호·비고는 구분자 뒤에서만 끊는다(번호·구간 `first-last`가 두 줄로 갈라지면 대장에서 다른 번호로 읽힌다).
+_WRAP = {'address': (150, re.compile(r'(?<= )'), True), 'name': (70, re.compile(r'(?<= )'), True),
+         'numbers': (100, re.compile(r'(?<=, )'), False), 'note': (110, re.compile(r'(?<=, )|(?<= · )'), False)}
+
+
+def _wrap(text, limit, boundary, hard):
+    """구분자를 앞 줄 끝에 남겨 끊는다. 이어 붙이면 원문과 같다. 경계 없이 limit보다 긴 조각은
+    hard면 글자 단위로 자르고, 아니면(번호·구간) 그 조각 하나만 한 줄에 둔다."""
+    lines, line = [], ''
+    for token in boundary.split(text):
+        if not token:
+            continue
+        if line and len(line) + len(token) > limit:
+            lines.append(line)
+            line = ''
+        while hard and len(token) > limit:
+            lines.append(token[:limit])
+            token = token[limit:]
+        line += token
+    if line:
+        lines.append(line)
+    return lines or ['']
+
+
 def _display_rows(rows):
     """긴 주소·교부번호도 Excel 셀 길이/행 높이 한도에서 누락되지 않도록 이어 쓴다."""
     out = []
-    limits = {'address': 150, 'name': 70, 'numbers': 100, 'note': 110}
     for original in rows:
-        chunks = {key: [str(original.get(key) or '')[i:i + limit] for i in range(0, len(str(original.get(key) or '')), limit)] or [''] for key, limit in limits.items()}
+        chunks = {key: _wrap(str(original.get(key) or ''), *rule) for key, rule in _WRAP.items()}
         for index in range(max(len(values) for values in chunks.values())):
             if index == 0:
                 row = dict(original)

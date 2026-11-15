@@ -18,7 +18,7 @@ from dgpc import server as SV  # noqa: E402
 
 OUT = ROOT / "docs" / "routes.md"
 ROLES = (("ADMIN", "관리자"), ("INTAKE", "접수"), ("FIELD", "수거팀"), ("LEAD", "팀장"), ("DONG", "지정 동"))
-PUBLIC = (("GET", "state", "설정 필요 여부·로그인 여부"), ("POST", "setup", "첫 관리자 만들기(사용자가 없을 때만)"),
+PUBLIC = (("GET", "state", "설정 필요 여부·로그인 여부"), ("POST", "setup", "첫 관리자 만들기(사용자가 없을 때만, 서버 PC 본체에서 접속했을 때만)"),
           ("POST", "login", "로그인(아이디별·PC별 실패 잠금)"), ("POST", "logout", "로그아웃(세션만 있으면)"))
 
 

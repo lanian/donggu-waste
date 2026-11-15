@@ -23,7 +23,7 @@ import { screenFix, screenPcInputHelp, screenStop } from './screens/stop.js';
 import { screenUnload } from './screens/unload.js';
 
 setRender(render);  // 화면 모듈이 core 의 render() 로 다시 그릴 수 있게
-export const APP_VERSION = '0.14.23';
+export const APP_VERSION = '0.14.24';
 let renderSeq = 0;
 const listRoutes = ['#/home', '#/find'];
 const detailRoutes = ['stop', 'add', 'fix', 'intake', 'map', 'pick', 'pc-input'];
@@ -70,7 +70,7 @@ async function render() {
     view = waitScreen();
     storeWait.then(() => render(), () => render());
   } else if (!(await S.hasPin())) view = screenSetup();
-  else if (!S.isUnlocked()) view = screenLock();
+  else if (!S.isUnlocked() || !st) view = screenLock();  // 잠금 해제 직후 다른 창의 저장을 기다리는 동안(st 읽기 전)도 잠금 화면
   else {
     if (my !== renderSeq) return;
     let [, route, arg] = (location.hash || '#/home').split('/');

@@ -282,7 +282,7 @@ def existing_probe_regressions():
                 self.child = Child() if self.status == "ready" else None
                 return self.status
 
-            def check_existing(self):
+            def check_existing(self, *, full=False):
                 self.probes += 1
                 started.set()
                 if case not in {"lost", "transient"}:

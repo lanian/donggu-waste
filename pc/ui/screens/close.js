@@ -1,6 +1,6 @@
 // PC 화면: 일일 마감
 import { won } from '/web/fees.js';
-import { ACTION, ENTITY, IDLE_RESET_MS, PAY, STATUS, afterWork, api, boot, btn, chip, confirmDlg, h, kst, modal, pagehead, post, postOnce, statusChip, toast, workEnd, wrap } from '../core.js';
+import { ACTION, ENTITY, IDLE_RESET_MS, PAY, STATUS, afterWork, api, boot, btn, canOpen, chip, confirmDlg, h, kst, modal, pagehead, post, postOnce, statusChip, toast, workEnd, wrap } from '../core.js';
 import { refreshBadges } from './home.js';
 import { unloadCard } from './settings.js';
 
@@ -27,7 +27,7 @@ async function screenClose() {
       h('div', { class: 'card' }, h('h2', {}, `${s.date} 접수 ${d.total}건`), h('div', { class: 'row' }, ...Object.entries(d.by_status).map(([k, v]) => { const el = statusChip(k); el.textContent = `${STATUS[k] || k} ${v}`; return el; })),
         h('p', {}, `충돌 미처리 ${d.conflicts}건 · 사진 미회수 ${d.photos_missing}장 · 수신 미확인 전송 ${d.unconfirmed_bundles}건`),
         (d.crews_no_result || []).length ? h('div', { class: 'notice bad' }, h('strong', {}, '결과를 가져오지 않은 팀: '), d.crews_no_result.map((c) => `${c.crew}(${kst(c.sent_at)} 전송)`).join(', '),
-          afterWork(s.date) ? ' — 수거팀에 [결과 보내기]를 요청하세요. ' : ` — 근무 끝(${workEnd()}) 전이면 아직 수거 중일 수 있습니다. `, h('a', { href: '#/results' }, '결과 가져오기 →')) : null,
+          afterWork(s.date) ? ' — 수거팀에 [결과 보내기]를 요청하세요. ' : ` — 근무 끝(${workEnd()}) 전이면 아직 수거 중일 수 있습니다. `, canOpen('results') ? h('a', { href: '#/results' }, '결과 가져오기 →') : null) : null,
         d.working ? h('p', { class: 'notice warn small' }, `${s.date}은(는) ${d.working}입니다.`) : null,
         last ? h('p', {}, chip('마감 기록됨', 'ok'), chip(last.status === 'APPROVED' ? `팀장 확인 (${last.approved_by})` : '팀장 확인 전', last.status === 'APPROVED' ? 'ok' : 'warn'),
           ` ${last.seq}회차 · ${kst(last.closed_at)} · ${last.closed_by || '-'} ${last.note || ''}`) : null),

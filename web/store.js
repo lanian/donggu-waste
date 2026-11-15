@@ -9,8 +9,10 @@ let dbp = null;
 let dataKey = null; // 잠금 해제 동안만 존재
 // 디스크 저장 실패분은 암호문만 잠시 보관한다. 잠금 때 키를 버려도 PIN 해제 뒤 다시 저장할 수 있다.
 const pendingSecure = new Map(), secureWrites = new Map();
+// 이 창이 디스크에서 마지막으로 읽었거나 쓴 암호문. 쓰기 직전 디스크가 이것과 다르면(다른 창이 그 사이 저장) 덮어쓰지 않는다.
+const knownSecure = new Map();
 let storageEpoch = 0, secureWriteSeq = 0;
-function resetRecovery() { storageEpoch++; pendingSecure.clear(); secureWrites.clear(); }
+function resetRecovery() { storageEpoch++; pendingSecure.clear(); secureWrites.clear(); knownSecure.clear(); }
 export const hasPendingSecure = (k) => pendingSecure.has(k);
 
 function idb() {
@@ -160,14 +162,17 @@ async function writeSecureRecord(k, record, recovery, observed, epoch) {
   return new Promise((resolve, reject) => {
     const t = db.transaction('kv', 'readwrite'), store = t.objectStore('kv');
     let failure = null;
-    t.oncomplete = () => resolve();
+    t.oncomplete = () => { if (epoch === storageEpoch) knownSecure.set(k, record); resolve(); };
     t.onerror = (ev) => { failure ||= (ev && ev.target && ev.target.error) || t.error; };
     t.onabort = () => reject(failure || t.error || new Error('저장 실패'));
     const read = store.get('s:' + k);
     read.onsuccess = () => {
       observed.base = read.result; observed.known = true;
-      // 복구 기준 대조와 쓰기를 한 트랜잭션에서 한다. 그 사이 다른 창의 쓰기가 끼어들 수 없다.
-      if (recovery && (!recovery.known || !sameRecord(read.result, recovery.base))) {
+      // 대조 기준: 복구 중이면 실패 당시의 디스크, 아니면 이 창이 마지막으로 읽었거나 쓴 것(처음 쓰는 창은 대조 없음).
+      const expected = recovery || (knownSecure.has(k) ? { known: true, base: knownSecure.get(k) } : null);
+      observed.expected = expected;
+      // 기준 대조와 쓰기를 한 트랜잭션에서 한다. 그 사이 다른 창의 쓰기가 끼어들 수 없다.
+      if (expected && (!expected.known || !sameRecord(read.result, expected.base))) {
         failure = Object.assign(new Error('다른 창에서 기록이 바뀌었습니다. 이 창의 기록을 먼저 보내거나 백업하세요.'), { code: 'STORE_CONFLICT' });
         t.abort(); return;
       }
@@ -177,7 +182,7 @@ async function writeSecureRecord(k, record, recovery, observed, epoch) {
 }
 export async function putSecure(k, obj) {
   const epoch = storageEpoch, seq = ++secureWriteSeq;
-  const recovery = pendingSecure.get(k), observed = { known: false, base: undefined };
+  const recovery = pendingSecure.get(k), observed = { known: false, base: undefined, expected: null };
   secureWrites.set(k, seq);
   const record = await encryptBytes(enc.encode(JSON.stringify(obj)), k);
   // 암호화하는 동안 자료를 지우거나 PIN을 새로 만들었다면 옛 자료를 다시 쓰지 않는다.
@@ -186,13 +191,20 @@ export async function putSecure(k, obj) {
     await writeSecureRecord(k, record, recovery, observed, epoch);
     if (epoch === storageEpoch && secureWrites.get(k) === seq) pendingSecure.delete(k);
   } catch (e) {
+    // 다시 저장할 때도 같은 기준으로 대조한다(충돌했으면 계속 충돌로 남아 다른 창의 기록을 덮지 않음).
+    const ref = recovery || observed.expected || observed;
     if (epoch === storageEpoch && secureWrites.get(k) === seq)
-      pendingSecure.set(k, { record, base: recovery ? recovery.base : observed.base, known: recovery ? recovery.known : observed.known });
+      pendingSecure.set(k, { record, base: ref.base, known: ref.known });
     throw e;  // 화면의 저장 실패 안내는 실제 디스크 저장 성공 때까지 유지한다.
   }
 }
 export async function getSecure(k) {
-  const r = pendingSecure.get(k)?.record || await getRaw('s:' + k);
+  let r = pendingSecure.get(k)?.record;
+  if (!r) {
+    const epoch = storageEpoch;
+    r = await getRaw('s:' + k);
+    if (epoch === storageEpoch && !pendingSecure.has(k)) knownSecure.set(k, r ?? null);
+  }
   return r ? JSON.parse(dec.decode(await decryptBytes(r, k))) : null;
 }
 export async function putSecureBytes(k, bytes) { await putRaw('b:' + k, await encryptBytes(bytes, k)); }

@@ -66,6 +66,8 @@ jobs:
       - name: 앱 내장 수수료표가 원본 JSON과 같은지
         run: python tools/check_generated.py
       - run: npm test
+      - run: python tests/test_pc_ui_roles.py   # PC 화면 역할 표(core.js CAN) = 서버 경로 권한
+      - run: python tests/test_module_layers.py   # 업무 모듈 계층(맨 위 import는 아래 계층만)
       - run: python tests/test_pc.py   # PC 업무 로직 (암호화 DB·노선·병합·충돌·사진·마감)
       - run: python tests/test_review_server.py   # 백업 구조 버전 보존·로그인 중 계정 변경 경쟁
       - run: python tests/test_pc_session_revocation.py   # 지연 저장·가져오기·작업 등록의 세션 취소
@@ -168,6 +170,9 @@ jobs:
           - test_official_forms_ui
           - test_official_forms_e2e
           - test_mobile_cleanup
+          - test_pc_design
+          - test_pc_review_fixes_ui
+          - test_mobile_review_fixes
     steps:
       - uses: actions/checkout@v7
       - name: 시험 작업 폴더 (화면 캡처는 그 아래 shots/)
@@ -243,6 +248,7 @@ jobs:
           python tests/test_desktop_app.py
           python tests/test_desktop_tray.py
           python tests/test_desktop_ui.py
+          python tests/test_desktop_review_fixes.py
           python tests/test_desktop_connection.py
           python tests/test_desktop_diagnostics.py
           python tests/test_desktop_operations.py

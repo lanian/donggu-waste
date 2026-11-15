@@ -11,7 +11,7 @@
 - 받는 곳 주소는 환경변수 DG_JUSO_BASE / DG_KAKAO_NAVI_BASE 로 바꿀 수 있다(자동 시험용 가짜 서버). 기본은 실제 주소.
 - 기관망 프록시: urllib 기본 동작대로 HTTPS_PROXY / HTTP_PROXY / NO_PROXY 환경변수를 따른다. 이 PC 안(127.0.0.1) 주소는 프록시를 거치지 않는다.
 - 요청 주소·검색어·키는 로그·오류 문구에 남기지 않는다(ExternalError 문구는 일반 문구만).
-- 시간 제한 5초. 쿠키·Referer 없음.
+- 시간 제한 5초. 쿠키·Referer 없음. 리다이렉트는 따라가지 않는다(키·검색어 든 URL이 다른 서버로 넘어가지 않게).
 """
 from __future__ import annotations
 
@@ -51,10 +51,18 @@ def _is_local(url: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리다이렉트를 따라가지 않는다. 승인키·검색어가 URL 쿼리에 있어(행안부·VWorld) 따라가면 다른 서버로 그대로 넘어간다.
+    3xx는 HTTPError로 올라와 http_json이 REDIRECT 오류(일반 문구)로 바꾼다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _opener(url: str):
     if _is_local(url):  # 시험용 가짜 서버(이 PC 안)는 프록시를 거치지 않는다
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()))  # 환경변수 프록시 그대로
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()), _NoRedirect())  # 환경변수 프록시 그대로
 
 
 def urlopen(req: urllib.request.Request, timeout: float):
@@ -75,6 +83,8 @@ def http_json(url: str, *, data: dict | None = None, headers: dict | None = None
             raw = r.read(4 * 1024 * 1024)
     except urllib.error.HTTPError as e:
         code = e.code
+        if 300 <= code < 400:  # 이동할 주소(Location)는 문구에 넣지 않는다
+            raise ExternalError("REDIRECT", "외부 서버가 다른 주소로 넘기려 해 따라가지 않았습니다(연결 주소·기관망 프록시 확인).") from None
         raise ExternalError("AUTH" if code in (401, 403) else f"HTTP_{code}",
                             "인증 키가 맞지 않거나 사용이 허락되지 않았습니다." if code in (401, 403) else f"외부 서버 오류({code})") from None
     except (TimeoutError, OSError) as e:  # URLError·소켓 시간 초과 포함

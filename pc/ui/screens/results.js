@@ -1,6 +1,6 @@
 // PC 화면: 결과·사진 가져오기·충돌함·단독 휴대폰 옮기기
 import { Collector } from '/web/proto.js';
-import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, can, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, statusChip, toast, wrap } from '../core.js';
 import { loadJsQR } from '../widgets.js';
 import { refreshBadges } from './home.js';
 
@@ -192,7 +192,7 @@ async function screenResults() {
     runCard,
     recentCard,
     webcamCard((r) => { addRun('휴대폰 화면 QR (웹캠)', 'RESULT', r); loadRecent().then(fill); if (!field) loadConf(); }),
-    soloCard(),
+    can('soloImport') ? soloCard() : null,  // POST import/solo: 관리자·접수만
     field ? null : conf, h('p', { class: 'muted' }, '오래된 배정·다른 팀·취소된 접수의 결과는 자동 반영하지 않고 충돌함에 둡니다.')));
   return screen;
 }
@@ -229,29 +229,43 @@ function correctionBody(c) {
 }
 
 // 휴대폰 단독 방식 백업(.dgb) → PC 원본으로 옮기기
+// [PC로 옮기기]는 미리보기한 그 파일 내용·비밀번호·팀으로만 보낸다. 미리보기 뒤(또는 미리보기 중) 입력이 바뀌면
+// 미리보기 결과와 [PC로 옮기기]를 지운다 — 화면에 보인 건수와 실제로 옮기는 파일이 어긋나지 않게.
 function soloCard() {
-  const f = h('input', { type: 'file', accept: '.dgb' });
+  const f = h('input', { type: 'file', accept: '.dgb', 'aria-label': '단독 방식 백업 파일(.dgb)' });
   const pw = h('input', { type: 'password', placeholder: '휴대폰 백업 비밀번호', autocomplete: 'off', style: 'width:200px' });
-  const crew = h('select', {}, h('option', { value: '' }, '(하차 기록 붙일 팀 없음)'), ...boot.crews.map((c) => h('option', { value: c.id }, c.name)));
+  const crew = h('select', { 'aria-label': '하차 기록 붙일 팀' }, h('option', { value: '' }, '(하차 기록 붙일 팀 없음)'), ...boot.crews.map((c) => h('option', { value: c.id }, c.name)));
   const out = h('div'), msg = h('p', { class: 'msg' });
-  const send = async (preview) => {
-    const file = f.files[0]; if (!file) throw new Error('파일을 고르세요.');
-    const raw = new Uint8Array(await file.arrayBuffer());
-    const pass = btoa(String.fromCharCode(...new TextEncoder().encode(pw.value)));
-    const r = await fetch(`/api/import/solo?preview=${preview ? 1 : 0}&crew=${crew.value}`, { method: 'POST', credentials: 'same-origin', body: raw,
-      headers: { 'X-DG-CSRF': '1', 'X-DG-Pass': pass, 'Content-Type': 'application/octet-stream' } });
+  let generation = 0;
+  const invalidate = () => { generation++; out.replaceChildren(); };
+  f.addEventListener('change', invalidate); pw.addEventListener('input', invalidate); crew.addEventListener('change', invalidate);
+  const send = async (snap, preview) => {
+    const r = await fetch(`/api/import/solo?preview=${preview ? 1 : 0}&crew=${encodeURIComponent(snap.crew)}`, { method: 'POST', credentials: 'same-origin', body: snap.raw,
+      headers: { 'X-DG-CSRF': '1', 'X-DG-Pass': snap.pass, 'Content-Type': 'application/octet-stream' } });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || '가져오기 실패');
     return d;
   };
   const prev = wrap(async () => {
-    const d = await send(true);
+    invalidate();
+    const mine = generation;
+    const file = f.files[0]; if (!file) throw new Error('파일을 고르세요.');
+    const raw = new Uint8Array(await file.arrayBuffer());
+    if (mine !== generation) return;
+    const snap = { raw, pass: btoa(String.fromCharCode(...new TextEncoder().encode(pw.value))), crew: crew.value };
+    const d = await send(snap, true);
+    if (mine !== generation || !out.isConnected) return;  // 미리보기 중 입력이 바뀌었으면 늦은 결과를 버린다
     out.replaceChildren(h('div', { class: 'notice' },
       h('p', {}, `백업 ${d.created_at ? kst(d.created_at) : ''} · 접수 ${d.requests}건 중 새 접수 ${d.new}건 (이미 PC에 있음 ${d.already}건) · 현장 기록 ${d.events}건 · 사진 ${d.photos}장 · 하차 ${d.unloads}회`),
       h('p', { class: 'small' }, '이미 PC에 있는 접수와 그 기록은 덮어쓰지 않습니다. 접수번호가 PC와 겹치면 끝에 S를 붙입니다.'),
       d.invalid ? h('div', { class: 'notice bad small' }, `옮기지 못하는 접수 ${d.invalid}건 (아래 표). 나머지만 옮깁니다.`,
         grid(['접수(앞 8자)', '접수번호', '문제'], (d.errors || []).map((x) => [h('span', { class: 'mono' }, x.request_id), x.receipt_no || '', x.error]))) : null,
-      btn('PC로 옮기기', wrap(async () => { const r = await send(false); toast(r.duplicate_file ? '이미 가져온 파일입니다' : `접수 ${r.requests}건 · 기록 ${r.events}건 · 사진 ${r.photos_recovered}장 · 하차 ${r.unloads_applied}회 옮김${r.renamed ? ` · 접수번호 S 표시 ${r.renamed}건` : ''}${r.invalid ? ` · 못 옮김 ${r.invalid}건` : ''}`); out.replaceChildren(); }, msg), 'primary')));
+      btn('PC로 옮기기', wrap(async () => {
+        if (mine !== generation) throw new Error('파일이나 비밀번호가 바뀌었습니다. 다시 미리보기한 뒤 옮기세요.');
+        const r = await send(snap, false);
+        toast(r.duplicate_file ? '이미 가져온 파일입니다' : `접수 ${r.requests}건 · 기록 ${r.events}건 · 사진 ${r.photos_recovered}장 · 하차 ${r.unloads_applied}회 옮김${r.renamed ? ` · 접수번호 S 표시 ${r.renamed}건` : ''}${r.invalid ? ` · 못 옮김 ${r.invalid}건` : ''}`);
+        if (mine === generation) invalidate();
+      }, msg), 'primary')));
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '휴대폰 단독 방식 자료 옮기기 (.dgb)'),
     h('p', { class: 'muted' }, '휴대폰만으로 운영하던 접수·현장 기록·사진을 PC 원본으로 옮깁니다. 휴대폰 [백업·복원]에서 만든 암호화 백업 파일을 승인된 보안 매체로 가져와 넣으세요.'),
@@ -259,42 +273,61 @@ function soloCard() {
 }
 
 // 역방향 QR: 휴대폰 화면의 결과 QR을 이 PC 웹캠으로 읽는다 (카메라 사용이 허용된 PC에서만)
+// 읽기 한 번 = 카메라 영상 하나. 읽는 동안 [웹캠으로 읽기]는 꺼져 있고(작업이 읽기 끝까지 이어짐), [멈추기]·화면 이동·완료가 그 영상을 끈다.
 function webcamCard(onDone) {
   const video = h('video', { playsinline: true, muted: true, style: 'width:100%;max-width:520px;border-radius:10px;background:#000;display:none' });
   const status = h('p', { class: 'muted' }, '휴대폰 [결과 보내기] → [PC 화면 카메라로 보내기]를 누른 뒤 이 PC 웹캠에 비추세요.');
   const msg = h('p', { class: 'msg' });
-  let stream = null, stop = false;
-  const end = () => { stop = true; if (stream) stream.getTracks().forEach((t) => t.stop()); video.style.display = 'none'; startBtn.disabled = false; };
+  let session = null;  // 지금 읽기: { stream, stopped, wake }
+  const end = () => {
+    const cur = session; if (!cur) return;
+    session = null; cur.stopped = true;
+    if (cur.stream) cur.stream.getTracks().forEach((t) => t.stop());
+    video.pause(); video.srcObject = null; video.style.display = 'none';
+    cur.wake?.();
+  };
   const startBtn = btn('웹캠으로 읽기', wrap(async () => {
-    await loadJsQR();
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-    stop = false; startBtn.disabled = true; video.style.display = ''; video.srcObject = stream; await video.play();
-    const col = new Collector(); let current = null;
-    const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const loop = async () => {
-      if (stop || !video.isConnected) return end();
-      if (video.videoWidth) {
-        canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0);
-        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-        if (code && code.data) {
+    if (session) return;
+    const me = session = { stream: null, stopped: false, wake: null };
+    try {
+      await loadJsQR();
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      if (me.stopped) { stream.getTracks().forEach((t) => t.stop()); return; }  // 카메라를 여는 사이 [멈추기]
+      me.stream = stream;
+      video.style.display = ''; video.srcObject = stream; await video.play();
+      const col = new Collector(); let current = null;
+      const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+      await new Promise((resolve, reject) => {
+        me.wake = resolve;
+        const loop = async () => {
+          if (me.stopped || !video.isConnected) { resolve(); return; }
           try {
-            const r = col.add(code.data);
-            current ||= r.key;
-            if (r.key === current) {
-              status.textContent = `조각 ${r.got} / ${r.total} 받음` + (col.missing(current).length <= 10 ? ` · 남은 번호 ${col.missing(current).map((x) => x + 1).join(', ')}` : '');
-              if (col.complete(current)) {
-                end();
-                const res = await api('import/result?channel=QR', { method: 'POST', raw: col.assemble(current) });
-                status.textContent = '결과를 받았습니다.'; onDone(res); return;
+            if (video.videoWidth) {
+              canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0);
+              const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+              if (code && code.data) {
+                let r = null;
+                try { r = col.add(code.data); } catch (e) { if (!e.code) throw e; }  // 다른 종류의 QR(오류 코드 있음)은 건너뛴다
+                if (r) {
+                  current ||= r.key;
+                  if (r.key === current) {
+                    status.textContent = `조각 ${r.got} / ${r.total} 받음` + (col.missing(current).length <= 10 ? ` · 남은 번호 ${col.missing(current).map((x) => x + 1).join(', ')}` : '');
+                    if (col.complete(current)) {
+                      end();
+                      const res = await api('import/result?channel=QR', { method: 'POST', raw: col.assemble(current) });
+                      status.textContent = '결과를 받았습니다.'; onDone(res); resolve(); return;
+                    }
+                  }
+                }
               }
             }
-          } catch (e) { if (e.message && !e.code) { msg.textContent = e.message; msg.className = 'err'; return end(); } }
-        }
-      }
-      setTimeout(loop, 80);
-    };
-    loop();
+          } catch (e) { reject(e); return; }
+          setTimeout(loop, 80);
+        };
+        loop();
+      });
+    } finally { if (session === me) end(); }
   }, msg), 'primary');
   return h('div', { class: 'card' }, h('h2', {}, '휴대폰 화면 QR로 받기 (웹캠)'), status, h('div', { class: 'row' }, startBtn, btn('멈추기', end)), video, msg,
     h('p', { class: 'muted' }, 'QR 조각을 모두 받고 서명·암호 검증이 끝나야 반영됩니다. 카메라 영상은 저장하지 않습니다.'));

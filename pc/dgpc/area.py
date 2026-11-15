@@ -230,15 +230,24 @@ def save_dong(con, data: dict) -> str:
 
 
 def delete_dong(con, did: str):
-    d = C.one(con, "SELECT * FROM dong WHERE id=?", (did,))
-    if not d:
-        raise C.UserError("동을 찾을 수 없습니다.")
-    if C.one(con, "SELECT 1 AS x FROM app_user_dong WHERE dong_id=? LIMIT 1", (did,)):
-        raise C.UserError("담당자에게 연결된 동은 지울 수 없습니다. 담당 동을 먼저 변경하거나 '사용' 표시를 끄세요.")
-    n = C.one(con, "SELECT COUNT(*) AS n FROM request WHERE dong=?", (d["name"],))["n"]
-    if n:
-        raise C.UserError(f"이 동으로 접수된 건이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
+    """동 삭제. 동을 가리키는 기록이 하나라도 있으면 막는다.
+    배출표 재고(numbered_label.stock_dong_id)·번호 배정(numbered_label_allocation.dong_id)은 ON DELETE SET NULL이라
+    지우면 번호가 어느 동에도 속하지 않게 되어 수불대장·자동 배정에서 사라진다. 차고지(depot_json)는 dong 행의 열이라 함께 지워진다."""
     with C.tx(con):
+        d = C.one(con, "SELECT * FROM dong WHERE id=?", (did,))
+        if not d:
+            raise C.UserError("동을 찾을 수 없습니다.")
+        if C.one(con, "SELECT 1 AS x FROM app_user_dong WHERE dong_id=? LIMIT 1", (did,)):
+            raise C.UserError("담당자에게 연결된 동은 지울 수 없습니다. 담당 동을 먼저 변경하거나 '사용' 표시를 끄세요.")
+        n = C.one(con, "SELECT COUNT(*) AS n FROM request WHERE dong=?", (d["name"],))["n"]
+        if n:
+            raise C.UserError(f"이 동으로 접수된 건이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
+        n = C.one(con, "SELECT COUNT(*) AS n FROM numbered_label WHERE stock_dong_id=?", (did,))["n"]
+        if n:
+            raise C.UserError(f"이 동에 입고·배부된 배출표 번호가 {n}개 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
+        n = C.one(con, "SELECT COUNT(*) AS n FROM numbered_label_allocation WHERE dong_id=?", (did,))["n"]
+        if n:
+            raise C.UserError(f"이 동의 배출표 번호 배정 기록이 {n}건 있어 지울 수 없습니다. '사용' 표시를 끄세요.")
         con.execute("DELETE FROM dong WHERE id=?", (did,))
         C.audit(con, "dong", did, "DELETE", {"name": d["name"]})
 

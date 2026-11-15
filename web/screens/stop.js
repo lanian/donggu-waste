@@ -647,8 +647,8 @@ function pcManage(stop, purged) {
     return '정정 요청 · ' + keys.map((k) => (Array.isArray(f) ? FIX_LABEL[k] || k : `${FIX_LABEL[k] || k} → ${k === 'phone' ? fmtPhone(f[k]) : f[k] || '(비움)'}`)).join(', ');
   };
   const cancelReq = async () => {
-    const r = await sheet({ title: '취소 요청', text: '주민이 취소했거나 수거할 수 없는 건이면 사유를 골라 PC로 요청합니다. PC 담당자가 확인한 뒤 취소되며, 기록은 지워지지 않습니다.',
-      input: { label: '내용 (기타는 필수)', placeholder: '예: 주민이 직접 처리함', required: '기타 사유를 적어 주세요.' },
+    const r = await sheet({ title: '취소 요청', text: '주민이 취소했거나 수거할 수 없는 건이면 사유를 골라 PC로 요청합니다. PC 담당자가 확인한 뒤 취소되며, 기록은 지워지지 않습니다. 적은 내용은 결과 파일에 암호화되어 PC로 갑니다 — 이름·연락처 등 개인정보를 적지 마세요.',
+      input: { label: '내용 (기타는 필수, 개인정보 적지 않기)', placeholder: '예: 주민이 직접 처리함', required: '기타 사유를 적어 주세요.' },
       choices: CANCEL_REQ.map(([v, l]) => ({ label: l, value: v, cls: v === 'RESIDENT' ? 'danger' : '', needInput: v === 'OTHER' })), cancel: '돌아가기' });
     if (!r || !r.value) return;
     await addEvent(stop, 'CANCEL_REQUEST', { code: r.value, text: (r.text || '').slice(0, 200) });
@@ -701,8 +701,8 @@ function screenFix(id) {
     h('div', { class: 'cta' }, msg, save));
 }
 
-// 현장 메모: 짧게 남기고 고치지 않는다(새 메모를 더함). 결과 파일로 PC에 전달.
-// 적는 중인 글은 화면을 다시 그려도(사진 저장·통화 뒤 등) 남는다: ui.memo[지점]에 두고, 남기면 비운다(메모리에만, 잠그면 사라짐).
+// 현장 메모: 짧게 남기고 고치지 않는다(새 메모를 더함). 적은 글 그대로 결과 파일(PC 전용 암호화)로 PC에 전달 — 입력칸에 개인정보 금지 안내.
+// 적는 중인 글은 화면을 다시 그려도(사진 저장·통화 뒤 등) 남는다: ui.memo[지점]에 두고, 남기면 비운다(메모리에만, 잠그면 core.js resetUi()가 지움).
 function fieldMemo(stop, d) {
   const id = stop.request_id, source = st, route = location.hash;
   if (!memoOperations.has(source)) memoOperations.set(source, new Map());
@@ -720,7 +720,9 @@ function fieldMemo(stop, d) {
   if (operation?.failed && !operation.busy && !collectionPending()) {
     clearSubmitted(operation); operations.delete(id); memoRecoveries.delete(operation.eventId); operation = null;
   }
-  const ta = h('textarea', { rows: 2, placeholder: '현장 메모 (예: 현관 앞 아님, 지하주차장 입구에 배출)', 'aria-label': '현장 메모' });
+  const ta = h('textarea', { rows: 2, placeholder: '현장 메모 (예: 현관 앞 아님, 지하주차장 입구에 배출)', 'aria-label': '현장 메모', 'aria-describedby': 'field-memo-help' });
+  const help = h('p', { class: 'small muted', id: 'field-memo-help' }, isSolo() ? '이름·연락처 등 개인정보를 적지 마세요. 메모는 적은 그대로 암호화되어 이 휴대폰과 백업 파일에 남습니다.'
+    : '이름·연락처 등 개인정보를 적지 마세요. 메모는 적은 그대로 결과 파일에 암호화되어 PC로 갑니다.');
   ta.value = ui.memo[id] || '';
   ta.addEventListener('input', () => { ui.memoVersion[id] = (ui.memoVersion[id] || 0) + 1; if (ta.value) ui.memo[id] = ta.value; else delete ui.memo[id]; });
   const message = h('p', { class: 'small', role: 'status' });
@@ -782,7 +784,7 @@ function fieldMemo(stop, d) {
   const retry = btn('메모 저장 다시 시도', () => run(true), 'primary', { hidden: true });
   const box = h('div', { class: 'memo-box' },
     (d.memos || []).length ? h('ul', { class: 'small list' }, ...d.memos.map((m) => h('li', {}, m.text))) : null,
-    ta, message, send, retry);
+    ta, help, message, send, retry);
   sync();
   if (operation?.busy) operation.promise?.then(() => { setTimeout(() => { if (current()) refresh(); }, 0); });
   return box;

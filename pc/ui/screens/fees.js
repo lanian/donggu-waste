@@ -2,7 +2,7 @@
 import { BUILTIN_FEES } from '/web/fees-data.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { FEES, api, boot, btn, chip, grid, h, kst, pagehead, post, render, setBoot, toast, wrap } from '../core.js';
+import { FEES, api, boot, btn, can, chip, grid, h, kst, pagehead, post, render, setBoot, toast, wrap } from '../core.js';
 
 async function screenFees() {
   const d = await api('fee-table');
@@ -41,7 +41,9 @@ async function screenFees() {
   const draftCard = draft ? h('div', { class: 'card notice' }, h('h2', {}, `승인 대기: 개정 ${draft.rev_no}번 (${draft.version_id})`),
     h('dl', { class: 'kv' }, h('dt', {}, '시행일'), h('dd', {}, draft.effective_from), h('dt', {}, '확인자'), h('dd', {}, draft.confirmed_by), h('dt', {}, '작성'), h('dd', {}, `${draft.created_by} · ${kst(draft.created_at)}`),
       h('dt', {}, '확정 행'), h('dd', {}, Object.entries(draft.overrides).map(([rid, o]) => { const r = BUILTIN_FEES.rows.find((x) => x.id === rid); return `${r ? r.name + ' ' + r.spec : rid} ${won(o.price)} (${o.reason})`; }).join(' / ') || '없음')),
-    draft.created_by === me.username ? h('p', { class: 'muted' }, '작성한 사람은 승인할 수 없습니다. 다른 담당자가 원문과 대조해 승인해야 적용됩니다.')
+    // 승인·반려는 POST fee-revisions/{id}/approve·reject 권한(can('feeReview'): 관리자·접수)만
+    !can('feeReview') ? h('p', { class: 'muted' }, '승인·반려는 운영 관리자 또는 접수 담당자가 원문과 대조해 처리합니다.')
+      : draft.created_by === me.username ? h('p', { class: 'muted' }, '작성한 사람은 승인할 수 없습니다. 다른 담당자가 원문과 대조해 승인해야 적용됩니다.')
       : h('div', { class: 'row' }, btn('원문과 대조했고 승인', wrap(async () => { await post(`fee-revisions/${draft.id}/approve`, {}); toast('승인했습니다. 시행일부터 새 접수에 적용됩니다.'); setBoot(null); render(); }, msg), 'primary'),
         reason, btn('반려', wrap(async () => { await post(`fee-revisions/${draft.id}/reject`, { reason: reason.value }); toast('반려했습니다'); render(); }, msg)))) : null;
   // 전체 표 조회

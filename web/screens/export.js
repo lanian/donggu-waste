@@ -29,7 +29,8 @@ async function screenExport() {
     setTimeout(() => URL.revokeObjectURL(u), 30000);
     say(message);
   };
-  // 결과 파일: 이름·연락처·주소·메모 없이 이벤트만, PC 공개키로 암호화 + 기기 서명
+  // 결과 파일: 기록(이벤트)을 그대로, PC 공개키로 암호화 + 기기 서명. 주민 이름·연락처·주소는 현장 접수·정정 요청에만 들어가고,
+  // 직원이 적은 글(현장 메모·취소 요청 내용·하차 메모)도 그대로 들어간다 — 화면 안내(sendCard)와 입력칸 안내가 이를 알린다.
   const buildResult = async () => {
     checkResultReady();
     const from = pending[0].seq, to = pending[pending.length - 1].seq;
@@ -138,21 +139,26 @@ async function screenExport() {
     if (cleaning || !cleanupCurrent()) return;
     if (!cleanupReady()) return cleanupBlocked();
     cleaning = true; cleanup.disabled = true;
-    const seq = st.seq;
-    // 확인창·사진 삭제를 기다리는 동안 생긴 기록이나 새 업무를 이전 화면의 확인으로 지우지 않는다.
+    const seq = st.seq, draft = st.intakeDraft;
+    // 확인창·사진 삭제를 기다리는 동안 생긴 기록이나 새 업무(새로 생긴 접수 초안 포함)를 이전 화면의 확인으로 지우지 않는다.
     const unchanged = () => {
       if (!cleanupCurrent()) return false;
-      if (st.seq !== seq || !cleanupReady()) { cleanupBlocked(); return false; }
+      if (st.seq !== seq || !cleanupReady() || (st.intakeDraft && st.intakeDraft !== draft)) { cleanupBlocked(); return false; }
       return true;
     };
     try {
-      if (!(await ask('반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.', '정리하기'))) return;
+      const text = '반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.';
+      // 작성 중인 접수 초안은 조용히 지우지 않는다: 알리고, 초안까지 지운다는 단추를 따로 눌러야 정리한다.
+      if (!(await (draft
+        ? ask(`${text} 작성 중인 접수 초안이 있습니다. 정리하면 이 초안도 지워집니다. 초안을 살리려면 [취소]를 누르고 목록의 [+ 접수 등록 (현장·전화)]에서 접수를 마치세요.`, '초안까지 지우고 정리', { danger: true })
+        : ask(text, '정리하기')))) return;
       for (const p of allPhotos) if (recovered.has(p.photo_id)) {
         if (!unchanged()) return;
         await S.delSecureBytes('ph:' + p.photo_id);
       }
       if (!unchanged()) return;
-      const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff'].map((k) => [k, st[k]]));
+      const keepCfg = Object.fromEntries(['mapEnabled', 'textSize', 'lockMin', 'workers', 'worker', 'smsTemplates', 'navApp', 'jusoKey', 'jusoCoordKey', 'addrRoute', 'unloadSite', 'unsentWarnH', 'retentionDays', 'geoEvidence', 'feeFavs', 'feeUsage', 'deviceCheck', 'navAppSet', 'mapPrefetchedAt', 'setupHidden', 'storagePersisted', 'persistHintOff',
+        'receiptCounter'].map((k) => [k, st[k]]));  // receiptCounter: 같은 날 다시 접수해도 현장 접수 임시번호가 1부터 다시 시작하지 않게
       const cleared = { ...emptyState(), ...keepCfg, mode: st.mode, seq: st.seq, releasedSeq: st.seq, gen: st.gen, gens: st.gens, genRestored: st.genRestored, keptPhotos: notRecovered, photoExports: st.photoExports, recoveredPhotos: [] };
       setSt(cleared);
       const saved = await commit();
@@ -168,7 +174,8 @@ async function screenExport() {
   const syncCleanup = () => {
     cleanup.disabled = cleaning || !cleanupReady();
     cleanupHint.textContent = unconfirmedResults().length ? '수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요.' : unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
-      : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.' : '';
+      : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.'
+      : st.intakeDraft ? '작성 중인 접수 초안이 있습니다. 정리하면 초안도 지워지니, 먼저 목록의 [+ 접수 등록 (현장·전화)]에서 접수를 마치거나 확인창에서 초안까지 지울지 고르세요.' : '';
     cleanupHint.hidden = !cleanupHint.textContent;
   };
   const watchCleanupRecovery = () => {
@@ -188,13 +195,16 @@ async function screenExport() {
     h('p', { class: 'small' }, 'PC 담당자가 결과를 가져온 뒤 알려 주는 결과 반영 코드(D-로 시작, 8자리)를 넣으세요. 넣어야 "보낸 것"으로 처리되고, 끝난 곳의 개인정보가 이 휴대폰에서 지워집니다. PC가 결과를 가져온 뒤 만든 새 목록을 받으면 코드 없이도 저절로 확인됩니다.'),
     codeBox('RESULT', codeIn), codeMsg, confirm,
     h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.superseded ? '뒤 파일로 반영됨' : x.via === 'list' ? '반영 확인됨(새 목록)' : x.confirmed ? '반영 확인됨' : '확인 대기'}`))));
+  // 직원이 직접 적은 글이 실리는 기록: 현장 메모, 내용을 적은 취소 요청, 메모를 적은 하차 기록
+  const freeText = pending.filter((e) => (e.kind === 'FIELD_MEMO' && e.body?.text) || (e.kind === 'CANCEL_REQUEST' && e.body?.text) || (e.kind === 'UNLOAD' && e.body?.note));
   const sendCard = h('section', { class: 'card' },
     h('h2', {}, h('span', { class: 'stepno' }, '1'), pending.length ? `결과 보내기 · 미전송 ${pending.length}건` : '결과 보내기'),
     unresolved.length ? h('section', { class: 'notice', 'aria-label': '수거 결과 재확인 필요' },
       h('strong', {}, `수거 결과 재확인 ${unresolved.length}건`), h('p', {}, '결과 저장 뒤 수량이 바뀐 접수가 있습니다. 현재 수량에 맞는 결과를 다시 저장한 뒤 보내세요.'),
       ...unresolved.map((s) => btn(`${s.seq}번 결과 재확인`, () => go(`#/stop/${s.request_id}`), 'big')),
       btn('기록 보호용 백업', () => go('#/backup'), 'big')) : null,
-    h('p', {}, '결과 파일에는 이름·연락처·주소·메모가 들어가지 않으며, PC에서만 열 수 있게 암호화됩니다. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(중간 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다.'),
+    h('p', {}, '결과 파일은 PC에서만 열 수 있게 암호화됩니다. 주민 이름·연락처·주소는 넣지 않지만(아래 현장 접수·정정 요청은 예외), 현장 메모·취소 요청 내용·하차 메모에 적은 글은 그대로 PC로 갑니다. 그런 칸에는 이름·연락처 등 개인정보를 적지 마세요. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(중간 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다.'),
+    freeText.length ? h('p', { class: 'notice free-text' }, `이번 파일에는 직접 적은 글(현장 메모·취소 요청 내용·하차 메모) ${freeText.length}건이 들어갑니다. 개인정보가 적혀 있지 않은지 확인하세요.`) : null,
     pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'notice' },
       `이번 파일에는 현장 접수·정정 요청 ${pending.filter((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION').length}건의 이름·연락처·주소가 들어갑니다(PC가 원본을 만들거나 고치려면 필요). PC 전용 암호화는 같으며, 업무 메일이나 PC 화면 카메라로만 보내세요.`) : null,
     showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg);
