@@ -127,6 +127,25 @@ def section(name, fn, *args):
         print("  ✗", name, "\n", traceback.format_exc(limit=3), flush=True)
 
 
+# ------------------------------------------------------------------ 12. 다른 PC의 첫 화면: 관리자 계정 만들기 양식을 보이지 않음
+def remote_first_setup(browser, url):
+    ctx = new_context(browser)
+    try:
+        # 서버는 다른 PC의 요청에 setup_here:false 를 더한다(본체 판정은 test_desktop_review_fixes 가 검사). 여기서는 그 응답을 흉내 낸다.
+        ctx.route("**/api/state", lambda route: route.fulfill(json={"setup_needed": True, "logged_in": False, "setup_here": False}))
+        page = ctx.new_page()
+        page.goto(url)
+        card = page.locator(".login")
+        expect(card).to_contain_text("서버 PC 본체")
+        ok(True, "다른 PC에는 첫 관리자 설정을 본체에서 하라고 안내")
+        ok(card.locator("input").count() == 0 and page.get_by_role("button", name="관리자 계정 만들기").count() == 0,
+           "다른 PC에는 아이디·비밀번호 입력칸과 [관리자 계정 만들기] 단추가 없음")
+        expect(page.get_by_role("button", name="다시 확인", exact=True)).to_be_visible()
+        ok(True, "본체에서 만든 뒤 [다시 확인]으로 로그인 화면을 불러올 수 있음")
+    finally:
+        ctx.close()
+
+
 # ------------------------------------------------------------------ 1. 모달 진행 중 취소 → 개인키 유실
 def backup_key_modal(page, url):
     fresh(page, url, "#/settings/backup")
@@ -149,6 +168,33 @@ def backup_key_modal(page, url):
     expect(dlg).to_have_count(0)
     expect(page.locator(".toast").filter(has_text="백업 키를 만들었습니다")).to_be_visible()
     ok(True, "개인키를 받은 뒤 대화 상자가 닫히고 완료를 알린다")
+
+
+# ------------------------------------------------------------------ 13. 응답이 오지 않는 처리 중 대화 상자: 기다리지 않고 닫을 길
+def stuck_modal(admin_ctx, url):
+    page = admin_ctx.new_page()
+    try:
+        page.clock.install()  # 시간은 그대로 흐르고, 필요할 때 앞으로 건너뛴다
+        fresh(page, url, "#/settings/backup")
+        page.get_by_role("button", name="백업 키 만들기", exact=True).click()
+        dlg = page.get_by_role("dialog")
+        dlg.get_by_label("개인키 보호 비밀번호 (12자 이상)", exact=True).fill("fixture-key-password-2")
+        dlg.get_by_label("한 번 더", exact=True).fill("fixture-key-password-2")
+        page.evaluate("() => __hold.add('POST backup-key')")  # 응답이 끝내 오지 않는 요청
+        dlg.get_by_role("button", name="만들고 개인키 내려받기", exact=True).click()
+        wait_gate(page)
+        escape = dlg.get_by_role("button", name="기다리지 않고 닫기", exact=True)
+        page.clock.fast_forward("00:20")
+        ok(escape.count() == 0 or not escape.is_visible(), "처리 중 30초 전에는 [기다리지 않고 닫기]가 없음(응답을 기다림)")
+        page.clock.fast_forward("00:11")
+        expect(escape).to_be_visible()
+        expect(dlg.get_by_role("status")).to_contain_text("새로 고쳐")
+        ok(True, "30초가 지나도 응답이 없으면 [기다리지 않고 닫기]와 결과 확인 방법을 보임")
+        escape.click()
+        expect(dlg).to_have_count(0)
+        ok(True, "[기다리지 않고 닫기]로 대화 상자를 닫고 화면을 계속 쓸 수 있음")
+    finally:
+        page.close()  # 붙잡은 요청은 보내지 않은 채 버린다
 
 
 # ------------------------------------------------------------------ 2. 일괄 취소 진행 중 취소 → 결과 누락
@@ -385,6 +431,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     with pc_server() as url, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path, headless=True)
+        section("12 다른 PC 첫 화면", remote_first_setup, browser, url)  # 관리자를 만들기 전(첫 설정 필요 상태)에 본다
         admin = new_context(browser)
         api(admin, url, "setup", {"username": "review_admin", "display_name": "가상 검토관리자", "password": PW})
         boot = api(admin, url, "bootstrap")
@@ -421,6 +468,7 @@ def main():
             section("9 팀장 수수료 승인", lead_fees, lead, url)
             intake_ctx, intake = role_page(browser, url, admin, "INTAKE")
             section("9·10 접수", intake_checks, intake, url)
+            section("13 응답 없는 대화 상자", stuck_modal, admin, url)
             ok(not ERRORS, "화면 스크립트 오류 없음: " + "; ".join(ERRORS))
         except BaseException:
             for name, p in [("admin", page), *[(n, v) for n, v in (("field", locals().get("field")), ("lead", locals().get("lead")), ("intake", locals().get("intake"))) if v]]:

@@ -10,7 +10,7 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, saveFailed, saving, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, saveFailed, saving, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
@@ -20,6 +20,11 @@ const collectionPending = () => saveFailed || S.hasPendingSecure('state');
 const priorQty = (stop, line) => Math.max(0, Number(stop.items.find((item) => item.line_id === line.line_id)?.prior_collected) || 0);
 let photoViewerController = null;
 const memoOperations = new WeakMap(), memoRecoveries = new Map();
+// 저장에 실패한 메모는 잠금 뒤 다시 시도할 수 있게 이벤트 ID만 남긴다. 원문(text·draft)과 저장 중 작업(promise, 옛 업무 상태를 붙잡음)은
+// 잠글 때 버린다: 원문은 이미 대기 암호문 안의 이벤트에 있고, 다시 시도는 그 이벤트 ID로 찾는다.
+onLock(() => {
+  for (const [eventId] of memoRecoveries) memoRecoveries.set(eventId, { eventId, version: 0, busy: false, failed: true });
+});
 
 // 원본 암호문을 읽기만 한다. 창을 벗어나거나 잠그면 사진 URL과 읽기 결과를 버린다.
 async function viewPhoto(photo, detail, current) {
@@ -707,7 +712,8 @@ function fieldMemo(stop, d) {
   const id = stop.request_id, source = st, route = location.hash;
   if (!memoOperations.has(source)) memoOperations.set(source, new Map());
   const operations = memoOperations.get(source);
-  const matches = (op) => source.events.some((event) => event.event_id === op.eventId && event.request_id === id && event.kind === 'FIELD_MEMO' && event.body.text === op.text);
+  // 잠근 뒤에는 원문 없이 이벤트 ID로만 맞춘다(이벤트 ID는 기기에서 만든 UUID라 다른 메모와 겹치지 않음)
+  const matches = (op) => source.events.some((event) => event.event_id === op.eventId && event.request_id === id && event.kind === 'FIELD_MEMO' && (op.text === undefined || event.body.text === op.text));
   for (const [eventId] of memoRecoveries) if (!source.events.some((event) => event.event_id === eventId)) memoRecoveries.delete(eventId);
   let operation = operations.get(id) || [...memoRecoveries.values()].find(matches);
   if (operation) operations.set(id, operation);

@@ -3,6 +3,15 @@ import { api, btn, h, post, render, setBoot, wrap } from '../core.js';
 
 async function screenLogin(initialState) {
   const st = initialState ?? await api('state', { timeoutMs: 10_000 });
+  // 다른 PC: 첫 관리자는 서버 PC 본체에서만 만들 수 있다(서버도 막는다). 양식 대신 안내와 다시 확인 단추만 보인다.
+  if (st.setup_needed && st.setup_here === false) {
+    return h('main', { class: 'login-wrap' },
+      h('div', { class: 'login card' }, h('h1', { class: 'sr-only' }, '첫 관리자 설정 필요'),
+        h('div', { class: 'brand' }, h('span', { class: 'logo' }, '동'), h('div', {}, h('strong', {}, '동구 대형폐기물 관리시스템'), h('small', {}, '접수·배차·수거 업무 (PC)'))),
+        h('p', {}, '아직 관리자 계정이 없습니다. 첫 관리자 계정은 서버 PC 본체에서 업무 화면을 열어 만드세요.'),
+        h('p', { class: 'muted' }, '본체에서 만든 뒤 아래 단추를 누르면 이 PC에서 로그인할 수 있습니다.'),
+        btn('다시 확인', () => { setBoot(null); render(); }, 'primary block')));
+  }
   const user = h('input', { placeholder: '아이디', autocomplete: 'username', value: st.setup_needed ? 'admin' : '' });
   const dname = st.setup_needed ? h('input', { placeholder: '이름 (예: 홍길동 주무관)' }) : null;
   const pw = h('input', { type: 'password', placeholder: '비밀번호', autocomplete: st.setup_needed ? 'new-password' : 'current-password' });

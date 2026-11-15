@@ -384,6 +384,9 @@ async function settleWrites() {
 // 남기는 것은 개인정보 없는 표시 설정과 접수 ID뿐(잠긴 사이 카메라에서 돌아온 사진·통화 뒤 돌아갈 곳을 찾는 데 씀).
 // 작성 중인 접수 초안은 draftFor 가 잠그기 전(settleWrites)에 암호화 저장해 두므로 잠금 해제 뒤 그대로 이어 쓴다.
 const UI_KEEP = ['filter', 'soloView', 'lastRoute', 'stopBackTo', 'stopBackId', 'afterCall', 'photoTarget', 'photoLine'];
+// 잠글 때 화면 모듈이 자기 모듈 안에 들고 있던 평문(재시도용 원문 등)을 버리게 하는 고리. resetUi()와 같은 때 부른다.
+const lockHooks = new Set();
+function onLock(fn) { lockHooks.add(fn); }
 function resetUi() {
   const keep = Object.fromEntries(UI_KEEP.filter((k) => ui[k] != null).map((k) => [k, ui[k]]));
   for (const k of Object.keys(ui)) delete ui[k];  // 같은 객체를 비운다(다른 모듈이 붙잡은 참조에도 남지 않게)
@@ -393,7 +396,7 @@ function lockNow() {
   if (locking) return locking;
   locking = (async () => {
     try { if (S.isUnlocked() && st) await settleWrites(); } catch {}
-    stopCamera(); S.lock(); st = null; resetUi(); wantWake(false);
+    stopCamera(); S.lock(); st = null; resetUi(); for (const fn of lockHooks) { try { fn(); } catch {} } wantWake(false);
     for (const done of [...openSheets]) done(null);
   })().finally(() => { locking = null; });
   return locking.then(() => render());
@@ -727,7 +730,7 @@ export {
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,
   handoffUntil, hiddenAt, isDark, isIOS, isQuota, isSolo, lastActive, launchApp,
-  lineFromRow, liveMap, loadState, lockMs, lockNow, locking, lowSpaceWarned, mdOf,
+  lineFromRow, liveMap, loadState, lockMs, lockNow, locking, onLock, lowSpaceWarned, mdOf,
   mergePrefs, nextSeq, normAddr, openExternal, openSheets, pcStops, pcWorkDate, pendingPhotos,
   photoFlushing, photoUrls, prefs, reduceMotion, registeredNow, reloadWanted, reloadWhenSafe, render,
   quantityInput, quantityValue,

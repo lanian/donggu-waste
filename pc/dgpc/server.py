@@ -648,7 +648,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "state" and method == "GET":
             with read_con() as rc:
                 need = not S.users_exist(rc)
-            return self.send_json({"setup_needed": need, "logged_in": bool(self.session())})
+            out = {"setup_needed": need, "logged_in": bool(self.session())}
+            # 첫 설정은 본체에서만 받으므로(아래 setup), 다른 PC에는 양식 대신 안내를 보이게 알린다. 본체의 응답 본문은 예전 그대로.
+            if need and not same_machine(self.client_address[0], self.connection.getsockname()[0]):
+                out["setup_here"] = False
+            return self.send_json(out)
         if p == "setup" and method == "POST":
             # 사용자가 없을 때는 인증 수단이 없으므로, LAN 모드의 다른 PC가 첫 관리자를 먼저 차지하지 못하게 서버 PC 본체에서만 받는다.
             if not same_machine(self.client_address[0], self.connection.getsockname()[0]):

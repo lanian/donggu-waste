@@ -149,6 +149,53 @@ def lock_clears_ui(browser, url):
         ctx.close()
 
 
+def heap_strings(page, needle):
+    """힙 스냅샷(먼저 가비지 수집을 한다)에서 needle 을 담은 문자열 수."""
+    cdp = page.context.new_cdp_session(page)
+    chunks = []
+    cdp.on("HeapProfiler.addHeapSnapshotChunk", lambda e: chunks.append(e["chunk"]))
+    cdp.send("HeapProfiler.collectGarbage")
+    cdp.send("HeapProfiler.takeHeapSnapshot", {"reportProgress": False})
+    cdp.detach()
+    return sum(needle in x for x in json.loads("".join(chunks))["strings"])
+
+
+def lock_drops_failed_memo_text(browser, url):
+    print("\n— 저장 실패한 현장 메모: 잠근 뒤 메모리에 원문을 두지 않음 —")
+    ctx, page = open_mobile(browser, url)
+    try:
+        today = today_of(page)
+        seed(page, {"daylist": daylist(today, [stop(1, today)])})
+        route(page, "#/stop/workflow-1")
+        page.evaluate("""() => { window.__put = IDBObjectStore.prototype.put;
+            IDBObjectStore.prototype.put = function (value, key) { if (key === 's:state') throw new DOMException('가상 저장 공간 부족', 'QuotaExceededError'); return window.__put.apply(this, arguments); }; }""")
+        memo = page.get_by_label("현장 메모", exact=True)
+        memo.fill("잠금후남으면안되는메모원문")
+        page.get_by_role("button", name="메모 남기기", exact=True).click()
+        # 화면 글자 검색(get_by_text)은 쓰지 않는다: 브라우저가 마지막 정규식 대상(화면 전체 글)을 붙잡아 힙 검사를 흐린다
+        page.wait_for_function("import('./core.js').then(C => C.saveFailed === true)")
+        eid = page.evaluate("async () => (await import('./core.js')).st.events.find(e => e.kind === 'FIELD_MEMO').event_id")
+        page.evaluate("async () => { await (await import('./core.js')).lockNow(); }")  # 저장은 계속 실패하는 채로 잠근다
+        expect(page.get_by_placeholder("PIN", exact=True)).to_be_visible()
+        # 떼어 낸 옛 화면 단추의 CSS 전환(누른 효과)이 끝날 때까지는 그 단추가 잠시 메모리에 남는다(브라우저가 곧 놓음)
+        page.wait_for_timeout(1500)
+        left = heap_strings(page, "잠금후남으면안되는메모원문")
+        ok(left == 0, f"잠근 뒤 저장 실패한 메모의 원문이 메모리에 남지 않음 (힙 문자열 {left}개)")
+        unlock(page)
+        route(page, "#/stop/workflow-1")
+        retry = page.get_by_role("button", name="메모 저장 다시 시도", exact=True)
+        expect(retry).to_be_visible()
+        ok(True, "잠금 해제 뒤에도 저장 대기 메모는 다시 시도할 수 있음")
+        page.evaluate("() => { IDBObjectStore.prototype.put = window.__put; }")
+        retry.click()
+        expect(page.get_by_text("메모 저장 대기", exact=True)).to_have_count(0)
+        stored = [e for e in disk_state(page)["events"] if e["kind"] == "FIELD_MEMO"]
+        ok(len(stored) == 1 and stored[0]["event_id"] == eid and stored[0]["body"]["text"] == "잠금후남으면안되는메모원문",
+           "다시 시도하면 같은 메모(같은 이벤트 ID) 한 건만 저장")
+    finally:
+        ctx.close()
+
+
 # ------------------------------------------------------------ 3. 결과 파일 메모 안내
 def export_memo_notice(browser, url):
     print("\n— 결과 파일 메모 안내 —")
@@ -223,7 +270,7 @@ def cleanup_keeps_counter_and_draft(browser, url):
         ctx.close()
 
 
-CASES = (two_window_handoff, normal_path_conflict, lock_clears_ui, export_memo_notice, cleanup_keeps_counter_and_draft)
+CASES = (two_window_handoff, normal_path_conflict, lock_clears_ui, lock_drops_failed_memo_text, export_memo_notice, cleanup_keeps_counter_and_draft)
 
 
 def main():

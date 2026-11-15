@@ -512,15 +512,23 @@ def defect6_setup_loopback_only(directory: Path):
             srv = SV.Server(("127.0.0.1", port), handler)
             servers.append(srv)
             threading.Thread(target=srv.serve_forever, daemon=True).start()
+            state_req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"X-DG-CSRF": "1"})
+            with opener.open(state_req, timeout=20) as response:
+                state = json.loads(response.read())
             status, data = post("/api/setup", body)
             srv.shutdown()
             srv.server_close()
             if handler is Remote:
+                ok(state == {"setup_needed": True, "logged_in": False, "setup_here": False},
+                   f"다른 PC의 첫 화면 상태는 여기서 첫 설정을 할 수 없다고 알림 ({state})")
                 ok(status == 403 and "PC 본체" in data.get("error", "") and not S.users_exist(con),
                    f"LAN의 다른 PC는 첫 관리자를 만들 수 없음 ({status} {data.get('error')})")
             else:
+                ok(state == {"setup_needed": True, "logged_in": False}, f"본체의 첫 화면 상태 본문은 예전 그대로 ({state})")
                 ok(status == 200 and S.users_exist(con), f"서버 PC 본체(127.0.0.1)에서는 첫 관리자 생성 ({status})")
     finally:
+        while not SV.RPOOL.empty():  # /api/state 가 연 조회 전용 연결도 닫는다(Windows는 열린 DB 파일을 지우지 못함)
+            SV.RPOOL.get_nowait().close()
         con.close()
         SV.CON, SV.PORT, SV.LAN = saved
         for k, v in saved_env.items():

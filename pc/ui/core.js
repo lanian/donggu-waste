@@ -257,6 +257,9 @@ const dlgStack = [];
 // extra: [{ label, value, cls }] — 확인·취소 말고 다른 답(누르면 value로 닫힘). sticky: 화면을 옮겨도 닫지 않음(다시 로그인)
 // onOk 처리 중(서버 요청 진행 중)에는 취소·다른 답·Esc·화면 이동으로 닫지 않는다: 서버는 계속 처리하므로
 // 중간에 닫으면 한 번만 주는 응답(백업 개인키 등)이나 결과 안내를 잃는다. 끝나면 결과로 닫힌다.
+// 처리 중인 대화 상자는 닫히지 않는다(응답을 잃지 않게). 다만 이 시간이 지나도 응답이 없으면(PC 서버 멈춤·연결 끊김)
+// [기다리지 않고 닫기]를 보여 화면에 갇히지 않게 한다. 그때 닫으면 결과를 못 받을 수 있으므로 새로 고쳐 확인하라고 알린다.
+const MODAL_STUCK_MS = 30_000;
 function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false, enterSubmit = true } = {}) {
   return new Promise((resolve) => {
     const id = `dlg${++dlgSeq}`;
@@ -267,14 +270,22 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
     const okB = btn(ok, null, danger ? 'danger' : 'primary', { 'data-dlg-ok': '1' });
     const noB = cancel ? btn(cancel, () => { if (!busy) close(null); }) : null;
     const exB = extra.map((x) => btn(x.label, () => { if (!busy) close(x.value); }, x.cls || ''));
+    const stuckB = btn('기다리지 않고 닫기', () => close(null), 'ghost', { hidden: true });
+    let stuckTimer = null;
     const box = h('div', { class: 'dlg' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': id + 't', tabindex: '-1' },
-      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, busyMsg, noB, ...exB, okB));
+      h('h2', { id: id + 't' }, title), h('div', { class: 'dlg-b' }, ...body), msg, h('div', { class: 'dlg-btns' }, busyMsg, stuckB, noB, ...exB, okB));
     const back = h('div', { class: 'dlg-back' }, box);
     const setBusy = (on) => {
       busy = on;
       box.setAttribute('aria-busy', on ? 'true' : 'false');
       for (const b of [okB, noB, ...exB]) if (b) { b.disabled = on; if (on) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy'); }
       busyMsg.textContent = on ? '처리 중입니다. 끝날 때까지 기다려 주세요.' : '';
+      clearTimeout(stuckTimer); stuckB.hidden = true;
+      if (on) stuckTimer = setTimeout(() => {
+        if (!busy || closed) return;
+        stuckB.hidden = false;
+        busyMsg.textContent = '응답이 늦습니다. 닫으면 결과를 받지 못할 수 있으니, 닫은 뒤 화면을 새로 고쳐 처리됐는지 확인하세요.';
+      }, MODAL_STUCK_MS);
     };
     const focusables = () => [...box.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')].filter((el) => !el.disabled && !el.hidden && el.offsetParent !== null);
     const key = (e) => {
@@ -290,7 +301,7 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
       } else if (enterSubmit && e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && box.contains(e.target) && !['checkbox', 'file'].includes(e.target.type)) { e.preventDefault(); okB.click(); }
     };
     let closed = false;
-    const close = (v) => { if (closed) return; closed = true; back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
+    const close = (v) => { if (closed) return; closed = true; clearTimeout(stuckTimer); back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
     back._close = close; back._sticky = sticky; back._busy = () => busy;
     okB.addEventListener('click', async () => {
       if (busy) return;
