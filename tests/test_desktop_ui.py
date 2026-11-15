@@ -357,7 +357,7 @@ def existing_probe_regressions():
             with patch.object(sys, "argv", arguments), patch.object(desktop, "DesktopController", Controller), \
                     patch.object(desktop, "EXISTING_CHECK_SECONDS", 0.02, create=True), \
                     patch.object(desktop, "resolve_db_key", side_effect=lambda *a, **kw: keys.append(True) or "가상 키"), \
-                    patch.object(desktop.webbrowser, "open", side_effect=opened.append), \
+                    patch.object(desktop.webbrowser, "open", side_effect=lambda url: opened.append(url) or True), \
                     patch.object(desktop_view, "DesktopView", capture):
                 result = desktop.main()
             outcomes.append((case, result, failures, history))

@@ -86,6 +86,11 @@ jobs:
       - run: python tests/test_pc_collection_api.py
       - run: python tests/test_date_visibility_api.py
       - run: python tests/test_pc_import_field_review_api.py
+      - run: python tests/test_desktop_connection.py
+      - run: python tests/test_desktop_diagnostics.py
+      - run: python tests/test_desktop_operations.py
+      - run: python tests/test_desktop_checker_bundle.py
+      - run: python tests/test_desktop_lan_bundle.py
       - run: python tests/test_vworld.py
       - run: python tests/test_pc_reports.py
       - run: python tests/test_pc_labels.py
@@ -237,6 +242,12 @@ jobs:
           python tests/test_desktop_app.py
           python tests/test_desktop_tray.py
           python tests/test_desktop_ui.py
+          python tests/test_desktop_connection.py
+          python tests/test_desktop_diagnostics.py
+          python tests/test_desktop_operations.py
+          python tests/test_desktop_operations_ui.py
+          python tests/test_desktop_checker_bundle.py
+          python tests/test_desktop_lan_bundle.py
       - name: Windows 실행 앱 빌드 도구
         if: runner.os == 'Windows'
         run: pip install --require-hashes -r tools/requirements-desktop.txt
@@ -246,6 +257,8 @@ jobs:
           python tools/build_desktop.py
           python tests/test_desktop_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe
           python tests/test_desktop_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe --legacy-dongs
+          python tests/test_desktop_checker_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe
+          python tests/test_desktop_lan_bundle.py --exe dist/desktop/Donggu-PC/Donggu-PC.exe
       - name: Windows 실행 앱 보관
         if: success() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4

@@ -102,6 +102,21 @@ def write_release_info(directory: Path) -> None:
         "업무 자료 위치는 실행 앱에 표시됩니다. 기존 자료는 자료 폴더 선택으로 연결하세요.\n"
         "새 버전을 받을 때 프로그램 폴더만 교체하고 업무 자료 폴더는 삭제하지 마세요.\n",
         encoding="utf-8-sig")
+    (directory / "PC 접속 점검.cmd").write_bytes(
+        b'@echo off\r\nstart "" "%~dp0Donggu-PC.exe" --check-connection\r\n')
+    (directory / "접속점검안내.txt").write_text(
+        "같은 기관·와이파이의 다른 PC에서 접속을 확인하는 방법\n\n"
+        "1. 서버 PC 실행 앱에서 서버 종료 후 접속 설정을 여세요.\n"
+        "2. 기관망 HTTPS, 기관에서 신뢰하는 인증서·개인키, 인증서의 접속 이름, 허용 IP 대역을 설정하세요.\n"
+        "3. 저장 후 재실행하고 접속 주소를 복사하세요. 기존 바로가기의 명시적 포트도 확인하세요.\n"
+        "4. 프로그램 폴더 전체를 다른 PC로 복사하고 ‘PC 접속 점검.cmd’를 실행해 주소를 입력하세요.\n"
+        "5. 이 점검은 실행한 PC에서 대상 서버 응답을 확인합니다. 서버 PC의 성공만으로 다른 PC 접속은 확인되지 않습니다.\n"
+        "인증서 오류는 신뢰·이름·유효기간을 확인하세요. 검증 생략이나 HTTP 전환은 지원하지 않습니다.\n"
+        "연결 실패는 서버 상태·주소·허용 IP·기관 방화벽·망 분리를 담당자와 확인하세요. 프로그램이 방화벽을 자동 변경하지 않습니다.\n"
+        "실행창의 ‘운영 진단’에서 저장공간을 확인하고 안전한 보고서를 저장할 수 있습니다. 로그 원문·키·업무 자료는 보고서에 포함하지 않습니다.\n"
+        "명령행 보고서: Donggu-PC.exe --check-connection https://서버이름:8766/ --check-output 점검.json\n"
+        "점검 전용 모드는 업무 자료나 비밀번호를 열지 않으며 서버를 실행하지 않습니다.\n",
+        encoding="utf-8-sig")
     manifest = {"python": sys.version.split()[0], "pyinstaller": metadata.version("pyinstaller"),
                 "runtime_distributions": distributions, "files": {}}
     for path in assert_public_files(directory):
