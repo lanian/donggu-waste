@@ -73,6 +73,7 @@ class DesktopView(ttk.Frame):
         self.root, self.callbacks = root, callbacks
         self.started_at = None
         self._clock_running, self._timer = False, None
+        self._clock_mode = None
         self.state = "checking"
         self._owned = False
         self.details_open = False
@@ -383,17 +384,33 @@ class DesktopView(ttk.Frame):
         if target is not None:
             self.canvas.yview_moveto(max(0, target) / max(1, self.content.winfo_height()))
 
-    def start_clock(self):
+    def start_clock(self, mode="busy"):
         self.started_at, self._clock_running = time.monotonic(), True
-        self.elapsed_var.set("경과 00:00")
+        self._clock_mode = mode
+        self._update_clock()
         if self._timer is None:
-            self._tick()
+            self._timer = self.after(200, self._tick)
+
+    def _update_clock(self):
+        seconds = int(max(0, time.monotonic() - self.started_at))
+        hours, rest = divmod(seconds, 3600)
+        minutes, seconds = divmod(rest, 60)
+        elapsed = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+        label = {"busy": "경과", "running": "서버 가동", "connected": "연결 경과"}[self._clock_mode]
+        self.elapsed_var.set(f"{label} {elapsed}")
+
+    def _stop_clock(self):
+        if self._clock_running:
+            self._update_clock()
+        self._clock_running = False
+        if self._timer is not None:
+            self.after_cancel(self._timer)
+            self._timer = None
 
     def _tick(self):
         self._timer = None
         if self._clock_running:
-            seconds = int(max(0, time.monotonic() - self.started_at))
-            self.elapsed_var.set(f"경과 {seconds // 60:02d}:{seconds % 60:02d}")
+            self._update_clock()
             self._timer = self.after(200, self._tick)
 
     def show_progress(self, stage):
@@ -448,14 +465,19 @@ class DesktopView(ttk.Frame):
             self.description_label.grid()
         busy = state in BUSY
         if busy:
-            if not self._clock_running:
+            if not self._clock_running or self._clock_mode != "busy":
                 self.start_clock()
             self.progress.grid()
             self.progress.start(50)
         else:
-            self._clock_running = False
             self.progress.stop()
             self.progress.grid_remove()
+            if state in {"ready", "existing"}:
+                mode = "running" if state == "ready" and owned else "connected"
+                if not self._clock_running or self._clock_mode != mode:
+                    self.start_clock(mode)
+            else:
+                self._stop_clock()
         ready = state in {"ready", "existing"}
         recover = state in {"error", "stop_waiting"}
         can_start = state in {"stopped", "error", "connection_lost"} and not owned
@@ -481,6 +503,7 @@ class DesktopView(ttk.Frame):
         self._resize()
 
     def destroy(self):
+        self._clock_running = False
         self.progress.stop()
         if self._timer is not None:
             self.after_cancel(self._timer)

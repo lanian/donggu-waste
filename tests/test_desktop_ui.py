@@ -370,6 +370,79 @@ def existing_probe_regressions():
             "stale_close": "창을 닫은 뒤 외부 서버 확인 결과가 화면을 되살리지 않음"}[case] + str(failures))
 
 
+def clock_regressions():
+    """실제 Tk after를 쓰고 monotonic 값만 제어해 시간·상태 경계를 확인한다."""
+    now = [100.0]
+    with patch('desktop_view.time.monotonic', side_effect=lambda: now[0]):
+        root, view, _ = make_view()
+        def tick():
+            root.after(230, root.quit)
+            root.mainloop()
+        try:
+            view.show_state('ready', owned=True)
+            begun = view.started_at
+            now[0] += 7
+            tick()
+            ok(view.elapsed_var.get() == '서버 가동 00:07', '준비 완료 뒤 실제 Tk 타이머에서 서버 가동시간 증가')
+            view.show_state('ready', owned=True)
+            ok(view.started_at == begun, '동일 ready 재표시가 서버 가동시간을 초기화하지 않음')
+            root.withdraw()
+            now[0] += 3600
+            tick()
+            root.deiconify()
+            ok(view.elapsed_var.get() == '서버 가동 01:00:07', '트레이처럼 숨긴 동안에도 monotonic 기준 1시간 이상 가동시간 유지')
+            view.show_state('error', detail='가상 오류', owned=True)
+            frozen = view.elapsed_var.get()
+            now[0] += 19
+            tick()
+            ok(view.elapsed_var.get() == frozen and view._timer is None, '오류 상태는 현재 경과값을 고정하고 timer 취소')
+            view.show_state('existing')
+            connected = view.started_at
+            now[0] += 4
+            tick()
+            ok(view.elapsed_var.get() == '연결 경과 00:04', '기존 서버는 실제 가동시간 대신 이 창의 연결 경과 표시')
+            view.show_state('existing')
+            ok(view.started_at == connected, '기존 서버의 반복 건강확인이 연결 시간을 초기화하지 않음')
+            view.show_state('connection_lost')
+            frozen = view.elapsed_var.get()
+            now[0] += 5
+            tick()
+            ok(view.elapsed_var.get() == frozen and view._timer is None, '연결 끊김은 마지막 연결 경과를 고정')
+            view.show_state('reconnecting')
+            now[0] += 2
+            tick()
+            ok(view.elapsed_var.get() == '경과 00:02', '재연결 시험은 새 확인 시간으로 시작')
+            view.show_state('existing')
+            ok(view.elapsed_var.get() == '연결 경과 00:00', '재연결 성공은 새 연결 epoch 시작')
+            view.start_clock()
+            view.show_state('stopping', owned=True)
+            now[0] += 3
+            tick()
+            ok(view.elapsed_var.get() == '경과 00:03', '종료 요청의 명시 start_clock은 기존 상태와 무관하게 작업 시간 시작')
+            view.show_state('stopped')
+            frozen = view.elapsed_var.get()
+            now[0] += 2
+            tick()
+            ok(view.elapsed_var.get() == frozen, '정상 종료 뒤 가동/작업 시간은 정지')
+            view.start_clock()
+            view.show_state('checking')
+            begun = view.started_at
+            for stage in ('unlocking', 'password', 'starting', 'waiting'):
+                view.show_state(stage)
+            view.show_progress('ready')
+            ok(view.started_at == begun and view.state == 'waiting', '준비 세부단계·미확정 ready progress는 같은 준비 epoch 유지')
+            timer = view._timer
+            view.destroy()
+            try:
+                root.tk.call('after', 'info', timer)
+            except Exception:
+                ok(True, 'view destroy는 예약된 timer 취소')
+            else:
+                raise AssertionError('destroy 뒤 timer가 남음')
+        finally:
+            root.destroy()
+
+
 def main():
     if os.name != "nt":
         print("SKIP Windows UI")
@@ -503,12 +576,12 @@ def main():
         root.mainloop()
         ok(view.elapsed_var.get() != "경과 00:00", "실제 Tk 타이머에서 준비 경과시간이 흐름")
         view.show_state("ready", owned=True)
-        frozen = view.elapsed_var.get()
-        root.after(300, root.quit)
+        root.after(1150, root.quit)
         root.mainloop()
-        ok(view.elapsed_var.get() == frozen, "서버 준비 완료 후 이번 준비 경과시간을 고정")
+        ok(view.elapsed_var.get().startswith('서버 가동 ') and view.elapsed_var.get() != '서버 가동 00:00', "서버 준비 완료 후 실제 Tk 타이머에서 가동시간 증가")
     finally:
         root.destroy()
+    clock_regressions()
     main_queue_regressions()
     existing_probe_regressions()
     print(f"실행 앱 실제 Tk UI {passed}개 통과")
