@@ -6,6 +6,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +44,24 @@ def make_view(scaling=4 / 3):
     view.pack(fill="both", expand=True)
     root.update()
     return root, view, actions
+
+
+def wait_elapsed_change(root, view, initial, timeout=3):
+    """실제 Tk tick의 표시 변경을 관찰한다. tick 위상·CI 부하를 고정 sleep으로 추정하지 않는다."""
+    deadline, pending = time.monotonic() + timeout, [None]
+    def poll():
+        pending[0] = None
+        if view.elapsed_var.get() != initial or time.monotonic() >= deadline:
+            root.quit()
+        else:
+            pending[0] = root.after(20, poll)
+    pending[0] = root.after(20, poll)
+    try:
+        root.mainloop()
+    finally:
+        if pending[0] is not None:
+            root.after_cancel(pending[0])
+    return view.elapsed_var.get() != initial
 
 
 def main_thread_tk_cleanup(test):
@@ -572,13 +591,11 @@ def main():
     root, view, _ = make_view()
     try:
         view.show_state("checking")
-        root.after(1150, root.quit)
-        root.mainloop()
-        ok(view.elapsed_var.get() != "경과 00:00", "실제 Tk 타이머에서 준비 경과시간이 흐름")
+        initial = view.elapsed_var.get()
+        ok(wait_elapsed_change(root, view, initial) and view.elapsed_var.get() != "경과 00:00", "실제 Tk 타이머에서 준비 경과시간이 흐름")
         view.show_state("ready", owned=True)
-        root.after(1150, root.quit)
-        root.mainloop()
-        ok(view.elapsed_var.get().startswith('서버 가동 ') and view.elapsed_var.get() != '서버 가동 00:00', "서버 준비 완료 후 실제 Tk 타이머에서 가동시간 증가")
+        initial = view.elapsed_var.get()
+        ok(wait_elapsed_change(root, view, initial) and view.elapsed_var.get().startswith('서버 가동 ') and view.elapsed_var.get() != '서버 가동 00:00', "서버 준비 완료 후 실제 Tk 타이머에서 가동시간 증가")
     finally:
         root.destroy()
     clock_regressions()
