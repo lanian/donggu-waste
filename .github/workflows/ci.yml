@@ -122,6 +122,7 @@ jobs:
           - test_dong_depots_ui
           - test_dong_depots_races_ui
           - test_dong_centers_ui
+          - test_pc_menu_dismiss
           - test_fee_calculator_ui
           - test_pc_collection_ui
           - test_pc_field_import_ui

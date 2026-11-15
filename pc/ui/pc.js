@@ -110,6 +110,18 @@ async function startPc() {
 
   // ------------------------------------------------------------ 틀·라우팅
   let renderSeq = 0;
+  const narrowNav = matchMedia('(max-width: 1000px)');
+  function setNavOpen(open, { restoreFocus = false } = {}) {
+    render.navOpen = Boolean(open);
+    const shell = $app.querySelector('.shell');
+    const trigger = shell?.querySelector('.menu-btn');
+    const focusInMenu = shell?.querySelector('#side-nav')?.contains(document.activeElement);
+    shell?.classList.toggle('nav-open', render.navOpen);
+    trigger?.setAttribute('aria-expanded', render.navOpen ? 'true' : 'false');
+    if (!render.navOpen && restoreFocus && focusInMenu && narrowNav.matches && trigger?.getClientRects().length) {
+      trigger.focus({ preventScroll: true });
+    }
+  }
   async function render(fromNav) {
     // 작업 끝의 다시 그리기(fromNav 아님)인데 진행 중인 작업이 모두 다른 화면에서 시작했으면, 지금 화면을 덮지 않는다
     if (fromNav !== true && pendingActions.size && !pendingActions.has(location.hash)) return;
@@ -218,7 +230,7 @@ async function startPc() {
         const dayTxt = isNaN(d) ? core.boot.today : `${core.boot.today.replace(/-/g, '.')} (${'일월화수목금토'[d.getDay()]})`;
         const logout = async (e) => { e.preventDefault(); await post('logout').catch(() => {}); screenModules.get('dongs')?.resetDongs(); setBoot(null, { sessionChanged: true }); screenModules.get('request')?.resetIntake(); stopSessionTimer(); document.querySelectorAll('.sess-warn').forEach((x) => x.remove()); render(); };
         const navOpen = render.navOpen || false;
-        const toggleNav = () => { render.navOpen = !render.navOpen; const sh = $app.querySelector('.shell'); sh.classList.toggle('nav-open', render.navOpen); sh.querySelector('.menu-btn').setAttribute('aria-expanded', render.navOpen ? 'true' : 'false'); };
+        const toggleNav = () => setNavOpen(!render.navOpen, { restoreFocus: true });
         const railBtn = () => { render.rail = !render.rail; try { localStorage.setItem('dg-rail', render.rail ? '1' : ''); } catch {} $app.querySelector('.shell').classList.toggle('rail', render.rail); };
         if (render.rail === undefined) { try { render.rail = localStorage.getItem('dg-rail') === '1'; } catch { render.rail = false; } }
         view = h('div', { class: 'shell' + (navOpen ? ' nav-open' : '') + (render.rail ? ' rail' : '') },
@@ -236,7 +248,7 @@ async function startPc() {
             ...GROUPS.map(([gt, ks]) => {
               const items = nav.filter(([k]) => ks.includes(k));
               return items.length ? h('div', { class: 'navgrp' + (group && group[0] === gt ? ' cur' : '') }, h('span', { class: 'navgrp-t', 'aria-hidden': 'true' }, gt),
-                ...items.map(([k, t]) => h('a', { href: '#/' + k, 'data-k': k, class: active === k ? 'on' : '', 'aria-current': active === k ? 'page' : null, title: t, onclick: () => { render.navOpen = false; } },
+                ...items.map(([k, t]) => h('a', { href: '#/' + k, 'data-k': k, class: active === k ? 'on' : '', 'aria-current': active === k ? 'page' : null, title: t, onclick: () => setNavOpen(false, { restoreFocus: true }) },
                   h('span', { class: 'ic', 'aria-hidden': 'true' }, navIcon(k)), h('span', { class: 'nt' }, t)))) : null;
             })),
           h('main', {}, h('nav', { class: 'crumb', 'aria-label': '현재 위치' }, h('span', {}, '홈'), ...crumbs.map((c, i) => h('span', { 'aria-current': i === crumbs.length - 1 ? 'page' : null }, c))), content));
@@ -266,8 +278,25 @@ async function startPc() {
     if (prevHash !== location.hash && h1 && !document.querySelector('main [autofocus]')) { h1.tabIndex = -1; if (!$app.querySelector('main input:focus')) h1.focus({ preventScroll: true }); }
   }
   addEventListener('hashchange', () => render(true));
-  // 좁은 화면에서 연 메뉴는 Esc로 닫는다
-  addEventListener('keydown', (e) => { if (e.key === 'Escape' && render.navOpen && !dlgStack.length) { render.navOpen = false; const sh = $app.querySelector('.shell'); if (sh) sh.classList.remove('nav-open'); } });
+  // 클릭 시작 상태만 기록하고 원래 대상 처리가 끝난 뒤 닫는다. 지도 좌표를 읽기 전에 틀 높이를 바꾸지 않는다.
+  const outsideNavClicks = new WeakSet();
+  addEventListener('click', (e) => {
+    if (!narrowNav.matches || !render.navOpen || dlgStack.length || e.defaultPrevented) return;
+    const target = e.target instanceof Element ? e.target : e.target?.parentElement;
+    if (target && !target.closest('#side-nav, .menu-btn')) outsideNavClicks.add(e);
+  }, true);
+  addEventListener('click', (e) => {
+    if (!outsideNavClicks.has(e)) return;
+    outsideNavClicks.delete(e);
+    if (narrowNav.matches && render.navOpen) setNavOpen(false, { restoreFocus: true });
+  });
+  narrowNav.addEventListener('change', (e) => { if (!e.matches) setNavOpen(false); });
+  addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && render.navOpen && !dlgStack.length && !e.defaultPrevented && !e.isComposing) {
+      e.preventDefault();
+      setNavOpen(false, { restoreFocus: true });
+    }
+  });
   // 단축키 (입력 칸 밖에서): / 찾기, N 새 접수 / 입력 중: Ctrl+Enter 저장
   addEventListener('keydown', (e) => {
     if (!core.boot || dlgStack.length) return;  // 대화 상자가 열려 있으면 단축키를 쓰지 않는다
