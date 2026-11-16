@@ -18,7 +18,7 @@ async function screenHomeSolo() {
     OPEN: open,
     CANCELLED: all.filter((x) => x.s.status === 'CANCELLED'),
   };
-  const VIEWS = [['TODAY', '오늘'], ['TOMORROW', '내일'], ['OPEN', '미처리'], ['CANCELLED', '취소']];
+  const VIEWS = [['TODAY', '오늘'], ['TOMORROW', '내일'], ['OPEN', '남음'], ['CANCELLED', '취소']];  // '남음': PC 연결 방식 거르기와 같은 이름
   const dongs = dongChips(lists[view]);  // 유효하지 않은 동 조건을 먼저 정리한 뒤 목록을 거른다.
   const list = filterDong(filterQ(lists[view].slice().sort((a, b) => (a.s.planned_date || '').localeCompare(b.s.planned_date || '') || a.s.seq - b.s.seq)));
   const route = view === 'TODAY' || view === 'TOMORROW';
@@ -47,7 +47,7 @@ async function screenHomeSolo() {
     await commit(); render();
   };
   const out = [
-    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'mode-tag' }, '단독'), themeToggle(), btn('잠금', lockNow, 'ghost')),
+    h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '동구 수거'), h('span', { class: 'chip mode-tag' }, '단독'), themeToggle(), btn('잠금', lockNow, 'ghost')),
     workerBar(),
     h('section', { class: 'card next-action', 'aria-label': '지금 할 일' }, h('h2', {}, '지금 할 일'),
       h('p', { class: 'next-title' }, next.title), h('p', { class: 'small next-detail' }, next.detail), btn(next.label, next.run, 'primary huge')),
@@ -58,13 +58,15 @@ async function screenHomeSolo() {
         : '아직 백업하지 않았습니다. 휴대폰을 잃어버리면 접수 원본이 사라집니다.'),
       h('a', { href: '#/backup', class: 'callout-link' }, '백업 ›')) : null,
     ...(await homeBanners()),
+    // PC 연결 방식과 같은 이름·같은 순서: [+ 접수 등록][날짜·접수 찾기][하차 기록][빠른 수수료 계산] + [백업·복원] (+ [지도])
     h('section', { class: 'actions home-tools', 'aria-label': '자주 쓰는 기능' },
-      h('h2', {}, '자주 쓰는 기능'), h('div', { class: 'grid2' },
-        btn('+ 전화 접수 등록', () => { ui.form = null; go('#/intake'); }, 'big'),
+      h('h2', { class: 'section-label' }, '자주 쓰는 기능'), h('div', { class: 'grid2' },
+        btn('+ 접수 등록', () => { ui.form = null; go('#/intake'); }, 'big intake-btn'),
         btn('날짜·접수 찾기', openFinder, 'big'),
+        btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'),
         btn('빠른 수수료 계산', () => go('#/calculator'), 'big'),
         btn('백업·복원', () => go('#/backup'), 'big'),
-        btn(`하차 기록${st.events.some((e) => e.kind === 'UNLOAD') ? ` (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : ''}`, () => go('#/unload'), 'big'))),
+        st.mapEnabled ? btn('지도', () => go('#/map'), 'big') : null)),
     setupCard(),
     h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'),
     view === 'TODAY' && lists.TODAY.length ? daySummary(lists.TODAY) : null,
@@ -78,7 +80,7 @@ async function screenHomeSolo() {
     if (ui.stopQ) {
       out.push(h('p', { class: 'empty' }, `'${ui.stopQ}'에 맞는 접수가 없습니다.`));
       out.push(btn('다른 날짜에서도 찾기', () => openFinder({ q: ui.stopQ }), 'big'));
-    } else if (view === 'TODAY' && !ui.dong) out.push(h('p', { class: 'empty' }, '오늘 수거 예정 접수가 없습니다. [+ 전화 접수 등록]으로 시작하세요.'));
+    } else if (view === 'TODAY' && !ui.dong) out.push(h('p', { class: 'empty' }, '오늘 수거 예정 접수가 없습니다. [+ 접수 등록]으로 시작하세요.'));
     else out.push(...emptyFilter([VIEWS.find(([k]) => k === view)[1], ui.dong], '접수가',
       () => { ui.soloView = 'TODAY'; ui.dong = ''; ui.reorder = false; render(); }, '오늘 보기'));
   }

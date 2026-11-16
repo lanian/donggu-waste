@@ -110,7 +110,7 @@ def mobile_workflow_regressions(browser, shots):
             action(page, "기기 등록").click()
             expect(page).to_have_url(url + "#/register")
             go_home(page)
-            ok(page.get_by_role("button", name="+ 접수 등록 (현장·전화)", exact=True).is_enabled(),
+            ok(page.get_by_role("button", name="+ 접수 등록", exact=True).is_enabled(),
                "미등록 기기는 등록 안내로 이동하고 현장·전화 접수는 계속 허용")
 
             stops = [stop(1, today), stop(2, today, dong="가상2동", address="가상시 가상2동 시험길 2")]

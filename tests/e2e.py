@@ -155,8 +155,8 @@ def main():
             page.get_by_role("button", name="PC와 연결해서 사용").click()
             expect(page.locator(".next-action").get_by_role("button", name="기기 등록", exact=True)).to_be_visible(timeout=20000)  # 2단계: 별도 등록 카드 대신 지금 할 일 하나
             page.screenshot(path=SHOTS / "01_home_unregistered.png")
-            ok(page.get_by_role("button", name="+ 접수 등록 (현장·전화)").is_enabled(), "기기 등록 전에도 접수 등록 단추는 눌림(보내기만 등록 뒤에)")
-            page.get_by_role("button", name="+ 접수 등록 (현장·전화)").click()
+            ok(page.get_by_role("button", name="+ 접수 등록", exact=True).is_enabled(), "기기 등록 전에도 접수 등록 단추는 눌림(보내기만 등록 뒤에)")
+            page.get_by_role("button", name="+ 접수 등록", exact=True).click()
             expect(page.get_by_text("이 휴대폰은 아직 PC에 등록되지 않았습니다")).to_be_visible()
             page.get_by_role("button", name="← 취소").click()
             page.get_by_role("button", name="기기 등록").click()
@@ -213,12 +213,14 @@ def main():
             page.locator(".trip-head").scroll_into_view_if_needed()
             page.screenshot(path=SHOTS / "04b_trip.png")
             page.screenshot(path=SHOTS / "04_list.png")
-            ok(page.get_by_role("button", name="🗺 지도로 보기").count() == 0 and page.locator("nav.tabbar .t-map").count() == 1, "지도는 아래 탭 하나로 (중복 단추 없음)")
+            ok(page.get_by_role("button", name="🗺 지도로 보기").count() == 0 and page.locator("nav.tabbar .t-map").count() == 0
+               and page.locator(".home-tools").get_by_role("button", name="지도", exact=True).count() == 1,
+               "지도는 자주 쓰는 기능의 [지도] 하나로 (탭바는 목록·보내기·설정 세 칸, 중복 단추 없음)")
             ok(page.get_by_role("progressbar").first.get_attribute("aria-label") == "완료 0/20", "진행 막대 aria-label '완료 0/20'")
             # 개인폰 작업자: 이름 하나를 저장하면 이후 기록에 자동 적용
             page.goto(url + "#/settings")
             ok(page.get_by_role("button", name="← 목록").count() == 0, "탭 화면(설정)에는 [← 목록] 중복 없음")
-            expect(page.locator(".install-card h2")).to_have_text("앱 설치 — 지금은 브라우저에서 실행 중")
+            expect(page.locator(".install-card h3")).to_have_text("앱 설치 — 지금은 브라우저에서 실행 중")
             ok("브라우저 탭" in page.locator("main").inner_text(), "설정: 지금 실행 위치(브라우저 탭/설치한 앱)를 분명히 표시")
             page.evaluate("""() => { const e = new Event('beforeinstallprompt', { cancelable: true }); e.prompt = async () => { window.__dgPrompted = true; };
               e.userChoice = Promise.resolve({ outcome: 'accepted' }); dispatchEvent(e); }""")
@@ -256,7 +258,7 @@ def main():
             expect(page.get_by_role("group", name="작업자 바꾸기")).to_have_count(0)
             ok(page.locator(".setup-card li.setup-worker.done").count() == 1 and "✓" in page.locator(".setup-card li.setup-worker").inner_text()
                and page.locator(".setup-card h2").inner_text().startswith("처음 설정 1/4"), "처음 설정: 작업자를 정하면 ✓ (1/4)")
-            ok(page.get_by_placeholder("PIN").count() == 0 and page.get_by_role('group', name='현재 작업자', exact=True).get_by_role('button').count() == 0,
+            ok(page.get_by_placeholder("PIN").count() == 0 and page.get_by_role('group', name='현재 작업자', exact=True).get_by_role('button').all_inner_texts() == ['이름 변경'],
                "개인폰 이름 자동 적용: 별도 작업자 선택·PIN 재입력 없음")
             page.goto(url + "#/backup")
             expect(page.get_by_text("PC 연결 방식의 안전용 백업")).to_be_visible()
@@ -602,13 +604,13 @@ def midday_update(pw, url):
     ok("새 1곳" in summ and "빠짐 1곳" in summ and "변경" in summ, f"하루 중 새 목록 → 요약 '{summ}'")
     page.screenshot(path=SHOTS / "16_midday_received.png")
     page.get_by_role("button", name="오늘 순서 보기").click()
-    expect(page.locator(".stop .chip.new", has_text="새로 추가")).to_have_count(1)
-    ok(page.locator(".stop .chip.new", has_text="순서·시간 변경").count() >= 1, "바뀐 곳 표시: 새로 추가 1곳, 순서·시간 변경")
+    expect(page.locator(".stop .badge.new", has_text="새로 추가")).to_have_count(1)
+    ok(page.locator(".stop .badge.new", has_text="순서·시간 변경").count() >= 1, "바뀐 곳 표시: 새로 추가 1곳, 순서·시간 변경")
     page.screenshot(path=SHOTS / "17_midday_list.png")
     page.locator(".stop", has_text="가상새집").click()
     expect(page.locator(".changed-note")).to_contain_text("새로 추가")
     page.get_by_role("button", name="← 목록").first.click()
-    expect(page.locator(".stop", has_text="가상새집").locator(".chip.new")).to_have_count(0)
+    expect(page.locator(".stop", has_text="가상새집").locator(".badge.new")).to_have_count(0)
     ok(True, "바뀐 곳은 열어 보면 표시가 사라짐")
     ctx.close()
 
@@ -652,7 +654,7 @@ def pc_field(pw, url):
     ok("순서 바꿈(이 휴대폰만)" in page.locator(".meta").inner_text() and page.get_by_role("button", name="PC 순서로 되돌리기").is_visible(),
        "PC 연결 방식에서도 방문 순서 바꾸기(이 휴대폰만, 다시 열어도 유지, PC 순서로 되돌리기)")
     # 현장 접수
-    page.get_by_role("button", name="+ 접수 등록 (현장·전화)").click()
+    page.get_by_role("button", name="+ 접수 등록", exact=True).click()
     expect(page.locator("h1", has_text="접수 등록 (PC로 보냄)")).to_be_visible()
     ok(page.get_by_role("group", name="접수 경로").get_by_role("button", name="현장").get_attribute("aria-pressed") == "true"
        and page.get_by_role("group", name="접수 경로").get_by_role("button", name="전화").count() == 1, "PC 연결 방식 접수: 경로 현장(기본)·전화·방문 고르기")
@@ -912,7 +914,7 @@ def pc_sync(pw, url):
     page.get_by_role("button", name="오늘 순서 보기").click()
     expect(page.locator(".stop").first).to_be_visible()
     flagged = [page.locator(".stop").nth(i).inner_text().replace("\n", " ")[:120] for i in range(page.locator(".stop").count())
-               if page.locator(".stop").nth(i).locator(".chip.warn", has_text="재방문").count() or page.locator(".stop").nth(i).locator(".chip.new", has_text="정보 변경").count()]
+               if page.locator(".stop").nth(i).locator(".badge.warn", has_text="재방문").count() or page.locator(".stop").nth(i).locator(".badge.new", has_text="정보 변경").count()]
     if flagged:
         print("  · 표시된 곳:", flagged, page.evaluate("JSON.stringify(window.__dgDebug || null)"))
     ok(not flagged,
@@ -967,7 +969,7 @@ def lock_and_bio(pw, port):
     page.get_by_role("button", name="PIN 설정").click()
     page.get_by_role("button", name="이 휴대폰만으로 사용").click()
     page.get_by_role("button", name="이 휴대폰만으로 시작").click()
-    page.get_by_role("button", name="+ 전화 접수 등록").click()
+    page.get_by_role("button", name="+ 접수 등록", exact=True).click()
     page.get_by_label("이름").fill("가상삼")
     page.get_by_label("연락처").fill("01000005555")
     page.get_by_label("배출 주소").fill("가상시 동구 잠금로 3")
@@ -986,7 +988,7 @@ def lock_and_bio(pw, port):
     page.goto(url + "#/home")
     page.get_by_role("button", name="잠금").click()
     page.get_by_role("button", name="지문·얼굴로 열기").click()
-    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
+    expect(page.get_by_role("button", name="+ 접수 등록", exact=True)).to_be_visible(timeout=20000)
     ok(True, "지문·얼굴(WebAuthn PRF)로 잠금 해제 — PIN 없이")
     # Galaxy(Samsung Pass)처럼 등록 응답에 PRF 값이 없는 경우: 한 번 더 인증 창 → 새로 누른 단추에서 인증 → 등록
     page.locator("nav.tabbar .t-set").click()
@@ -1003,7 +1005,7 @@ def lock_and_bio(pw, port):
     page.goto(url + "#/home")
     page.get_by_role("button", name="잠금").click()
     page.get_by_role("button", name="지문·얼굴로 열기").click()
-    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
+    expect(page.get_by_role("button", name="+ 접수 등록", exact=True)).to_be_visible(timeout=20000)
     ok(True, "등록 응답에 PRF가 없는 휴대폰(Samsung Pass 흉내): [한 번 더 인증] → 등록 → 지문·얼굴로 잠금 해제")
     # 자동 잠금 기본 10분: 6분은 열림, 11분이면 잠김
     page.get_by_role("button", name=re.compile("내일 1")).click()
@@ -1148,10 +1150,11 @@ def juso_flow(pw, url):
     page.get_by_role("button", name="PIN 설정").click()
     page.get_by_role("button", name="이 휴대폰만으로 사용").click()
     page.get_by_role("button", name="이 휴대폰만으로 시작").click()
-    page.get_by_role("button", name="+ 전화 접수 등록").click()
+    page.get_by_role("button", name="+ 접수 등록", exact=True).click()
     expect(page.locator(".addr-status")).to_contain_text("주소 검색을 쓸 수 없습니다. 주소를 직접 적어 주세요.")
     ok("승인키" not in page.locator("main").inner_text(), "현장 접수 화면에는 승인키 안내가 없음 (설정의 주소 검색 칸에만)")
     page.goto(url + "#/settings")
+    page.locator("details.set-group.admin > summary").click()  # 승인키는 관리자 설정(기본 접힘) 안
     page.get_by_label("주소 검색 승인키").fill("TEST-SEARCH-KEY")
     page.get_by_label("좌표 승인키").fill("TEST-COORD-KEY")
     page.get_by_role("button", name="승인키 저장").click()
@@ -1250,10 +1253,10 @@ def solo(pw, url, video):
     expect(page.get_by_role("dialog")).to_be_visible()
     ok(page.get_by_role("dialog").get_by_role("button", name="이 휴대폰만으로 시작").is_visible(), "확인은 브라우저 창이 아니라 앱 안의 아래 창(큰 단추)")
     page.get_by_role("button", name="이 휴대폰만으로 시작").click()
-    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible(timeout=20000)
+    expect(page.get_by_role("button", name="+ 접수 등록", exact=True)).to_be_visible(timeout=20000)
 
     def intake(name, phone, addr, items, free=None, dong=""):
-        page.get_by_role("button", name="+ 전화 접수 등록").click()
+        page.get_by_role("button", name="+ 접수 등록", exact=True).click()
         page.get_by_label("이름").fill(name)
         page.get_by_label("연락처").fill(phone)
         page.get_by_label("배출 주소").fill(addr)
@@ -1359,6 +1362,7 @@ def solo(pw, url, video):
     page.get_by_role("button", name="하차 기록", exact=True).click()
     expect(page.get_by_role("button", name="하차 기록 (1회)")).to_be_visible()
     page.goto(url + "#/settings")
+    page.locator("details.set-group.admin > summary").click()  # 단가는 관리자 설정(기본 접힘) 안
     mline = page.locator(".line", has_text="6인용 이상(대리석)")
     mline.get_by_placeholder("원", exact=True).fill("15000")
     mline.get_by_role("button", name="저장").click()
@@ -1387,8 +1391,8 @@ def solo(pw, url, video):
     page.get_by_role("button", name="자동").click()
     page.locator("section.card", has_text="야외 고대비").get_by_role("button", name="끔").click()
     ok(theme == ["dark", True] and page.evaluate("document.documentElement.dataset.theme") is None, "테마 자동/밝게/어둡게 + 야외 고대비")
-    ok(page.locator("section.screen-card").count() == 1 and page.locator("main > section").first.get_attribute("class").count("screen-card") == 1
-       and page.locator(".theme-seg .tp").count() == 3, "설정 맨 위 '화면': 밝기 구분 단추(미리보기 3개)")
+    ok(page.locator("section.screen-card").count() == 1 and page.locator("main > section").nth(1).locator("section.screen-card").count() == 1
+       and page.locator(".theme-seg .tp").count() == 3, "설정 '화면' 묶음(도움말·점검 다음, 4단계): 밝기 구분 단추(미리보기 3개)")
     page.goto(url + "#/intake")
     page.get_by_role("button", name=re.compile(r"^\+ 품목 (더 )?담기$")).click()
     page.get_by_label("품목 찾기").fill("대리석")
@@ -1406,7 +1410,7 @@ def solo(pw, url, video):
     page.get_by_role("button", name="자동", exact=True).click()
     expect(page.get_by_role("button", name="자동", exact=True)).to_have_attribute("aria-pressed", "true")
     page.goto(url + "#/home")
-    expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible()
+    expect(page.get_by_role("button", name="+ 접수 등록", exact=True)).to_be_visible()
 
     # 백업 → 전체 삭제 → 복원
     ok(page.get_by_text("아직 백업하지 않았습니다. 휴대폰을 잃어버리면 접수 원본이 사라집니다.").count() == 1, "백업 전 경고 띠 표시")

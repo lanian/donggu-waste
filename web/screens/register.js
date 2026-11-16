@@ -1,7 +1,7 @@
 // 휴대폰 화면: 기기 등록
 import * as P from '../proto.js';
 import * as S from '../store.js';
-import { btn, errMsg, flowSteps, footBar, go, h, msgBox, render, say, startCamera, stopCamera, toast, ui } from '../core.js';
+import { backBtn, btn, errMsg, flowSteps, footBar, go, h, msgBox, render, say, startCamera, stopCamera, toast, ui } from '../core.js';
 import { drawQr } from './resultqr.js';
 
 async function screenRegister() {
@@ -12,7 +12,7 @@ async function screenRegister() {
     dev = { id: P.randomBytes(16), kex: keys.kex, sign: keys.sign };
     await S.putRaw('device', dev);
   }
-  const back = h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '기기 등록'));
+  const back = h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '기기 등록'));
   const STEPS = ['PC 등록 QR 읽기', '기기 코드 전달', '지문 숫자 대조'];
   if (!pc || ui.rescanPc) {
     const video = h('video', { playsinline: true, muted: true, class: 'cam' });

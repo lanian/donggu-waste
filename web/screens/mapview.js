@@ -1,9 +1,15 @@
 // 휴대폰 화면: 지도·위치 지정
 import * as M from '../map.js';
 import { deriveStop } from '../fees.js';
-import { addEvent, ask, btn, commit, findStop, go, h, isSolo, liveMap, msgBox, pcStops, pcWorkDate, say, setLiveMap, setMapEnabled, st, tabBar, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, backBtn, btn, commit, findStop, go, h, isSolo, liveMap, msgBox, pcStops, pcWorkDate, say, setLiveMap, setMapEnabled, st, toast, todayKST, ui } from '../core.js';
 import { addrSearch } from './intake.js';
+import { stopState } from './stoplist.js';
 
+// 핀 하나의 표시: 번호, 이름 "{n}번 · {진행 상태}"(목록 카드와 같은 판정 stopState), 진행 모양(완료 ✓·미수거/보류 점선은 style.css), 고른 핀
+function pinFor(s, d, focusId = null) {
+  const state = stopState(s, d);
+  return { label: String(s.seq), name: `${s.seq}번 · ${state.label}`, cls: 'p-' + state.progress + (s.request_id === focusId ? ' focus' : '') };
+}
 const mapNotice = () => h('p', { class: 'small' }, '바탕 지도 조각만 OpenFreeMap에서 받습니다. 이름·연락처·주소와 핀 위치는 지도 서버로 보내지 않습니다.');
 function mapStops() {
   if (isSolo()) {
@@ -14,8 +20,8 @@ function mapStops() {
 }
 
 async function screenMap(focusId) {
-  // 아래 탭에서 연 지도에는 [← 목록]을 두지 않는다(탭과 중복). 접수에서 연 지도만 [← 접수]
-  const back = h('header', { class: 'bar' }, focusId ? btn('← 접수', () => go(`#/stop/${focusId}`), 'ghost') : null, h('h1', { class: 'bar-title' }, '지도'));
+  // 목록의 [지도]로 연 지도는 [← 목록](또는 연 곳), 접수에서 연 지도는 [← 접수]
+  const back = h('header', { class: 'bar' }, focusId ? backBtn(`#/stop/${focusId}`) : backBtn(), h('h1', { class: 'bar-title' }, '지도'));
   // 지도가 꺼져 있으면 설정의 [지도 사용 켜기]와 같은 동작으로 바로 켠다
   if (!st.mapEnabled) return h('main', {}, back, h('p', { class: 'empty' }, '지도가 꺼져 있습니다.'),
     h('div', { class: 'empty-actions' }, btn('지도 켜기', () => setMapEnabled(true), 'big')));
@@ -23,17 +29,16 @@ async function screenMap(focusId) {
   const placed = items.filter((x) => x.d.loc), missing = items.filter((x) => !x.d.loc);
   const box = h('div', { class: 'mapbox', id: 'map' });
   const msg = msgBox();
-  const view = h('main', { class: focusId ? '' : 'with-tabs' }, back, box,
+  const view = h('main', {}, back, box,
     h('div', { class: 'grid2' }, btn('📍 내 위치', async () => {
-      try { const p = await M.myPosition(); if (liveMap) { liveMap.flyTo({ center: p, zoom: 16 }); M.pin(ui.ml, liveMap, { lng: p[0], lat: p[1], label: '나', cls: 'me' }); } }
+      try { const p = await M.myPosition(); if (liveMap) { liveMap.flyTo({ center: p, zoom: 16 }); M.pin(ui.ml, liveMap, { lng: p[0], lat: p[1], label: '나', name: '내 위치', cls: 'me' }); } }
       catch (e) { say(msg, e.message, true); }
     }, 'opt'), btn('전체 보기', () => fitAll(), 'opt')),
     msg, mapNotice(),
     missing.length ? h('section', { class: 'card' }, h('h2', {}, `위치 미지정 ${missing.length}건`),
       h('ul', { class: 'stops' }, missing.map(({ s }) => h('li', {}, h('a', { href: `#/pick/${s.request_id}`, class: 'stop' },
         h('span', { class: 'seq' }, s.seq), h('span', { class: 'body' }, h('strong', {}, s.name), h('span', { class: 'addr' }, s.address)),
-        h('span', { class: 'eta' }, '위치 지정 →')))))) : null,
-    focusId ? null : tabBar('map'));
+        h('span', { class: 'eta' }, '위치 지정 →')))))) : null);
   const fitAll = () => {
     if (!liveMap || !placed.length) return;
     if (placed.length === 1) return liveMap.flyTo({ center: [placed[0].d.loc.lon, placed[0].d.loc.lat], zoom: 16 });
@@ -47,7 +52,7 @@ async function screenMap(focusId) {
       const { map, ml } = await M.createMap(box, { center: focus ? [focus.d.loc.lon, focus.d.loc.lat] : placed[0] ? [placed[0].d.loc.lon, placed[0].d.loc.lat] : M.DEFAULT_CENTER, zoom: focus ? 17 : 14 });
       setLiveMap(map); ui.ml = ml;
       for (const { s, d } of placed) {
-        M.pin(ml, map, { lng: d.loc.lon, lat: d.loc.lat, label: String(s.seq), cls: 'p-' + d.progress + (s.request_id === focusId ? ' focus' : ''), onClick: () => go(`#/stop/${s.request_id}`) });
+        M.pin(ml, map, { lng: d.loc.lon, lat: d.loc.lat, ...pinFor(s, d, focusId), onClick: () => go(`#/stop/${s.request_id}`) });
       }
       if (!focus) fitAll();
     } catch (e) { say(msg, '지도를 불러오지 못했습니다. 인터넷 연결을 확인하세요.', true); }
@@ -129,5 +134,5 @@ async function screenPick(id) {
 // ------------------------------------------------------------ 결과 QR 표시 (역방향: 휴대폰 → PC 웹캠)
 
 export {
-  mapNotice, mapStops, screenMap, screenPick,
+  mapNotice, mapStops, pinFor, screenMap, screenPick,
 };

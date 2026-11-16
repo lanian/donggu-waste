@@ -223,6 +223,7 @@ def outbox_terms(browser, url):
         route(page, "#/settings")
         dl = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('dt')].map(dt => [dt.textContent.trim(), dt.nextElementSibling?.textContent.trim()]))""")
         ok(dl.get("보낼 기록") == "1건" and dl.get("확인 대기") == "2건" and "미전송 기록" not in dl, f"설정 정보표: '보낼 기록 1건' / '확인 대기 2건' 두 줄 ({dl})")
+        page.locator("details.set-group.admin > summary").click()  # 4단계: 기기 등록은 관리자 설정(기본 접힘) 안
         ok(page.get_by_role("button", name="기기 등록", exact=True).count() == 1 and page.get_by_role("button", name="기기 등록 화면").count() == 0,
            "설정: [기기 등록 화면] → [기기 등록]")
         text = page.locator("main").inner_text()

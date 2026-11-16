@@ -4,7 +4,7 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
-import { COLLECT_TTL_MS, btn, commit, errMsg, flowSteps, footBar, go, h, mdOf, msgBox, render, say, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
+import { backBtn, btn, COLLECT_TTL_MS, commit, errMsg, flowSteps, footBar, go, h, mdOf, msgBox, render, say, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
 import { purgeReleased } from './export.js';
 
 async function loadCollector() {
@@ -25,7 +25,7 @@ function prevDayOwed() {
 }
 function screenScanOwed(o) {
   return h('main', {},
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
     h('section', { class: 'card callout warn owed-card', role: 'alert' },
       h('h2', {}, `${mdOf(o.date)} 결과가 아직 PC에 반영되지 않았습니다`),
       // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
@@ -157,7 +157,7 @@ async function screenScan() {
     if (col.complete(current)) finish();
   }).catch((e) => { say(msg, errMsg(e), true); }), 0);
   return h('main', {},
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
     flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], current ? 1 : 0),
     h('section', { class: 'card cam-card' }, video, bar, count, miss, msg,
       h('p', { class: 'small' }, '다 받기 전에는 저장하지 않습니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.')),
@@ -174,7 +174,7 @@ function screenReceived() {
   const r = ui.receipt || (st.lastReceipt && !st.lastReceipt.told ? { code: st.lastReceipt.code.slice(0, 4) + ' ' + st.lastReceipt.code.slice(4), count: st.lastReceipt.count, ver: st.lastReceipt.ver, diff: '', again: true } : null);
   if (!r) { go('#/home'); return h('main'); }
   return h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, r.again ? btn('← 목록', () => go('#/home'), 'ghost') : null, h('h1', { class: 'bar-title' }, r.again ? '수신 코드 다시 보기' : '목록 받기 완료')),
+    h('header', { class: 'bar' }, r.again ? backBtn() : null, h('h1', { class: 'bar-title' }, r.again ? '수신 코드 다시 보기' : '목록 받기 완료')),
     flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], 2),
     h('section', { class: 'card center-card' },
       h('h2', {}, '목록을 받았습니다'),

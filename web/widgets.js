@@ -140,8 +140,9 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   const drawTabs = () => {
     const cur = P.q ? null : (P.cat || 'FREQ');
     const n = items.length;
-    tabs.replaceChildren(...[['FREQ', '자주 쓴'], ...CATS.map((c) => [c, catLabel(c)]), ['PICKED', n ? `담음 ${n}` : '담음']].map(([k, t]) =>
-      btn(t, () => { P.cat = k; P.q = ''; q.value = ''; draw(); scrollTo(0, 0); }, 'tab' + (cur === k ? ' on' : '') + (k === 'PICKED' && n ? ' has' : ''), { ...keep, 'aria-pressed': cur === k ? 'true' : 'false' })));
+    // 담은 것이 있으면 [담음]에 개수 뱃지(테두리 색이 아니라 숫자로 알림)
+    tabs.replaceChildren(...[['FREQ', '자주 쓴'], ...CATS.map((c) => [c, catLabel(c)]), ['PICKED', n ? ['담음 ', h('span', { class: 'badge ok' }, String(n))] : '담음']].map(([k, t]) =>
+      btn(t, () => { P.cat = k; P.q = ''; q.value = ''; draw(); scrollTo(0, 0); }, 'tab' + (cur === k ? ' on' : ''), { ...keep, 'aria-pressed': cur === k ? 'true' : 'false' })));
   };
   q.addEventListener('input', () => { P.q = q.value; draw(); list.scrollTop = 0; });
   q.addEventListener('focus', () => q.select());
@@ -191,11 +192,11 @@ async function doInstall() {
   render();
 }
 async function installCard() {
-  if (runningAsApp()) return h('section', { class: 'card install-card' }, h('h2', {}, '앱 설치'),
+  if (runningAsApp()) return h('section', { class: 'card install-card' }, h('h3', {}, '앱 설치'),
     h('p', {}, '✓ 설치한 앱으로 실행 중입니다.'),
     h('p', { class: 'small' }, isIOS() ? '아이폰: 홈 화면 앱과 Safari는 자료를 따로 보관합니다. 업무는 이 앱에서만 하세요.' : '브라우저에서 같은 주소를 열어도 같은 자료가 보입니다. 업무는 이 앱으로 하세요.'));
   const inst = installEvt ? false : await appInstalled();
-  return h('section', { class: 'card install-card callout info' }, h('h2', {}, '앱 설치 — 지금은 브라우저에서 실행 중'),
+  return h('section', { class: 'card install-card callout info' }, h('h3', {}, '앱 설치 — 지금은 브라우저에서 실행 중'),
     h('p', { class: 'small' }, '브라우저 탭에서도 똑같이 동작하지만, 설치해 두면 홈 화면 아이콘으로 바로 열리고 주소창 없이 전체 화면으로 씁니다. ' + (isIOS() ? '' : '설치해도 자료는 그대로입니다(같은 자료를 씀).')),
     installEvt ? btn('홈 화면에 앱 설치', doInstall, 'primary big')
       : inst ? h('p', {}, '이 휴대폰에 이미 설치되어 있습니다. 홈 화면이나 앱 목록의 "동구 수거"로 여세요. 홈 화면 아이콘만 지웠다면 앱은 남아 있습니다(휴대폰 설정 → 애플리케이션에서 지울 수 있음).')

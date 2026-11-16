@@ -59,11 +59,12 @@ export async function createMap(container, { center = DEFAULT_CENTER, zoom = 14 
   return { map, ml };
 }
 
-// 번호 핀 (휴대폰 화면에서만 그림)
-export function pin(ml, map, { lng, lat, label, cls = '', onClick }) {
+// 번호 핀 (휴대폰 화면에서만 그림). name: 스크린리더 이름(예: "3번 · 미수거"). 넘기지 않으면 내 위치(cls 'me', 표시 '나')는 "내 위치",
+// 그 밖은 예전처럼 "{label}번 위치"(PC 지도 화면도 이 함수를 쓴다).
+export function pin(ml, map, { lng, lat, label, name = null, cls = '', onClick }) {
   const el = document.createElement('button');
   el.type = 'button'; el.className = 'pin ' + cls; el.textContent = label;
-  el.setAttribute('aria-label', `${label}번 위치`);
+  el.setAttribute('aria-label', name || (cls.split(' ').includes('me') && label === '나' ? '내 위치' : `${label}번 위치`));
   if (onClick) el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
   return new ml.Marker({ element: el, anchor: 'bottom' }).setLngLat([lng, lat]).addTo(map);
 }

@@ -182,7 +182,7 @@ def draft_late_case(browser, url, shots):
         save.dispatch_event('click')
         assert len(page.evaluate('()=>window.__C.st.events')) == 1
         page.evaluate("()=>{location.hash='#/settings';}")
-        expect(page.get_by_role('heading', name='설정·정보', exact=True)).to_be_visible()
+        expect(page.get_by_role('heading', name='설정', exact=True)).to_be_visible()
         expect(page).to_have_url(url + '#/settings')
         newer_draft = page.get_by_label('작업자 이름', exact=True)
         newer_draft.fill('가상 새화면초안')

@@ -50,7 +50,7 @@ def main():
                 expect(page.locator('.stops .stop')).to_have_count(1)
                 page.locator('.stops .stop').click()
                 expect(page.get_by_role('button', name='PC 입력 도움', exact=True)).to_be_visible()
-                page.get_by_role('button', name='← 목록', exact=True).click()
+                page.get_by_role('button', name='← 찾기', exact=True).click()
                 expect(finder).to_have_value('2233')
                 expect(page.locator('.stops .stop')).to_have_count(1)
                 assert page.evaluate("import('./core.js').then(C=>JSON.stringify([C.st.requests,C.st.daylist,C.st.events]))") == before

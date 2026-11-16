@@ -134,7 +134,7 @@ def late_lock_case(browser, url, shots):
         assert len(ids(page)) == 2
         page.evaluate("()=>{location.hash='#/settings';}")
         try:
-            expect(page.get_by_role('heading', name='설정·정보', exact=True)).to_be_visible(timeout=2500)
+            expect(page.get_by_role('heading', name='설정', exact=True)).to_be_visible(timeout=2500)
         except BaseException:
             page.screenshot(path=str(shots / 'red-add-navigation.png'), full_page=True)
             raise
@@ -146,11 +146,11 @@ def late_lock_case(browser, url, shots):
         page.locator('.pick-foot > button').dispatch_event('click')
         assert len(ids(page)) == 2
         page.goto(url + '#/settings')
-        expect(page.get_by_role('heading', name='설정·정보', exact=True)).to_be_visible()
+        expect(page.get_by_role('heading', name='설정', exact=True)).to_be_visible()
         page.get_by_label('작업자 이름', exact=True).fill('가상 다른 초안')
         release(page)
         expect(page).to_have_url(url + '#/settings')
-        expect(page.get_by_role('heading', name='설정·정보', exact=True)).to_be_visible()
+        expect(page.get_by_role('heading', name='설정', exact=True)).to_be_visible()
         expect(page.get_by_label('작업자 이름', exact=True)).to_have_value('가상 다른 초안')
         assert len(disk_state(page)['events']) == 2
         page.goto(url + '#/add/workflow-1')
@@ -232,7 +232,7 @@ def modal_case(browser, url, shots):
         assert len(ids(page)) == 1
         page.get_by_role('button', name='추가 저장 (2)', exact=True).click()
         page.evaluate("location.hash='#/settings'")
-        expect(page.get_by_role('heading', name='설정·정보', exact=True)).to_be_visible()
+        expect(page.get_by_role('heading', name='설정', exact=True)).to_be_visible()
         expect(page.get_by_role('heading', name='같은 품목이 있습니다', exact=True)).to_have_count(0)
         page.goto(url + '#/add/workflow-1')
         expect(page.get_by_role('button', name='추가 저장 (2)', exact=True)).to_be_enabled()

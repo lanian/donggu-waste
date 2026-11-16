@@ -1,7 +1,7 @@
 // 휴대폰 화면: 하차 기록
 import * as NAV from '../nav.js';
 import { isUnlocked } from '../store.js';
-import { addCrewEvent, btn, commit, errMsg, go, h, isSolo, locking, render, say, st, toast, todayKST } from '../core.js';
+import { addCrewEvent, backBtn, btn, commit, errMsg, go, h, isSolo, locking, render, say, st, toast, todayKST } from '../core.js';
 import { NO_LOC, navBtn, unloadLoc } from '../widgets.js';
 
 // 지도에서 위치를 정하고 돌아와도 같은 초안을 쓴다. 잠금을 풀어 상태가 바뀌면 옛 초안을 재사용하지 않는다.
@@ -90,7 +90,7 @@ function screenUnload() {
   }, 'primary dock-next');
   const locationButton = btn(uLoc ? '반입지 위치 고치기' : '반입지 위치 지정', () => { if (current() && !draft.operation) go('#/pick/unload'); }, 'opt', { disabled: !source.mapEnabled });
   view = h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '하차 기록')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '하차 기록')),
     h('section', { class: 'card' }, fld('반입지', place), h('div', { class: 'grid2' }, fld('시각', time), fld('부피 (m³, 추정)', vol)), fld('중량 (kg)', kg), fld('메모', note),
       h('p', { class: 'small' }, isSolo() ? '이 휴대폰에 저장되고 백업 파일에 함께 들어갑니다. 부피나 중량 중 하나는 적어 주세요.' : '결과 보내기 때 PC로 함께 갑니다. 부피나 중량 중 하나는 적어 주세요.'), msg),
     h('section', { class: 'card' }, h('h2', {}, '반입지 길안내'),
@@ -99,7 +99,7 @@ function screenUnload() {
         : h('p', { class: 'small nav-none' }, `길안내: ${NO_LOC}`)),
     list.length ? h('section', { class: 'card' }, h('h2', {}, `하차 내역 ${list.length}회`),
       h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq <= source.releasedSeq ? '' : (source.exports || []).some((x) => e.seq >= x.from && e.seq <= x.to) ? '(확인 대기)' : '(보낼 기록)'}`)))) : null,
-    h('nav', { class: 'dock' }, h('span', {}), h('span', {}), save));
+    h('nav', { class: 'dock', 'aria-label': '주 동작' }, save));  // 단추 하나뿐인 하단 바는 한 칸 전체(style.css .dock:has(> .btn:only-child))
   if (draft.operation) draft.operation.notify = () => { if (current()) sync(); };
   sync();
   return view;

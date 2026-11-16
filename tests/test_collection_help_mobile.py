@@ -46,7 +46,7 @@ def main():
             page.screenshot(path=str(output / 'mobile-collection-help.png'), full_page=True)
             dialog.get_by_role('button', name='접수 상세로', exact=True).click()
             expect(opening).to_be_focused()
-            page.get_by_role('button', name='← 목록', exact=True).click()
+            page.get_by_role('button', name='← 찾기', exact=True).click()  # 찾기에서 연 상세는 [← 찾기](4단계)
             expect(page.get_by_label('찾을 접수', exact=True)).to_have_value(request['receipt_no'])
             page.locator('.stops .stop').click()
             assert page.evaluate("import('./core.js').then(C=>JSON.stringify(C.st.events))") == before
