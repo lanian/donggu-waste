@@ -1,6 +1,6 @@
 // PC 화면: 결과·사진 가져오기·충돌함·단독 휴대폰 옮기기
 import { Collector } from '/web/proto.js';
-import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, can, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, can, cell, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, sortable, statusChip, toast, wrap } from '../core.js';
 import { loadJsQR } from '../widgets.js';
 import { refreshBadges } from './home.js';
 
@@ -108,7 +108,7 @@ async function screenResults() {
   const recentBody = h('tbody');
   const loadRecent = wrap(async () => {
     recent = await api('imports/recent?limit=30');
-    recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, h('td', { class: 'nowrap' }, kst(x.imported_at)), h('td', {}, IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
+    recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, cell(kst(x.imported_at), x.imported_at, 'nowrap'), h('td', {}, IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
       h('td', {}, x.crew || h('span', { class: 'muted' }, '(팀 없음)'), h('span', { class: 'muted small block' }, x.device_label || (x.device_id || '').slice(0, 8))),
       h('td', {}, impSummary(x.counts), canReviewField && x.kind === 'RESULT' ? btn('현장 내용 확인', (e) => {
         const cell = e.currentTarget.parentElement;
@@ -123,7 +123,8 @@ async function screenResults() {
       : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '아직 가져온 파일이 없습니다.'))]));
   });
   const recentCard = h('div', { class: 'card', id: 'recent-imports' }, h('div', { class: 'panel-h' }, h('h2', {}, '최근 가져오기'), btn('새로 고침', loadRecent, 'small')),
-    h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['가져온 시각', '종류', '팀·기기', '건수', '코드', '휴대폰'].map((t) => h('th', { scope: 'col' }, t)))), recentBody)),
+    h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['가져온 시각', '종류', '팀·기기', '건수', '코드', '휴대폰'].map((t) => h('th', { scope: 'col' }, t)))), recentBody),
+      { key: 'recent-imports', cols: ['date', 'text', 'text', null, null, 'text'] })),
     h('p', { class: 'muted small' }, '결과 반영 코드(D-)를 휴대폰에 넣으면 그 접수들의 이름·연락처·주소가 휴대폰에서 지워지고, 사진 회수 코드(P-)를 넣어야 휴대폰에서 사진을 지울 수 있습니다. 코드를 넣지 않아도 휴대폰이 다음 목록을 받으면 저절로 확인됩니다.'));
   // 3) 충돌함: 접수별로 묶고, 접수 하나·가져오기 하나의 기록을 한 사유로 [모두 반영/거부]
   const conf = h('div', { class: 'card', id: 'conflicts' });
@@ -259,7 +260,7 @@ function soloCard() {
       h('p', {}, `백업 ${d.created_at ? kst(d.created_at) : ''} · 접수 ${d.requests}건 중 새 접수 ${d.new}건 (이미 PC에 있음 ${d.already}건) · 현장 기록 ${d.events}건 · 사진 ${d.photos}장 · 하차 ${d.unloads}회`),
       h('p', { class: 'small' }, '이미 PC에 있는 접수와 그 기록은 덮어쓰지 않습니다. 접수번호가 PC와 겹치면 끝에 S를 붙입니다.'),
       d.invalid ? h('div', { class: 'notice bad small' }, `옮기지 못하는 접수 ${d.invalid}건 (아래 표). 나머지만 옮깁니다.`,
-        grid(['접수(앞 8자)', '접수번호', '문제'], (d.errors || []).map((x) => [h('span', { class: 'mono' }, x.request_id), x.receipt_no || '', x.error]))) : null,
+        grid(['접수(앞 8자)', '접수번호', '문제'], (d.errors || []).map((x) => [h('span', { class: 'mono' }, x.request_id), x.receipt_no || '', x.error]), { sort: { key: 'solo-errors', cols: ['text', 'text', 'text'] } })) : null,
       btn('PC로 옮기기', wrap(async () => {
         if (mine !== generation) throw new Error('파일이나 비밀번호가 바뀌었습니다. 다시 미리보기한 뒤 옮기세요.');
         const r = await send(snap, false);

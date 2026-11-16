@@ -1,6 +1,6 @@
 // PC 화면: 일일 마감
 import { won } from '/web/fees.js';
-import { ACTION, ENTITY, IDLE_RESET_MS, PAY, STATUS, afterWork, api, boot, btn, canOpen, chip, confirmDlg, h, kst, modal, pagehead, post, postOnce, statusChip, toast, workEnd, wrap } from '../core.js';
+import { ACTION, ENTITY, IDLE_RESET_MS, PAY, STATUS, afterWork, api, boot, btn, canOpen, cell, chip, confirmDlg, h, kst, modal, pagehead, post, postOnce, sortable, statusChip, toast, workEnd, wrap } from '../core.js';
 import { refreshBadges } from './home.js';
 import { unloadCard } from './settings.js';
 
@@ -33,8 +33,9 @@ async function screenClose() {
           ` ${last.seq}회차 · ${kst(last.closed_at)} · ${last.closed_by || '-'} ${last.note || ''}`) : null),
       // 마감 이월 대상: 마감 기록 때 예정일을 다음 업무일로 옮긴다
       h('div', { class: 'card' }, h('h2', {}, `마감 이월 대상 ${d.carry.length}건`),
-        d.carry.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['접수', '동', '상태', '까닭', '옮길 날'].map((t) => h('th', {}, t)))),
-          h('tbody', {}, ...d.carry.map((x) => h('tr', {}, h('td', {}, h('a', { href: `#/request/${x.id}` }, `${x.receipt_no} ${x.name}`)), h('td', {}, x.dong || '-'), h('td', {}, statusChip(x.status)), h('td', {}, x.kind), h('td', { class: 'code' }, x.to)))))
+        d.carry.length ? sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['접수', '동', '상태', '까닭', '옮길 날'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, ...d.carry.map((x) => h('tr', {}, h('td', {}, h('a', { href: `#/request/${x.id}` }, `${x.receipt_no} ${x.name}`)), h('td', {}, x.dong || '-'), h('td', {}, statusChip(x.status)), h('td', {}, x.kind), h('td', { class: 'code' }, x.to))))),
+          { key: 'close-carry', cols: ['text', 'text', 'text', 'text', 'date'] })
           : h('p', { class: 'empty' }, '이월할 접수가 없습니다.'),
         h('p', { class: 'muted small' }, '미배정·결과 없음·재방문 약속이 없는 일부 수거·미수거·보류 건입니다. 마감을 기록하면 예정일이 다음 업무일(휴무일·쉬는 요일·동 수거 요일 반영)로 옮겨지고, 배정은 풀리며, 수정 이력에 "마감 이월"이 남습니다.')),
       h('div', { class: 'grid2' },
@@ -46,13 +47,13 @@ async function screenClose() {
         list('추가 금액 고지 거부', d.fee_refused || [], (x) => `${x.receipt_no} ${x.name} · 추가 ${won(x.extra || 0)} 거부 (해당 품목 미수거)`),
         list('미수거 부재 증거 없음 (사진·사유 없음)', d.no_evidence || [], (x) => `${x.receipt_no} ${x.name}`)),
       d.post_close_edits.length ? h('div', { class: 'card' }, h('h2', {}, `마감 후 수정 ${d.post_close_edits.length}건`),
-        h('table', {}, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '사유'].map((t) => h('th', {}, t)))),
-          h('tbody', {}, ...d.post_close_edits.map((x) => h('tr', {}, h('td', { class: 'nowrap' }, kst(x.at)), h('td', {}, x.actor || ''), h('td', {}, x.request_id ? h('a', { href: `#/request/${x.request_id}` }, x.receipt_no || '접수') : ''),
-            h('td', {}, `${ENTITY[x.entity] || x.entity} ${ACTION[x.action] || x.action}`), h('td', {}, x.reason)))))) : null,
+        sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '사유'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, ...d.post_close_edits.map((x) => h('tr', {}, cell(kst(x.at), x.at, 'nowrap'), h('td', {}, x.actor || ''), h('td', {}, x.request_id ? h('a', { href: `#/request/${x.request_id}` }, x.receipt_no || '접수') : ''),
+            h('td', {}, `${ENTITY[x.entity] || x.entity} ${ACTION[x.action] || x.action}`), h('td', {}, x.reason))))), { key: 'close-edits', cols: ['date', 'text', 'text', 'text', 'text'] })) : null,
       unloadCard(d),
-      d.closes.length ? h('div', { class: 'card' }, h('h2', {}, '마감 기록 회차'), h('table', {}, h('thead', {}, h('tr', {}, ...['회차', '기록', '기록자', '이월', '메모', '팀장 확인'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, ...d.closes.map((c) => h('tr', {}, h('td', {}, `${c.seq}회차`), h('td', { class: 'nowrap' }, kst(c.closed_at)), h('td', {}, c.closed_by || '-'), h('td', {}, `${c.carried}건`), h('td', {}, c.note || ''),
-          h('td', {}, c.status === 'APPROVED' ? `${c.approved_by} · ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : chip('확인 전', 'warn'))))))) : null,
+      d.closes.length ? h('div', { class: 'card' }, h('h2', {}, '마감 기록 회차'), sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['회차', '기록', '기록자', '이월', '메모', '팀장 확인'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, ...d.closes.map((c) => h('tr', {}, h('td', {}, `${c.seq}회차`), cell(kst(c.closed_at), c.closed_at, 'nowrap'), h('td', {}, c.closed_by || '-'), h('td', {}, `${c.carried}건`), h('td', {}, c.note || ''),
+          h('td', {}, c.status === 'APPROVED' ? `${c.approved_by} · ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : chip('확인 전', 'warn')))))), { key: 'close-log', cols: ['num', 'date', 'text', 'num', 'text', null] })) : null,
       h('div', { class: 'card row' }, ['ADMIN', 'INTAKE'].includes(role) ? [note, btn(last ? '마감 다시 기록' : '마감 기록', wrap(async () => {
         // 목록을 보냈는데 결과 파일을 가져오지 않은 팀: 마감을 막지는 않지만 확인창에 먼저 보여 준다
         const nr = d.crews_no_result || [];

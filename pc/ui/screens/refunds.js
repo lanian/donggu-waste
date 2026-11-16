@@ -47,7 +47,7 @@ async function screenRefunds() {
     h('div', { class: 'card tablecard' }, grid(['접수번호', '부과번호', '동', '사유', '금액', '상태', '신청', '결재', '지급', '처리'], d.rows.map((c) => [h('a', { href: `#/request/${c.request_id}` }, c.receipt_no), c.levy_no || '', c.dong || '',
       REFUND_CAUSE[c.cause] || c.cause, won(c.amount), chip(REFUND_ST[c.status] || c.status, stCls(c.status)), c.requested_by ? `${c.requested_by} ${kst(c.requested_at)}` : (c.auto ? '자동 생성' : ''),
       c.approved_by ? `${c.approved_by} ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : '', c.paid_on ? `${c.paid_on} · ${c.pay_method}${c.account_checked ? ' · 계좌 확인' : ''}${c.account_last4 ? ' ·· ' + c.account_last4 : ''}` : (c.void_reason || ''),
-      h('span', { class: 'row' }, ...act(c))]), { num: [4], empty: '해당하는 환불 건이 없습니다.' })),
+      h('span', { class: 'row' }, ...act(c))]), { num: [4], empty: '해당하는 환불 건이 없습니다.', sort: { key: 'refunds', cols: ['text', 'text', 'text', 'text', 'num', 'text', null, null, null, null] } })),
     d.partial.length ? h('div', { class: 'card' }, h('h2', {}, `일부 수거 차액 환불 후보 ${d.partial.length}건`),
       h('p', { class: 'muted small' }, '일부 수거로 끝나 실제로 실은 수량 기준 부과 금액보다 더 낸 경우입니다. 재방문하지 않기로 했을 때만 신청하세요(자동으로 신청하지 않음).'),
       grid(['접수번호', '부과번호', '동', '부과 금액', '납부', '차액', ''], d.partial.map((x) => [h('a', { href: `#/request/${x.request_id}` }, x.receipt_no), x.levy_no || '', x.dong || '', won(x.levied), won(x.paid), won(x.due),

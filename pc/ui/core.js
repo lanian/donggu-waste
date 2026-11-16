@@ -75,9 +75,93 @@ const chip = (text, cls = '') => h('span', { class: 'chip ' + cls }, text);
 // 화면 공통 틀: 제목 줄(오른쪽 도구), 목록 머리줄(총 N건 · 단추), 가로 스크롤되는 격자 표
 const pagehead = (title, ...tools) => h('div', { class: 'pagehead' }, h('h1', {}, title), tools.length ? h('div', { class: 'row' }, ...tools) : null);
 const gridbar = (count, ...right) => h('div', { class: 'gridbar' }, count != null ? h('span', { class: 'cnt' }, '총 ', h('b', {}, String(count)), '건') : null, h('span', { class: 'grow' }), ...right);
-function grid(head, rowsArr, { cls = '', empty = '자료가 없습니다.', num = [] } = {}) {
-  return h('div', { class: 'tablewrap' }, h('table', { class: 'grid ' + cls }, h('thead', {}, h('tr', {}, ...head.map((t, i) => h('th', { scope: 'col', class: num.includes(i) ? 'num' : null }, t)))),
-    h('tbody', {}, ...(rowsArr.length ? rowsArr.map((cells) => (cells instanceof Node ? cells : h('tr', {}, ...cells.map((c, i) => (c instanceof Node && c.tagName === 'TD' ? c : h('td', { class: num.includes(i) ? 'num' : null }, c)))))) : [h('tr', {}, h('td', { colspan: head.length, class: 'muted' }, empty))]))));
+// sort: { key, cols, note } 를 주면 열 머리 정렬(아래 sortable). cols[i] = 'text'|'num'|'date'|null(정렬 안 함)
+function grid(head, rowsArr, { cls = '', empty = '자료가 없습니다.', num = [], sort = null } = {}) {
+  const table = h('table', { class: 'grid ' + cls }, h('thead', {}, h('tr', {}, ...head.map((t, i) => h('th', { scope: 'col', class: num.includes(i) ? 'num' : null }, t)))),
+    h('tbody', {}, ...(rowsArr.length ? rowsArr.map((cells) => (cells instanceof Node ? cells : h('tr', {}, ...cells.map((c, i) => (c instanceof Node && c.tagName === 'TD' ? c : h('td', { class: num.includes(i) ? 'num' : null }, c)))))) : [h('tr', {}, h('td', { colspan: head.length, class: 'muted' }, empty))])));
+  return h('div', { class: 'tablewrap' }, sort ? sortable(table, sort) : table);
+}
+// 정렬 값을 따로 가진 칸: 화면 글자(예: 연도 없는 시각 '11. 16. 09:30')와 비교 값(원래 ISO 시각)을 나눈다.
+const cell = (content, sortValue, cls = null) => h('td', { class: cls, 'data-sort': sortValue ?? '' }, content);
+
+// ------------------------------------------------------------ 표 정렬(화면 안)
+// 열 머리를 정렬 단추(접수 목록과 같은 button.sort·aria-sort)로 바꾸고, 누를 때마다 오름 → 내림 → 원래 순서.
+// 행(tr) 노드를 그대로 옮기므로 행에 붙은 처리·입력·고름 상태가 남는다. 빈 값은 방향과 무관하게 뒤, 같은 값은 원래 순서(안정 정렬).
+// 합계 행(class sum·total 또는 data-sort-fixed)과 '자료 없음'처럼 한 칸으로 합친 행은 움직이지 않는다(위에 있던 것은 위, 나머지는 아래).
+// 정렬 상태는 key 별로 이 세션(페이지를 다시 읽기 전까지) 기억해, 화면을 다시 그려도 같은 정렬로 보인다.
+// tbody 를 새 행으로 다시 채우면 그 순서를 '원래 순서'로 삼아 같은 정렬을 곧바로 다시 적용한다.
+// note: 서버가 쪽을 나눠 보내는 표 등 '보이는 행 안에서만' 정렬함을 알릴 글(머리 단추 설명과 표 아래 작은 글씨).
+const tableSorts = new Map();
+const sortCollator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' });
+function sortValueOf(td, type) {
+  if (!td) return null;
+  const own = td.dataset.sort ?? td.querySelector('[data-sort]')?.dataset.sort;
+  const raw = (own ?? td.textContent).trim();
+  if (!raw || raw === '-' || raw === '—') return null;
+  if (type === 'num') { const m = raw.replace(/,/g, '').match(/[-+]?\d+(?:\.\d+)?/); return m ? Number(m[0]) : null; }
+  if (type === 'date') { const d = raw.replace(/\D/g, ''); return d || null; }
+  return raw;
+}
+function sortable(table, { key, cols = [], note = '' } = {}) {
+  const headRow = table.tHead?.rows[0];
+  if (!headRow || !key) return table;
+  const order = new WeakMap();   // 행 → 원래 순서
+  let seq = 0;
+  const st = tableSorts.get(key) || { col: -1, dir: '' };
+  if (st.col >= 0 && !cols[st.col]) { st.col = -1; st.dir = ''; }  // 열 구성이 바뀌어 그 열을 더 정렬하지 않으면 원래 순서
+  tableSorts.set(key, st);
+  const help = '눌러서 정렬: 오름차순 → 내림차순 → 원래 순서' + (note ? ` (${note})` : '');
+  const ths = [...headRow.cells];
+  const buttons = [];
+  ths.forEach((th, i) => {
+    if (!cols[i]) return;
+    const arr = h('span', { class: 'arr', 'aria-hidden': 'true' });
+    const b = h('button', { type: 'button', class: 'sort', title: help, onclick: () => {
+      if (st.col !== i) { st.col = i; st.dir = 'asc'; } else if (st.dir === 'asc') st.dir = 'desc'; else { st.col = -1; st.dir = ''; }
+      apply();
+    } }, ...th.childNodes, arr);
+    th.replaceChildren(b);
+    buttons[i] = { th, b, arr };
+  });
+  if (note) table.append(h('caption', { class: 'sortnote muted small' }, `열 머리를 누르면 ${note}`));
+  const fixed = (tr) => tr.classList.contains('sum') || tr.classList.contains('total') || 'sortFixed' in tr.dataset || (tr.cells.length === 1 && tr.cells[0].colSpan > 1);
+  function apply() {
+    buttons.forEach((x, i) => {
+      if (!x) return;
+      const on = st.col === i;
+      x.th.setAttribute('aria-sort', on ? (st.dir === 'desc' ? 'descending' : 'ascending') : 'none');
+      x.b.classList.toggle('on', on);
+      x.arr.textContent = on ? (st.dir === 'desc' ? '▼' : '▲') : '↕';
+    });
+    for (const tb of table.tBodies) {
+      const rows = [...tb.rows];
+      rows.forEach((tr) => { if (!order.has(tr)) order.set(tr, seq++); });
+      const movable = rows.filter((tr) => !fixed(tr));
+      if (!movable.length) continue;
+      const first = rows.indexOf(movable[0]);
+      const top = rows.slice(0, first).filter(fixed), bottom = rows.slice(first).filter(fixed);
+      const type = cols[st.col], sign = st.dir === 'desc' ? -1 : 1;
+      const keyed = movable.map((tr) => ({ tr, o: order.get(tr), v: st.col >= 0 ? sortValueOf(tr.cells[st.col], type) : null }));
+      keyed.sort((a, b) => {
+        if (st.col >= 0 && (a.v == null) !== (b.v == null)) return a.v == null ? 1 : -1;
+        let c = 0;
+        if (st.col >= 0 && a.v != null) c = type === 'num' ? a.v - b.v : type === 'date' ? (a.v < b.v ? -1 : a.v > b.v ? 1 : 0) : sortCollator.compare(a.v, b.v);
+        return c * sign || a.o - b.o;
+      });
+      const next = [...top, ...keyed.map((x) => x.tr), ...bottom];
+      if (next.some((tr, i) => tr !== rows[i])) tb.append(...next);
+    }
+    watch.takeRecords();  // 직접 옮긴 것은 다시 정렬할 변화로 보지 않는다
+  }
+  // 화면이 tbody(또는 표의 tbody 자체)를 새로 채우면 다시 정렬한다. 칸 안 내용 변화는 무시.
+  const watch = new MutationObserver((records) => {
+    if (!records.some((r) => r.target.tagName === 'TBODY' || r.target === table)) return;
+    if (st.col < 0) { [...table.tBodies].forEach((tb) => [...tb.rows].forEach((tr) => { if (!order.has(tr)) order.set(tr, seq++); })); return; }
+    apply();
+  });
+  watch.observe(table, { childList: true, subtree: true });
+  apply();
+  return table;
 }
 const searchbox = (pairs, ...btns) => h('div', { class: 'card searchbox', role: 'search', 'aria-label': '조회조건' }, h('div', { class: 'cond' }, ...pairs.flatMap(([l, v, wide]) => [h('span', { class: 'cond-l' }, l), h('div', { class: 'cond-v' + (wide ? ' ' + wide : '') }, ...[].concat(v))])),
   btns.length ? h('div', { class: 'cond-btns' }, ...btns) : null);
@@ -520,10 +604,10 @@ export {
   NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, RECON, REFUND_CAUSE, REFUND_ST,
   REQ_IDS, SMS_T, STATUS, STICKER, THEME, afterWork, api, apiRaw,
   CAN, SCREEN_ROLES, applyPrefs, boot, btn, can, canOpen, canWork, chip, clearMaps, confirmDlg, copyNotice,
-  crewEnd, dlgSeq, dlgStack, dongOpts, download, feeMemo, fmtPhone, go,
+  cell, crewEnd, dlgSeq, dlgStack, dongOpts, download, feeMemo, fmtPhone, go,
   grid, gridbar, h, isPlaceholderContact, isStale, jobsPanel, kst, liveMaps,
   mb, md, modal, nowHM, pagehead, pendingActions, post, postOnce,
   prefsControls, promptDlg, reasonDlg, reasonFields, reauth, relogin, render, reqDone,
-  reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, sessionOwner, setBoot, setRender, statusChip,
+  reqId, routeEpoch, runJob, savePrefs, searchbox, sessTimer, sessionOwner, setBoot, setRender, sortable, statusChip,
   stopSessionTimer, takeAuthReset, toast, touchSession, uuid, workEnd, wrap,
 };

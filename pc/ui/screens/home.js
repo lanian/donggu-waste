@@ -1,6 +1,6 @@
 // PC 화면: 오늘 현황(대시보드)·처리할 일 배지
 import * as M from '/web/map.js';
-import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, workEnd } from '../core.js';
+import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, sortable, workEnd } from '../core.js';
 import { mapIn } from '../widgets.js';
 import { screenRequests } from './requests.js';
 
@@ -201,11 +201,11 @@ async function screenHome() {
         bkSt && !bkSt.key ? h('div', { class: 'small muted' }, '백업 키가 없어 자동 백업을 하지 않습니다.') : null))) : null;
   const nodeCls = (st) => (st === 'DONE' ? 'ok' : ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(st) ? 'warn' : st === 'CANCELLED' ? 'neutral' : st === 'IN_PROGRESS' ? 'info' : '');
   const dongCard = (sum.dongs || []).length ? h('div', { class: 'card today-dongs' }, h('div', { class: 'panel-h' }, h('h2', {}, '동별 현황'), sum.capacity && sum.capacity.limit ? h('span', { class: 'muted small' }, `전체 ${sum.capacity.booked}/${sum.capacity.limit}건`) : null),
-    h('div', { class: 'tablewrap' }, h('table', { class: 'dongtbl' }, h('thead', {}, h('tr', {}, ...['동', '담당 팀', '예정', '완료', '미처리', '한도 대비'].map((t) => h('th', { scope: 'col' }, t)))),
-      h('tbody', {}, ...sum.dongs.map((x) => h('tr', {}, h('td', {}, x.dong ? h('a', { href: '#/requests', onclick: () => { screenRequests.f = { ...(screenRequests.f || {}), size: 50, dong: x.dong, status: '', date_from: s.date, date_to: s.date, date_field: 'planned', page: 1, quick: 'ALL' }; } }, x.dong) : h('span', { class: 'muted' }, '(동 미지정)'),
+    h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'dongtbl' }, h('thead', {}, h('tr', {}, ...['동', '담당 팀', '예정', '완료', '미처리', '한도 대비'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, ...sum.dongs.map((x) => h('tr', {}, h('td', { 'data-sort': x.dong || '' }, x.dong ? h('a', { href: '#/requests', onclick: () => { screenRequests.f = { ...(screenRequests.f || {}), size: 50, dong: x.dong, status: '', date_from: s.date, date_to: s.date, date_field: 'planned', page: 1, quick: 'ALL' }; } }, x.dong) : h('span', { class: 'muted' }, '(동 미지정)'),
         x.working ? null : chip('수거일 아님', 'neutral')),
         h('td', {}, x.crew || '-'), h('td', { class: 'num' }, x.total), h('td', { class: 'num' }, x.done), h('td', { class: 'num' }, x.open),
-        h('td', {}, x.limit ? chip(`${x.total}/${x.limit}건`, x.total > x.limit ? 'bad' : x.total === x.limit ? 'warn' : 'ok') : '-', x.limit_m3 ? chip(`${x.m3}/${x.limit_m3}m³`, x.m3 > x.limit_m3 ? 'bad' : '') : null))))))) : null;
+        h('td', {}, x.limit ? chip(`${x.total}/${x.limit}건`, x.total > x.limit ? 'bad' : x.total === x.limit ? 'warn' : 'ok') : '-', x.limit_m3 ? chip(`${x.m3}/${x.limit_m3}m³`, x.m3 > x.limit_m3 ? 'bad' : '') : null))))), { key: 'home-dongs', cols: ['text', 'text', 'num', 'num', 'num', null] }))) : null;
   const crewsCard = h('div', { class: 'card today-crews' }, h('div', { class: 'panel-h' }, h('h2', {}, '팀별 진행'), act.length ? h('span', { class: 'legend small' }, h('span', { class: 'lg ok' }, '완료'), h('span', { class: 'lg warn' }, '재방문'), h('span', { class: 'lg track' }, '남음')) : null),
     act.length ? h('div', { class: 'crews' }, ...act.map((b, bi) => {
       const n = b.stops.length, d = b.stops.filter((x) => x.status === 'DONE').length, w = b.stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.status)).length;

@@ -1,6 +1,6 @@
 // PC 화면: QR 실측
 import * as M from '/web/map.js';
-import { api, boot, btn, chip, grid, h, pagehead, post, toast, wrap } from '../core.js';
+import { api, boot, btn, cell, chip, grid, h, pagehead, post, sortable, toast, wrap } from '../core.js';
 
 async function screenQrTest() {
   const devs = boot.devices.filter((d) => d.status === 'ACTIVE');
@@ -17,8 +17,8 @@ async function screenQrTest() {
       const el = h('input', { type: 'number', step: '0.1', placeholder: '초', style: 'width:80px', value: t.elapsed_s ?? '' });
       const rd = h('input', { type: 'number', placeholder: '인식 횟수', style: 'width:90px', value: t.reads ?? '' });
       const ck = h('input', { placeholder: '확인 4자리', style: 'width:100px' });
-      return h('tr', {}, h('td', {}, t.created_at.replace('T', ' ').slice(5, 16)), h('td', {}, `${t.params.count}건 · ${t.params.addr}`), h('td', {}, `${t.params.chunk}B · ${t.params.ec} · ${t.params.fps}장/초`),
-        h('td', {}, `${t.bytes.toLocaleString()}B · ${t.frames}장`), h('td', {}, t.verified == null ? '' : t.verified ? chip(`${t.elapsed_s}초 · 인식 ${t.reads}회 · 복원 일치`, 'ok') : chip('확인 코드 불일치', 'bad')),
+      return h('tr', {}, cell(t.created_at.replace('T', ' ').slice(5, 16), t.created_at), h('td', {}, `${t.params.count}건 · ${t.params.addr}`), h('td', {}, `${t.params.chunk}B · ${t.params.ec} · ${t.params.fps}장/초`),
+        cell(`${t.bytes.toLocaleString()}B · ${t.frames}장`, t.bytes), h('td', {}, t.verified == null ? '' : t.verified ? chip(`${t.elapsed_s}초 · 인식 ${t.reads}회 · 복원 일치`, 'ok') : chip('확인 코드 불일치', 'bad')),
         h('td', {}, btn('QR 다시 표시', () => window.open('/qrtest/' + t.id.slice(0, 8), 'dg-qrtest', 'width=760,height=900'), 'small'), ' ', el, rd, ck,
           btn('기록', wrap(async () => { const r = await post(`qrtest/${t.id}/result`, { elapsed_s: el.value, reads: rd.value, check: ck.value }); toast(r.verified ? '기록했습니다 (복원 일치)' : '확인 코드가 맞지 않습니다', !r.verified); load(); }), 'small primary')));
     }));
@@ -34,7 +34,8 @@ async function screenQrTest() {
     h('div', { class: 'card' }, h('p', { class: 'muted' }, '기관 휴대폰으로 QR 전송 시간과 인식률을 잽니다. 가상 자료만 쓰며 업무 자료에 섞이지 않습니다. 휴대폰은 [오늘 목록 받기]로 읽으면 "실측 모드"로 결과만 보여 주고 저장하지 않습니다.'),
       devs.length ? h('div', { class: 'row' }, lab('휴대폰', F.device), lab('건수', F.count), lab('주소 길이', F.addr), lab('조각 크기', F.chunk), lab('오류 복원', F.ec), lab('표시 속도', F.fps), btn('실측 QR 표시', run, 'primary'))
         : h('p', { class: 'err' }, '설정에서 휴대폰을 먼저 등록하세요.'), msg),
-    h('div', { class: 'card tablecard' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['시각', '자료', '조건', '크기', '결과', '휴대폰 결과 입력'].map((x) => h('th', {}, x)))), tbody)),
+    h('div', { class: 'card tablecard' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['시각', '자료', '조건', '크기', '결과', '휴대폰 결과 입력'].map((x) => h('th', {}, x)))), tbody),
+      { key: 'qrtest', cols: ['date', 'text', 'text', 'num', 'text', null] })),
     h('p', { class: 'muted' }, '휴대폰에 나온 시간·인식 횟수·확인 4자리를 입력하세요. 확인 4자리가 맞아야 전체 복원이 정확했다는 뜻입니다. 같은 조건을 10회 반복해 평균을 비교하세요.'));
 }
 

@@ -284,8 +284,43 @@ def cancel_request(con, rid: str, reason: str = "", code: str | None = None, req
     return res
 
 
-SORTABLE = {"receipt_no": "receipt_no", "planned_date": "COALESCE(planned_date,'9999')", "received_at": "received_at", "name": "name",
-            "dong": "COALESCE(dong,'')", "status": "status", "channel": "channel", "address": "address"}
+# 접수 목록 정렬 허용 목록: 화면이 보내는 키 → (SQL 식, 빈 값(NULL)을 방향과 무관하게 뒤로). 식은 여기 적은 상수만 쓰고
+# 화면이 보낸 문자열은 SQL에 넣지 않는다(키가 목록에 없으면 기본 정렬). 연락처는 정렬하지 않는다(개인정보 정렬 불필요).
+_PAY_ORDER = ("NONE", "AMOUNT_PENDING", "PAID_AMOUNT_PENDING", "UNPAID", "UNDERPAID", "PAID", "OVERPAID_REVIEW",
+              "REFUND_NEEDED", "OVERREFUNDED_REVIEW", "EXEMPT")  # 화면 수납 상태(PAY) 표시 순서
+SORTABLE = {
+    "receipt_no": ("receipt_no", False),
+    "planned_date": ("planned_date", True),
+    "received_at": ("received_at", False),
+    "name": ("name", False),
+    "dong": ("dong", True),
+    "status": ("status", False),
+    "channel": ("channel", False),
+    "address": ("address", False),
+    "fee": ("fee_final", True),                                           # 최종 금액(금액 미정은 맨 뒤)
+    "pay": ("CASE pay_status " + " ".join(f"WHEN '{k}' THEN {i}" for i, k in enumerate(_PAY_ORDER)) + " END", True),
+    "crew": ("(SELECT c.name FROM crew c WHERE c.id=request.active_crew_id)", True),  # 배정 팀 이름(미배정은 뒤)
+    "loc": ("(lat IS NOT NULL)", False),                                  # 오름 = 위치 없음 먼저
+}
+
+
+def _order_sql(f: dict) -> str:
+    """정렬 조건(sort·dir, 2차 sort2·dir2) → ORDER BY. 허용 목록에 없는 키는 무시하고, 마지막에 접수 최신·id로 순서를 고정한다(쪽 나눔이 흔들리지 않게)."""
+    keys = []
+    for k, d in (("sort", "dir"), ("sort2", "dir2")):
+        key = f.get(k) if isinstance(f.get(k), str) else ""
+        if key not in SORTABLE or key in [x for x, _ in keys] or (k == "sort2" and not keys):
+            continue
+        keys.append((key, str(f.get(d) or "").lower() == "desc"))
+    if not keys:
+        keys = [("planned_date", False)]
+    parts = []
+    for key, desc in keys:
+        expr, nulls_last = SORTABLE[key]
+        if nulls_last:
+            parts.append(f"({expr}) IS NULL")
+        parts.append(f"{expr} {'DESC' if desc else 'ASC'}")
+    return " ORDER BY " + ", ".join(parts + ["received_at DESC", "id"])
 QUICK = ("ALL", "TODAY", "NOLOC", "FEE", "UNASSIGNED", "REFUND", "FIELD", "OVERDUE", "NODATE")
 _NOT_FINAL = "status NOT IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD','CANCELLED')"
 
@@ -365,7 +400,8 @@ def _request_sql(f: dict, scope_ids=None) -> tuple[str, list]:
 
 def search_requests(con, f: dict | None = None, scope_ids: set[str] | None = None, with_counts: bool = True) -> dict:
     """접수 목록 조회(서버 쪽 쪽 나눔, SQL로 거르고 세고 자른다 — 접수마다 계산하지 않음). f: q, date, date_field(planned|received), date_from, date_to,
-    status, crew, dong, channel, pay(수납 상태), quick(ALL·TODAY·NOLOC·FEE·UNASSIGNED·REFUND·FIELD·OVERDUE·NODATE), sort, dir, page(1부터), size.
+    status, crew, dong, channel, pay(수납 상태), quick(ALL·TODAY·NOLOC·FEE·UNASSIGNED·REFUND·FIELD·OVERDUE·NODATE), sort·dir(1차 정렬), sort2·dir2(2차 정렬, SORTABLE 키만),
+    page(1부터), size.
     돌려줌: rows(이 쪽), total(조건에 맞는 전체), counts(빠른 조회별 건수)."""
     f = dict(f or {})
     quick = f.get("quick") or "ALL"
@@ -389,9 +425,7 @@ def search_requests(con, f: dict | None = None, scope_ids: set[str] | None = Non
     else:
         total = con.execute("SELECT COUNT(*) FROM request" + where, args).fetchone()[0]
         counts.setdefault("ALL", total if quick == "ALL" else con.execute("SELECT COUNT(*) FROM request" + _request_sql(f, scope_ids)[0], _request_sql(f, scope_ids)[1]).fetchone()[0])
-    key = SORTABLE.get(f.get("sort") or "", None)
-    desc = (f.get("dir") or "").lower() == "desc"
-    order = f" ORDER BY {key} {'DESC' if desc else 'ASC'}, received_at DESC" if key else " ORDER BY COALESCE(planned_date,'9999'), received_at DESC"
+    order = _order_sql(f)
     try:
         size = max(1, min(500, int(f.get("size") or 50)))
         page_ = int(f.get("page") or 1)

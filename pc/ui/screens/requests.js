@@ -1,12 +1,13 @@
 // PC 화면: 접수 목록·일괄 처리·CSV 일괄 등록
 import { won } from '/web/fees.js';
-import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, routeEpoch, searchbox, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, routeEpoch, searchbox, sortable, statusChip, toast, wrap } from '../core.js';
 import { presetRange } from '../date_filters.js';
 async function screenRequests() {
   const myRoute = routeEpoch, myHash = location.hash;
   let view, loadSeq = 0, ready = false;
   const current = () => view?.isConnected && myRoute === routeEpoch && location.hash === myHash;
-  const f = (screenRequests.f ||= { q: '', date_field: 'planned', date_from: '', date_to: '', status: 'OPEN', crew: '', dong: '', pay: '', channel: '', quick: 'ALL', sort: '', dir: '', page: 1, size: 50 });
+  const f = (screenRequests.f ||= { q: '', date_field: 'planned', date_from: '', date_to: '', status: 'OPEN', crew: '', dong: '', pay: '', channel: '', quick: 'ALL', sort: '', dir: '', sort2: '', dir2: '', page: 1, size: 50 });
+  f.sort2 ??= ''; f.dir2 ??= '';
   const sel = (screenRequests.sel ||= new Set());
   const q = h('input', { type: 'search', id: 'rq-q', placeholder: '이름·연락처·주소·접수번호', value: f.q });
   const dfield = h('select', { id: 'rq-df', 'aria-label': '기간 기준' }, h('option', { value: 'planned', selected: f.date_field === 'planned' }, '예정일'), h('option', { value: 'received', selected: f.date_field === 'received' }, '접수일'));
@@ -25,20 +26,65 @@ async function screenRequests() {
   const selBar = h('div', { class: 'selbar' });
   const QUICK = [['ALL', '전체'], ['TODAY', '오늘 예정'], ['OVERDUE', '지난 예정일 미처리'], ['NODATE', '예정일 없음'], ['NOLOC', '위치 없음'], ['FEE', '금액 확인 대기'], ['UNASSIGNED', '미배정'], ['REFUND', '환불 필요'], ['FIELD', '현장 접수 확인']];
   const COLS = [['', null], ['번호', null], ['접수번호', 'receipt_no'], ['예정일', 'planned_date'], ['동', 'dong'], ['이름', 'name'], ['연락처', null], ['배출 주소', 'address'],
-    ['품목', null], ['상태', 'status'], ['금액', null], ['위치', null], ['배정', null]];
+    ['품목', null], ['상태', 'status'], ['금액', 'fee'], ['위치', 'loc'], ['배정', 'crew']];
+  // 서버 정렬 키(pc/dgpc/intake.py SORTABLE). 표에 열이 없는 접수일·수납 상태·접수 경로는 정렬 상자에서 고른다(표를 넓히지 않음).
+  const SORTS = [['planned_date', '예정일'], ['received_at', '접수일'], ['receipt_no', '접수번호'], ['dong', '동'], ['name', '이름'], ['address', '배출 주소'],
+    ['status', '상태'], ['channel', '접수 경로'], ['fee', '금액'], ['pay', '수납 상태'], ['crew', '배정 팀'], ['loc', '위치 있음·없음']];
+  const sortName = (k) => SORTS.find(([key]) => key === k)?.[1] || k;
+  // 방향 이름: 위치는 오름 = 위치 없음 먼저(서버 식 lat IS NOT NULL)
+  const dirName = (k, d) => (k === 'loc' ? (d === 'desc' ? '위치 있음 먼저' : '위치 없음 먼저') : d === 'desc' ? '내림차순' : '오름차순');
+  const PRESETS = [['기본 순서', '', '', '', ''], ['예정일 → 동', 'planned_date', '', 'dong', ''], ['접수일 최신', 'received_at', 'desc', '', ''],
+    ['금액 큰 순', 'fee', 'desc', '', ''], ['위치 없음 먼저', 'loc', '', 'planned_date', '']];
+  const sortOpts = (none) => [h('option', { value: '' }, none), ...SORTS.map(([k, t]) => h('option', { value: k }, t))];
+  const dirOpts = () => [h('option', { value: '' }, '오름차순 ▲'), h('option', { value: 'desc' }, '내림차순 ▼')];
+  const s1 = h('select', { id: 'rq-sort1', 'aria-label': '1차 정렬 기준' }, ...sortOpts('기본 (예정일 → 접수 최신)'));
+  const d1 = h('select', { id: 'rq-dir1', 'aria-label': '1차 정렬 방향' }, ...dirOpts());
+  const s2 = h('select', { id: 'rq-sort2', 'aria-label': '2차 정렬 기준' }, ...sortOpts('2차 기준 없음'));
+  const d2 = h('select', { id: 'rq-dir2', 'aria-label': '2차 정렬 방향' }, ...dirOpts());
+  const presetBar = h('div', { class: 'sort-presets', role: 'group', 'aria-label': '정렬 빠른 고르기' });
+  const setSort = (sort, dir, sort2, dir2) => {
+    Object.assign(f, { sort, dir: sort ? dir : '', sort2: sort && sort2 !== sort ? sort2 : '', dir2: '' });
+    if (f.sort2) f.dir2 = dir2;
+    f.page = 1; reload();
+  };
+  // 머리 단추: 누르면 그 열 하나로(같은 열이면 방향 바꿈, 2차 유지), Shift+누르면 2차 기준으로 더함(다시 Shift+누르면 방향 → 해제)
+  const sortClick = (key, e) => {
+    if (e.shiftKey && f.sort && f.sort !== key) {
+      if (f.sort2 !== key) setSort(f.sort, f.dir, key, '');
+      else if (f.dir2 !== 'desc') setSort(f.sort, f.dir, key, 'desc');
+      else setSort(f.sort, f.dir, '', '');
+    } else if (f.sort === key) setSort(key, f.dir === 'desc' ? '' : 'desc', f.sort2, f.dir2);
+    else setSort(key, '', '', '');
+  };
+  s1.addEventListener('change', () => setSort(s1.value, f.dir, f.sort2, f.dir2));
+  d1.addEventListener('change', () => setSort(f.sort, d1.value, f.sort2, f.dir2));
+  s2.addEventListener('change', () => setSort(f.sort, f.dir, s2.value, f.dir2));
+  d2.addEventListener('change', () => setSort(f.sort, f.dir, f.sort2, d2.value));
+  const sortText = () => (f.sort ? `${sortName(f.sort)} ${dirName(f.sort, f.dir)}${f.sort2 ? ` → ${sortName(f.sort2)} ${dirName(f.sort2, f.dir2)}` : ''}` : '기본(예정일 → 접수 최신)');
+  const drawSort = () => {
+    s1.value = f.sort; d1.value = f.dir === 'desc' ? 'desc' : ''; s2.value = f.sort2; d2.value = f.dir2 === 'desc' ? 'desc' : '';
+    d1.disabled = s2.disabled = !f.sort; d2.disabled = !f.sort2;
+    presetBar.replaceChildren(...PRESETS.map(([t, a, b, c, d]) => {
+      const on = f.sort === a && (f.dir || '') === b && (f.sort2 || '') === c && (f.dir2 || '') === d;
+      return h('button', { type: 'button', class: 'sortchip' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', onclick: () => setSort(a, b, c, d) }, t);
+    }));
+  };
   let res = { rows: [], total: 0, page: 1, pages: 1, counts: {} };
   const work = canWork();
   const drawHead = () => {
+    drawSort();
     const pageIds = res.rows.map((r) => r.id);
     const all = h('input', { type: 'checkbox', 'aria-label': '이 쪽 모두 고르기', disabled: !ready, checked: pageIds.length && pageIds.every((i) => sel.has(i)),
       onchange: (e) => { if (!ready || !current() || !e.currentTarget.isConnected) return; pageIds.forEach((i) => (e.target.checked ? sel.add(i) : sel.delete(i))); draw(); } });
     thead.replaceChildren(h('tr', {}, ...COLS.map(([t, key], i) => {
       if (i === 0) return h('th', { class: 'chk', scope: 'col' }, work ? all : null);
       if (!key) return h('th', { class: i === 1 ? 'num' : null, scope: 'col' }, t);
-      const on = f.sort === key;
+      // aria-sort 는 1차 기준 열에만. 2차 기준 열은 단추 이름에 '2차 정렬'을 붙이고 화살표 옆에 작은 '2'.
+      const on = f.sort === key, two = !!f.sort && f.sort2 === key, d = on ? f.dir : f.dir2;
       return h('th', { scope: 'col', 'aria-sort': on ? (f.dir === 'desc' ? 'descending' : 'ascending') : 'none' },
-        h('button', { type: 'button', class: 'sort' + (on ? ' on' : ''), onclick: () => { if (on) f.dir = f.dir === 'desc' ? '' : 'desc'; else { f.sort = key; f.dir = ''; } f.page = 1; reload(); } },
-          t, h('span', { class: 'arr', 'aria-hidden': 'true' }, on ? (f.dir === 'desc' ? '▼' : '▲') : '↕')));
+        h('button', { type: 'button', class: 'sort' + (on || two ? ' on' : ''), title: '누르면 이 열로 정렬 · Shift+누르면 2차 기준으로 더함',
+          'aria-label': two ? `${t}, 2차 정렬 ${dirName(key, f.dir2)}` : null, onclick: (e) => sortClick(key, e) },
+          t, h('span', { class: 'arr', 'aria-hidden': 'true' }, on || two ? (d === 'desc' ? '▼' : '▲') : '↕'), two ? h('span', { class: 'arr2', 'aria-hidden': 'true' }, '2') : null));
     })));
   };
   const draw = () => {
@@ -48,10 +94,13 @@ async function screenRequests() {
     count.textContent = res.total.toLocaleString();
     drawHead();
     const shortDate = (d) => (!d ? '-' : d === boot.today ? '오늘' : d.slice(5));
+    // 접수일로 정렬할 때만 예정일 칸 아래에 접수일(한국 날짜)을 작게 보여 준다(열을 늘리지 않음)
+    const showRcv = f.sort === 'received_at' || f.sort2 === 'received_at';
+    const rcvDay = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' }); };
     const base = (res.page - 1) * res.size;
     tbody.replaceChildren(...(res.rows.length ? res.rows.map((r, ri) => h('tr', { class: 'click' + (sel.has(r.id) ? ' sel' : ''), onclick: (e) => { if (!['A', 'INPUT', 'LABEL'].includes(e.target.tagName)) go(`#/request/${r.id}`); } },
       h('td', { class: 'chk' }, work ? h('input', { type: 'checkbox', 'aria-label': `${r.receipt_no} 고르기`, checked: sel.has(r.id), onchange: (e) => { if (!ready || !current() || !e.currentTarget.isConnected) return; e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); } }) : null),
-      h('td', { class: 'num rn' }, base + ri + 1), h('td', { class: 'code' }, h('a', { href: `#/request/${r.id}`, title: r.receipt_no }, r.receipt_no.replace(/^DG-\d{4}/, ''))), h('td', { class: 'code' }, shortDate(r.planned_date)),
+      h('td', { class: 'num rn' }, base + ri + 1), h('td', { class: 'code' }, h('a', { href: `#/request/${r.id}`, title: r.receipt_no }, r.receipt_no.replace(/^DG-\d{4}/, ''))), h('td', { class: 'code' }, shortDate(r.planned_date), showRcv ? h('span', { class: 'rcv', title: '접수일' }, '접수 ' + shortDate(rcvDay(r.received_at))) : null),
       h('td', { class: 'nowrap' }, r.dong || h('span', { class: 'muted' }, '-')), h('td', { class: 'nowrap' }, r.name), h('td', { class: 'code' }, fmtPhone(r.phone)),
       h('td', {}, h('span', { class: 'clamp' }, r.address)),
       h('td', {}, h('span', { class: 'clamp' }, r.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', '))),
@@ -72,7 +121,7 @@ async function screenRequests() {
     Object.assign(f, { q: q.value, date_field: dfield.value, date_from: dfrom.value, date_to: dto.value, status: status.value, crew: crew.value, dong: dong.value, pay: pay.value, channel: channel.value });
     filterSummary.textContent = `${dfield.selectedOptions[0]?.textContent || '예정일'} 기준 · ${f.date_from || f.date_to ? `${f.date_from || '시작 제한 없음'} ~ ${f.date_to || '끝 제한 없음'}` : '전체 기간'} · ${f.status ? status.selectedOptions[0]?.textContent : '모든 상태'} · ${dong.selectedOptions[0]?.textContent || '전체 동'} · 빠른 조회: ${QUICK.find(([key]) => key === f.quick)?.[1] || '전체'}${f.q ? ` · 검색: ${f.q}` : ''}`;
     filterSummary.textContent += [f.crew && `수거팀: ${crew.selectedOptions[0]?.textContent}`, f.pay && `수납: ${pay.selectedOptions[0]?.textContent}`,
-      f.channel && `경로: ${f.channel}`].filter(Boolean).map((value) => ` · ${value}`).join('');
+      f.channel && `경로: ${f.channel}`, `정렬: ${sortText()}`].filter(Boolean).map((value) => ` · ${value}`).join('');
     const qs = new URLSearchParams(Object.entries(f).map(([k, v]) => [k, String(v ?? '')]));
     markLoading();
     let next;
@@ -163,7 +212,8 @@ async function screenRequests() {
       h('div', { class: 'cond' }, cl('검색어', 'rq-q'), h('div', { class: 'cond-v' }, q), cl('기간', 'rq-from'), h('div', { class: 'cond-v' }, dfield, dfrom, '~', dto), cl('처리 상태', 'rq-status'), h('div', { class: 'cond-v' }, status),
         cl('수거팀', 'rq-crew'), h('div', { class: 'cond-v' }, crew), cl('행정동', 'rq-dong'), h('div', { class: 'cond-v' }, dong), cl('수납 상태', 'rq-pay'), h('div', { class: 'cond-v' }, pay),
         cl('접수 경로', 'rq-channel'), h('div', { class: 'cond-v' }, channel),
-        h('span', { class: 'cond-l' }, '빠른 조회'), h('div', { class: 'cond-v wide2' }, quickBar)),
+        h('span', { class: 'cond-l' }, '빠른 조회'), h('div', { class: 'cond-v wide2' }, quickBar),
+        cl('정렬', 'rq-sort1'), h('div', { class: 'cond-v wide sortbox' }, s1, d1, h('span', { 'aria-hidden': 'true' }, '→'), s2, d2, presetBar)),
       h('div', { class: 'cond-btns' }, btn('검색', () => { f.page = 1; load(); }, 'dark')),
       h('div', { class: 'row requests-date-tools', role: 'group', 'aria-label': '기간 빠른 조회' },
         btn('어제', () => period('yesterday'), 'small'), btn('오늘', () => period('today'), 'small'), btn('이번 달', () => period('month'), 'small'),
@@ -187,10 +237,11 @@ async function importDlg() {
     const r = await api('requests/import?preview=1', { method: 'POST', raw: await raw() });
     previewed = true;
     out.replaceChildren(h('p', {}, `${r.rows}행 · 등록 가능 ${r.ok}행 · 오류 ${r.errors}행 · 중복 후보 ${r.duplicates}행`),
-      h('div', { class: 'imp-scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ...['행', '이름', '연락처', '주소', '예정일', '동', '경로', '품목', '확인'].map((t) => h('th', {}, t)))),
+      h('div', { class: 'imp-scroll' }, sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['행', '이름', '연락처', '주소', '예정일', '동', '경로', '품목', '확인'].map((t) => h('th', {}, t)))),
         h('tbody', {}, ...r.lines.map((x) => h('tr', { class: x.errors.length ? 'bad' : '' }, h('td', {}, x.line), h('td', {}, x.summary.name), h('td', {}, fmtPhone(x.summary.phone)), h('td', {}, x.summary.address),
           h('td', {}, x.summary.planned_date || '-'), h('td', {}, x.summary.dong || '-'), h('td', {}, x.summary.channel), h('td', {}, x.summary.items),
-          h('td', {}, ...x.errors.map((e) => chip(e, 'bad')), x.duplicates.length ? chip('중복 후보: ' + x.duplicates.join(', '), 'warn') : null, ...x.warnings.map((w) => h('div', { class: 'small muted' }, w)))))))));
+          h('td', {}, ...x.errors.map((e) => chip(e, 'bad')), x.duplicates.length ? chip('중복 후보: ' + x.duplicates.join(', '), 'warn') : null, ...x.warnings.map((w) => h('div', { class: 'small muted' }, w))))))),
+        { key: 'import-preview', cols: ['num', 'text', null, 'text', 'date', 'text', 'text', 'text', 'text'] })));
   };
   file.addEventListener('change', () => { previewed = false; out.replaceChildren(); });
   return modal({ title: '접수 일괄 등록 (CSV)', ok: '등록', wide: true,

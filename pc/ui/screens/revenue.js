@@ -1,6 +1,6 @@
 // PC 화면: 세입 일계표·월계표·대사
 import { won } from '/web/fees.js';
-import { RECON, api, boot, btn, canWork, chip, confirmDlg, download, grid, h, kst, pagehead, render, searchbox, toast, wrap } from '../core.js';
+import { RECON, api, boot, btn, canWork, cell, chip, confirmDlg, download, grid, h, kst, pagehead, render, searchbox, toast, wrap } from '../core.js';
 
 async function screenRevenue() {
   const s = (screenRevenue.s ||= { start: boot.today.slice(0, 8) + '01', end: boot.today, unit: 'day' });
@@ -23,7 +23,7 @@ async function screenRevenue() {
     out.replaceChildren(h('div', { class: 'notice info' }, `${r.total}행 · `, ...Object.entries(r.counts).map(([k, n]) => chip(`${RECON[k] || k} ${n}`, k === 'MATCH' ? 'ok' : k === 'ALREADY' ? 'neutral' : 'warn')),
         r.already_imported ? h('strong', {}, ` 이미 반영한 파일입니다(${kst(r.already_imported.at)}).`) : null),
       grid(['행', '부과번호', '접수번호', '금액', '납부일', '영수번호', '부과·납부', '판정', '설명'], r.rows.map((x) => [x.line, x.levy_no, x.receipt_no || '', x.amount != null ? won(x.amount) : '', x.paid_on, x.ref || '',
-        x.levied != null ? `${won(x.levied)} / ${won(x.paid)}` : '', chip(RECON[x.status] || x.status, x.status === 'MATCH' ? 'ok' : x.status === 'ALREADY' ? 'neutral' : 'warn'), x.note || '']), { cls: 'recon', num: [0, 3] }),
+        x.levied != null ? `${won(x.levied)} / ${won(x.paid)}` : '', chip(RECON[x.status] || x.status, x.status === 'MATCH' ? 'ok' : x.status === 'ALREADY' ? 'neutral' : 'warn'), x.note || '']), { cls: 'recon', num: [0, 3], sort: { key: 'recon-preview', cols: ['num', 'text', 'text', 'num', 'date', 'text', null, 'text', 'text'] } }),
       h('div', { class: 'row' }, btn(`일치 ${r.counts.MATCH || 0}건 납부로 기록`, wrap(async () => {
         if (!r.counts.MATCH) throw new Error('일치하는 행이 없습니다.');
         if (!(await confirmDlg('대사 반영', `일치 ${r.counts.MATCH}건을 납부(출처 '대사')로 기록합니다. 불일치 ${bad.length}건은 기록하지 않으니 따로 확인하세요.`, { ok: '기록' }))) return;
@@ -37,13 +37,15 @@ async function screenRevenue() {
     h('div', { class: 'kpis' }, ...[['납부', won(T.pay), `${T.pay_n}건`], ['환불', won(T.refund), `${T.refund_n}건`], ['순수입', won(T.net), `${d.count}건 기록`]].map(([k, v, sub]) => h('div', { class: 'kpi' }, h('span', { class: 'k' }, k), h('b', { class: 'v' }, v), h('span', { class: 's' }, sub)))),
     h('div', { class: 'grid2' },
       h('div', { class: 'card' }, h('h2', {}, `납부 방법별 (${s.unit === 'month' ? '월계' : '일계'})`), grid([per, '납부 방법', '납부 건수', '납부액', '환불 건수', '환불액', '순수입'],
-        d.by_method.map((x) => [x.period, x.method, x.pay_n, won(x.pay), x.refund_n, won(x.refund), won(x.net)]), { num: [2, 3, 4, 5, 6], empty: '이 기간 납부 기록이 없습니다.' })),
+        d.by_method.map((x) => [x.period, x.method, x.pay_n, won(x.pay), x.refund_n, won(x.refund), won(x.net)]), { num: [2, 3, 4, 5, 6], empty: '이 기간 납부 기록이 없습니다.',
+          sort: { key: 'revenue-method', cols: ['date', 'text', 'num', 'num', 'num', 'num', 'num'] } })),
       h('div', { class: 'card' }, h('h2', {}, `행정동별 (${s.unit === 'month' ? '월계' : '일계'})`), grid([per, '행정동', '납부 건수', '납부액', '환불액', '순수입'],
-        d.by_dong.map((x) => [x.period, x.dong || '(동 미지정)', x.pay_n, won(x.pay), won(x.refund), won(x.net)]), { num: [2, 3, 4, 5], empty: '이 기간 납부 기록이 없습니다.' }))),
+        d.by_dong.map((x) => [x.period, x.dong || '(동 미지정)', x.pay_n, won(x.pay), won(x.refund), won(x.net)]), { num: [2, 3, 4, 5], empty: '이 기간 납부 기록이 없습니다.',
+          sort: { key: 'revenue-dong', cols: ['date', 'text', 'num', 'num', 'num', 'num'] } }))),
     canRecon ? h('div', { class: 'card' }, h('h2', {}, '대사 (세외수입 납부 자료 맞추기)'),
       h('p', { class: 'muted' }, '세외수입 담당자에게 받은 납부 자료를 CSV(부과번호, 금액, 납부일, 영수번호 선택)로 넣으면 PC의 부과 금액과 맞춰 봅니다. 미리보기에서 일치·불일치를 확인한 뒤 [기록]을 눌러야 반영됩니다. 같은 파일은 한 번만 반영됩니다.'),
       h('div', { class: 'row' }, btn('서식 내려받기', wrap(() => download('recon-template', '동구-대사-서식.csv')), 'small'), file, btn('미리보기', preview, 'small primary')), msg, out,
-      hist.length ? h('details', { class: 'tableview' }, h('summary', {}, `반영 기록 ${hist.length}건`), grid(['시각', '작업자', '행', '일치·기록'], hist.map((x) => [kst(x.at), x.actor, x.rows, x.matched]), { num: [2, 3] })) : null) : null);
+      hist.length ? h('details', { class: 'tableview' }, h('summary', {}, `반영 기록 ${hist.length}건`), grid(['시각', '작업자', '행', '일치·기록'], hist.map((x) => [cell(kst(x.at), x.at), x.actor, x.rows, x.matched]), { num: [2, 3], sort: { key: 'recon-history', cols: ['date', 'text', 'num', 'num'] } })) : null) : null);
 }
 
 // ------------------------------------------------------------ 환불 목록 (신청 → 결재 → 지급 기록)
