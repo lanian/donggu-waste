@@ -530,7 +530,11 @@ def css_rules(css):
 
 def links_tokens(browser, url):
     print("\n— F. 링크 색, 다크 토큰 한 벌, 쓰지 않는 토큰·클래스 없음, 지도 핀 고정색 없음 —")
-    ok(CSS.count("--bg: #0f1419") == 1, "다크 토큰은 한 번만 정의 (@media·[data-theme=dark] 한 블록)")
+    # 다크 토큰 묶음은 [data-scheme=dark] 한 벌. 예외는 스크립트 전 첫 화면용 바탕·글자 세 값뿐(boot_dark 참고)
+    boot = re.search(r":root:not\(\[data-scheme\]\)\s*\{([^{}]*)\}", CSS)
+    boot_vars = set(re.findall(r"(--[\w-]+)\s*:", boot.group(1))) if boot else set()
+    ok(CSS.count("--brand: #3fcf8e") == 1 and boot_vars <= {"--bg", "--ink", "--muted"},
+       f"다크 토큰 묶음은 한 벌, 스크립트 전 첫 화면 규칙은 바탕·글자만 ({sorted(boot_vars)})")
     corpus = "\n".join(p.read_text(encoding="utf-8") for p in list(WEB.glob("*.js")) + list(WEB.glob("screens/*.js")) + [WEB / "index.html"])
     defined = sorted(set(re.findall(r"(--[\w-]+)\s*:", CSS)))
     uses = CSS + CALC_CSS + corpus
@@ -662,7 +666,22 @@ def small_targets(browser, url):
         ctx.close()
 
 
-CASES = (type_tokens, shape_tokens, badges_chips, settings_groups, back_and_tabs, links_tokens, map_pins, pc_solo_names, small_targets, common_checks)
+def boot_dark(browser, url):
+    print("\n— 스크립트가 돌기 전 첫 화면도 휴대폰 다크 설정을 따름(밤에 밝게 번쩍이지 않음) —")
+    for scheme, want_dark in (("dark", True), ("light", False)):
+        ctx = browser.new_context(service_workers="block", viewport={"width": 360, "height": 640}, color_scheme=scheme, java_script_enabled=False)
+        try:
+            page = ctx.new_page()
+            page.goto(url)
+            bg = page.evaluate("() => getComputedStyle(document.body).backgroundColor")
+            nums = [int(x) for x in bg[bg.index("(") + 1:bg.index(")")].split(",")[:3]]
+            dark = sum(nums) / 3 < 80
+            ok(dark == want_dark, f"스크립트 전 첫 화면({scheme}): 배경 {bg} → {'어두움' if dark else '밝음'}")
+        finally:
+            ctx.close()
+
+
+CASES = (type_tokens, shape_tokens, badges_chips, settings_groups, back_and_tabs, links_tokens, map_pins, pc_solo_names, small_targets, common_checks, boot_dark)
 
 
 def main():

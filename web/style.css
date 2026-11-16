@@ -27,6 +27,8 @@
 }
 /* 밝기 테마: 자동(휴대폰 설정 따름) · 밝게 · 어둡게 (설정 → 화면).
    어두운 토큰은 여기 한 벌뿐이다. core.js applyPrefs()가 '자동'을 휴대폰 설정으로 풀어 data-scheme에 적는다(설정이 바뀌면 따라감). */
+/* 스크립트가 data-scheme 을 적기 전(첫 '불러오는 중…' 화면)에만: 휴대폰이 어두운 설정이면 바탕·글자만 어둡게(밤에 밝게 번쩍이지 않게) */
+@media (prefers-color-scheme: dark) { :root:not([data-scheme]) { color-scheme: dark; --bg: #0f1419; --ink: #eef1f4; --muted: #a7b0ba; } }
 :root[data-scheme="dark"] { color-scheme: dark;
   --bg: #0f1419; --card: #1a2027; --ink: #eef1f4; --muted: #a7b0ba; --line: #2c343d; --line-strong: #3a444f;
   --brand: #3fcf8e; --brand-strong: #34b97d; --brand-ink: #0b1a13; --brand-soft: #143426; --brand-soft-ink: #8de8bb;

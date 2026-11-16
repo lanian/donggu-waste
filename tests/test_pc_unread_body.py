@@ -35,5 +35,23 @@ class UnreadBodyTests(SessionHTTPTestCase):
         self.assertEqual(lost, [], f"{self.ROUNDS}번 중 {len(lost)}번 403 응답을 읽기 전에 연결이 끊김")
 
 
+    def test_client_disconnect_is_not_logged_as_server_error(self):
+        """응답을 쓰는 중에 브라우저가 연결을 끊으면(다른 화면으로 이동 등) 서버 오류(500·추적 기록)로 남기지 않는다."""
+        import contextlib
+        import io
+        from unittest.mock import patch
+        from dgpc import server as SV
+
+        def gone(*_a, **_k):
+            raise ConnectionAbortedError(10053, "클라이언트가 연결을 끊음(시험)")
+
+        err = io.StringIO()
+        with patch.object(SV.Handler, "api", gone), contextlib.redirect_stderr(err), self.assertNoLogs(SV.LOG, level="ERROR"):
+            try:
+                self.raw_post("dongs/centers", b"{}", self.admin_cookie)
+            except (ConnectionError, OSError, http.client.HTTPException, ValueError):
+                pass  # 응답 없이 닫힘(정상)
+        self.assertNotIn("Traceback", err.getvalue(), "연결 끊김을 서버 오류 추적 기록으로 출력함")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

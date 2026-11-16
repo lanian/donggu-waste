@@ -656,6 +656,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(e)}, 403)
         except S.UserError as e:
             return self.send_json({"error": str(e)}, 400)
+        except CLIENT_GONE:  # 브라우저가 응답 전에 연결을 끊음(다른 화면으로 이동·요청 취소): 서버 오류가 아니고 보낼 곳도 없다
+            self.close_connection = True
+            return None
         except Exception:  # 오류 내용에 개인정보가 섞일 수 있어 화면에는 일반 문구만, 로그에는 전화·주소 모양 값을 가린 추적 기록
             tb = scrub(traceback.format_exc())
             LOG.error("오류 %s %s\n%s", method, path_template(self.path), tb)
@@ -2276,8 +2279,17 @@ def dt_now() -> str:
     return dt.datetime.now(S.KST).strftime("%Y-%m-%d %H:%M")
 
 
+# 클라이언트가 연결을 끊었을 때 나는 오류(서버 잘못 아님). 서버 오류(500·추적 기록)로 남기지 않는다.
+CLIENT_GONE = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], CLIENT_GONE):
+            return  # 응답을 쓰다가 브라우저가 떠남: 조용히 닫는다
+        super().handle_error(request, client_address)
     # 브라우저는 첫 화면에서 ES 모듈 수십 개를 동시에 연다. Windows는 listen 대기열(기본 5)이 차면 연결을 대기시키지 않고
     # 거부해(ERR_CONNECTION_REFUSED) 화면이 '불러오는 중'에 멈춘다(동시 연결 30개 중 25개 거부를 실측). 넉넉히 받는다.
     request_queue_size = 128

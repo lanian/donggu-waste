@@ -177,6 +177,7 @@ jobs:
           - test_mobile_ui_phase1
           - test_mobile_ui_phase2
           - test_mobile_ui_phase3
+          - test_mobile_ui_phase4
           - test_pc_table_sort
     steps:
       - uses: actions/checkout@v7
