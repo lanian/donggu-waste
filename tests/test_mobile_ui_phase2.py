@@ -417,12 +417,12 @@ def screen_reader(browser, url):
     ctx, page = open_mobile(browser, url)
     try:
         html = page.evaluate("() => fetch('index.html', { cache: 'no-store' }).then(r => r.text())")
-        ok('<div id="sr-polite" class="sr-only" aria-live="polite" aria-atomic="true"></div>' in html
-           and '<div id="sr-alert" class="sr-only" role="alert"></div>' in html, "index.html 에 항상 있는 #sr-polite·#sr-alert")
+        ok('<div id="sr-polite" class="toast-host" aria-live="polite" aria-atomic="true"></div>' in html
+           and '<div id="sr-alert" class="toast-host"></div>' in html, "index.html 에 항상 있는 알림 영역 #sr-polite(polite)·오류 토스트 자리 #sr-alert")
         ok("connect-src 'self' https://tiles.openfreemap.org https://business.juso.go.kr;" in html, "CSP 허용 서버는 그대로")
         layout = page.evaluate("""() => ['sr-polite', 'sr-alert'].map(id => { const e = document.getElementById(id), r = e.getBoundingClientRect();
             return { inApp: !!e.closest('#app'), w: r.width, h: r.height, pos: getComputedStyle(e).position }; })""")
-        ok(all(not x["inApp"] and x["w"] <= 1 and x["h"] <= 1 and x["pos"] == "absolute" for x in layout), f".sr-only: 화면 밖(1px), #app 밖 ({layout})")
+        ok(all(not x["inApp"] and x["w"] == 0 and x["h"] == 0 and x["pos"] == "fixed" for x in layout), f"알림 영역은 자리를 차지하지 않고 #app 밖 ({layout})")
 
         today = today_of(page)
         s1 = stop(1, today)
@@ -432,14 +432,16 @@ def screen_reader(browser, url):
         page.evaluate("async m => (await import('./core.js')).toast(m)", msg)
         page.wait_for_function("m => document.getElementById('sr-polite').textContent === m", arg=msg)
         role = page.locator(".toast").last.get_attribute("role")
-        ok(role is None, f"안내 토스트 글이 #sr-polite 에 같이 쓰임 (보이는 토스트는 role 없이 겹쳐 읽지 않음: {role})")
+        ok(role is None and page.locator("#sr-polite > .toast").count() == 1 and page.get_by_text(msg).count() == 1,
+           f"안내 토스트는 #sr-polite 안에 하나만(같은 글을 두 곳에 두지 않음, 토스트 자신은 role 없음: {role})")
         page.wait_for_timeout(4300)
         ok(page.locator(".toast", has_text="가상 안내 문구").count() == 1, f"안내 토스트는 글자 수만큼 오래 남음 (4.3초 뒤에도 보임, {len(msg)}자)")
         page.wait_for_timeout(1500 + len(msg) * 90 - 4300 + 500)
         ok(page.locator(".toast", has_text="가상 안내 문구").count() == 0, f"Math.max(4000, 1500 + {len(msg)}×90)ms 뒤 사라짐")
         page.evaluate("async () => (await import('./core.js')).toast('가상 오류 알림', 'bad')")
-        page.wait_for_function("() => document.getElementById('sr-alert').textContent === '가상 오류 알림'")
-        ok(True, "오류 토스트 글은 #sr-alert 에")
+        page.wait_for_function("() => document.querySelector('#sr-alert > .toast.bad')?.firstChild?.textContent === '가상 오류 알림'")
+        ok(page.locator("#sr-alert > .toast.bad").get_attribute("role") == "alert" and page.locator("#sr-alert").get_attribute("role") is None
+           and page.locator("#sr-alert .tx").get_attribute("aria-hidden") == "true", "오류 토스트는 자신이 role=alert(담는 자리는 role 없음, 겹쳐 읽지 않음), '닫기 ✕'는 읽지 않음")
         page.locator(".toast.bad").click()
 
         # 수량 + 를 Tab 으로 → Enter 두 번 → 다시 그린 뒤에도 같은 + 에 초점, 값 단추 이름에 새 숫자

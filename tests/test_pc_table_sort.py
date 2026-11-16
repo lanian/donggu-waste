@@ -260,11 +260,11 @@ def requests_ui(ctx, page, url):
     ok("1건 선택" in page.locator(".selbar").inner_text(), "다녀와도 선택 유지")
     page.get_by_role("button", name="선택 해제").click()
 
-    # 접속기록에 정렬 조건이 남지 않음
+    # 접속기록: 같은 쪽 번호라도 정렬에 따라 본 행이 달라지므로 정렬 조건(2차 포함)도 남긴다. 검색어 내용은 남기지 않는다.
     rows = api(ctx, url, "access?action=LIST&size=500")["rows"]
     lists = [r["filter"] for r in rows if (r["filter"] or "").startswith("전체")]
-    ok(lists and all("sort" not in f and "dir" not in f for f in lists) and any("page=2" in f for f in lists),
-       "접수 목록 접속기록: 건수·조건(쪽 번호 포함)만, 정렬 조건은 남기지 않음")
+    ok(lists and any("page=2" in f for f in lists) and any("sort=" in f for f in lists) and any("sort2=" in f for f in lists),
+       "접수 목록 접속기록: 건수·조건·쪽 번호와 정렬 조건(1·2차)을 남김")
 
 
 HELPER_JS = r"""async () => {

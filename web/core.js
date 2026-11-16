@@ -49,31 +49,21 @@ function tabBar(active) {
     h('a', { href, class: 't-' + k, 'aria-current': k === active ? 'page' : null }, t)));
 }
 const appLogo = (cls = 'logo') => h('img', { src: 'icons/icon.svg', alt: '', class: cls, width: 72, height: 72 });
-// 스크린리더 알림: index.html 에 처음부터 있는 영역(#sr-polite·#sr-alert)에 쓴다. 새로 붙인 role=status 요소는 TalkBack이 자주 놓친다.
-// 같은 글을 다시 알려도 읽히게 비운 뒤 다음 그리기에서 채우고, 읽힌 뒤(2초) 다시 비운다(화면을 훑을 때 지난 알림이 남아 읽히지 않게).
-const ANNOUNCE_CLEAR_MS = 2000;
-function announce(text, kind = '') {
-  const live = document.getElementById(kind === 'bad' ? 'sr-alert' : 'sr-polite');
-  if (!live) return;
-  const msg = String(text);
-  live.textContent = '';
-  requestAnimationFrame(() => {
-    live.textContent = msg;
-    setTimeout(() => { if (live.textContent === msg) live.textContent = ''; }, ANNOUNCE_CLEAR_MS);
-  });
-}
+// 알림 상자: 안내 토스트는 index.html 에 처음부터 있는 알림 영역(#sr-polite, polite) 안에 넣는다.
+// 새로 붙인 role=status 요소는 TalkBack이 자주 놓치지만, 이미 있던 영역에 더해진 글은 읽는다.
+// 오류 토스트는 자신이 role=alert(새로 붙어도 읽힘)이고 #sr-alert 는 담는 자리일 뿐이다. 같은 글을 따로 한 번 더 쓰지 않는다.
+const toastHost = (bad) => document.getElementById(bad ? 'sr-alert' : 'sr-polite') || document.body;
 // 알림: 안내는 글 길이만큼(최소 4초) 보이다 사라지고, 오류는 눌러서 닫을 때까지 남는다(장갑 낀 손으로 놓치지 않게).
-// 보이는 알림에는 role을 두지 않는다(알림 영역과 같은 글을 두 번 읽지 않게).
+// 안내 토스트 자신에는 role을 두지 않는다(감싼 알림 영역이 읽는다). 오류 토스트만 role=alert.
 const toastMs = (msg) => Math.max(4000, 1500 + String(msg).length * 90);
 const toast = (msg, kind = '') => {
   // 한 번에 하나만. 단, 안내 알림이 오류 알림을 덮지 않는다(오류는 눌러서 닫을 때까지)
   document.querySelectorAll(kind === 'bad' ? '.toast' : '.toast:not(.bad)').forEach((x) => x.remove());
   const bad = kind === 'bad';
-  const t = h('div', { class: 'toast ' + kind }, msg, bad ? h('span', { class: 'tx' }, '닫기 ✕') : null);
+  const t = h('div', { class: 'toast ' + kind, role: bad ? 'alert' : null }, msg, bad ? h('span', { class: 'tx', 'aria-hidden': 'true' }, '닫기 ✕') : null);
   if (bad) { t.tabIndex = 0; const close = () => t.remove(); t.addEventListener('click', close); t.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') close(); }); }
   else setTimeout(() => t.remove(), toastMs(msg));
-  document.body.append(t);
-  announce(msg, kind);
+  toastHost(bad).append(t);
 };
 // 화면 안 안내 글(.msg): 오류는 role=alert(빨강), 일반 안내는 role=status. 같은 칸에 진행 안내와 오류가 번갈아 나오는 곳에서 쓴다.
 function say(el, text, bad = false) {
@@ -756,7 +746,7 @@ const clearPhotoUrls = () => { photoUrls.forEach((u) => URL.revokeObjectURL(u));
 export {
   $app, BACKUP_WARN_MS, COLLECT_TTL_MS, END_OF_DAY_H, ERR, HANDOFF_MS, HIDDEN_LOCK_MS, LOCK_CHOICES,
   LOW_SPACE_MB, TEXT_SIZES, WIN_ID, addCrewEvent, addEvent, addrRoute, afterUnlock, ago,
-  allStops, announce, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
+  allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
   camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, dial, digits,
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,

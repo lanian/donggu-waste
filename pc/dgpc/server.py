@@ -258,7 +258,6 @@ class Route:
 ROUTES: list[Route] = []
 
 
-_SORT_ARGS = ("sort", "dir", "sort2", "dir2")  # 접수 목록 정렬 인자(접속기록 조건에서 뺀다)
 
 
 def endpoint(method: str, pattern: str, roles, lock: str | None = None, must_change_ok: bool = False, access=None):
@@ -1290,10 +1289,9 @@ class Handler(BaseHTTPRequestHandler):
         """변경 이력 조회."""
         return S.audit_page(self.c, qs)
 
-    # 접속기록에는 건수·거름 조건만 남긴다(내용 없음). 정렬 조건(sort·dir·sort2·dir2)은 남기지 않는다(쪽 번호·쪽 크기는 남김).
+    # 접속기록에는 건수·거름 조건만 남긴다(내용 없음). 정렬 조건도 남긴다: 같은 쪽 번호라도 정렬에 따라 본 행이 달라지기 때문(개인정보 아님).
     @endpoint("GET", "requests", ALL,
-              access=("LIST", lambda h, out, qs: ("", len(out["rows"]), f"전체 {out['total']}건 · " + PV.filter_summary(
-                  {k: v for k, v in qs.items() if k not in _SORT_ARGS}))))
+              access=("LIST", lambda h, out, qs: ("", len(out["rows"]), f"전체 {out['total']}건 · " + PV.filter_summary(qs))))
     def ep_requests(self, qs):
         """접수 검색(수거팀 계정: 자기 팀에 배정된 접수만)."""
         scope = S.crew_request_ids(self.c, self.crew_scope()) if self.crew_scope() is not None else None

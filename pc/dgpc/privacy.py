@@ -94,7 +94,7 @@ def record_access(con, action: str, target: str = "", count: int | None = None, 
 
 
 # 목록 조건 중 값이 개인정보일 수 있는 칸(검색어)은 값 대신 '있음'만 남긴다
-_FILTER_SAFE = ("date", "date_field", "date_from", "date_to", "status", "crew", "dong", "channel", "pay", "quick", "sort", "dir", "page", "size")
+_FILTER_SAFE = ("date", "date_field", "date_from", "date_to", "status", "crew", "dong", "channel", "pay", "quick", "sort", "dir", "sort2", "dir2", "page", "size")
 
 
 def filter_summary(f: dict) -> str:
