@@ -91,20 +91,22 @@ async function screenHome() {
   // 자주 쓰는 기능: 늘 같은 자리·같은 단추. 접수 등록(현장·전화)은 기기 등록 전에도 받아 둘 수 있다(PC로 보내는 것만 등록 뒤에)
   const sendTool = ob.toSend ? `결과 보내기 · 보낼 기록 ${ob.toSend}건` : ob.waiting ? `결과 보내기 · 확인 대기 ${ob.waiting}건` : '결과 보내기';
   const stale = (ob.toSend || ob.waiting) && past;
+  // 단독 방식과 같은 이름·같은 순서: [+ 접수 등록][날짜·접수 찾기][하차 기록][빠른 수수료 계산] (+ 지도를 켰으면 [지도])
+  const unloads = st.events.filter((e) => e.kind === 'UNLOAD').length;
   out.push(h('section', { class: 'actions home-tools', 'aria-label': '자주 쓰는 기능' },
-    h('h2', {}, '자주 쓰는 기능'), h('div', { class: 'grid2' },
+    h('h2', { class: 'section-label' }, '자주 쓰는 기능'), h('div', { class: 'grid2' },
       btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered }),
       btn(sendTool, () => go('#/export'), 'big' + (stale ? ' warn' : '')),
-      btn('+ 접수 등록 (현장·전화)', () => { ui.form = null; go('#/intake'); }, 'big intake-btn'), btn('날짜·접수 찾기', openFinder, 'big'),
-      btn('빠른 수수료 계산', () => go('#/calculator'), 'big'))));
+      btn('+ 접수 등록', () => { ui.form = null; go('#/intake'); }, 'big intake-btn'), btn('날짜·접수 찾기', openFinder, 'big'),
+      btn(unloads ? `하차 기록 (${unloads}회)` : '하차 기록', () => go('#/unload'), 'big'),
+      btn('빠른 수수료 계산', () => go('#/calculator'), 'big'),
+      st.mapEnabled ? btn('지도', () => go('#/map'), 'big') : null)));
   if (registered) out.push(setupCard());
   out.push(h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'));
-  const moreBtns = btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big');
   if (!today.length) {
     // 지금 할 일이 같은 [오늘 목록 받기]면 빈 상태에는 문구만 둔다(같은 단추를 세 번 보이지 않게)
     out.push(h('p', { class: 'empty' }, '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.'),
       next.key === 'scan' ? null : h('div', { class: 'empty-actions' }, btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered })));
-    out.push(moreBtns);
   } else {
     const active = stops.filter(({ s }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged);
     const remain = active.filter(({ s, d }) => !isStopDone(s, d));
@@ -152,7 +154,6 @@ async function screenHome() {
         btn('하차 기록', () => go('#/unload'), 'u-log', { 'aria-label': `${s.unload_after.label} 하차 기록` })) : null);
     const showTrips = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && !ui.reorder;
     out.push(h('ul', { class: 'stops route' }, ui.reorder && canReorder ? list.map(one) : routeItems(list, one, showTrips ? tripHeads(stops) : {})));
-    out.push(moreBtns);
   }
   if (later.length) out.push(h('section', { class: 'card' }, h('h2', {}, `다른 날 현장 접수 ${later.length}건`),
     h('p', { class: 'small' }, '결과 보내기 때 PC로 갑니다. PC가 그날 목록에 넣으면 여기서 사라집니다.'),

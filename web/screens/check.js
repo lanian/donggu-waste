@@ -4,7 +4,7 @@ import * as J from '../juso.js';
 import * as L from '../load.js';
 import * as NAV from '../nav.js';
 import * as S from '../store.js';
-import { ask, btn, camera, commit, go, h, handoff, isIOS, launchApp, render, sheet, st, tabBar, toast, wakeLock } from '../core.js';
+import { ask, backBtn, btn, camera, commit, go, h, handoff, isIOS, launchApp, render, sheet, st, tabBar, toast, wakeLock } from '../core.js';
 import { CHECKS, CHECK_SPOT, runningAsApp } from '../widgets.js';
 import { APP_VERSION } from '../app.js';
 
@@ -62,13 +62,13 @@ async function screenCheck() {
     catch { await sheet({ title: '점검 결과', text: '아래 내용을 길게 눌러 복사하세요.', body: h('pre', { class: 'check-pre' }, t), choices: [], cancel: '닫기' }); }
   }, 'primary big');
   return h('main', { class: 'with-tabs' },
-    h('header', { class: 'bar' }, btn('← 설정', () => go('#/settings'), 'ghost'), h('h1', { class: 'bar-title' }, '현장 점검')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '현장 점검')),
     h('section', { class: 'callout info' }, h('p', {}, '자동 시험으로는 확인할 수 없는 것을 이 휴대폰에서 눌러 보고 결과를 남깁니다. 결과에는 주민 정보가 들어가지 않습니다.'),
       h('p', { class: 'small' }, `진행 ${done}/${CHECKS.length}`)),
     h('section', { class: 'card' }, h('h2', {}, '이 휴대폰'), h('dl', {}, ...Object.entries(deviceInfo()).filter(([k]) => k !== 'standalone').flatMap(([k, v]) => [h('dt', {}, ({ os: '운영체제', browser: '브라우저', model: '모델', app: '앱 버전' })[k] || k), h('dd', {}, v || '-')]),
       ...autoBits.flatMap(([a, b]) => [h('dt', {}, a), h('dd', {}, b)]))),
     ...CHECKS.map(([k, t, how]) => h('section', { class: 'card check-item' + (R[k] && R[k].result ? ' r-' + R[k].result : '') },
-      h('h2', {}, t, R[k] && R[k].result ? h('span', { class: 'chip ' + (R[k].result === 'OK' ? 'ok' : R[k].result === 'FAIL' ? 'bad' : '') }, ({ OK: '된다', FAIL: '안 된다', NA: '해당 없음' })[R[k].result]) : null),
+      h('h2', {}, t, R[k] && R[k].result ? h('span', { class: 'badge ' + (R[k].result === 'OK' ? 'ok' : R[k].result === 'FAIL' ? 'bad' : 'neutral') }, ({ OK: '된다', FAIL: '안 된다', NA: '해당 없음' })[R[k].result]) : null),
       h('p', { class: 'small' }, how),
       tests[k] ? btn('시험', tests[k], 'big') : null,
       go3(k),

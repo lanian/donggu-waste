@@ -1,6 +1,6 @@
 // 날짜와 상태에 가려진 접수 찾기. 현재 휴대폰에 보관 중인 자료만 읽는다.
 import { deriveStop, matchText } from '../fees.js';
-import { allStops, appLogo, btn, go, h, isSolo, render, st, tabBar } from '../core.js';
+import { allStops, appLogo, backBtn, btn, go, h, isSolo, render, st, tabBar } from '../core.js';
 import { isStopDone, stopCard, stopHay } from './stoplist.js';
 
 const filtersByState = new WeakMap();
@@ -47,7 +47,7 @@ export function screenFind() {
   }).sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || a.s.seq - b.s.seq);
   const period = f.range === 'ALL' ? '전체 기간' : f.range === 'UNDATED' ? '예정일 없음' : f.day ? `예정일 ${f.day}` : '예정일을 선택하세요';
   view = h('main', { class: 'with-tabs' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), appLogo(), h('h1', { class: 'bar-title' }, '날짜·접수 찾기')),
+    h('header', { class: 'bar' }, backBtn('#/home'), appLogo(), h('h1', { class: 'bar-title' }, '날짜·접수 찾기')),
     h('section', { class: 'card' },
       h('p', { class: 'small', 'aria-label': '찾기 자료 범위' }, solo ? '이 휴대폰에 보관 중인 전체 접수입니다.' : '이 휴대폰의 받은 목록과 현장 접수에서 찾습니다. 받은 목록은 목록일, 현장 접수는 예정일 기준입니다. PC 전체 과거 내역은 PC에서 조회하세요.'),
       h('label', { class: 'fld' }, h('span', {}, '접수번호·이름·연락처·주소·품목'), q),

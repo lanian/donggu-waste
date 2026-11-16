@@ -4,7 +4,7 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
-import { addrRoute, allStops, ask, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, msgBox, outbox, render, say, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
+import { addrRoute, allStops, ask, backBtn, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, msgBox, outbox, render, say, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
 import { APP_VERSION } from '../app.js';
 import { closeCheckBox } from './stoplist.js';
 
@@ -154,7 +154,7 @@ async function screenExport() {
       const text = '반영이 확인된 목록과 기록을 이 휴대폰에서 지웁니다. 회수가 확인된 사진만 지우고, 나머지 사진은 남깁니다.';
       // 작성 중인 접수 초안은 조용히 지우지 않는다: 알리고, 초안까지 지운다는 단추를 따로 눌러야 정리한다.
       if (!(await (draft
-        ? ask(`${text} 작성 중인 접수 초안이 있습니다. 정리하면 이 초안도 지워집니다. 초안을 살리려면 [취소]를 누르고 목록의 [+ 접수 등록 (현장·전화)]에서 접수를 마치세요.`, '초안까지 지우고 정리', { danger: true })
+        ? ask(`${text} 작성 중인 접수 초안이 있습니다. 정리하면 이 초안도 지워집니다. 초안을 살리려면 [취소]를 누르고 목록의 [+ 접수 등록]에서 접수를 마치세요.`, '초안까지 지우고 정리', { danger: true })
         : ask(text, '정리하기')))) return;
       for (const p of allPhotos) if (recovered.has(p.photo_id)) {
         if (!unchanged()) return;
@@ -181,7 +181,7 @@ async function screenExport() {
     cleanup.classList.toggle('primary', !cleanup.disabled); cleanup.classList.toggle('big', !cleanup.disabled); cleanup.classList.toggle('ghost', cleanup.disabled);
     cleanupHint.textContent = unconfirmedResults().length ? '수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요.' : unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
       : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.'
-      : st.intakeDraft ? '작성 중인 접수 초안이 있습니다. 정리하면 초안도 지워지니, 먼저 목록의 [+ 접수 등록 (현장·전화)]에서 접수를 마치거나 확인창에서 초안까지 지울지 고르세요.' : '';
+      : st.intakeDraft ? '작성 중인 접수 초안이 있습니다. 정리하면 초안도 지워지니, 먼저 목록의 [+ 접수 등록]에서 접수를 마치거나 확인창에서 초안까지 지울지 고르세요.' : '';
     cleanupHint.hidden = !cleanupHint.textContent;
   };
   const watchCleanupRecovery = () => {
@@ -244,8 +244,10 @@ async function screenExport() {
   const cleanCard = stepCard(4, '정리', 'cleanup-card', cleanup, cleanupHint);
   // 결과 파일 단추(하단 고정)는 ① 단계일 때만 주 단추
   if (cur !== 0) { make.classList.remove('primary', 'huge'); make.classList.add('big'); }
+  // 결과 반영 코드 입력도 ② 단계일 때만 주 단추(하단 바의 주 단추와 한 화면에 둘이 보이지 않게)
+  if (cur !== 1) { confirm.classList.remove('primary', 'huge'); confirm.classList.add('big'); }
   view = h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '결과 보내기')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '결과 보내기')),
     closeCheckBox(),
     flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], cur),
     msg,  // 결과 파일을 만든 뒤 다음 단계(②)로 넘어가 ① 카드가 접혀도 안내가 보이게 카드 밖에 둔다

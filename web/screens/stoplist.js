@@ -45,6 +45,16 @@ function stopState(s, d) {
   return { label, progress, warn: review || unsaved, excluded, cancelled, review, unsaved, finished, loaded: unsaved ? loadedSummary(d.lines || []) : '' };
 }
 
+// 상태 뱃지 색: 진행(stopState.progress)·연락 결과 → .badge 종류(ok·warn·bad·field·neutral). 목록 카드·상세 머리 뱃지 공용.
+const PROGRESS_BADGE = { DONE: 'ok', STARTED: 'field', PARTIAL: 'warn', NOT_COLLECTED: 'warn', ON_HOLD: 'warn' };
+const CONTACT_BADGE = { REACHED: 'ok', NO_ANSWER: 'warn', CALLBACK: 'warn', WRONG_NUMBER: 'bad' };
+const stateBadge = (state) => (state.warn ? 'warn' : PROGRESS_BADGE[state.progress] || 'neutral');
+// 싣기 안내 칩: 2인·장비는 앞에 ⚠, 설명은 aria-label 에(title 만으로는 스크린리더·손가락이 못 읽음)
+const HAZARD = new Set(['TWO', 'EQUIP']);
+const loadChip = (t) => (HAZARD.has(t)
+  ? h('em', { class: `chip load ld-${t}`, role: 'img', 'aria-label': `주의 ${L.TAGS[t].label}: ${L.TAGS[t].hint}` }, `⚠ ${L.TAGS[t].label}`)
+  : h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label));
+
 // 오늘 진행 요약 띠: 완료/전체와 진행 막대 (0%여도 막대 바탕이 보이게)
 function daySummary(items) {
   const active = items.filter((x) => !x.s.removed && x.s.status !== 'CANCELLED');
@@ -55,7 +65,7 @@ function daySummary(items) {
     h('div', { class: 'sum-top', 'aria-hidden': 'true' }, h('span', {}, '오늘 진행'), h('span', { class: 'sum-pct' }, `${n ? Math.round((done / n) * 100) : 0}%`)),
     h('div', { class: 'sum-main' }, h('b', {}, done), h('span', {}, ` / ${n}곳 완료`)),
     h('div', { class: 'progress track', role: 'progressbar', 'aria-label': `완료 ${done}/${n}`, 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done }, h('div', { class: 'fill', style: `width:${n ? (done / n) * 100 : 0}%` })),
-    h('div', { class: 'sum-sub' }, pend ? h('span', { class: 'chip warn' }, `금액 확인 대기 ${pend}`) : null));
+    h('div', { class: 'sum-sub' }, pend ? h('span', { class: 'badge warn' }, `금액 확인 대기 ${pend}`) : null));
 }
 // 지금 할 일이 다음 지점이면 큰 단추 아래 [N번 길안내][N번 전화]. 위치가 없으면 길안내를, 연락처가 없거나 정리됐으면 전화를 끈다.
 function nextQuick(s) {
@@ -115,7 +125,7 @@ const filterDong = (list) => (ui.dong ? list.filter((x) => dongOf(x.s) === ui.do
 // 방문 카드 한 장 (PC 목록·단독 목록 공용). 개인정보를 지운 곳은 접수번호만 보인다.
 function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
   const purged = !!s.pii_purged;
-  const { label: state, progress, warn, excluded, finished, loaded } = stopState(s, d);
+  const ss = stopState(s, d), { label: state, progress, excluded, finished, loaded } = ss;
   const lines = d.lines || s.items;
   const remaining = new Map();
   for (const line of lines) {
@@ -132,7 +142,7 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
     h('span', { class: 'seq' }, s.seq, isNow ? h('small', { class: 'now-tag' }, '지금') : null),
     h('span', { class: 'body' },
       h('span', { class: 'stop-heading' }, h('strong', {}, purged ? '개인정보 정리됨' : s.name),
-        h('em', { class: 'chip state stop-state ' + (warn ? 'warn' : 'p-' + progress) }, state)),
+        h('em', { class: `badge stop-state ${stateBadge(ss)}` }, state)),
       loaded ? h('span', { class: 'stop-loaded' }, loaded) : null,
       h('span', { class: 'stop-meta' }, h('span', { class: 'receipt' }, s.receipt_no ? `접수 ${s.receipt_no}` : '접수번호 없음'),
         s.eta ? h('span', { class: 'eta' }, `예정 ${s.eta}`) : null),
@@ -140,15 +150,16 @@ function stopCard(s, d, { nowId = null, solo = false, showDate = false } = {}) {
       h('span', { class: 'items' }, lines.map((i) => `${i.name} ${i.spec || ''} ${i.qty_confirmed ?? i.qty}${i.unit_label || ''}`.trim()).join(', ')),
       !excluded && !finished ? h('span', { class: 'stop-quantity' + (d.outcome === 'PARTIAL' || s.revisit ? ' warn' : '') }, `남음 ${left}`) : null,
       h('span', { class: 'chips' },
-        ...changes.map((c) => h('em', { class: 'chip new' }, F.DIFF_LABEL[c] || c)),
+        // 상태(.badge): 바뀐 곳·재방문·취소 요청·연락 결과·금액 확인 대기 / 속성(.chip): 날짜·동·싣기 안내·접수 경로
+        ...changes.map((c) => h('em', { class: 'badge field new' }, F.DIFF_LABEL[c] || c)),
+        !solo && s.revisit ? h('em', { class: 'badge warn' }, '재방문') : null,
+        !solo && cancelAsked(s.request_id) ? h('em', { class: 'badge warn' }, '취소 요청') : null,
+        h('em', { class: `badge c-${d.contact} ${CONTACT_BADGE[d.contact] || 'neutral'}` }, LABEL.contact[d.contact]),
+        d.fee.pendingCount ? h('em', { class: 'badge warn' }, '금액 확인 대기') : null,
         showDate ? h('em', { class: 'chip' }, s.planned_date) : null,
         !purged && dongOf(s) ? h('em', { class: 'chip dong' }, dongOf(s)) : null,
-        ...(excluded || finished ? [] : L.tagsOf(lines.map((line) => ({ ...line, qty: line.qty_confirmed ?? line.qty }))).map((t) => h('em', { class: `chip load ld-${t}`, title: L.TAGS[t].hint }, L.TAGS[t].label))),
-        !solo && s.revisit ? h('em', { class: 'chip warn' }, '재방문') : null,
-        !solo && s.field ? h('em', { class: 'chip new' }, `${s.channel || '현장'} 접수`) : null,
-        !solo && cancelAsked(s.request_id) ? h('em', { class: 'chip warn' }, '취소 요청') : null,
-        h('em', { class: 'chip c-' + d.contact }, LABEL.contact[d.contact]),
-        d.fee.pendingCount ? h('em', { class: 'chip warn' }, '금액 확인 대기') : null)));
+        ...(excluded || finished ? [] : L.tagsOf(lines.map((line) => ({ ...line, qty: line.qty_confirmed ?? line.qty }))).map(loadChip)),
+        !solo && s.field ? h('em', { class: 'chip field-intake' }, `${s.channel || '현장'} 접수`) : null)));
 }
 // 노선 시간표: 동이 바뀌는 곳에 동 이름 머리글
 function routeItems(list, renderOne, heads = {}) {
@@ -184,7 +195,8 @@ function tripHeads(stops) {
 // 개인폰은 작업자를 고르지 않고 현재 이름만 확인한다. 변경은 설정에서 한다.
 function workerBar() {
   const name = workerName();
-  return name ? h('p', { class: 'small', role: 'group', 'aria-label': '현재 작업자' }, '작업자 ', h('strong', {}, name), ' · ', h('a', { href: '#/settings' }, '이름 변경')) : null;
+  return name ? h('p', { class: 'small worker-bar', role: 'group', 'aria-label': '현재 작업자' }, '작업자 ', h('strong', {}, name),
+    btn('이름 변경', () => go('#/settings'), 'ghost worker-change')) : null;
 }
 const kstHour = () => Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', hour12: false }).format(new Date()));
 async function batteryInfo() {
@@ -312,6 +324,6 @@ function closeCheckBox() {
 }
 
 export {
-  batteryInfo, closeCheck, closeCheckBox, daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextQuick, nextToVisit, routeItems,
+  CONTACT_BADGE, HAZARD, PROGRESS_BADGE, batteryInfo, loadChip, stateBadge, closeCheck, closeCheckBox, daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextQuick, nextToVisit, routeItems,
   setupCard, setupSteps, stopCard, stopHay, stopSearch, stopState, tripHeads, workerBar,
 };

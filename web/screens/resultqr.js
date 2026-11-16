@@ -1,7 +1,7 @@
 // 휴대폰 화면: 결과 QR 표시
 import * as M from '../map.js';
 import qrcode from '../vendor/qrcode.mjs';
-import { btn, flowSteps, footBar, go, h, ui } from '../core.js';
+import { backBtn, btn, flowSteps, footBar, go, h, ui } from '../core.js';
 
 function drawQr(canvas, text, mode = 'Alphanumeric') {
   const q = qrcode(0, 'M');
@@ -24,7 +24,7 @@ function screenResultQr() {
   const show = () => { if (!canvas.isConnected) return clearTimeout(timer); drawQr(canvas, r.frames[i]); count.textContent = `${i + 1} / ${r.frames.length}`; i = (i + 1) % r.frames.length; timer = setTimeout(show, 1000 / fps); };
   setTimeout(show, 0);
   return h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 결과 보내기', () => { clearTimeout(timer); ui.resultQr = null; go('#/export'); }, 'ghost'), h('h1', { class: 'bar-title' }, '결과 QR')),
+    h('header', { class: 'bar' }, backBtn('#/export', { onClick: () => { clearTimeout(timer); ui.resultQr = null; go('#/export'); } }), h('h1', { class: 'bar-title' }, '결과 QR')),
     flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], 0),
     h('section', { class: 'card center-card' },
       h('p', {}, 'PC [결과 가져오기] → [웹캠으로 읽기]를 누르고 이 화면을 웹캠에 비추세요. 화면 밝기를 최대로 하면 잘 읽힙니다.'),

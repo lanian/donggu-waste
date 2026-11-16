@@ -10,9 +10,9 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, msgBox, render, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, backBtn, backName, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, msgBox, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, ro, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
-import { nextToVisit, stopState } from './stoplist.js';
+import { loadChip, nextToVisit, stateBadge, stopState } from './stoplist.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
 const collectionWrites = new WeakMap();
@@ -183,7 +183,7 @@ async function screenPcInputHelp(id) {
       ...rows.map((line, i) => h('article', { class: 'card pc-help-item' },
         h('h3', {}, `${i + 1}. ${line.name}`),
         h('p', { class: 'small pc-help-spec' }, `규격 ${line.spec || '미지정'} · 단위 ${line.unit_label}`),
-        line.kind === 'FIELD' ? h('p', { class: 'chip new pc-help-field' }, '현장 추가 · PC 품목 확인') : null,
+        line.kind === 'FIELD' ? h('p', { class: 'badge field pc-help-field' }, '현장 추가 · PC 품목 확인') : null,
         h('strong', { class: 'pc-help-quantity' + (!line.added ? ' zero' : '') }, `${addedLabel} ${line.added}${line.unit_label}`),
         h('p', { class: 'small pc-help-compare' }, h('span', {}, `이전 수거 ${line.previous}${line.unit_label}`),
           h('span', {}, `목표 누적 ${line.qty_collected}${line.unit_label}`), h('span', {}, `남음 ${line.remaining}${line.unit_label}`)),
@@ -361,7 +361,7 @@ function loadGuide(items) {
   const l = L.loadOf(items);
   if (!l.tags.length && l.m3 < 1) return null;
   return h('div', { class: 'load-guide' }, h('p', {}, h('strong', {}, '싣기'), ` 약 ${l.m3}m³ · ${l.kg.toLocaleString()}kg (추정)`),
-    l.tags.length ? h('ul', {}, ...l.tags.map((t) => h('li', {}, h('em', { class: `chip load ld-${t}` }, L.TAGS[t].label), ' ', L.TAGS[t].hint))) : null);
+    l.tags.length ? h('ul', {}, ...l.tags.map((t) => h('li', {}, loadChip(t), ' ', L.TAGS[t].hint))) : null);
 }
 async function screenStop(id) {
   const stop = findStop(id);
@@ -459,7 +459,7 @@ async function screenStop(id) {
   const stickerRow = (l) => {
     const sk = d.stickers[l.line_id];
     return h('div', { class: 'chk', 'data-line': l.line_id },
-      h('span', { class: 'chk-label' }, `스티커·필증 · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
+      h('span', { class: 'section-label chk-label' }, `스티커·필증 · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
       h('div', { class: 'chk-opts', role: 'group', 'aria-label': `${l.name} 스티커·신고필증` },
         ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k, 'data-fk': `${l.line_id}:sticker:${k}` }))),
       sk ? h('p', { class: 'sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''}${sk.result !== 'OK' ? ` → ${sk.decision === 'LEAVE' ? '미수거 결정' : sk.decision === 'COLLECT' ? '수거 결정' : '결정 전'}` : ''} · 이번 실은 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`) : null,
@@ -490,7 +490,7 @@ async function screenStop(id) {
     h('p', { class: 'sticker-summary' }, `스티커·필증: 확인 ${stickerCounts.ok} · 문제 ${stickerCounts.problem} · 미확인 ${stickerCounts.unchecked}`),
     ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
       h('div', { class: 'lhead' },
-        h('div', { class: 'lname' }, h('em', { class: 'tag' }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
+        h('div', { class: 'lname' }, h('em', { class: 'badge ' + (l.kind === 'FIELD' ? 'field' : 'neutral') }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
         l.price == null ? h('span', { class: 'amt pending' }, '확인 대기') : h('span', { class: 'amt', 'aria-label': `금액 ${won(l.price * l.qty_confirmed)}` }, won(l.price * l.qty_confirmed))),
       h('div', { class: 'price' }, l.price == null ? '금액 확인 대기' : `${won(l.price)} / ${l.unit_label} × ${l.qty_confirmed}`),
       ...quantityRows(l),
@@ -673,7 +673,7 @@ async function screenStop(id) {
   // 저장한 결과가 지금 기록과 맞으면 결과 단추 4개를 선택형으로 그린다: 저장된 것만 ✓ + 선택 모양(aria-pressed), 큰 주 단추 없음.
   // ✓는 읽지 않게(aria-hidden) 해서 단추 이름은 그대로 두고, 선택 여부는 aria-pressed로 알린다.
   const chosen = d.outcome && resultConfirmed ? d.outcome : null;
-  const choiceLabel = (k, text) => (chosen === k ? [h('span', { 'aria-hidden': 'true' }, '✓ '), text] : text);
+  const choiceLabel = (k, text) => (chosen === k ? [h('span', { class: 'sel-mark', 'aria-hidden': 'true' }, '✓ '), text] : text);
   const outcome = h('section', { class: 'card' }, h('h2', { id: 'st-result-title', tabindex: '-1' }, '수거 결과', d.outcome ? h('span', { class: 'hint ' + (chosen ? 'ok' : 'warn') },
     (resultUnsaved ? ' — 저장 대기: ' : d.resultNeedsConfirmation ? ' — 결과 재확인 필요: ' : ' — 저장됨: ') + LABEL.outcome[d.outcome]) : null),
     d.resultNeedsConfirmation ? h('p', { class: 'callout warn', role: 'status' }, '수량이나 품목이 바뀌었습니다. 실제 수거 결과를 다시 선택해 저장하세요.') : null,
@@ -740,14 +740,14 @@ async function screenStop(id) {
   const saved = resultConfirmed && (d.outcome || stop.status === 'CANCELLED');
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
-    btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': '목록으로' }),
+    btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))} 돌아가기` }),
     saved && next ? btn(`${next.seq}번 전화`, () => dial(next), 'dock-call', { disabled: !!next.pii_purged || !next.phone })
       : btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
     saved ? (next ? navBtn(`${next.seq}번 길안내`, next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
       : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
-      ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
+      ? btn(next ? `다음 ${next.seq}번 ▶` : `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))}`, () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
       : btn(d.resultNeedsConfirmation ? '수거 결과 재확인 ↓' : '수거 결과 선택 ↓', () => goSection('st-result'), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 스크롤한 뒤 그 구역 제목에 초점(스크린리더·키보드가 따라가게), 끝난 단계는 ✓
   const goSection = (sid) => {
@@ -768,8 +768,8 @@ async function screenStop(id) {
   // 머리 칩: 저장 대기·재확인은 그대로, 그 밖은 목록과 같은 판정(stopState) — 결과 없이 수량만 넣었으면 '결과 미저장'(경고색)과 실은 양
   const state = stopState(stop, d);
   const headChip = resultUnsaved || d.resultNeedsConfirmation
-    ? h('span', { class: 'chip state p-STARTED' }, resultUnsaved ? '저장 대기' : '결과 재확인 필요')
-    : h('span', { class: 'chip state ' + (state.warn ? 'warn' : 'p-' + state.progress) }, state.label, state.loaded ? h('small', { class: 'chip-sub' }, state.loaded) : null);
+    ? h('span', { class: 'badge state field' }, resultUnsaved ? '저장 대기' : '결과 재확인 필요')
+    : h('span', { class: `badge state ${stateBadge(state)}` }, state.label, state.loaded ? h('small', { class: 'badge-sub' }, state.loaded) : null);
   // 결과 저장 띠(5초): 이 창·이 화면에서 방금 저장한 결과만. 저장 대기·저장 중에는 띄우지 않는다.
   const bandLeft = savedBand && savedBand.source === source && savedBand.id === id && savedBand.route === route && !resultUnsaved ? savedBand.until - Date.now() : 0;
   if (savedBand && savedBand.id === id && savedBand.until <= Date.now()) savedBand = null;
@@ -786,7 +786,7 @@ async function screenStop(id) {
     h('span', { class: 'photo-then-text' }, '사진 저장됨 —'),
     btn(`${LABEL.outcome[then.outcome]}로 저장`, () => runCollection(() => saveOutcome(then.outcome))(), 'photo-then-save')) : null;
   view = h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go(ui.stopBackTo || '#/home'), 'ghost'), h('h1', { class: 'bar-title' }, `${stop.seq}번`), headChip),
+    h('header', { class: 'bar' }, backBtn(ui.stopBackTo || '#/home'), h('h1', { class: 'bar-title' }, `${stop.seq}번`), headChip),
     stepNav, info, contact, lines, photos, outcome, fee, memo, manage, band, photoThen, dock);
   if (pendingSave || busySave) lines.querySelectorAll('button,input,select,textarea').forEach((element) => { element.disabled = true; });
   if (activeWrite) activeWrite.promise.then(() => { if (current()) render(); }, () => { if (current()) render(); });

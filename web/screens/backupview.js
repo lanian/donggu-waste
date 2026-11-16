@@ -2,7 +2,7 @@
 import * as B from '../backup.js';
 import * as F from '../field.js';
 import * as S from '../store.js';
-import { ERR, ago, ask, btn, commit, emptyState, errMsg, flowSteps, footBar, go, h, isSolo, msgBox, pcStops, say, setSt, settleWrites, st, toast, todayKST, ui } from '../core.js';
+import { ago, ask, backBtn, btn, commit, emptyState, ERR, errMsg, flowSteps, footBar, go, h, isSolo, msgBox, pcStops, say, setSt, settleWrites, st, toast, todayKST, ui } from '../core.js';
 import { APP_VERSION } from '../app.js';
 import { closeCheckBox } from './stoplist.js';
 
@@ -71,7 +71,7 @@ async function screenBackup() {
 
   pw1.addEventListener('input', () => { if (pw1.value.length >= 8) flow.replaceWith(flow = flowSteps(BSTEPS, 1)); });
   return h('main', { class: 'with-dock' },
-    h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '백업·복원')),
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '백업·복원')),
     isSolo() ? closeCheckBox() : null,  // 단독 방식의 하루 마감(백업) 화면에도 해당하는 마감 점검
     flow,
     isSolo() ? null : h('section', { class: 'card callout info' }, h('h2', {}, 'PC 연결 방식의 안전용 백업'),

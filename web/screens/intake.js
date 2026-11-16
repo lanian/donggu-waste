@@ -4,7 +4,7 @@ import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
 import { isUnlocked } from '../store.js';
-import { addEvent, addrRoute, allStops, btn, commit, digits, dongOf, errMsg, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, say, st, stepFlush, stepper, toast, todayKST, ui, withWorker } from '../core.js';
+import { addEvent, addrRoute, allStops, backBtn, btn, commit, digits, dongOf, errMsg, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, say, st, stepFlush, stepper, toast, todayKST, ui, withWorker } from '../core.js';
 import { pickScreen } from '../widgets.js';
 
 // PC 연결 방식 휴대폰에서 받는 접수의 경로(PC 접수 경로와 같은 이름)
@@ -26,7 +26,7 @@ function pendingIntakeScreen(state, operation) {
     ui.form = operation.form;
     if (location.hash === operation.hash) render(); else go(operation.hash);
   }, 'primary huge');
-  const view = h('main', {}, h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '접수 저장 확인')),
+  const view = h('main', {}, h('header', { class: 'bar' }, backBtn('#/home'), h('h1', { class: 'bar-title' }, '접수 저장 확인')),
     h('section', { class: 'card' }, h('h2', {}, '저장하던 접수가 있습니다'), message, resume));
   const sync = () => {
     if (st !== state || !isUnlocked()) return;
@@ -138,7 +138,7 @@ function screenIntake(id) {
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
       h('div', { class: 'lhead' }, h('div', { class: 'lname' }, h('strong', {}, `${it.name} ${it.spec}`)),
         it.price_status === 'CONFIRMED' ? h('span', { class: 'amt' }, won(it.unit_price * it.qty)) : h('span', { class: 'amt pending' }, '확인 대기')),
-      locked.has(it.line_id) ? h('em', { class: 'tag' }, '현장 기록 있음') : null,
+      locked.has(it.line_id) ? h('em', { class: 'badge neutral' }, '현장 기록 있음') : null,
       h('div', { class: 'price' }, it.price_status === 'CONFIRMED' ? `${won(it.unit_price)} / ${it.unit_label}` : it.unit_price != null ? `금액 확인 대기 (원문 ${won(it.unit_price)} / ${it.unit_label})` : '금액 확인 대기'),
       h('div', { class: 'row' }, h('span', {}, '수량'), locked.has(it.line_id) ? h('span', { class: 'val' }, it.qty) :
         stepper(it.qty, (n) => { if (!currentView() || intakeOperations.has(ownerState)) return; it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1, 9999, 0, `${it.name} 접수 수량`, { editable: true, unit: it.unit_label })),
@@ -289,7 +289,7 @@ function screenIntake(id) {
     !editing && st.intakeDraft ? h('p', { class: 'small' }, '작성 중이던 내용을 불러왔습니다. ',
       btn('지우고 새로 쓰기', async () => { draft?.cancel(); if (!currentForm()) return; ownerState.intakeDraft = null; await commit(); if (!currentForm()) return; ui.form = null; render(); }, 'ghost')) : null,
     h('section', { class: 'card' },
-      onField ? h('div', {}, h('div', { class: 'fld-label' }, '접수 경로'),
+      onField ? h('div', {}, h('div', { class: 'section-label' }, '접수 경로'),
         h('div', { class: 'grid3', role: 'group', 'aria-label': '접수 경로' }, ...FIELD_CHANNELS.map((c) =>
           btn(c, () => { f.channel = c; saveDraft(); render(); }, f.channel === c ? 'opt on' : 'opt', { 'aria-pressed': f.channel === c ? 'true' : 'false' })))) : null,
       field('name', '이름', { autocomplete: 'off' }),
@@ -315,7 +315,7 @@ function screenIntake(id) {
       field('memo', '요청 메모', { multiline: true }),
       h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
     h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox,
-      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'primary big')),
+      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'big')),  // 주 단추는 아래 [접수 저장] 하나
     editing && !fieldEdit ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
   const operation = intakeOperations.get(ownerState);
@@ -328,7 +328,7 @@ const knownDongs = () => [...new Set([...(st.recentDongs || []), ...allStops().m
 // ------------------------------------------------------------ 주소 검색 (행정안전부 도로명주소 API, juso.js)
 // manual: 검색을 쓸 수 없을 때 대신 할 일(접수 화면은 주소 직접 적기, 위치 지정 화면은 지도·내 위치)
 function addrSearch({ onPick, forbid = () => [], manual = '주소를 직접 적어 주세요.', officeNote = true }) {
-  const box = h('div', { class: 'addr-search' }, h('div', { class: 'fld-label' }, '주소 검색'));
+  const box = h('div', { class: 'addr-search' }, h('div', { class: 'section-label' }, '주소 검색'));
   if (addrRoute() === 'pc') {
     // 현장 화면에는 PC·관리자 설명을 두지 않는다(검색 경로·승인키 안내는 설정의 주소 검색 칸에만)
     box.append(h('p', { class: 'small addr-status' }, manual + (officeNote ? ' 정확한 위치는 사무실이 PC에서 정합니다.' : '')));

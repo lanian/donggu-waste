@@ -41,8 +41,8 @@ def main():
             dates = seed(page)
             today = dates['today']
             record = stop(1, today)
-            pc_names = ['오늘 목록 받기', '결과 보내기', '+ 접수 등록 (현장·전화)', '날짜·접수 찾기', '빠른 수수료 계산']
-            solo_names = ['+ 전화 접수 등록', '날짜·접수 찾기', '빠른 수수료 계산', '백업·복원', '하차 기록']
+            pc_names = ['오늘 목록 받기', '결과 보내기', '+ 접수 등록', '날짜·접수 찾기', '하차 기록', '빠른 수수료 계산']  # 4단계: 하차 기록도 도구 묶음 안
+            solo_names = ['+ 접수 등록', '날짜·접수 찾기', '하차 기록', '빠른 수수료 계산', '백업·복원']  # 4단계: PC와 같은 이름·순서
             assert_tools(page, pc_names)
             for width in (360, 390, 430):
                 page.set_viewport_size({'width': width, 'height': 844})
@@ -63,14 +63,16 @@ def main():
             page.get_by_role('region', name='자주 쓰는 기능', exact=True).get_by_role('button', name='날짜·접수 찾기', exact=True).click()
             expect(page.get_by_role('heading', name='날짜·접수 찾기', exact=True)).to_be_visible()
             page.goto(url + '#/home')
-            page.get_by_role('region', name='자주 쓰는 기능', exact=True).get_by_role('button', name='+ 접수 등록 (현장·전화)', exact=True).click()
+            page.get_by_role('region', name='자주 쓰는 기능', exact=True).get_by_role('button', name='+ 접수 등록', exact=True).click()
             expect(page).to_have_url(url + '#/intake')
             page.goto(url + '#/settings')
             toggle = page.get_by_role('switch', name='자동 잠금', exact=True)
             expect(toggle).to_be_visible()
-            headings = page.locator('main > section.card > h2').all_text_contents()
-            assert headings[:3] == ['화면', '잠금', '작업자'], headings
-            assert headings.index('작업자') < headings.index('도움말') < headings.index('현장 기록'), headings
+            # 4단계 설정 묶음: 도움말·점검 / 화면 / 나와 이 휴대폰(작업자·잠금·길안내 앱) / 기록 지키기 / 관리자 설정(접힘) / 앱 정보
+            groups = page.locator('main .set-group .group-title').all_text_contents()
+            assert groups == ['도움말·점검', '화면', '나와 이 휴대폰', '기록 지키기', '관리자 설정', '앱 정보'], groups
+            mine = page.locator('main .set-group.me > .card > h3').all_text_contents()
+            assert mine[:3] == ['작업자', '잠금', '길안내 앱'], mine
             page.get_by_label('작업자 이름', exact=True).fill('가상 임시수정')
             toggle.click()
             expect(toggle).not_to_be_checked()

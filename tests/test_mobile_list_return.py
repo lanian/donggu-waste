@@ -34,7 +34,8 @@ def enter(page, number=15):
     card.click()
     expect(page).to_have_url(re.compile(f'#/stop/workflow-{number}$'))
     expect(page.get_by_role('heading', name=f'{number}번', exact=True)).to_be_visible()
-    expect(page.get_by_role('button', name='← 목록', exact=True)).to_be_visible()
+    # 4단계: 뒤로 단추 이름은 목적지에서(목록에서 열면 ← 목록, 찾기에서 열면 ← 찾기)
+    expect(page.locator('main > .bar .back-btn')).to_have_text(re.compile(r'^← (목록|찾기)$'))
     return before
 
 
@@ -114,7 +115,7 @@ def main():
                     route = prepare(page, mode, finder)
                     before_state = page.evaluate("import('./core.js').then(C=>JSON.stringify([C.st.requests,C.st.daylist,C.st.events]))")
                     before = enter(page)
-                    page.get_by_role('button', name='← 목록', exact=True).click()
+                    page.get_by_role('button', name='← 찾기' if finder else '← 목록', exact=True).click()
                     restored(page, route, before)
                     before = enter(page)
                     page.locator('.dock-back').click()
@@ -135,7 +136,7 @@ def main():
                 expect(page.get_by_role('button', name='PC 입력 도움', exact=True)).to_be_focused()
                 page.locator('.dock-next').click()
                 expect(page).to_have_url(url + '#/stop/workflow-16')
-                page.get_by_role('button', name='← 목록', exact=True).click()
+                page.get_by_role('button', name='← 찾기', exact=True).click()
                 restored(page, route, before)
                 expect(page.get_by_label('찾을 접수', exact=True)).to_have_value('가상')
 
@@ -190,7 +191,7 @@ def main():
             # 검색 조건 초기화·새 조회에서 이전 상세의 카드 초점을 되살리지 않는다.
             prepare(page, 'SOLO', True)
             enter(page)
-            page.get_by_role('button', name='← 목록', exact=True).click()
+            page.get_by_role('button', name='← 찾기', exact=True).click()
             page.get_by_role('button', name='조건 지우기', exact=True).click()
             expect(page.locator('.stops .stop:focus')).to_have_count(0)
             prepare(page, 'SOLO', True)

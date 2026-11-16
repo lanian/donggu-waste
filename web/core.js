@@ -42,12 +42,25 @@ function h(tag, attrs = {}, ...kids) {
 const btn = (label, onclick, cls = '', extra = {}) => h('button', { class: 'btn ' + cls, onclick, type: 'button', ...(/\b(opt|tab)\b/.test(cls) ? { 'aria-pressed': /\bon\b/.test(cls) ? 'true' : 'false' } : {}), ...extra }, label);
 const fmtPhone = (p) => p.length === 11 ? `${p.slice(0, 3)}-${p.slice(3, 7)}-${p.slice(7)}` : p;
 const go = (hash) => { location.hash = hash; };
-// 아래 탭 막대: 맨 위 단계 화면(목록·지도·설정)끼리 바로 옮겨 다닌다. 다른 화면은 위 [← 목록]으로 돌아온다.
+// 아래 탭 막대 세 칸: [목록 · 보내기(PC 연결)/백업(단독) · 설정]. 보내기 칸에는 보낼 기록 수(0이면 없음),
+// 단독 백업 칸에는 백업 경고(마지막 백업 뒤 하루가 지남) 때 점을 단다. 지도는 목록의 자주 쓰는 기능에서 연다.
+const needBackup = () => !!(st && st.requests.length && (!st.lastBackupAt || Date.now() - Date.parse(st.lastBackupAt) > BACKUP_WARN_MS));
 function tabBar(active) {
-  const tabs = [['list', '#/home', '목록'], ...(st && st.mapEnabled ? [['map', '#/map', '지도']] : []), ['set', '#/settings', '설정·정보']];
-  return h('nav', { class: 'tabbar', 'aria-label': '주 메뉴' }, ...tabs.map(([k, href, t]) =>
-    h('a', { href, class: 't-' + k, 'aria-current': k === active ? 'page' : null }, t)));
+  const solo = st && st.mode === 'SOLO';
+  const toSend = st && !solo ? outbox().toSend : 0, warnBackup = solo && needBackup();
+  const mid = solo ? ['backup', '#/backup', '백업', warnBackup ? '백업, 백업 필요' : null, warnBackup ? h('span', { class: 'tab-dot', 'aria-hidden': 'true' }) : null]
+    : ['send', '#/export', '보내기', toSend ? `보내기, 보낼 기록 ${toSend}건` : null, toSend ? h('span', { class: 'tab-badge', 'aria-hidden': 'true' }, String(toSend)) : null];
+  const tabs = [['list', '#/home', '목록'], mid, ['set', '#/settings', '설정']];
+  return h('nav', { class: 'tabbar', 'aria-label': '주 메뉴' }, ...tabs.map(([k, href, t, name, mark]) =>
+    h('a', { href, class: 't-' + k, 'aria-current': k === active ? 'page' : null, 'aria-label': name || null }, t, mark || null)));
 }
+// 뒤로 단추 하나: 이름은 목적지에서 정한다(← 목록 · ← 찾기 · ← 설정 · ← 접수 · ← 결과 보내기). 설정에서 연 화면은 설정으로 돌아간다.
+const BACK_NAMES = { '#/home': '목록', '#/find': '찾기', '#/settings': '설정', '#/export': '결과 보내기', '#/backup': '백업', '#/unload': '하차 기록' };
+const backName = (to) => (String(to).startsWith('#/stop/') ? '접수' : BACK_NAMES[to] || '목록');
+// 받침이 있으면 '으로'(ㄹ 받침은 '로'): 목록으로 · 찾기로 · 설정으로 · 접수로
+const ro = (word) => { const c = word.charCodeAt(word.length - 1) - 0xac00; return c >= 0 && c <= 11171 && c % 28 && c % 28 !== 8 ? '으로' : '로'; };
+const backTo = () => ui.backTo || '#/home';
+const backBtn = (to = backTo(), { onClick = null } = {}) => btn('← ' + backName(to), onClick || (() => go(to)), 'ghost back-btn');
 const appLogo = (cls = 'logo') => h('img', { src: 'icons/icon.svg', alt: '', class: cls, width: 72, height: 72 });
 // 알림 상자: 안내 토스트는 index.html 에 처음부터 있는 알림 영역(#sr-polite, polite) 안에 넣는다.
 // 새로 붙인 role=status 요소는 TalkBack이 자주 놓치지만, 이미 있던 영역에 더해진 글은 읽는다.
@@ -169,8 +182,11 @@ let prefs = { theme: 'auto', hc: false };
 function applyPrefs() {
   const r = document.documentElement;
   if (prefs.theme === 'light' || prefs.theme === 'dark') r.dataset.theme = prefs.theme; else delete r.dataset.theme;
+  // 어두운 토큰은 style.css 에 한 벌([data-scheme=dark])만 있다: '자동'은 여기서 휴대폰 설정으로 풀어 적는다
+  r.dataset.scheme = isDark() ? 'dark' : 'light';
   r.classList.toggle('hc', !!prefs.hc);
 }
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyPrefs()); } catch {}
 const isDark = () => prefs.theme === 'dark' || (prefs.theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
 // 첫 화면 위 ☀/🌙: 지금 보이는 것의 반대로 바로 바꾼다(설정의 '자동'을 밝게/어둡게로 고정)
 const themeToggle = () => btn(isDark() ? '☀' : '🌙', async () => { await setPrefs({ theme: isDark() ? 'light' : 'dark' }); render(); }, 'ghost theme-toggle',
@@ -401,7 +417,7 @@ async function settleWrites() {
 // 잠그면 화면 상태(ui)도 비운다: 적던 접수·정정·메모·검색어에 이름·연락처·주소가 평문으로 남지 않게.
 // 남기는 것은 개인정보 없는 표시 설정과 접수 ID뿐(잠긴 사이 카메라에서 돌아온 사진·통화 뒤 돌아갈 곳을 찾는 데 씀).
 // 작성 중인 접수 초안은 draftFor 가 잠그기 전(settleWrites)에 암호화 저장해 두므로 잠금 해제 뒤 그대로 이어 쓴다.
-const UI_KEEP = ['filter', 'soloView', 'lastRoute', 'stopBackTo', 'stopBackId', 'afterCall', 'photoTarget', 'photoLine'];
+const UI_KEEP = ['filter', 'soloView', 'lastRoute', 'backTo', 'stopBackTo', 'stopBackId','afterCall', 'photoTarget', 'photoLine'];
 // 잠글 때 화면 모듈이 자기 모듈 안에 들고 있던 평문(재시도용 원문 등)을 버리게 하는 고리. resetUi()와 같은 때 부른다.
 const lockHooks = new Set();
 function onLock(fn) { lockHooks.add(fn); }
@@ -746,13 +762,13 @@ const clearPhotoUrls = () => { photoUrls.forEach((u) => URL.revokeObjectURL(u));
 export {
   $app, BACKUP_WARN_MS, COLLECT_TTL_MS, END_OF_DAY_H, ERR, HANDOFF_MS, HIDDEN_LOCK_MS, LOCK_CHOICES,
   LOW_SPACE_MB, TEXT_SIZES, WIN_ID, addCrewEvent, addEvent, addrRoute, afterUnlock, ago,
-  allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
+  allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, backBtn, backName, backTo, btn, camInput, camInputs,
   camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, dial, digits,
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,
   handoffUntil, hiddenAt, isDark, isIOS, isQuota, isSolo, lastActive, launchApp,
   lineFromRow, liveMap, loadState, lockMs, lockNow, locking, msgBox, onLock, outbox, lowSpaceWarned, mdOf,
-  mergePrefs, nextSeq, normAddr, openExternal, openSheets, pcStops, pcWorkDate, pendingPhotos,
+  mergePrefs, needBackup, nextSeq, normAddr, openExternal, ro, openSheets, pcStops, pcWorkDate, pendingPhotos,
   photoFlushing, photoUrls, prefs, reduceMotion, registeredNow, reloadWanted, reloadWhenSafe, render,
   quantityInput, quantityValue,
   routeStopId, saveBanner, saveFailed, savePhoto, saving, say, sessionChan, setLiveMap, setLockMs, setMapEnabled,

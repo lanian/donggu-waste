@@ -1,4 +1,6 @@
 // 휴대폰 화면: 설정
+// 묶음 순서: 도움말·점검 / 화면 / 나와 이 휴대폰 / 기록 지키기 / 관리자 설정(기본 접힘) / 앱 정보, 맨 아래 따로 위험 동작(모든 자료 지우기).
+// 매일 쓰는 것은 위에, 담당자가 한 번 정하는 것(승인키·지도 서버·문자 문구·단가·기기 등록·사용 방식)은 접어 둔다.
 import * as BIO from '../bio.js';
 import * as F from '../field.js';
 import * as M from '../map.js';
@@ -8,9 +10,16 @@ import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
-import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setMapEnabled, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, outbox, say, msgBox, unsent, workerName } from '../core.js';
+import { LOCK_CHOICES, TEXT_SIZES, addrRoute, ago, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, needBackup, prefs, render, setAutoLockEnabled, setLockMs, setMapEnabled, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, outbox, say, msgBox, ui, unsent, workerName } from '../core.js';
 import { CHECKS, installCard, runningAsApp } from '../widgets.js';
 import { APP_VERSION } from '../app.js';
+
+// 선택지 묶음: .seg 틀 안의 고르는 단추(고른 것은 aria-pressed + 선택 표시)
+const seg = (label, opts, cur, onPick, cls = '') => h('div', { class: 'seg ' + cls, role: 'group', 'aria-label': label },
+  ...opts.map(([v, t]) => btn(t, () => onPick(v), cur === v ? 'opt on' : 'opt')));
+const label = (text) => h('div', { class: 'section-label' }, text);
+const card = (title, ...kids) => h('section', { class: 'card' }, title ? h('h3', {}, title) : null, ...kids);
+const group = (cls, title, ...kids) => h('section', { class: 'set-group ' + cls, 'aria-label': title }, h('h2', { class: 'section-label group-title' }, title), ...kids);
 
 function autoLockControls(times) {
   const owner = st, hint = h('p', { class: 'small' }), error = h('p', { class: 'msg err', role: 'alert' });
@@ -22,8 +31,8 @@ function autoLockControls(times) {
     if (!root.isConnected || st !== owner) return;
     sync();
     if (saved) toast(enabled ? '자동 잠금을 켰습니다' : '자동 잠금을 껐습니다');
-  }, 'opt big', { role: 'switch', 'aria-label': '자동 잠금' });
-  const root = h('div', { class: 'auto-lock-controls' }, h('div', { class: 'fld-label' }, '자동 잠금'), toggle, hint, times, error);
+  }, 'big lock-switch', { role: 'switch', 'aria-label': '자동 잠금' });
+  const root = h('div', { class: 'auto-lock-controls' }, label('자동 잠금'), toggle, hint, times, error);
   function sync() {
     const status = autoLockStatus();
     toggle.textContent = status.pending ? '설정 저장 중…' : status.enabled ? '자동 잠금 켜짐' : '자동 잠금 꺼짐';
@@ -60,7 +69,7 @@ function workerControls() {
     else error.textContent = '작업자 이름을 저장하지 못했습니다. 입력한 이름을 유지했으니 다시 저장해 주세요.';
     if (returnFocus && document.activeElement === document.body) save.focus();
   }, 'big');
-  const root = h('section', { class: 'card', 'aria-label': '작업자 설정' }, h('h2', {}, '작업자'),
+  const root = h('section', { class: 'card', 'aria-label': '작업자 설정' }, h('h3', {}, '작업자'),
     h('p', { class: 'small' }, '이 휴대폰을 사용하는 본인 이름을 적으세요. 이후 현장 기록에 자동으로 남습니다. 이름을 바꿔도 이전 기록은 그대로입니다.'),
     h('label', { class: 'fld' }, h('span', {}, '작업자 이름'), name), save, result, error);
   return root;
@@ -73,15 +82,39 @@ async function screenSettings() {
   let quota = '';
   try { const e = await navigator.storage.estimate(); quota = `${(e.usage / 1048576).toFixed(1)}MB 사용`; } catch {}
   const set = async (patch, msg) => { Object.assign(st, patch); if ('lockMin' in patch) setLockMs(patch.lockMin * 60000); await commit(); if (msg) toast(msg); render(); };
-  const choice = (opts, cur, onPick) => h('div', { class: 'grid' + Math.min(opts.length, 3) }, ...opts.map(([v, t]) => btn(t, () => onPick(v), cur === v ? 'opt on' : 'opt')));
+  const solo = isSolo();
 
-  // 지문·얼굴 (WebAuthn PRF)
+  // ---- 도움말·점검
+  const checked = st.deviceCheck && Object.keys(st.deviceCheck).length ? ` (${CHECKS.filter(([k]) => st.deviceCheck[k] && st.deviceCheck[k].result).length}/${CHECKS.length})` : '';
+  const helpGroup = group('help-group', '도움말·점검',
+    h('section', { class: 'card' },
+      h('p', { class: 'small' }, '한 지점에서 무엇을 어떤 순서로 하는지 한 장으로 봅니다.'),
+      btn('현장 처리 순서', () => go('#/help'), 'big'),
+      h('p', { class: 'small' }, '설치·지문·주소 검색·길안내·카메라가 이 휴대폰에서 되는지 눌러 보고, 결과를 담당자에게 보냅니다.'),
+      btn(`현장 점검${checked}`, () => go('#/check'), 'big')));
+
+  // ---- 화면: 밝기·글자 크기·고대비 (자주 바꾸고, '자동'이 휴대폰의 어두운 화면을 따라가 어둡게만 보이는 경우가 있어 위쪽에)
+  const screenGroup = group('screen', '화면',
+    h('section', { class: 'card screen-card' },
+      label('밝기'),
+      h('div', { class: 'seg theme-seg', role: 'group', 'aria-label': '밝기 테마' }, ...[['auto', '자동'], ['light', '밝게'], ['dark', '어둡게']].map(([k, t]) =>
+        btn([h('span', { class: 'tp tp-' + k, 'aria-hidden': 'true' }, h('i'), h('i')), h('span', {}, t)], async () => { await setPrefs({ theme: k }); render(); },
+          'opt seg-opt' + ((prefs.theme || 'auto') === k ? ' on' : ''), { 'aria-label': t }))),
+      h('p', { class: 'small' }, (prefs.theme || 'auto') === 'auto' ? `자동: 휴대폰 설정을 따릅니다 (지금 ${isDark() ? '어둡게' : '밝게'}). 첫 화면 위 ☀/🌙로 바로 바꿀 수 있습니다.` : '첫 화면 위 ☀/🌙로도 바꿀 수 있습니다.'),
+      label('글자 크기'),
+      h('div', { class: 'seg size-seg', role: 'group', 'aria-label': '글자 크기' }, ...TEXT_SIZES.map(([k, t, px]) =>
+        btn(t, async () => { st.textSize = k; applyTextSize(); await commit(); render(); }, 'opt seg-opt' + ((st.textSize || '') === k ? ' on' : ''), { 'data-px': px }))),
+      label('야외 고대비'),
+      h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
+      seg('야외 고대비', [[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })));
+
+  // ---- 나와 이 휴대폰: 작업자 · 잠금(자동 잠금·지문) · 길안내 앱 · 앱 설치
   const bio = await S.getBio().catch(() => null);
   const bioOk = bio ? true : await BIO.bioAvailable();
-  const bioCard = h('section', { class: 'card' }, h('h2', {}, '잠금'),
-    autoLockControls(h('fieldset', { class: 'auto-lock-times' }, h('legend', { class: 'fld-label' }, '무조작 시간'),
-      choice(LOCK_CHOICES.map((m) => [m, `${m}분`]), LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10, (v) => set({ lockMin: v }, `${v}분 동안 조작이 없으면 잠급니다`)))),
-    h('div', { class: 'fld-label' }, '지문·얼굴로 열기'),
+  const bioCard = h('section', { class: 'card' }, h('h3', {}, '잠금'),
+    autoLockControls(h('fieldset', { class: 'auto-lock-times' }, h('legend', { class: 'section-label' }, '무조작 시간'),
+      seg('무조작 시간', LOCK_CHOICES.map((m) => [m, `${m}분`]), LOCK_CHOICES.includes(st.lockMin) ? st.lockMin : 10, (v) => set({ lockMin: v }, `${v}분 동안 조작이 없으면 잠급니다`)))),
+    label('지문·얼굴로 열기'),
     bio ? h('div', {}, h('p', { class: 'small' }, `등록됨 (${bio.at.slice(0, 10)}). 데이터 키는 생체 인증 뒤에만 풀리는 키로 감싸 저장됩니다.`),
       btn('지문·얼굴 등록 해제', async () => { await S.removeBio(); toast('지문·얼굴 잠금 해제를 껐습니다'); render(); }, 'big'))
       : bioOk ? btn('지문·얼굴 잠금 해제 등록', async () => {
@@ -113,25 +146,40 @@ async function screenSettings() {
       }, 'big') : h('p', { class: 'small' }, '이 휴대폰(또는 브라우저)은 키 보호(PRF)를 지원하는 지문·얼굴 인증이 없어 PIN만 씁니다.'),
     !bio && st.bioLastError ? h('details', { class: 'small bio-err' }, h('summary', {}, `마지막 등록 오류 (${st.bioLastError.at.slice(0, 16).replace('T', ' ')}) — 담당자에게 알려 주세요`),
       h('pre', { class: 'small' }, [`단계: ${st.bioLastError.step}`, `오류: ${st.bioLastError.name} ${st.bioLastError.code}`.trim(), st.bioLastError.message, `앱 ${APP_VERSION} · ${st.bioLastError.ua}`].filter(Boolean).join('\n'))) : null);
+  const navCard = card('길안내 앱',
+    seg('길안내 앱', Object.entries(NAV.NAV_APPS), st.navApp || NAV.DEFAULT_NAV_APP, (k) => set({ navApp: k, navAppSet: true }, `길안내는 ${NAV.NAV_APPS[k]}로 엽니다`), 'cols2'),
+    h('p', { class: 'small' }, "지도 앱에는 목적지 좌표와 'N번 수거지'(반입지는 '반입지') 표시만 전달됩니다. 이름·연락처·주소는 넘기지 않습니다. 앱이 없으면 카카오맵·네이버지도는 웹 지도로, T맵은 기본 지도 앱으로 엽니다."));
+  const meGroup = group('me', '나와 이 휴대폰', workerControls(), bioCard, navCard, await installCard());
 
-  const workerCard = workerControls();
+  // ---- 기록 지키기: 백업(별도 카드) · 보낼 기록 알림 · 위치 남기기 · (단독) 보관 기간
+  const backupCard = h('section', { class: 'card backup-card' }, h('h3', {}, solo ? '백업·복원' : '안전용 백업'),
+    h('p', { class: 'small' }, solo ? `이 휴대폰이 접수 원본입니다. 마지막 백업: ${ago(st.lastBackupAt)}.${needBackup() ? ' 하루가 지나 다시 백업할 때입니다.' : ''}`
+      : '휴대폰 고장·초기화에 대비한 예비본입니다. PC 반영은 결과 보내기로 합니다.'),
+    btn(solo ? '백업·복원' : '안전용 암호화 백업', () => go('#/backup'), 'big'));
+  const keepGroup = group('keep', '기록 지키기', backupCard,
+    solo ? null : card('보낼 기록 알림',
+      h('p', { class: 'small' }, '보낼 기록이 이 시간보다 오래되면 첫 화면에 알립니다. 오후 5시 뒤에는 1건이라도 있으면 알립니다.'),
+      seg('보낼 기록 알림', [[1, '1시간'], [3, '3시간'], [6, '6시간']], st.unsentWarnH || 3, (v) => set({ unsentWarnH: v }))),
+    card('위치 남기기',
+      h('p', { class: 'small' }, '[도착]을 누르거나 사진을 찍을 때 위치 권한이 허용되어 있으면 위치·오차를 함께 기록합니다(결과 파일로 PC에만 전달).'),
+      seg('도착·사진에 휴대폰 위치 남기기', [[true, '남김'], [false, '안 남김']], st.geoEvidence !== false, (v) => set({ geoEvidence: v }))),
+    solo ? card('개인정보 보관 기간',
+      h('p', { class: 'small' }, '처리가 끝난 접수는 이 기간이 지나고 백업이 끝났으면 첫 화면에서 알린 뒤 이름·연락처·주소를 지웁니다.'),
+      seg('개인정보 보관 기간', [[30, '30일'], [90, '90일'], [180, '180일']], st.retentionDays || 90, (v) => set({ retentionDays: v }))) : null);
 
-  // 문자 문구
-  const tpls = smsTemplates();
-  const tIns = tpls.map((t) => { const ta = h('textarea', { rows: 3, 'aria-label': `문자 문구: ${t.label}` }); ta.value = t.text; return ta; });
-  const smsMsg = h('p', { class: 'msg err', role: 'alert' });
-  const smsCard = h('section', { class: 'card' }, h('h2', {}, '문자 문구'),
-    h('p', { class: 'small' }, `넣을 수 있는 자리표시: ${Object.entries(F.SMS_VARS).map(([k, v]) => `${k} ${v}`).join(', ')}. 주민 이름·연락처·주소는 넣을 수 없습니다.`),
-    ...tpls.map((t, i) => h('label', { class: 'fld' }, h('span', {}, t.label), tIns[i])),
-    smsMsg,
-    h('div', { class: 'grid2' },
-      btn('문구 저장', async () => {
-        for (let i = 0; i < tpls.length; i++) { const err = F.checkSmsTemplate(tIns[i].value, allStops()); if (err) { smsMsg.textContent = `${tpls[i].label}: ${err}`; return; } }
-        await set({ smsTemplates: tpls.map((t, i) => ({ id: t.id, label: t.label, text: tIns[i].value.trim() })) }, '문자 문구를 저장했습니다');
-      }, 'opt'),
-      btn('기본 문구로', () => set({ smsTemplates: null }, '기본 문구로 되돌렸습니다'), 'opt')));
+  // ---- 관리자 설정(기본 접힘): 주소 검색 승인키·경로 · 지도 서버 · 문자 문구 · 단가 · 기기 등록 · 사용 방식
+  const kIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '주소 검색 승인키', placeholder: '주소 검색 승인키 (confmKey)', value: st.jusoKey || '' });
+  const cIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '좌표 승인키', placeholder: '좌표제공 승인키 (confmKey)', value: st.jusoCoordKey || '' });
+  const jusoCard = card('주소 검색',
+    h('p', { class: 'small' }, '행정안전부 도로명주소 검색·좌표제공 API(business.juso.go.kr)를 씁니다. 보내는 것은 검색칸에 적은 주소 낱말과 승인키, 고른 건물의 식별 번호뿐이며 이름·연락처는 보내지 않습니다. 승인키는 주소정보누리집에서 기관이 발급받아 넣습니다(이 휴대폰에 암호화 저장).'),
+    label('주소 검색 경로'),
+    seg('주소 검색 경로', [['direct', '직접'], ['pc', 'PC 경유']], addrRoute(), (v) => set({ addrRoute: v })),
+    h('p', { class: 'small' }, addrRoute() === 'pc' ? 'PC 경유: 휴대폰에서는 검색하지 않습니다. PC 연결 방식에서는 PC 접수 화면의 [주소 찾기](PC의 주소 자료 + PC 서버가 대신 묻는 행안부 검색)로 주소·좌표를 정해 목록에 실어 보냅니다. 휴대폰과 PC는 실시간으로 연결되지 않으므로 휴대폰에서 PC로 검색을 보내지는 않습니다.'
+      : '직접: 이 휴대폰이 주소 서버에 바로 묻습니다. 브라우저가 주소 서버 응답을 막으면(CORS) 검색이 되지 않으니, 그때는 직접 적고 지도에서 위치를 지정하거나 PC에서 주소 작업을 하세요.'),
+    h('label', { class: 'fld' }, h('span', {}, '주소 검색 승인키'), kIn),
+    h('label', { class: 'fld' }, h('span', {}, '좌표 승인키'), cIn),
+    btn('승인키 저장', () => set({ jusoKey: kIn.value.trim(), jusoCoordKey: cIn.value.trim() }, kIn.value.trim() ? '승인키를 저장했습니다' : '승인키를 지웠습니다'), 'big'));
 
-  // 지도
   const tc = await M.tileCacheInfo();
   const pmsg = msgBox();
   const prefetch = btn('동구 지도 미리 받기', async () => {
@@ -145,90 +193,66 @@ async function screenSettings() {
     } catch { say(pmsg, '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.', true); }
     prefetch.disabled = false;
   }, 'big', { disabled: !st.mapEnabled });
-  const mapCard = h('section', { class: 'card' }, h('h2', {}, '지도'),
-    h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 지도 서버로 보내지 않습니다.'),
+  const mapCard = card('지도',
+    h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 지도 서버로 보내지 않습니다. 켜면 목록의 자주 쓰는 기능에 [지도]가 생깁니다.'),
     btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', () => setMapEnabled(!st.mapEnabled), 'big'),
     h('p', { class: 'small' }, `인터넷이 약한 곳에 대비해 오늘 지점 주변(없으면 동구 전체)의 넓은 범위 지도(줌 14 이하)를 미리 받아 둡니다. 보관 ${tc.count}개 · ${(tc.bytes / 1048576).toFixed(1)}MB (최대 50MB, 오래 안 쓴 것부터 지움)`),
     prefetch, pmsg);
 
-  // 길안내 앱
-  const navCard = h('section', { class: 'card' }, h('h2', {}, '길안내 앱'),
-    h('div', { class: 'grid2', role: 'group', 'aria-label': '길안내 앱' }, ...Object.entries(NAV.NAV_APPS).map(([k, t]) =>
-      btn(t, () => set({ navApp: k, navAppSet: true }, `길안내는 ${t}로 엽니다`), (st.navApp || NAV.DEFAULT_NAV_APP) === k ? 'opt on' : 'opt'))),
-    h('p', { class: 'small' }, "지도 앱에는 목적지 좌표와 'N번 수거지'(반입지는 '반입지') 표시만 전달됩니다. 이름·연락처·주소는 넘기지 않습니다. 앱이 없으면 카카오맵·네이버지도는 웹 지도로, T맵은 기본 지도 앱으로 엽니다."));
-
-  // 주소 검색 (행정안전부 도로명주소 API)
-  const kIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '주소 검색 승인키', placeholder: '주소 검색 승인키 (confmKey)', value: st.jusoKey || '' });
-  const cIn = h('input', { type: 'text', class: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': '좌표 승인키', placeholder: '좌표제공 승인키 (confmKey)', value: st.jusoCoordKey || '' });
-  const jusoCard = h('section', { class: 'card' }, h('h2', {}, '주소 검색'),
-    h('p', { class: 'small' }, '행정안전부 도로명주소 검색·좌표제공 API(business.juso.go.kr)를 씁니다. 보내는 것은 검색칸에 적은 주소 낱말과 승인키, 고른 건물의 식별 번호뿐이며 이름·연락처는 보내지 않습니다. 승인키는 주소정보누리집에서 기관이 발급받아 넣습니다(이 휴대폰에 암호화 저장).'),
-    h('div', { class: 'fld-label' }, '주소 검색 경로'),
-    choice([['direct', '직접'], ['pc', 'PC 경유']], addrRoute(), (v) => set({ addrRoute: v })),
-    h('p', { class: 'small' }, addrRoute() === 'pc' ? 'PC 경유: 휴대폰에서는 검색하지 않습니다. PC 연결 방식에서는 PC 접수 화면의 [주소 찾기](PC의 주소 자료 + PC 서버가 대신 묻는 행안부 검색)로 주소·좌표를 정해 목록에 실어 보냅니다. 휴대폰과 PC는 실시간으로 연결되지 않으므로 휴대폰에서 PC로 검색을 보내지는 않습니다.'
-      : '직접: 이 휴대폰이 주소 서버에 바로 묻습니다. 브라우저가 주소 서버 응답을 막으면(CORS) 검색이 되지 않으니, 그때는 직접 적고 지도에서 위치를 지정하거나 PC에서 주소 작업을 하세요.'),
-    h('label', { class: 'fld' }, h('span', {}, '주소 검색 승인키'), kIn),
-    h('label', { class: 'fld' }, h('span', {}, '좌표 승인키'), cIn),
-    btn('승인키 저장', () => set({ jusoKey: kIn.value.trim(), jusoCoordKey: cIn.value.trim() }, kIn.value.trim() ? '승인키를 저장했습니다' : '승인키를 지웠습니다'), 'big'));
-
-  return h('main', { class: 'with-tabs' },
-    h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '설정·정보')),
-    // 화면(밝기·글자 크기)은 맨 위에: 자주 바꾸고, '자동'이 휴대폰의 어두운 화면을 따라가 어둡게만 보이는 경우가 있어 찾기 쉽게
-    h('section', { class: 'card screen-card' }, h('h2', {}, '화면'),
-      h('div', { class: 'fld-label' }, '밝기'),
-      h('div', { class: 'seg theme-seg', role: 'group', 'aria-label': '밝기 테마' }, ...[['auto', '자동'], ['light', '밝게'], ['dark', '어둡게']].map(([k, t]) =>
-        btn([h('span', { class: 'tp tp-' + k, 'aria-hidden': 'true' }, h('i'), h('i')), h('span', {}, t)], async () => { await setPrefs({ theme: k }); render(); },
-          'opt seg-opt' + ((prefs.theme || 'auto') === k ? ' on' : ''), { 'aria-label': t }))),
-      h('p', { class: 'small' }, (prefs.theme || 'auto') === 'auto' ? `자동: 휴대폰 설정을 따릅니다 (지금 ${isDark() ? '어둡게' : '밝게'}). 첫 화면 위 ☀/🌙로 바로 바꿀 수 있습니다.` : '첫 화면 위 ☀/🌙로도 바꿀 수 있습니다.'),
-      h('div', { class: 'fld-label' }, '글자 크기'),
-      h('div', { class: 'seg size-seg', role: 'group', 'aria-label': '글자 크기' }, ...TEXT_SIZES.map(([k, t, px]) =>
-        btn(t, async () => { st.textSize = k; applyTextSize(); await commit(); render(); }, 'opt seg-opt' + ((st.textSize || '') === k ? ' on' : ''), { 'data-px': px }))),
-      h('div', { class: 'fld-label' }, '야외 고대비'),
-      h('p', { class: 'small' }, '햇빛 아래에서 잘 보이게 글자·테두리를 진하게 합니다. 휴대폰의 "대비 높이기" 설정을 켜도 적용됩니다.'),
-      choice([[false, '끔'], [true, '켬']], !!prefs.hc, async (v) => { await setPrefs({ hc: v }); render(); })),
-    bioCard, workerCard,
-    await installCard(),
-    h('section', { class: 'card' }, h('h2', {}, '도움말'), h('p', { class: 'small' }, '한 지점에서 무엇을 어떤 순서로 하는지 한 장으로 봅니다.'),
-      btn('현장 처리 순서', () => go('#/help'), 'big')),
-    h('section', { class: 'card' }, h('h2', {}, '현장 점검'), h('p', { class: 'small' }, '설치·지문·주소 검색·길안내·카메라가 이 휴대폰에서 되는지 눌러 보고, 결과를 담당자에게 보냅니다.'),
-      btn(`현장 점검${st.deviceCheck && Object.keys(st.deviceCheck).length ? ` (${CHECKS.filter(([k]) => st.deviceCheck[k] && st.deviceCheck[k].result).length}/${CHECKS.length})` : ''}`, () => go('#/check'), 'big')),
-    h('section', { class: 'card' }, h('dl', {},
-      h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
-      h('dt', {}, '실행 위치'), h('dd', {}, runningAsApp() ? '설치한 앱' : '브라우저 탭'),
-      h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
-      h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
-      h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
-      // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
-      ...(isSolo() ? [] : [h('dt', {}, '보낼 기록'), h('dd', {}, outbox().toSend + '건'), h('dt', {}, '확인 대기'), h('dd', {}, outbox().waiting + '건')]))),
-    h('section', { class: 'card' }, h('h2', {}, '현장 기록'),
-      h('div', { class: 'fld-label' }, '도착·사진에 휴대폰 위치 남기기'),
-      h('p', { class: 'small' }, '[도착]을 누르거나 사진을 찍을 때 위치 권한이 허용되어 있으면 위치·오차를 함께 기록합니다(결과 파일로 PC에만 전달).'),
-      choice([[true, '남김'], [false, '안 남김']], st.geoEvidence !== false, (v) => set({ geoEvidence: v })),
-      isSolo() ? null : h('div', {}, h('div', { class: 'fld-label' }, '보낼 기록 알림'),
-        h('p', { class: 'small' }, '보낼 기록이 이 시간보다 오래되면 첫 화면에 알립니다. 오후 5시 뒤에는 1건이라도 있으면 알립니다.'),
-        choice([[1, '1시간'], [3, '3시간'], [6, '6시간']], st.unsentWarnH || 3, (v) => set({ unsentWarnH: v })),
-        btn('안전용 암호화 백업', () => go('#/backup'), 'big')),
-      isSolo() ? h('div', {}, h('div', { class: 'fld-label' }, '개인정보 보관 기간'),
-        h('p', { class: 'small' }, '처리가 끝난 접수는 이 기간이 지나고 백업이 끝났으면 첫 화면에서 알린 뒤 이름·연락처·주소를 지웁니다.'),
-        choice([[30, '30일'], [90, '90일'], [180, '180일']], st.retentionDays || 90, (v) => set({ retentionDays: v }))) : null),
-    smsCard, navCard, jusoCard, mapCard,
-    isSolo() ? soloFeeCard() : null,
-    h('section', { class: 'card' },
-      isSolo() ? null : btn('기기 등록', () => go('#/register'), 'big'),
-      btn('사용 방식 바꾸기', async () => {
-        if (st.requests.length || st.daylist || st.events.length) return toast('자료가 있어 바꿀 수 없습니다. 백업·정리 후 바꿔 주세요.', 'bad');
-        st.mode = null; await commit(); go('#/mode');
+  const tpls = smsTemplates();
+  const tIns = tpls.map((t) => { const ta = h('textarea', { rows: 3, 'aria-label': `문자 문구: ${t.label}` }); ta.value = t.text; return ta; });
+  const smsMsg = h('p', { class: 'msg err', role: 'alert' });
+  const smsCard = card('문자 문구',
+    h('p', { class: 'small' }, `넣을 수 있는 자리표시: ${Object.entries(F.SMS_VARS).map(([k, v]) => `${k} ${v}`).join(', ')}. 주민 이름·연락처·주소는 넣을 수 없습니다.`),
+    ...tpls.map((t, i) => h('label', { class: 'fld' }, h('span', {}, t.label), tIns[i])),
+    smsMsg,
+    h('div', { class: 'grid2' },
+      btn('문구 저장', async () => {
+        for (let i = 0; i < tpls.length; i++) { const err = F.checkSmsTemplate(tIns[i].value, allStops()); if (err) { smsMsg.textContent = `${tpls[i].label}: ${err}`; return; } }
+        await set({ smsTemplates: tpls.map((t, i) => ({ id: t.id, label: t.label, text: tIns[i].value.trim() })) }, '문자 문구를 저장했습니다');
       }, 'big'),
-      h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 PC 반영이 확인되지 않은 기록(보낼 기록·확인 대기)이 사라지니 주의하세요.'),
-      btn('이 휴대폰의 모든 자료 지우기', async () => {
-        const u = unsent().length;
-        const rec = new Set(st.recoveredPhotos || []);
-        const ph = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)].filter((x) => !rec.has(x)).length;
-        if (!(await ask((u ? `PC 반영이 확인되지 않은 기록 ${u}건(보낼 기록·확인 대기)이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
-        if ((u || ph) && !(await ask(`정말 지울까요? PC 반영이 확인되지 않은 기록 ${u}건${ph ? `과 회수 안 된 사진 ${ph}장` : ''}은 어디에도 남지 않습니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
-        stopCamera();
-        try { await S.wipeAll(); } catch (e) { return toast('지우지 못했습니다: ' + errMsg(e), 'bad'); }
-        setSt(null); location.hash = ''; location.reload();
-      }, 'danger')),
+      btn('기본 문구로', () => set({ smsTemplates: null }, '기본 문구로 되돌렸습니다'), 'big')));
+
+  const linkCard = card('이 휴대폰 연결',
+    solo ? null : btn('기기 등록', () => go('#/register'), 'big'),
+    btn('사용 방식 바꾸기', async () => {
+      if (st.requests.length || st.daylist || st.events.length) return toast('자료가 있어 바꿀 수 없습니다. 백업·정리 후 바꿔 주세요.', 'bad');
+      st.mode = null; await commit(); go('#/mode');
+    }, 'big'),
+    h('p', { class: 'small' }, `지금 사용 방식: ${solo ? '이 휴대폰만 사용' : 'PC와 연결'}. 자료가 없을 때만 바꿀 수 있습니다.`));
+
+  const admin = h('details', { class: 'set-group admin', open: ui.adminOpen === true, ontoggle: (e) => { ui.adminOpen = e.target.open; } },
+    h('summary', {}, h('h2', { class: 'section-label group-title' }, '관리자 설정'), h('span', { class: 'small admin-brief' }, '주소 검색·지도·문자 문구·' + (solo ? '단가·' : '기기 등록·') + '사용 방식')),
+    h('p', { class: 'small' }, '담당자가 처음 한 번 정하는 설정입니다. 현장에서는 바꾸지 않아도 됩니다.'),
+    jusoCard, mapCard, smsCard, solo ? soloFeeCard() : null, linkCard);
+
+  // ---- 앱 정보
+  const infoGroup = group('info', '앱 정보', h('section', { class: 'card' }, h('dl', {},
+    h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
+    h('dt', {}, '실행 위치'), h('dd', {}, runningAsApp() ? '설치한 앱' : '브라우저 탭'),
+    h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
+    h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
+    h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
+    // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
+    ...(solo ? [] : [h('dt', {}, '보낼 기록'), h('dd', {}, outbox().toSend + '건'), h('dt', {}, '확인 대기'), h('dd', {}, outbox().waiting + '건')]))));
+
+  // ---- 위험 동작: 맨 아래 따로
+  const danger = h('section', { class: 'card danger-zone', 'aria-label': '위험 동작' }, h('h2', {}, '이 휴대폰 자료 지우기'),
+    h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 PC 반영이 확인되지 않은 기록(보낼 기록·확인 대기)이 사라지니 주의하세요.'),
+    btn('이 휴대폰의 모든 자료 지우기', async () => {
+      const u = unsent().length;
+      const rec = new Set(st.recoveredPhotos || []);
+      const ph = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)].filter((x) => !rec.has(x)).length;
+      if (!(await ask((u ? `PC 반영이 확인되지 않은 기록 ${u}건(보낼 기록·확인 대기)이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
+      if ((u || ph) && !(await ask(`정말 지울까요? PC 반영이 확인되지 않은 기록 ${u}건${ph ? `과 회수 안 된 사진 ${ph}장` : ''}은 어디에도 남지 않습니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
+      stopCamera();
+      try { await S.wipeAll(); } catch (e) { return toast('지우지 못했습니다: ' + errMsg(e), 'bad'); }
+      setSt(null); location.hash = ''; location.reload();
+    }, 'danger'));
+
+  return h('main', { class: 'with-tabs settings' },
+    h('header', { class: 'bar' }, h('h1', { class: 'bar-title' }, '설정')),
+    helpGroup, screenGroup, meGroup, keepGroup, admin, infoGroup, danger,
     tabBar('set'));
 }
 
@@ -237,12 +261,12 @@ function soloFeeCard() {
   const ov = st.feeOverrides || {};
   const review = BUILTIN_FEES.rows.filter((r) => r.status !== 'CONFIRMED');
   const msg = msgBox();
-  return h('section', { class: 'card' }, h('h2', {}, `확인 필요 품목 단가 (${review.length})`),
+  return h('section', { class: 'card' }, h('h3', {}, `확인 필요 품목 단가 (${review.length})`),
     h('p', { class: 'small' }, '원문 규격이 겹치거나 단위가 불명확한 품목입니다. 담당 부서 기준을 확인한 것만 정하세요. 정한 단가는 그 뒤 새로 접수·추가하는 품목에만 쓰입니다.'),
     ...review.map((r) => {
       const price = h('input', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '원', value: ov[r.id] ? ov[r.id].price : '' });
       const why = h('input', { type: 'text', placeholder: '근거 (예: 청소과 확인 11/3)', value: ov[r.id] ? ov[r.id].reason : '' });
-      return h('div', { class: 'line' }, h('div', { class: 'lhead' }, h('strong', {}, `${r.name} ${r.spec}`), h('em', { class: 'tag' }, ov[r.id] ? `확정 ${won(ov[r.id].price)}` : '확인 대기')),
+      return h('div', { class: 'line' }, h('div', { class: 'lhead' }, h('strong', {}, `${r.name} ${r.spec}`), h('em', { class: 'badge ' + (ov[r.id] ? 'ok' : 'warn') }, ov[r.id] ? `확정 ${won(ov[r.id].price)}` : '확인 대기')),
         h('p', { class: 'small' }, r.note || ''), h('div', { class: 'grid2' }, price, why),
         h('div', { class: 'grid2' },
           btn('저장', async () => {
@@ -252,11 +276,11 @@ function soloFeeCard() {
             st.feeOverrides = { ...ov, [r.id]: { price: n, reason: why.value.trim(), at: new Date().toISOString() } };
             st.feeRev = (st.feeRev || 0) + 1; (st.feeLog ||= []).push({ id: r.id, price: n, reason: why.value.trim(), at: new Date().toISOString() });
             await commit(); toast('저장했습니다'); render();
-          }, 'opt'),
+          }, 'big'),
           ov[r.id] ? btn('확인 대기로 되돌리기', async () => {
             const { [r.id]: _, ...rest } = ov; st.feeOverrides = rest; st.feeRev = (st.feeRev || 0) + 1;
             (st.feeLog ||= []).push({ id: r.id, price: null, reason: '되돌림', at: new Date().toISOString() }); await commit(); render();
-          }, 'opt') : h('span')));
+          }, 'big') : h('span')));
     }), msg);
 }
 

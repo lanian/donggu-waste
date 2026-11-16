@@ -70,7 +70,7 @@ def main():
                 before = page.evaluate("import('./core.js').then(C=>JSON.stringify(C.st))")
                 expect(page.get_by_role('progressbar')).to_have_attribute('aria-valuenow', '1')
                 expect(page.get_by_role('progressbar')).to_have_attribute('aria-valuemax', '4')
-                label = '남음 3' if mode == 'PC' else '미처리 3'
+                label = '남음 3'  # PC·단독 같은 이름(4단계)
                 page.get_by_role('button', name=label, exact=True).click()
                 expect(page.locator('.stops .stop')).to_have_count(3)
                 expect(page.get_by_label('목록 조회 결과', exact=True)).to_contain_text('3건')

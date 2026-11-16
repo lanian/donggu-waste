@@ -94,6 +94,9 @@ async function render() {
     if (isSolo() && ['scan', 'register', 'export', 'received', 'resultqr'].includes(route)) route = 'home';
     if (!isSolo() && route === 'intake' && arg && !fieldEditable(arg)) route = 'home';  // PC 연결 방식: 보내기 전 휴대폰 접수만 고침, 그 밖은 정정 요청
     if (isSolo() && route === 'fix') route = 'home';
+    // 뒤로 단추의 목적지(core.js backBtn): 목록·설정에서 다른 화면으로 옮겨 가면 그 출발지로 돌아간다(설정에서 연 기기 등록·백업 → ← 설정).
+    // 그 사이에 거쳐 가는 화면(결과 QR 등)에서 돌아와도 출발지는 그대로다.
+    if (ui.lastRoute !== location.hash && ['#/home', '#/settings'].includes(ui.lastRoute)) ui.backTo = ui.lastRoute;
     const previous = (ui.lastRoute || '').split('/');
     if (listReturn && !sameListIdentity(listReturn)) listReturn = null;
     if (route === 'stop' && ui.lastRoute !== location.hash && listRoutes.includes(ui.lastRoute)) rememberList(arg);
@@ -136,6 +139,7 @@ async function render() {
   if (!sameRoute && listRoutes.includes(location.hash)) restoreList(view);
   renderedList = S.isUnlocked() && st && listRoutes.includes(location.hash)
     ? { ...listIdentity(), route: location.hash, view } : null;
+  if (['#/home', '#/settings', '#/', ''].includes(location.hash)) ui.backTo = null;
   ui.lastRoute = location.hash;
 }
 addEventListener('hashchange', render);

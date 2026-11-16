@@ -33,6 +33,10 @@ def settings(page, url):
     expect(name).to_be_visible(timeout=10000)
     expect(page.get_by_role('textbox', name='작업자 이름', exact=True)).to_have_count(1)
     expect(page.get_by_label('작업자 1 이름', exact=True)).to_have_count(0)
+    # 4단계: 문자 문구는 관리자 설정(기본 접힘) 안 — 펼쳐 둔다(다시 그려도 펼친 채)
+    admin = page.locator('details.set-group.admin')
+    if admin.get_attribute('open') is None:
+        admin.locator('summary').click()
     return name
 
 
@@ -79,8 +83,9 @@ def main():
             expect(page.get_by_role('group', name='작업자 바꾸기', exact=True)).to_have_count(0)
             current = page.get_by_role('group', name='현재 작업자', exact=True)
             expect(current).to_contain_text('가상 본인')
-            expect(current.get_by_role('button')).to_have_count(0)
-            expect(current.get_by_role('link', name='이름 변경', exact=True)).to_be_visible()
+            # 작업자 고르기 단추는 없고 [이름 변경](설정으로 가는 ghost 단추, 4단계) 하나뿐
+            expect(current.get_by_role('button')).to_have_count(1)
+            expect(current.get_by_role('button', name='이름 변경', exact=True)).to_be_visible()
             assert page.evaluate("import('./screens/stoplist.js').then(M=>M.setupSteps().find(x=>x[0]==='worker')[3])")
             assert add_records(page, '이름 변경 전') == ['가상 본인', '가상 본인']
             name = settings(page, url)
@@ -202,7 +207,7 @@ def main():
                 page.screenshot(path=str(shots / f'personal-worker-{width}-large.png'), full_page=True)
                 page.goto(url + '#/home')
                 expect(page.get_by_role('group', name='현재 작업자', exact=True)).to_contain_text('가상개인휴대폰작업자')
-                expect(page.get_by_role('group', name='현재 작업자', exact=True).get_by_role('button')).to_have_count(0)
+                expect(page.get_by_role('group', name='현재 작업자', exact=True).get_by_role('button')).to_have_count(1)  # [이름 변경]만
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 page.screenshot(path=str(shots / f'personal-worker-home-{width}-large.png'), full_page=True)
             assert not errors, errors
