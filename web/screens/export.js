@@ -6,6 +6,7 @@ import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
 import { addrRoute, allStops, ask, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, msgBox, outbox, render, say, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
 import { APP_VERSION } from '../app.js';
+import { closeCheckBox } from './stoplist.js';
 
 async function screenExport() {
   await flushSteps();
@@ -118,6 +119,7 @@ async function screenExport() {
       const u = URL.createObjectURL(new File([sealed.bytes], name, { type: 'application/octet-stream' }));
       const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
       say(pmsg, `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 사진 회수 코드(P-)를 받으세요.`);
+      if (view?.isConnected) photoCodeCard.open = true;  // 다음 단계(④ P-코드 넣기)를 펼친다(안내 글이 지워지지 않게 다시 그리지 않음)
     } catch (e) { say(pmsg, '사진 파일을 만들지 못했습니다: ' + errMsg(e), true); }
     makePhotos.disabled = false;
   }, 'big', { disabled: !notRecovered.length });
@@ -175,6 +177,8 @@ async function screenExport() {
   const cleanupHint = h('p', { class: 'small' });
   const syncCleanup = () => {
     cleanup.disabled = cleaning || !cleanupReady();
+    // 정리할 조건을 채우면 이 화면의 주 단추
+    cleanup.classList.toggle('primary', !cleanup.disabled); cleanup.classList.toggle('big', !cleanup.disabled); cleanup.classList.toggle('ghost', cleanup.disabled);
     cleanupHint.textContent = unconfirmedResults().length ? '수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요.' : unsent().length || st.exports.some((x) => !x.confirmed) ? '모든 결과의 PC 반영이 확인되어야 정리할 수 있습니다.'
       : writesPending() || S.hasPendingSecure('state') ? '사진·기록 저장이 끝나야 정리할 수 있습니다. 대기 중인 사진은 목록에서 [사진 다시 저장]으로 저장을 마쳐 주세요.'
       : st.intakeDraft ? '작성 중인 접수 초안이 있습니다. 정리하면 초안도 지워지니, 먼저 목록의 [+ 접수 등록 (현장·전화)]에서 접수를 마치거나 확인창에서 초안까지 지울지 고르세요.' : '';
@@ -191,33 +195,61 @@ async function screenExport() {
   const waitingCode = st.exports.some((x) => !x.confirmed);
   const sentPhotos = new Set((st.photoExports || []).flatMap((x) => x.ids));
   const cur = (pending.length && !waitingCode) || (!st.exports.length && !allPhotos.length) ? 0 : waitingCode ? 1 : notRecovered.some((p) => !sentPhotos.has(p.photo_id)) ? 2 : notRecovered.length ? 3 : 4;
-  // 결과 반영 코드 입력: 보낸 뒤 기다리는 코드가 있으면 맨 위에 크게
-  const codeCard = h('section', { class: 'card code-card' + (waitingCode ? ' ask' : '') },
-    h('h2', {}, h('span', { class: 'stepno' }, '2'), '결과 반영 코드 입력 (PC → 휴대폰)'),
+  // 단계 카드 ①~⑤는 위 단계 표시와 1:1. 지금 단계만 펼치고 나머지는 한 줄 요약(지금 / ✓ 완료 / 대기)으로 접는다(눌러 펼칠 수 있음).
+  const doneStep = [
+    !ob.toSend && st.exports.length > 0,
+    st.exports.length > 0 && !waitingCode,
+    allPhotos.length ? notRecovered.every((p) => sentPhotos.has(p.photo_id)) : cur > 2,
+    allPhotos.length ? !notRecovered.length : cur > 3,
+    false,
+  ];
+  if (!ui.exportOpen || ui.exportOpen.cur !== cur) ui.exportOpen = { cur, open: [] };
+  const opened = ui.exportOpen;
+  // ⑤ 정리는 조건을 채웠으면(미회수 사진은 남겨 둔 채 정리 가능) 지금 단계가 아니어도 펼쳐 둔다
+  const ready = cleanupReady();
+  const stepCard = (i, title, cls, ...kids) => h('details', { class: `card step-card ${cls}`, open: i === cur || (i === 4 && ready) || opened.open.includes(i),
+    ontoggle: (e) => { if (i === cur) return; opened.open = opened.open.filter((x) => x !== i).concat(e.target.open ? [i] : []); } },
+  h('summary', {}, h('h2', {}, h('span', { class: 'stepno' }, String(i + 1)), title),
+    h('span', { class: 'step-state' + (i === cur || (i === 4 && ready) ? ' now' : doneStep[i] ? ' done' : '') },
+      i === cur ? '지금' : i === 4 && ready ? '정리 가능' : doneStep[i] ? '✓ 완료' : '대기')),
+  ...kids);
+  // ② 결과 반영 코드(D-) 넣기
+  const codeCard = stepCard(1, 'D-코드 넣기 (결과 반영 코드)', 'code-card' + (waitingCode ? ' ask' : ''),
     h('p', { class: 'small' }, 'PC 담당자가 결과를 가져온 뒤 알려 주는 결과 반영 코드(D-로 시작, 8자리)를 넣으세요. 넣어야 "보낸 것"으로 처리되고, 끝난 곳의 개인정보가 이 휴대폰에서 지워집니다. PC가 결과를 가져온 뒤 만든 새 목록을 받으면 코드 없이도 저절로 확인됩니다.'),
     codeBox('RESULT', codeIn), codeMsg, confirm,
     h('ul', { class: 'small list' }, ...st.exports.slice(-5).reverse().map((x) => h('li', {}, `${x.name} · ${x.superseded ? '뒤 파일로 반영됨' : x.via === 'list' ? '반영 확인됨(새 목록)' : x.confirmed ? '반영 확인됨' : '확인 대기'}`))));
   // 직원이 직접 적은 글이 실리는 기록: 현장 메모, 내용을 적은 취소 요청, 메모를 적은 하차 기록
   const freeText = pending.filter((e) => (e.kind === 'FIELD_MEMO' && e.body?.text) || (e.kind === 'CANCEL_REQUEST' && e.body?.text) || (e.kind === 'UNLOAD' && e.body?.note));
-  const sendCard = h('section', { class: 'card' },
-    h('h2', {}, h('span', { class: 'stepno' }, '1'), ['결과 보내기', ob.toSend ? `보낼 기록 ${ob.toSend}건` : '', ob.waiting ? `확인 대기 ${ob.waiting}건` : ''].filter(Boolean).join(' · ')),
+  // ① 결과 보내기: 첫 설명은 한 줄 + 작은 개인정보 안내, 나머지는 [자세히] 안. 이번 파일에 들어가는 직접 쓴 글·주민 정보 건수는 그대로 보인다.
+  const sendCard = stepCard(0, ['결과 보내기', ob.toSend ? `보낼 기록 ${ob.toSend}건` : '', ob.waiting ? `확인 대기 ${ob.waiting}건` : ''].filter(Boolean).join(' · '), 'send-card',
     unresolved.length ? h('section', { class: 'callout warn', 'aria-label': '수거 결과 재확인 필요' },
       h('strong', {}, `수거 결과 재확인 ${unresolved.length}건`), h('p', {}, '결과 저장 뒤 수량이 바뀐 접수가 있습니다. 현재 수량에 맞는 결과를 다시 저장한 뒤 보내세요.'),
       ...unresolved.map((s) => btn(`${s.seq}번 결과 재확인`, () => go(`#/stop/${s.request_id}`), 'big')),
       btn('기록 보호용 백업', () => go('#/backup'), 'big')) : null,
-    h('p', {}, '결과 파일은 PC에서만 열 수 있게 암호화됩니다. 주민 이름·연락처·주소는 넣지 않지만(아래 현장 접수·정정 요청은 예외), 현장 메모·취소 요청 내용·하차 메모에 적은 글은 그대로 PC로 갑니다. 그런 칸에는 이름·연락처 등 개인정보를 적지 마세요. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(지금까지 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다. 결과 반영 코드(D-)를 넣기 전까지는 보낸 기록도 "확인 대기"로 남아 다음 파일에 다시 들어갑니다.'),
+    h('p', { class: 'send-lead' }, 'PC만 열 수 있게 암호화해 업무 메일로 보냅니다.'),
+    h('p', { class: 'small' }, '메모에 이름·연락처 등 개인정보를 적지 마세요.'),
     freeText.length ? h('p', { class: 'callout warn free-text' }, `이번 파일에는 직접 적은 글(현장 메모·취소 요청 내용·하차 메모) ${freeText.length}건이 들어갑니다. 개인정보가 적혀 있지 않은지 확인하세요.`) : null,
     pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'callout warn' },
       `이번 파일에는 현장 접수·정정 요청 ${pending.filter((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION').length}건의 이름·연락처·주소가 들어갑니다(PC가 원본을 만들거나 고치려면 필요). PC 전용 암호화는 같으며, 업무 메일이나 PC 화면 카메라로만 보내세요.`) : null,
-    showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg);
+    h('details', { class: 'send-more' }, h('summary', {}, '자세히'),
+      h('p', { class: 'small' }, '결과 파일은 PC에서만 열 수 있게 암호화됩니다. 주민 이름·연락처·주소는 넣지 않지만(현장 접수·정정 요청은 예외), 현장 메모·취소 요청 내용·하차 메모에 적은 글은 그대로 PC로 갑니다. 그런 칸에는 이름·연락처 등 개인정보를 적지 마세요. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(지금까지 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다. 결과 반영 코드(D-)를 넣기 전까지는 보낸 기록도 "확인 대기"로 남아 다음 파일에 다시 들어갑니다.')),
+    showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'));
+  // ③ 사진 보내기 · ④ 사진 회수 코드(P-) 넣기 · ⑤ 정리
+  const photoCard = stepCard(2, `사진 보내기 · 사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`, 'photo-card',
+    h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다.'),
+    makePhotos, pmsg);
+  const photoCodeCard = stepCard(3, 'P-코드 넣기 (사진 회수 코드)', 'photo-code-card',
+    h('p', { class: 'small' }, 'PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣거나, PC가 사진을 가져온 뒤 만든 새 목록을 받으면 회수가 확인됩니다.'),
+    codeBox('PHOTO', pcode), pcodeMsg, pconfirm);
+  const cleanCard = stepCard(4, '정리', 'cleanup-card', cleanup, cleanupHint);
+  // 결과 파일 단추(하단 고정)는 ① 단계일 때만 주 단추
+  if (cur !== 0) { make.classList.remove('primary', 'huge'); make.classList.add('big'); }
   view = h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '결과 보내기')),
+    closeCheckBox(),
     flowSteps(['결과 파일', '결과 반영 코드', '사진 파일', '사진 회수 코드', '정리'], cur),
-    waitingCode ? codeCard : null, sendCard, waitingCode ? null : codeCard,
-    h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '3'), `사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`),
-      h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다. PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣거나, PC가 사진을 가져온 뒤 만든 새 목록을 받으면 회수가 확인됩니다.'),
-      makePhotos, pmsg, codeBox('PHOTO', pcode), pcodeMsg, pconfirm),
-    h('section', { class: 'card' }, h('h2', {}, h('span', { class: 'stepno' }, '5'), '정리'), cleanup, cleanupHint),
+    msg,  // 결과 파일을 만든 뒤 다음 단계(②)로 넘어가 ① 카드가 접혀도 안내가 보이게 카드 밖에 둔다
+    sendCard, codeCard, photoCard, photoCodeCard, cleanCard,
     footBar(make));
   setTimeout(watchCleanupRecovery, 0);
   return view;

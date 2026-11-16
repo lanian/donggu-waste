@@ -48,6 +48,7 @@ def numeric_case(browser, url, shots):
         apply_quantity(page,0)
         assert page.evaluate('window.__zeroQuantity') == 0, '최솟값 0을 빈 입력으로 처리함'
         assert events(page) == before_zero, '공유 수량 입력만으로 업무 기록 생성'
+        page.get_by_role('button', name='수량이 접수와 다름', exact=True).click()  # 현장 수량 스테퍼는 접수와 같으면 접혀 있음
         button = page.get_by_role('button', name=re.compile(r'^가상 의자 현장 수량 \d+개, 눌러서 직접 입력$'))
         expect(button).to_be_visible()
         before = events(page)

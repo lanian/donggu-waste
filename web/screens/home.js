@@ -101,8 +101,9 @@ async function screenHome() {
   out.push(h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'));
   const moreBtns = btn(st.events.some((e) => e.kind === 'UNLOAD') ? `하차 기록 (${st.events.filter((e) => e.kind === 'UNLOAD').length}회)` : '하차 기록', () => go('#/unload'), 'big');
   if (!today.length) {
+    // 지금 할 일이 같은 [오늘 목록 받기]면 빈 상태에는 문구만 둔다(같은 단추를 세 번 보이지 않게)
     out.push(h('p', { class: 'empty' }, '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.'),
-      h('div', { class: 'empty-actions' }, btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered })));
+      next.key === 'scan' ? null : h('div', { class: 'empty-actions' }, btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered })));
     out.push(moreBtns);
   } else {
     const active = stops.filter(({ s }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged);
@@ -147,7 +148,8 @@ async function screenHome() {
       ui.reorder && canReorder && !s.removed ? h('span', { class: 'mv' }, btn('▲', () => move(s, -1), 'step', { 'aria-label': '위로' }), btn('▼', () => move(s, 1), 'step', { 'aria-label': '아래로' })) : null,
       s.unload_after && !ui.stopQ && !(ui.reorder && canReorder) ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
         h('span', { class: 'u-body' }, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`)),
-        navBtn('길안내', null, unloadLoc(s.unload_after), NAV.navLabel('UNLOAD'), 'u-nav')) : null);
+        navBtn('길안내', null, unloadLoc(s.unload_after), NAV.navLabel('UNLOAD'), 'u-nav'),
+        btn('하차 기록', () => go('#/unload'), 'u-log', { 'aria-label': `${s.unload_after.label} 하차 기록` })) : null);
     const showTrips = ui.filter === 'ALL' && !ui.stopQ && !ui.dong && !ui.reorder;
     out.push(h('ul', { class: 'stops route' }, ui.reorder && canReorder ? list.map(one) : routeItems(list, one, showTrips ? tripHeads(stops) : {})));
     out.push(moreBtns);

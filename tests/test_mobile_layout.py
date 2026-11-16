@@ -44,7 +44,7 @@ def metrics(page):
         return {viewport:innerWidth, page:document.documentElement.scrollWidth,
             font:getComputedStyle(document.documentElement).fontSize,
             dock:[...document.querySelectorAll('.dock button')].map(box),
-            quantities:[...document.querySelectorAll('.line .stepper')].map(e=>({
+            quantities:[...document.querySelectorAll('.line .stepper')].filter(e=>e.getClientRects().length).map(e=>({
                 ...box(e), row:box(e.parentElement), controls:[...e.querySelectorAll('button')].map(box),
                 value:box(e.querySelector('.val'))}))};
     }""")

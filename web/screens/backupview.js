@@ -4,6 +4,7 @@ import * as F from '../field.js';
 import * as S from '../store.js';
 import { ERR, ago, ask, btn, commit, emptyState, errMsg, flowSteps, footBar, go, h, isSolo, msgBox, pcStops, say, setSt, settleWrites, st, toast, todayKST, ui } from '../core.js';
 import { APP_VERSION } from '../app.js';
+import { closeCheckBox } from './stoplist.js';
 
 async function screenBackup() {
   const BSTEPS = ['비밀번호 정하기', '파일 만들기', '안전한 곳에 보관'];
@@ -71,6 +72,7 @@ async function screenBackup() {
   pw1.addEventListener('input', () => { if (pw1.value.length >= 8) flow.replaceWith(flow = flowSteps(BSTEPS, 1)); });
   return h('main', { class: 'with-dock' },
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '백업·복원')),
+    isSolo() ? closeCheckBox() : null,  // 단독 방식의 하루 마감(백업) 화면에도 해당하는 마감 점검
     flow,
     isSolo() ? null : h('section', { class: 'card callout info' }, h('h2', {}, 'PC 연결 방식의 안전용 백업'),
       h('p', { class: 'small' }, 'PC 연결 방식에서는 [결과 보내기]가 기본입니다. 이 백업은 휴대폰 고장·초기화에 대비한 예비본이며, PC는 이 파일이 아니라 결과 파일(.dgr)로 반영합니다. 받은 목록(주민 정보)이 함께 들어가므로 승인된 보안 매체에만 보관하세요.')),

@@ -6,7 +6,7 @@ import { LABEL } from '../fees.js';
 import { deriveStop } from '../fees.js';
 import { matchText } from '../fees.js';
 import * as NAV from '../nav.js';
-import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dial, dongOf, flushPhotos, go, h, isSolo, outbox, pendingPhotos, render, st, toast, ui, workerName } from '../core.js';
+import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dial, dongOf, flushPhotos, go, h, isSolo, outbox, pcStops, pcWorkDate, pendingPhotos, render, st, toast, todayKST, ui, workerName } from '../core.js';
 import { CHECKS, doInstall, installEvt, navBtn, runningAsApp } from '../widgets.js';
 
 // 수량 입력만 끝난 상태와 방문 결과까지 저장한 완료를 구분한다.
@@ -269,7 +269,49 @@ async function homeBanners() {
   return out;
 }
 
+// 하루 마감 점검(결과 보내기·단독 백업 화면 맨 위, 막지 않는 안내). 그날(PC: 목록 날짜, 단독: 오늘) 기준으로 센다.
+// - 결과 미기록: 홈 '지금 할 일'과 같은 needsResult
+// - 하차 기록 0회: 하차 계획(unload_after)이 있거나 실은 곳이 1곳 이상인데 그날 UNLOAD 기록이 없음
+// - 저장 대기 사진: 아직 암호화 저장되지 않은 사진
+const kstDay = (ts) => { const t = Date.parse(ts || ''); return Number.isFinite(t) ? new Date(t + 9 * 3600000).toISOString().slice(0, 10) : null; };
+function closeCheck() {
+  const solo = isSolo(), day = solo ? todayKST() : pcWorkDate();
+  const stops = (solo ? st.requests.filter((r) => r.planned_date === day) : pcStops().filter((s) => !(s.field && s.planned_date !== day)))
+    .filter((s) => !s.removed && s.status !== 'CANCELLED').map((s) => ({ s, d: deriveStop(s, st.events) }));
+  const unrecorded = stops.filter(({ s, d }) => needsResult(s, d)).map(({ s }) => s);
+  const prior = (s, l) => Math.max(0, Number(s.items.find((i) => i.line_id === l.line_id)?.prior_collected) || 0);
+  const planned = stops.some(({ s }) => !!s.unload_after);
+  const loaded = stops.some(({ s, d }) => d.lines.some((l) => l.qty_collected > prior(s, l)));
+  const unloads = st.events.filter((e) => e.kind === 'UNLOAD' && kstDay(e.ts) === day).length;
+  return { unrecorded, unloads, unloadMissing: (planned || loaded) && !unloads, photos: pendingPhotos.length };
+}
+function closeCheckBox() {
+  const c = closeCheck(), items = [], brief = [];
+  if (c.unrecorded.length) {
+    brief.push(`결과 미기록 ${c.unrecorded.length}곳`);
+    items.push(h('li', { class: 'close-unrecorded' }, h('strong', {}, `결과 미기록 ${c.unrecorded.length}곳`),
+      h('span', { class: 'close-jumps', role: 'group', 'aria-label': '결과 미기록 바로 가기' },
+        ...c.unrecorded.map((s) => btn(`${s.seq}번`, () => go(`#/stop/${s.request_id}`), 'close-jump', { 'aria-label': `${s.seq}번 결과 기록하러 가기` })))));
+  }
+  if (c.unloadMissing) {
+    brief.push(`하차 기록 ${c.unloads}회`);
+    items.push(h('li', { class: 'close-unload' }, h('strong', {}, `하차 기록 ${c.unloads}회`), btn('하차 기록', () => go('#/unload'), 'close-go')));
+  }
+  if (c.photos) {
+    brief.push(`저장 대기 사진 ${c.photos}장`);
+    items.push(h('li', { class: 'close-photos' }, h('strong', {}, `저장 대기 사진 ${c.photos}장`), btn('사진 다시 저장', async () => { await flushPhotos(); render(); }, 'close-go')));
+  }
+  if (!items.length) return h('p', { class: 'callout ok close-check', role: 'status' }, '✓ 마감 점검 이상 없음');
+  // 퇴근 무렵(END_OF_DAY_H 이후)에는 펼쳐 두고, 그 전에는 한 줄 요약으로 접어 둔다(눌러 펼침)
+  const late = kstHour() >= END_OF_DAY_H;
+  return h('details', { class: 'callout warn close-check', open: late || ui.closeCheckOpen === true, 'aria-label': '마감 점검',
+    ontoggle: (e) => { if (!late) ui.closeCheckOpen = e.target.open; } },
+  h('summary', {}, h('strong', {}, `마감 점검 · 확인할 것 ${items.length}가지`), h('span', { class: 'close-brief' }, brief.join(' · '))),
+  h('ul', { class: 'close-list' }, ...items),
+  h('p', { class: 'small' }, '막지 않는 안내입니다. 확인한 뒤 그대로 보내도 됩니다.'));
+}
+
 export {
-  batteryInfo, daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextQuick, nextToVisit, routeItems,
+  batteryInfo, closeCheck, closeCheckBox, daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextQuick, nextToVisit, routeItems,
   setupCard, setupSteps, stopCard, stopHay, stopSearch, stopState, tripHeads, workerBar,
 };

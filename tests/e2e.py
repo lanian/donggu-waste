@@ -348,15 +348,19 @@ def main():
 
             # 첫 원접수 품목은 1개만 수거하고 나머지는 사유 기록
             orig = page.locator(".line.orig").first
-            orig.locator(".row").nth(2).locator(".btn.step").last.click()  # 실은 수량 +1
+            orig.locator(".row.got .btn.step").last.click()  # 실은 수량 +1
             page.wait_for_timeout(700)
             page.get_by_role("button", name="일부 수거", exact=True).click()
+            # 사유가 빠졌으면 오류 대신 사유 시트(3단계). 시트를 닫으면 지금처럼 품목 칸 사유 강조로 안내
+            reason_sheet = page.get_by_role("dialog", name="1번 일부 수거 사유", exact=True)
+            expect(reason_sheet).to_be_visible()
+            reason_sheet.get_by_role("button", name="취소", exact=True).click()
             expect(page.locator("#st-result .msg.err")).to_contain_text("사유를 골라")
-            ok(page.locator("select.reason.need").count() >= 1, "못 실은 품목의 사유 없이 일부 수거 저장 막음 (사유 칸 강조)")
+            ok(page.locator("select.reason.need").count() >= 1, "못 실은 품목의 사유 없이 일부 수거 저장 막음 (사유 시트, 닫으면 사유 칸 강조)")
             page.get_by_role("button", name="품목 수량을 모두 실음으로 채우기").click()
             # 안마기는 수거 못 함: 수거 0 → 사유
             fld = page.locator(".line.field").last
-            fld.locator(".row").nth(1).locator(".btn.step").first.click()  # 실은 수량 −1
+            fld.locator(".row.got .btn.step").first.click()  # 실은 수량 −1
             page.wait_for_timeout(700)
             fld.locator("select.reason").select_option("CANNOT_LOAD")
             page.get_by_role("button", name="일부 수거", exact=True).click()
@@ -397,6 +401,8 @@ def main():
             page.goto(url + "#/home")
             page.locator(".stop .seq").filter(has_text=re.compile(r"^2(?!\d)")).first.click()
             expect(page.locator(".who .levy-no")).to_have_text(re.compile(r"^부과번호 2026-"))
+            ok("부과 금액" in page.locator("details.fee > summary").inner_text(), "감면 건: 접힌 계산 내역 요약도 '부과 금액'")
+            page.locator("details.fee > summary").click()  # 증감·대기가 없으면 계산 내역은 한 줄로 접혀 있음(3단계)
             red = page.locator(".fee dl.reduction")
             expect(red).to_contain_text("감면 (50%)")
             won_ = lambda t: int(re.sub(r"\D", "", t))
@@ -473,7 +479,9 @@ def main():
             ok(name.encode() not in blob and phone.replace("-", "").encode() not in blob, "결과 파일에 이름·전화번호 평문 없음")
             page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(release)
             page.get_by_role("button", name="결과 반영 코드 입력").click()
-            expect(page.get_by_text("반영 확인됨")).to_be_visible()
+            # 코드를 넣으면 다음 단계로 넘어가 ② 카드는 '✓ 완료'로 접힘(3단계). 목록에는 '반영 확인됨'
+            expect(page.locator("details.code-card .step-state")).to_have_text("✓ 완료")
+            expect(page.locator("details.code-card li").first).to_contain_text("반영 확인됨")
             ok(True, f"결과 반영 코드(D-) 입력 → 반영 확인 ({release})")
             evs = pc_sql("SELECT kind, body_json FROM result_event")
             kinds = {e["kind"] for e in evs}
@@ -770,7 +778,8 @@ def pc_field(pw, url):
     release = re.search(RELEASE_RE, imp).group(1)
     page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(release)
     page.get_by_role("button", name="결과 반영 코드 입력").click()
-    expect(page.get_by_text("반영 확인됨").first).to_be_visible()
+    expect(page.locator("details.code-card .step-state")).to_have_text("✓ 완료")
+    expect(page.locator("details.code-card li").first).to_contain_text("반영 확인됨")
     page.goto(url + "#/home")
     page.locator(".stop", has_text="가상새집").click()
     expect(page.get_by_text("PC로 보냄 · 사무실 확인 뒤 새 목록에 반영")).to_be_visible(timeout=15000)
@@ -835,6 +844,7 @@ def pc_sync(pw, url):
     f1 = grab_file(page, lambda: page.get_by_role("button", name=re.compile("결과 파일 만들어 보내기")).click())
     imp1 = py("import-result", str(f1))
     ok('"applied": 2' in imp1 or '"applied": 1' in imp1, "백업 뒤 기록 2건 → PC 가져옴 " + imp1.splitlines()[0])
+    page.locator("details.photo-card > summary").click()  # D-코드 대기(② 단계)면 ③ 사진 카드는 접혀 있음
     pf = grab_file(page, lambda: page.get_by_role("button", name=re.compile("사진 파일 만들기")).click())
     pimp = py("import-photos", str(pf))
     ok('"recovered": 1' in pimp, "사진 1장 → PC 회수 (휴대폰에는 사진 회수 코드를 넣지 않음)")
@@ -908,6 +918,7 @@ def pc_sync(pw, url):
        "코드 입력 없이: 결과 파일 반영 확인(새 목록)·사진 미회수 0장, rel 뒤의 기록 1건은 보낼 기록 그대로")
     # 코드 칸 확인: 사진 회수 코드를 결과 칸에 넣으면 알려 줌
     pcode = re.search(PHOTO_RE, pimp).group(1)
+    page.locator("details.code-card").evaluate("e => { e.open = true; }")  # 보낼 기록이 있어 ① 단계면 ② 카드는 접혀 있음
     page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(pcode)
     page.get_by_role("button", name="결과 반영 코드 입력").click()
     expect(page.locator(".code-card .msg.err")).to_contain_text("사진 회수 코드")
@@ -996,8 +1007,10 @@ def lock_and_bio(pw, port):
     # 부재·배출 안 됨으로 미수거: 사진이 없으면 사진 또는 "사진 불가" 이유를 요구
     page.get_by_role("button", name="부재", exact=True).click()
     page.get_by_role("button", name="미수거", exact=True).click()
-    page.locator("select.reason").first.select_option("NOT_PUT_OUT")
-    page.get_by_role("button", name="미수거", exact=True).click()
+    # 사유가 빠졌으면 사유 시트에서 고르고 바로 저장 흐름으로(3단계)
+    reason_sheet = page.get_by_role("dialog", name=re.compile("미수거 사유$"))
+    reason_sheet.get_by_role("button", name="배출 안 됨", exact=True).click()
+    reason_sheet.get_by_role("button", name="이 사유로 미수거 저장", exact=True).click()
     expect(page.get_by_role("dialog")).to_contain_text("증거 사진이 필요합니다")
     page.screenshot(path=SHOTS / "19_evidence_sheet.png")
     page.get_by_role("button", name="사진 불가: 어두워 촬영 불가").click()

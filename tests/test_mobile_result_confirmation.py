@@ -153,6 +153,7 @@ def consumer_case(browser, url, shots):
         page.goto(url + '#/export')
         expect(page.get_by_role('button', name='PC 화면 카메라로 보내기 (QR)', exact=True)).to_be_disabled()
         expect(page.get_by_role('button', name='결과 파일 만들어 보내기', exact=False)).to_be_disabled()
+        page.locator('details.cleanup-card > summary').click()  # 지금 단계가 아닌 ⑤ 정리 카드는 접혀 있음
         expect(page.get_by_role('button', name='오늘 자료 정리', exact=True)).to_be_disabled()
         page.get_by_role('button', name='기록 보호용 백업', exact=True).click()
         expect(page).to_have_url(url + '#/backup')

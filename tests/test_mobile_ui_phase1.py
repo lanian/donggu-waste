@@ -443,6 +443,8 @@ def control_contrast(browser, url):
         select = page.get_by_label("가상 의자 못 실은 사유", exact=True)
         ok(select.get_attribute("aria-invalid") is None, "사유를 고르라고 하기 전에는 aria-invalid 없음")
         page.get_by_role("button", name="일부 수거", exact=True).click()
+        # 3단계: 사유가 빠지면 사유 시트가 먼저 열린다. 시트를 닫으면 품목 칸 사유 강조로 안내
+        page.get_by_role("dialog", name="1번 일부 수거 사유", exact=True).get_by_role("button", name="취소", exact=True).click()
         expect(page.locator("#st-result .msg.err")).to_contain_text("사유를 골라")
         select = page.get_by_label("가상 의자 못 실은 사유", exact=True)
         ok(select.get_attribute("aria-invalid") == "true", "사유가 빠지면 사유 칸에 aria-invalid=true")

@@ -29,6 +29,7 @@ def open_case(browser, url, qty=1, previous=0, two_lines=False):
 def quantity_case(browser, url, output):
     context, page, _ = open_case(browser, url, qty=150, previous=1)
     try:
+        page.get_by_role('button', name='수량이 접수와 다름', exact=True).click()  # 현장 수량 스테퍼는 접수와 같으면 접혀 있음
         page.get_by_role('button', name='가상 의자 현장 수량 빼기', exact=True).click()
         page.wait_for_function('()=>window.__collectionCore.st.events.some(e=>e.kind==="ITEM_RESULT")')
         quantity = page.evaluate('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_confirmed')
@@ -61,6 +62,7 @@ def prior_case(browser, url, output):
         minus.click()
         page.wait_for_function('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_collected===2')
         expect(minus).to_be_disabled()
+        page.get_by_role('button', name='수량이 접수와 다름', exact=True).click()  # 현장 수량 스테퍼는 접수와 같으면 접혀 있음
         page.get_by_role('button', name='가상 의자 현장 수량 빼기', exact=True).click()
         page.wait_for_function('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_confirmed===2')
         expect(page.get_by_role('button', name='가상 의자 현장 수량 빼기', exact=True)).to_be_disabled()

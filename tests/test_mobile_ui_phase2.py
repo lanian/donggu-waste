@@ -216,7 +216,9 @@ def outbox_terms(browser, url):
            f"결과 보내기 화면 제목: '보낼 기록 1건 · 확인 대기 2건' ({head})")
         ok(page.get_by_role("button", name="결과 파일 만들어 보내기 (3건)", exact=True).count() == 1,
            "결과 파일에는 지금처럼 D-코드 전 기록 전부(3건)가 들어감 — 전송 형식 그대로")
-        ok("지금까지 결과" in page.locator("main").inner_text() and "중간 결과" not in page.locator("main").inner_text(), "'중간 결과' → '지금까지 결과'")
+        page.locator("details.send-card > summary").click()  # 3단계: D-코드 대기면 ① 카드는 접혀 있음
+        page.locator("details.send-more summary").click()  # 3단계: 긴 설명은 [자세히] 안
+        ok("지금까지 결과" in page.locator("main").inner_text() and "중간 결과" not in page.locator("main").inner_text(), "'중간 결과' → '지금까지 결과' ([자세히] 안)")
 
         route(page, "#/settings")
         dl = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('dt')].map(dt => [dt.textContent.trim(), dt.nextElementSibling?.textContent.trim()]))""")
@@ -369,9 +371,11 @@ def field_wording(browser, url):
         seed(page)
         empty = page.locator(".empty")
         expect(empty).to_have_text("오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.")
-        page.locator(".empty-actions").get_by_role("button", name="오늘 목록 받기", exact=True).click()
+        # 3단계: 지금 할 일이 같은 [오늘 목록 받기]면 빈 상태에는 문구만(단추 중복 없음)
+        ok(page.locator(".empty-actions").count() == 0, "빈 상태에는 같은 단추를 되풀이하지 않음")
+        page.locator(".next-action").get_by_role("button", name="오늘 목록 받기", exact=True).click()
         expect(page).to_have_url(url + "#/scan")
-        ok(True, "홈 빈 상태: '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.' + [오늘 목록 받기]")
+        ok(True, "홈 빈 상태: '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.' + 지금 할 일 [오늘 목록 받기]")
 
         seed(page, {"daylist": daylist(today, [stop(1, today), stop(2, today)])})
         page.get_by_role("button", name="재방문·보류 0", exact=True).click()
