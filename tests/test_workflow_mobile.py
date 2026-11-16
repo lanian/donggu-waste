@@ -101,12 +101,13 @@ def mobile_workflow_regressions(browser, shots):
         try:
             dates = seed(page)
             today, yesterday, tomorrow = (dates[k] for k in ("today", "yesterday", "tomorrow"))
-            action(page, "배정 목록 수신")
-            ok(page.get_by_role("button", name="오늘 목록 받기", exact=True).count() == 1,
-               "PC 새 기기의 다음 행동은 목록 수신이며 기존 버튼 이름을 중복하지 않음")
+            action(page, "오늘 목록 받기")
+            ok(page.locator(".home-tools").get_by_role("button", name="오늘 목록 받기", exact=True).count() == 1
+               and page.locator(".btn.primary", has_text="오늘 목록 받기").count() == 1,
+               "PC 새 기기의 다음 행동은 '오늘 목록 받기'(자주 쓰는 기능과 같은 이름, 주 단추는 지금 할 일 하나)")
 
             seed(page, registered=False)
-            action(page, "PC 연결 등록하기").click()
+            action(page, "기기 등록").click()
             expect(page).to_have_url(url + "#/register")
             go_home(page)
             ok(page.get_by_role("button", name="+ 접수 등록 (현장·전화)", exact=True).is_enabled(),
@@ -146,15 +147,15 @@ def mobile_workflow_regressions(browser, shots):
                "수신 코드 안내는 같은 R-코드를 다시 열고 PC에 알렸음을 자동 처리하지 않음")
 
             seed(page, {"daylist": daylist(yesterday, [stop(1, yesterday)]), "events": [event(1)]})
-            action(page, "결과 전달·반영 확인").click()
+            action(page, "결과 보내기").click()
             expect(page).to_have_url(url + "#/export")
             go_home(page)
             ok(page.locator(".day-banner").is_visible() and page.locator(".summary").count() == 0,
                "지난 목록의 미반영 결과부터 안내하고 오늘 진행 표시를 만들지 않음")
             seed(page, {"daylist": daylist(yesterday, [stop(1, yesterday)])})
-            action(page, "배정 목록 수신")
+            action(page, "오늘 목록 받기")
             seed(page, {"daylist": daylist(tomorrow, [stop(1, tomorrow)]), "events": [event(1)]})
-            action(page, "배정 목록 수신")
+            action(page, "오늘 목록 받기")
             ok(page.locator(".next-action").get_by_text("수거 이어가기", exact=False).count() == 0,
                "결과 없는 지난 목록·미래 목록은 오늘 목록 수신으로 안내하며 미래 수거로 보내지 않음")
 
@@ -172,16 +173,16 @@ def mobile_workflow_regressions(browser, shots):
             ok(True, "빠진·취소·개인정보 정리 지점은 건너뛰고 미확인 결과 파일이 있어도 남은 오늘 방문부터 안내")
 
             seed(page, {"daylist": daylist(today, [stop(1, today)]), "events": [event(1)]})
-            action(page, "결과 전달·반영 확인").click()
+            action(page, "결과 보내기").click()
             ok("수거 완료" not in page.locator("main").inner_text(), "일부 수거 결과를 수거 완료로 단정하지 않음")
             with page.expect_download():
                 page.get_by_role("button", name="결과 파일 만들어 보내기 (1건)", exact=True).click()
             code = page.evaluate("async () => (await import('./core.js')).st.exports[0].code")
             go_home(page)
-            action(page, "결과 전달·반영 확인")
+            action(page, "결과 반영 코드 넣기")
             ok(page.evaluate("async () => (await import('./core.js')).st.releasedSeq") == 0,
-               "실제 암호화 결과 파일 생성 뒤에도 D-코드 전에는 PC 반영 확인을 유지")
-            action(page, "결과 전달·반영 확인").click()
+               "실제 암호화 결과 파일 생성 뒤에도 D-코드 전에는 PC 반영 확인을 유지(보낼 기록 0 → 결과 반영 코드 넣기)")
+            action(page, "결과 반영 코드 넣기").click()
             page.get_by_placeholder("결과 반영 코드 8자리").fill("R-" + code)
             page.get_by_role("button", name="결과 반영 코드 입력", exact=True).click()
             ok(page.evaluate("async () => (await import('./core.js')).st.releasedSeq") == 0,
@@ -207,15 +208,15 @@ def mobile_workflow_regressions(browser, shots):
                 C.st.keptPhotos[0].bytes = bytes.length;
                 await S.putSecureBytes('ph:workflow-photo', bytes); await C.commit();
             }""")
-            action(page, "사진 전달·회수 확인").click()
+            action(page, "사진 보내기").click()
             with page.expect_download():
                 page.get_by_role("button", name="사진 파일 만들기 (1장)", exact=True).click()
             pcode = page.evaluate("async () => (await import('./core.js')).st.photoExports[0].code")
             go_home(page)
-            action(page, "사진 전달·회수 확인")
+            action(page, "사진 회수 코드 넣기")
             ok(page.evaluate("async () => !(await import('./core.js')).st.recoveredPhotos?.length"),
                "사진 파일 생성만으로 사진 회수나 정리 단계로 넘어가지 않음")
-            action(page, "사진 전달·회수 확인").click()
+            action(page, "사진 회수 코드 넣기").click()
             page.get_by_placeholder("사진 회수 코드 8자리").fill("P-" + pcode)
             page.get_by_role("button", name="사진 회수 코드 입력", exact=True).click()
             go_home(page)
@@ -245,7 +246,7 @@ def mobile_workflow_regressions(browser, shots):
                     await C.addEvent({ request_id: 'workflow-1', req_ver: 1, assign_ver: 1 }, 'CONTACT', { result: 'NO_ANSWER' });
                     await C.render();
                 }""")
-                action(page, "기록 보호용 내보내기" if mode == "PC" and registered else "기록 보호용 백업").click()
+                action(page, "결과 보내기" if mode == "PC" and registered else "기록 보호용 백업").click()
                 expect(page).to_have_url(url + ("#/export" if mode == "PC" and registered else "#/backup"))
                 ok(page.locator("#save-fail").is_visible(), f"{mode} 등록={registered}: 실제 저장 실패는 기록 보호 경로를 우선하고 실패 알림 유지")
                 page.evaluate("""async () => {

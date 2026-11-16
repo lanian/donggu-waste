@@ -191,7 +191,7 @@ def main():
             prepare(page, 'SOLO', True)
             enter(page)
             page.get_by_role('button', name='← 목록', exact=True).click()
-            page.get_by_role('button', name='조회조건 초기화', exact=True).click()
+            page.get_by_role('button', name='조건 지우기', exact=True).click()
             expect(page.locator('.stops .stop:focus')).to_have_count(0)
             prepare(page, 'SOLO', True)
             enter(page)

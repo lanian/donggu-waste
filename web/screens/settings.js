@@ -8,7 +8,7 @@ import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
-import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, unsent, workerName } from '../core.js';
+import { LOCK_CHOICES, TEXT_SIZES, addrRoute, allStops, applyTextSize, ask, autoLockStatus, btn, commit, errMsg, go, h, isDark, isSolo, prefs, render, setAutoLockEnabled, setLockMs, setMapEnabled, setPrefs, setSt, sheet, smsTemplates, st, stopCamera, tabBar, toast, outbox, say, msgBox, unsent, workerName } from '../core.js';
 import { CHECKS, installCard, runningAsApp } from '../widgets.js';
 import { APP_VERSION } from '../app.js';
 
@@ -133,21 +133,21 @@ async function screenSettings() {
 
   // 지도
   const tc = await M.tileCacheInfo();
-  const pmsg = h('p', { class: 'msg', role: 'status' });
+  const pmsg = msgBox();
   const prefetch = btn('동구 지도 미리 받기', async () => {
     if (!navigator.serviceWorker || !navigator.serviceWorker.controller) { pmsg.textContent = '앱을 한 번 닫았다 다시 연 뒤에 받을 수 있습니다(오프라인 저장 준비 중).'; return; }
     prefetch.disabled = true;
     const pts = allStops().filter((s) => !s.removed && s.status !== 'CANCELLED').map((s) => deriveStop(s, st.events).loc).filter(Boolean);
     try {
       const r = await M.prefetchTiles(M.bboxAround(pts), (n, t) => { pmsg.textContent = `받는 중 ${n} / ${t}`; });
-      pmsg.textContent = r.fail === r.total ? '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.' : `${pts.length ? '오늘 지점 주변' : '동구 전체'} 지도 조각 ${r.total - r.fail}개를 받았습니다${r.fail ? ` (실패 ${r.fail})` : ''}.`;
+      say(pmsg, r.fail === r.total ? '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.' : `${pts.length ? '오늘 지점 주변' : '동구 전체'} 지도 조각 ${r.total - r.fail}개를 받았습니다${r.fail ? ` (실패 ${r.fail})` : ''}.`, r.fail === r.total);
       if (r.fail < r.total && st) { st.mapPrefetchedAt = new Date().toISOString(); commit(); }
-    } catch { pmsg.textContent = '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.'; }
+    } catch { say(pmsg, '지도 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요.', true); }
     prefetch.disabled = false;
   }, 'big', { disabled: !st.mapEnabled });
   const mapCard = h('section', { class: 'card' }, h('h2', {}, '지도'),
     h('p', { class: 'small' }, '지도를 켜면 바탕 지도 조각을 인터넷(OpenFreeMap)에서 받습니다. 이름·연락처·주소·핀 위치는 지도 서버로 보내지 않습니다.'),
-    btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', async () => { st.mapEnabled = !st.mapEnabled; await commit(); render(); }, 'big'),
+    btn(st.mapEnabled ? '지도 사용 끄기' : '지도 사용 켜기', () => setMapEnabled(!st.mapEnabled), 'big'),
     h('p', { class: 'small' }, `인터넷이 약한 곳에 대비해 오늘 지점 주변(없으면 동구 전체)의 넓은 범위 지도(줌 14 이하)를 미리 받아 둡니다. 보관 ${tc.count}개 · ${(tc.bytes / 1048576).toFixed(1)}MB (최대 50MB, 오래 안 쓴 것부터 지움)`),
     prefetch, pmsg);
 
@@ -197,13 +197,14 @@ async function screenSettings() {
       h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
       h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
       h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
-      h('dt', {}, '미전송 기록'), h('dd', {}, unsent().length + '건'))),
+      // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
+      ...(isSolo() ? [] : [h('dt', {}, '보낼 기록'), h('dd', {}, outbox().toSend + '건'), h('dt', {}, '확인 대기'), h('dd', {}, outbox().waiting + '건')]))),
     h('section', { class: 'card' }, h('h2', {}, '현장 기록'),
       h('div', { class: 'fld-label' }, '도착·사진에 휴대폰 위치 남기기'),
       h('p', { class: 'small' }, '[도착]을 누르거나 사진을 찍을 때 위치 권한이 허용되어 있으면 위치·오차를 함께 기록합니다(결과 파일로 PC에만 전달).'),
       choice([[true, '남김'], [false, '안 남김']], st.geoEvidence !== false, (v) => set({ geoEvidence: v })),
-      isSolo() ? null : h('div', {}, h('div', { class: 'fld-label' }, '미전송 알림'),
-        h('p', { class: 'small' }, '보내지 않은 기록이 이 시간보다 오래되면 첫 화면에 알립니다. 오후 5시 뒤에는 1건이라도 있으면 알립니다.'),
+      isSolo() ? null : h('div', {}, h('div', { class: 'fld-label' }, '보낼 기록 알림'),
+        h('p', { class: 'small' }, '보낼 기록이 이 시간보다 오래되면 첫 화면에 알립니다. 오후 5시 뒤에는 1건이라도 있으면 알립니다.'),
         choice([[1, '1시간'], [3, '3시간'], [6, '6시간']], st.unsentWarnH || 3, (v) => set({ unsentWarnH: v })),
         btn('안전용 암호화 백업', () => go('#/backup'), 'big')),
       isSolo() ? h('div', {}, h('div', { class: 'fld-label' }, '개인정보 보관 기간'),
@@ -212,18 +213,18 @@ async function screenSettings() {
     smsCard, navCard, jusoCard, mapCard,
     isSolo() ? soloFeeCard() : null,
     h('section', { class: 'card' },
-      isSolo() ? null : btn('기기 등록 화면', () => go('#/register'), 'big'),
+      isSolo() ? null : btn('기기 등록', () => go('#/register'), 'big'),
       btn('사용 방식 바꾸기', async () => {
         if (st.requests.length || st.daylist || st.events.length) return toast('자료가 있어 바꿀 수 없습니다. 백업·정리 후 바꿔 주세요.', 'bad');
         st.mode = null; await commit(); go('#/mode');
       }, 'big'),
-      h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 보내지 않은 기록이 사라지니 주의하세요.'),
+      h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 PC 반영이 확인되지 않은 기록(보낼 기록·확인 대기)이 사라지니 주의하세요.'),
       btn('이 휴대폰의 모든 자료 지우기', async () => {
         const u = unsent().length;
         const rec = new Set(st.recoveredPhotos || []);
         const ph = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)].filter((x) => !rec.has(x)).length;
-        if (!(await ask((u ? `보내지 않은 기록 ${u}건이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
-        if ((u || ph) && !(await ask(`정말 지울까요? 보내지 않은 기록 ${u}건${ph ? `과 회수 안 된 사진 ${ph}장` : ''}은 어디에도 남지 않습니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
+        if (!(await ask((u ? `PC 반영이 확인되지 않은 기록 ${u}건(보낼 기록·확인 대기)이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
+        if ((u || ph) && !(await ask(`정말 지울까요? PC 반영이 확인되지 않은 기록 ${u}건${ph ? `과 회수 안 된 사진 ${ph}장` : ''}은 어디에도 남지 않습니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
         stopCamera();
         try { await S.wipeAll(); } catch (e) { return toast('지우지 못했습니다: ' + errMsg(e), 'bad'); }
         setSt(null); location.hash = ''; location.reload();
@@ -235,7 +236,7 @@ async function screenSettings() {
 function soloFeeCard() {
   const ov = st.feeOverrides || {};
   const review = BUILTIN_FEES.rows.filter((r) => r.status !== 'CONFIRMED');
-  const msg = h('p', { class: 'msg' });
+  const msg = msgBox();
   return h('section', { class: 'card' }, h('h2', {}, `확인 필요 품목 단가 (${review.length})`),
     h('p', { class: 'small' }, '원문 규격이 겹치거나 단위가 불명확한 품목입니다. 담당 부서 기준을 확인한 것만 정하세요. 정한 단가는 그 뒤 새로 접수·추가하는 품목에만 쓰입니다.'),
     ...review.map((r) => {
@@ -246,8 +247,8 @@ function soloFeeCard() {
         h('div', { class: 'grid2' },
           btn('저장', async () => {
             const n = parseInt(price.value, 10);
-            if (!(n > 0)) return (msg.textContent = '단가는 0원보다 커야 합니다. 모르면 확인 대기로 두세요.');
-            if (!why.value.trim()) return (msg.textContent = '근거를 적어 주세요.');
+            if (!(n > 0)) return say(msg, '단가는 0원보다 커야 합니다. 모르면 확인 대기로 두세요.', true);
+            if (!why.value.trim()) return say(msg, '근거를 적어 주세요.', true);
             st.feeOverrides = { ...ov, [r.id]: { price: n, reason: why.value.trim(), at: new Date().toISOString() } };
             st.feeRev = (st.feeRev || 0) + 1; (st.feeLog ||= []).push({ id: r.id, price: n, reason: why.value.trim(), at: new Date().toISOString() });
             await commit(); toast('저장했습니다'); render();

@@ -207,7 +207,7 @@ def export_memo_notice(browser, url):
         text = page.locator("main").inner_text()
         ok("이름·연락처·주소·메모가 들어가지 않" not in text, "결과 파일에 메모가 안 들어간다고 잘못 안내하지 않음")
         ok("현장 메모" in text and "개인정보를 적지 마세요" in text, "현장 메모·취소 사유가 암호화되어 PC로 간다고 안내")
-        expect(page.locator(".notice.free-text")).to_contain_text("1건")
+        expect(page.locator(".callout.warn.free-text")).to_contain_text("1건")
         ok(True, "이번 파일에 직접 적은 글이 몇 건 들어가는지 알림")
         route(page, "#/stop/workflow-1")
         memo = page.get_by_label("현장 메모", exact=True)

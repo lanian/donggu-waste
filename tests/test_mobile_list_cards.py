@@ -73,7 +73,9 @@ def card_contract(page):
     expect(card(page, 9).locator('.stop-state')).to_have_text('보류')
     assert 'done' not in card(page, 9).get_attribute('class').split()
     expect(page.locator('.summary .sum-main')).to_have_text('2 / 7곳 완료')
-    expect(page.locator('.summary .sum-sub')).to_contain_text('재방문·보류 3')
+    # 2단계: 재방문·보류 수는 진행 요약 칩이 아니라 거르기 탭에만 둔다(중복 제거)
+    expect(page.locator('.summary .sum-sub')).not_to_contain_text('재방문·보류')
+    expect(page.get_by_role('button', name='재방문·보류 3', exact=True)).to_have_count(1)
 
 
 def search_contract(page):

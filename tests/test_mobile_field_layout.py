@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 
@@ -47,7 +48,7 @@ def numeric_case(browser, url, shots):
         apply_quantity(page,0)
         assert page.evaluate('window.__zeroQuantity') == 0, '최솟값 0을 빈 입력으로 처리함'
         assert events(page) == before_zero, '공유 수량 입력만으로 업무 기록 생성'
-        button = page.get_by_role('button', name='가상 의자 현장 수량 직접 입력', exact=True)
+        button = page.get_by_role('button', name=re.compile(r'^가상 의자 현장 수량 \d+개, 눌러서 직접 입력$'))
         expect(button).to_be_visible()
         before = events(page)
         button.click()
@@ -64,15 +65,15 @@ def numeric_case(browser, url, shots):
         expect(dialog).to_have_count(0)
         page.wait_for_function('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_confirmed===149')
         page.evaluate('async()=>{await window.__collectionCore.saving;}')
-        expect(page.get_by_role('button', name='가상 의자 현장 수량 직접 입력', exact=True)).to_be_focused()
+        expect(page.get_by_role('button', name=re.compile(r'^가상 의자 현장 수량 \d+개, 눌러서 직접 입력$'))).to_be_focused()
         before_cancel = events(page)
-        page.get_by_role('button', name='가상 의자 현장 수량 직접 입력', exact=True).click()
+        page.get_by_role('button', name=re.compile(r'^가상 의자 현장 수량 \d+개, 눌러서 직접 입력$')).click()
         number = page.get_by_role('dialog', name='수량 직접 입력', exact=True).get_by_role('spinbutton')
         number.fill('140')
         page.get_by_role('dialog').get_by_role('button', name='취소', exact=True).click()
         assert events(page) == before_cancel, '수량 입력 취소가 업무 기록을 바꿈'
-        expect(page.get_by_role('button', name='가상 의자 현장 수량 직접 입력', exact=True)).to_have_text('149')
-        collected = page.get_by_role('button', name='가상 의자 실은 수량 직접 입력', exact=True)
+        expect(page.get_by_role('button', name=re.compile(r'^가상 의자 현장 수량 \d+개, 눌러서 직접 입력$'))).to_have_text('149')
+        collected = page.get_by_role('button', name=re.compile(r'^가상 의자 실은 수량 \d+개, 눌러서 직접 입력$'))
         collected.click()
         for invalid in ('1', '150'):
             apply_quantity(page, invalid)
@@ -81,14 +82,14 @@ def numeric_case(browser, url, shots):
         page.wait_for_function('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_collected===100')
         page.evaluate('async()=>{await window.__collectionCore.saving;}')
         before_leave = events(page)
-        page.get_by_role('button', name='가상 의자 실은 수량 직접 입력', exact=True).click()
+        page.get_by_role('button', name=re.compile(r'^가상 의자 실은 수량 \d+개, 눌러서 직접 입력$')).click()
         page.get_by_role('dialog').get_by_role('spinbutton').fill('110')
         page.evaluate("async()=>{location.hash='#/home';await window.__collectionCore.render();}")
         if page.get_by_role('dialog').count():
             page.get_by_role('dialog').get_by_role('button', name='적용', exact=True).click()
         assert events(page) == before_leave, '이탈한 수량 입력창이 이전 접수를 수정함'
         page.goto(url+'#/stop/'+receipt['request_id'])
-        page.get_by_role('button', name='가상 의자 실은 수량 직접 입력', exact=True).click()
+        page.get_by_role('button', name=re.compile(r'^가상 의자 실은 수량 \d+개, 눌러서 직접 입력$')).click()
         page.get_by_role('dialog').get_by_role('spinbutton').fill('110')
         page.evaluate('()=>window.__collectionCore.lockNow()')
         expect(page.get_by_placeholder('PIN', exact=True)).to_be_visible()

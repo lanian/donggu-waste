@@ -63,7 +63,7 @@ async function screenCheck() {
   }, 'primary big');
   return h('main', { class: 'with-tabs' },
     h('header', { class: 'bar' }, btn('← 설정', () => go('#/settings'), 'ghost'), h('h1', { class: 'bar-title' }, '현장 점검')),
-    h('section', { class: 'card notice' }, h('p', {}, '자동 시험으로는 확인할 수 없는 것을 이 휴대폰에서 눌러 보고 결과를 남깁니다. 결과에는 주민 정보가 들어가지 않습니다.'),
+    h('section', { class: 'callout info' }, h('p', {}, '자동 시험으로는 확인할 수 없는 것을 이 휴대폰에서 눌러 보고 결과를 남깁니다. 결과에는 주민 정보가 들어가지 않습니다.'),
       h('p', { class: 'small' }, `진행 ${done}/${CHECKS.length}`)),
     h('section', { class: 'card' }, h('h2', {}, '이 휴대폰'), h('dl', {}, ...Object.entries(deviceInfo()).filter(([k]) => k !== 'standalone').flatMap(([k, v]) => [h('dt', {}, ({ os: '운영체제', browser: '브라우저', model: '모델', app: '앱 버전' })[k] || k), h('dd', {}, v || '-')]),
       ...autoBits.flatMap(([a, b]) => [h('dt', {}, a), h('dd', {}, b)]))),

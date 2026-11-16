@@ -49,16 +49,40 @@ function tabBar(active) {
     h('a', { href, class: 't-' + k, 'aria-current': k === active ? 'page' : null }, t)));
 }
 const appLogo = (cls = 'logo') => h('img', { src: 'icons/icon.svg', alt: '', class: cls, width: 72, height: 72 });
-// 알림: 안내는 4초 뒤 사라지고, 오류는 눌러서 닫을 때까지 남는다(장갑 낀 손으로 놓치지 않게)
+// 스크린리더 알림: index.html 에 처음부터 있는 영역(#sr-polite·#sr-alert)에 쓴다. 새로 붙인 role=status 요소는 TalkBack이 자주 놓친다.
+// 같은 글을 다시 알려도 읽히게 비운 뒤 다음 그리기에서 채우고, 읽힌 뒤(2초) 다시 비운다(화면을 훑을 때 지난 알림이 남아 읽히지 않게).
+const ANNOUNCE_CLEAR_MS = 2000;
+function announce(text, kind = '') {
+  const live = document.getElementById(kind === 'bad' ? 'sr-alert' : 'sr-polite');
+  if (!live) return;
+  const msg = String(text);
+  live.textContent = '';
+  requestAnimationFrame(() => {
+    live.textContent = msg;
+    setTimeout(() => { if (live.textContent === msg) live.textContent = ''; }, ANNOUNCE_CLEAR_MS);
+  });
+}
+// 알림: 안내는 글 길이만큼(최소 4초) 보이다 사라지고, 오류는 눌러서 닫을 때까지 남는다(장갑 낀 손으로 놓치지 않게).
+// 보이는 알림에는 role을 두지 않는다(알림 영역과 같은 글을 두 번 읽지 않게).
+const toastMs = (msg) => Math.max(4000, 1500 + String(msg).length * 90);
 const toast = (msg, kind = '') => {
   // 한 번에 하나만. 단, 안내 알림이 오류 알림을 덮지 않는다(오류는 눌러서 닫을 때까지)
   document.querySelectorAll(kind === 'bad' ? '.toast' : '.toast:not(.bad)').forEach((x) => x.remove());
   const bad = kind === 'bad';
-  const t = h('div', { class: 'toast ' + kind, role: bad ? 'alert' : 'status' }, msg, bad ? h('span', { class: 'tx' }, '닫기 ✕') : null);
+  const t = h('div', { class: 'toast ' + kind }, msg, bad ? h('span', { class: 'tx' }, '닫기 ✕') : null);
   if (bad) { t.tabIndex = 0; const close = () => t.remove(); t.addEventListener('click', close); t.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') close(); }); }
-  else setTimeout(() => t.remove(), 4000);
+  else setTimeout(() => t.remove(), toastMs(msg));
   document.body.append(t);
+  announce(msg, kind);
 };
+// 화면 안 안내 글(.msg): 오류는 role=alert(빨강), 일반 안내는 role=status. 같은 칸에 진행 안내와 오류가 번갈아 나오는 곳에서 쓴다.
+function say(el, text, bad = false) {
+  el.classList.add('msg'); el.classList.toggle('err', !!bad);
+  el.setAttribute('role', bad ? 'alert' : 'status');
+  el.textContent = text || '';
+  return el;
+}
+const msgBox = (text = '', attrs = {}) => h('p', { class: 'msg', role: 'status', ...attrs }, text);
 
 // 아래에서 올라오는 확인 창 (window.prompt·confirm 대신). 큰 단추, 큰 글씨 설정을 따른다.
 // choices: [{label, value, cls, needInput}] → 고른 value (입력칸이 있으면 {value, text}), 취소·뒤로 가기는 null
@@ -346,6 +370,10 @@ async function addCrewEvent(kind, body) {
   return commit();
 }
 const unsent = () => st.events.filter((e) => e.seq > st.releasedSeq);
+// 화면 표시용: 보낼 기록(어느 결과 파일에도 없음)·확인 대기(보냈지만 D-코드 전). 전송·정리·이전 목록 막기 판단은 unsent() 그대로.
+const outbox = () => F.outboxInfo(st.events, st.releasedSeq, st.exports);
+// 지도 켜기·끄기(설정과 지도 화면이 같이 씀)
+async function setMapEnabled(on) { st.mapEnabled = !!on; await commit(); render(); }
 
 // ------------------------------------------------------------ 잠금
 let lockMs = 10 * 60000; // 잠금 해제 동안 설정값(5·10·15분)
@@ -539,16 +567,18 @@ async function quantityInput(value, min = 0, max = 9999, label = '수량') {
     return result && st === ownerState && location.hash === ownerHash && S.isUnlocked() ? Number(result.text) : null;
   } finally { window.removeEventListener('hashchange', leave); }
 }
-function quantityValue(value, onChange, min = 0, max = 9999, label = '수량') {
+// 수량 값 단추 이름에 지금 값을 넣는다: "가상 의자 실은 수량 2개, 눌러서 직접 입력"(단위가 없으면 '개')
+const quantityName = (label, value, unit) => `${label} ${value}${unit || '개'}, 눌러서 직접 입력`;
+// fk: 같은 화면을 다시 그린 뒤 초점을 되돌릴 고정 키(app.js render). 직접 입력 뒤 초점 복원은 data-qty-name(바뀌지 않는 묶음 이름)으로 찾는다.
+function quantityValue(value, onChange, min = 0, max = 9999, label = '수량', { unit = '', fk = null } = {}) {
   const ownerState = st, ownerHash = location.hash, ownerForm = ui.form;
   let ownerDialog = null;
-  const name = `${label} 직접 입력`;
   const restore = () => {
     if (st !== ownerState || location.hash !== ownerHash || ui.form !== ownerForm || !S.isUnlocked()) return;
     const topDialog = [...document.querySelectorAll('dialog[open]')].at(-1);
     if (topDialog && topDialog !== ownerDialog) return;
     if (document.activeElement !== document.body && document.activeElement !== v && document.activeElement !== ownerDialog && document.activeElement?.isConnected) return;
-    const matches = [...(ownerDialog?.isConnected ? ownerDialog : document).querySelectorAll('.qty-value')].filter((e) => e.getAttribute('aria-label') === name && !e.disabled);
+    const matches = [...(ownerDialog?.isConnected ? ownerDialog : document).querySelectorAll('.qty-value')].filter((e) => e.dataset.qtyName === label && !e.disabled);
     if (matches.length === 1) matches[0].focus({ preventScroll: true });
   };
   const v = btn(String(value), async () => {
@@ -557,24 +587,25 @@ function quantityValue(value, onChange, min = 0, max = 9999, label = '수량') {
     if (n == null || !v.isConnected || st !== ownerState || location.hash !== ownerHash || ui.form !== ownerForm) return;
     await onChange(n);
     restore();
-  }, 'val qty-value', { 'aria-label': name });
+  }, 'val qty-value', { 'aria-label': quantityName(label, value, unit), 'data-qty-name': label, 'data-fk': fk ? `${fk}:value` : null });
   v.restoreQuantityFocus = restore;
+  v.setQuantityName = (n) => v.setAttribute('aria-label', quantityName(label, n, unit));
   return v;
 }
 function stepper(value, onChange, min = 0, max = 99, delay = 0, label = '', options = {}) {
   let cur = value, timer = null;
   let restoreValueFocus = false;
-  const key = Symbol('step');
-  const v = options.editable ? quantityValue(value, (n) => change(n, true), min, max, label) : h('span', { class: 'val', 'aria-live': 'polite' }, value);
-  const minus = btn('−', () => bump(-1), 'step', { 'aria-label': `${label} 빼기`.trim(), disabled: value <= min });
-  const plus = btn('+', () => bump(1), 'step', { 'aria-label': `${label} 더하기`.trim(), disabled: value >= max });
+  const key = Symbol('step'), fk = options.fk || null;
+  const v = options.editable ? quantityValue(value, (n) => change(n, true), min, max, label, { unit: options.unit, fk }) : h('span', { class: 'val', 'aria-live': 'polite' }, value);
+  const minus = btn('−', () => bump(-1), 'step', { 'aria-label': `${label} 빼기`.trim(), disabled: value <= min, 'data-fk': fk ? `${fk}:-` : null });
+  const plus = btn('+', () => bump(1), 'step', { 'aria-label': `${label} 더하기`.trim(), disabled: value >= max, 'data-fk': fk ? `${fk}:+` : null });
   function bump(dlt) {
     const n = Math.min(max, Math.max(min, cur + dlt));
     return change(n);
   }
   function change(n, direct = false) {
     if (n === cur) return;
-    cur = n; v.textContent = n; minus.disabled = n <= min; plus.disabled = n >= max;
+    cur = n; v.textContent = n; v.setQuantityName?.(n); minus.disabled = n <= min; plus.disabled = n >= max;
     if (!delay) return onChange(cur);
     restoreValueFocus = direct;
     if (options.editable) v.disabled = true;
@@ -588,7 +619,7 @@ function stepper(value, onChange, min = 0, max = 99, delay = 0, label = '', opti
     };
     stepFlush.set(key, fire); timer = setTimeout(fire, delay);
   }
-  return h('span', { class: 'stepper' }, minus, v, plus);
+  return h('span', { class: 'stepper', role: 'group', 'aria-label': label || null }, minus, v, plus);
 }
 
 // ------------------------------------------------------------ 현장 보조: 도착·문자·길안내·스티커·금액 고지·증거
@@ -725,18 +756,18 @@ const clearPhotoUrls = () => { photoUrls.forEach((u) => URL.revokeObjectURL(u));
 export {
   $app, BACKUP_WARN_MS, COLLECT_TTL_MS, END_OF_DAY_H, ERR, HANDOFF_MS, HIDDEN_LOCK_MS, LOCK_CHOICES,
   LOW_SPACE_MB, TEXT_SIZES, WIN_ID, addCrewEvent, addEvent, addrRoute, afterUnlock, ago,
-  allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
+  allStops, announce, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, btn, camInput, camInputs,
   camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, dial, digits,
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,
   handoffUntil, hiddenAt, isDark, isIOS, isQuota, isSolo, lastActive, launchApp,
-  lineFromRow, liveMap, loadState, lockMs, lockNow, locking, onLock, lowSpaceWarned, mdOf,
+  lineFromRow, liveMap, loadState, lockMs, lockNow, locking, msgBox, onLock, outbox, lowSpaceWarned, mdOf,
   mergePrefs, nextSeq, normAddr, openExternal, openSheets, pcStops, pcWorkDate, pendingPhotos,
   photoFlushing, photoUrls, prefs, reduceMotion, registeredNow, reloadWanted, reloadWhenSafe, render,
   quantityInput, quantityValue,
-  routeStopId, saveBanner, saveFailed, savePhoto, saving, sessionChan, setLiveMap, setLockMs,
+  routeStopId, saveBanner, saveFailed, savePhoto, saving, say, sessionChan, setLiveMap, setLockMs, setMapEnabled,
   setAutoLockEnabled, setPrefs, setRegisteredNow, setRender, setSt, settleWrites, sheet, smsTemplates, st,
-  startCamera, stepFlush, stepper, stopCamera, storageLeft, tabBar, themeToggle, toast,
+  startCamera, stepFlush, stepper, stopCamera, storageLeft, tabBar, themeToggle, toast, toastMs,
   todayKST, ui, unsent, wakeLock, wakeRoute, wantWake, withOverrides, withWorker, workerName,
   writesPending,
 };

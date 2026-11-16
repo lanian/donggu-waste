@@ -4,7 +4,7 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
-import { COLLECT_TTL_MS, btn, commit, errMsg, flowSteps, footBar, go, h, mdOf, render, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
+import { COLLECT_TTL_MS, btn, commit, errMsg, flowSteps, footBar, go, h, mdOf, msgBox, render, say, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
 import { purgeReleased } from './export.js';
 
 async function loadCollector() {
@@ -26,10 +26,10 @@ function prevDayOwed() {
 function screenScanOwed(o) {
   return h('main', {},
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
-    h('section', { class: 'card notice owed-card', role: 'alert' },
+    h('section', { class: 'card callout warn owed-card', role: 'alert' },
       h('h2', {}, `${mdOf(o.date)} 결과가 아직 PC에 반영되지 않았습니다`),
-      h('p', {}, o.notSent ? `보내지 않은 기록 ${o.notSent}건` + (o.waiting ? ` · 보냈지만 결과 반영 코드를 받지 않은 기록 ${o.waiting}건` : '')
-        : `보냈지만 결과 반영 코드를 받지 않은 기록 ${o.waiting}건`),
+      // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
+      h('p', {}, [o.notSent ? `보낼 기록 ${o.notSent}건` : '', o.waiting ? `확인 대기 ${o.waiting}건` : ''].filter(Boolean).join(' · ')),
       h('p', { class: 'small' }, o.notSent ? '먼저 [결과 보내기]로 PC에 보내 주세요. 새 날짜 목록은 이전 결과가 반영된 뒤에 받습니다.'
         : 'PC 담당자에게 결과 반영 코드(D-)를 받아 [결과 보내기]에 넣거나, PC가 결과를 가져온 뒤 만든 새 목록을 받으면 저절로 확인됩니다.'),
       btn(o.notSent ? '결과 보내기' : '결과 반영 코드 넣기', () => go('#/export'), 'primary huge'),
@@ -46,7 +46,7 @@ async function screenScan() {
   const bar = h('div', { class: 'progress track', role: 'progressbar', 'aria-label': '받은 조각' }, h('div', { class: 'fill' }));
   const count = h('p', { class: 'count' }, '목록 QR을 비추세요');
   const miss = h('p', { class: 'small' });
-  const msg = h('p', { class: 'msg' });
+  const msg = msgBox();
   const show = () => {
     if (!current) return;
     const b = col.bundles[current], got = Object.keys(b.parts).length;
@@ -59,7 +59,7 @@ async function screenScan() {
   show();
   let finishing = false, reads = 0;
   const finish = async () => {
-    finishing = true; stopCamera(); msg.textContent = '확인 중…';
+    finishing = true; stopCamera(); say(msg, '확인 중…');
     try {
       const envBytes = col.assemble(current);
       const opened = await P.openEnvelope(envBytes, await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
@@ -87,7 +87,7 @@ async function screenScan() {
         await commit();
         ui.relDone = { ...relDone, purged };
       } else ui.relDone = null;
-      if (hash === st.lastBundleHash) { msg.textContent = '이미 받은 목록입니다. 바뀐 내용이 없습니다.'; }
+      if (hash === st.lastBundleHash) { say(msg, '이미 받은 목록입니다. 바뀐 내용이 없습니다.'); }
       else {
         if (old && old.work_date === pl.work_date && pl.assign_ver < old.assign_ver) throw Object.assign(new Error(''), { code: 'QR_STALE_VERSION' });
         // 지난 날짜 목록은 받지 않는다(이미 지운 주민 정보가 다시 들어오지 않게)
@@ -140,7 +140,7 @@ async function screenScan() {
       await commit();
       go('#/received');
     } catch (e) {
-      msg.textContent = errMsg(e);
+      say(msg, errMsg(e), true);
       if (['AUTH_FAIL', 'WRONG_DEVICE', 'QR_STALE_VERSION', 'BAD_VERSION'].includes(e.code)) { col.drop(current); await S.putRaw('collect', col.bundles); current = null; }
       finishing = false;
     }
@@ -148,14 +148,14 @@ async function screenScan() {
   setTimeout(() => startCamera(video, async (text) => {
     if (finishing) return;
     let r;
-    try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') msg.textContent = errMsg(e); return; }
+    try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') say(msg, errMsg(e), true); return; }
     if (!current) current = r.key;
-    if (r.key !== current) { msg.textContent = '다른 목록의 QR이 섞였습니다. 지금 받던 목록을 계속 비춰 주세요.'; return; }
+    if (r.key !== current) { say(msg, '다른 목록의 QR이 섞였습니다. 지금 받던 목록을 계속 비춰 주세요.', true); return; }
     reads += 1;
-    if (!r.dup) { msg.textContent = ''; S.putRaw('collect', col.bundles); if (navigator.vibrate) navigator.vibrate(20); }
+    if (!r.dup) { say(msg, ''); S.putRaw('collect', col.bundles); if (navigator.vibrate) navigator.vibrate(20); }
     show();
     if (col.complete(current)) finish();
-  }).catch((e) => { msg.textContent = errMsg(e); }), 0);
+  }).catch((e) => { say(msg, errMsg(e), true); }), 0);
   return h('main', {},
     h('header', { class: 'bar' }, btn('← 목록', () => go('#/home'), 'ghost'), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
     flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], current ? 1 : 0),
@@ -168,7 +168,7 @@ async function screenScan() {
 const codeShow = (kind, code) => h('p', { class: 'code-show k-' + kind }, h('span', { class: 'code-kind', 'aria-label': F.CODE_KINDS[kind].label }, F.CODE_KINDS[kind].prefix + '-'), h('span', { class: 'fp' }, code));
 function relNote(rel) {
   if (!rel || !(rel.events || rel.photos)) return null;
-  return h('p', { class: 'notice rel-note', role: 'status' }, 'PC 반영 정보도 함께 받았습니다: ' + [rel.events ? `결과 ${rel.events}건 반영 확인` : '', rel.photos ? `사진 ${rel.photos}장 회수 확인` : '', rel.purged ? `끝난 ${rel.purged}곳 개인정보 정리` : ''].filter(Boolean).join(' · ') + ' (코드 입력 필요 없음)');
+  return h('p', { class: 'callout ok rel-note', role: 'status' }, 'PC 반영 정보도 함께 받았습니다: ' + [rel.events ? `결과 ${rel.events}건 반영 확인` : '', rel.photos ? `사진 ${rel.photos}장 회수 확인` : '', rel.purged ? `끝난 ${rel.purged}곳 개인정보 정리` : ''].filter(Boolean).join(' · ') + ' (코드 입력 필요 없음)');
 }
 function screenReceived() {
   const r = ui.receipt || (st.lastReceipt && !st.lastReceipt.told ? { code: st.lastReceipt.code.slice(0, 4) + ' ' + st.lastReceipt.code.slice(4), count: st.lastReceipt.count, ver: st.lastReceipt.ver, diff: '', again: true } : null);
@@ -179,7 +179,7 @@ function screenReceived() {
     h('section', { class: 'card center-card' },
       h('h2', {}, '목록을 받았습니다'),
       h('p', {}, `${r.count}건 · 목록 갱신본 ${r.ver}`),
-      r.diff ? h('p', { class: 'notice diff-summary', role: 'status' }, `바뀐 내용: ${r.diff}`) : null,
+      r.diff ? h('p', { class: 'callout info diff-summary', role: 'status' }, `바뀐 내용: ${r.diff}`) : null,
       relNote(r.rel),
       h('p', {}, 'PC 담당자에게 아래 수신 코드를 알려 주세요. (휴대폰 → PC)'),
       codeShow('RECEIPT', r.code),

@@ -119,6 +119,18 @@ export function unsentInfo(events, releasedSeq, now = Date.now()) {
   const oldest = list.reduce((m, e) => Math.min(m, Date.parse(e.ts) || now), now);
   return { count: list.length, oldestTs: list.length ? new Date(oldest).toISOString() : null, ageH: list.length ? (now - oldest) / 3600000 : 0 };
 }
+/** 화면 표시용으로 releasedSeq 뒤 기록을 둘로 나눈다(저장 형식·결과 파일에 담는 기록·unsentInfo 의 뜻은 그대로).
+ *  보낼 기록(toSend) = 어느 결과 파일(exports 의 from~to)에도 들어가지 않은 기록, 확인 대기(waiting) = 결과 파일에는 들어갔지만
+ *  아직 D-코드(또는 새 목록의 반영 정보)로 반영이 확인되지 않은 기록. oldestTs·ageH 는 보낼 기록 중 가장 오래된 것 기준. */
+export function outboxInfo(events, releasedSeq, exports = [], now = Date.now()) {
+  const files = Array.isArray(exports) ? exports : [];
+  const inFile = (e) => files.some((x) => e.seq >= x.from && e.seq <= x.to);
+  const pending = (events || []).filter((e) => e.seq > releasedSeq);
+  const toSend = pending.filter((e) => !inFile(e));
+  const oldest = toSend.reduce((m, e) => Math.min(m, Date.parse(e.ts) || now), now);
+  return { toSend: toSend.length, waiting: pending.length - toSend.length,
+    oldestTs: toSend.length ? new Date(oldest).toISOString() : null, ageH: toSend.length ? (now - oldest) / 3600000 : 0 };
+}
 
 /** 단독 방식 보관 기간: 처리가 끝난(isDone) 지 days일이 지난 접수. doneAt = 그 접수의 마지막 기록·수정·취소 시각.
  *  돌려주는 값: [{ r, doneAt }] — 실제로 지울지는 화면에서 백업 여부를 보고 사람이 정한다. */

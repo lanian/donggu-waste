@@ -87,8 +87,8 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
         () => openSpecs(cat, nm), 'name-chip' + (n ? ' on' : ''), { 'aria-label': `${nm}${n ? ` (${n}개 담김)` : ''}${multi ? ' 규격 고르기' : ' 1개 담기'}` });
     }));
   };
-  const ctl = (n, onMinus, onPlus, name, onSet, min = 1, max = 9999) => (n
-    ? h('span', { class: 'pick-ctl' }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), quantityValue(n, onSet, min, max, `${name} 수량`), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기`, disabled: n >= max }))
+  const ctl = (n, onMinus, onPlus, name, onSet, min = 1, max = 9999, unit = '') => (n
+    ? h('span', { class: 'pick-ctl', role: 'group', 'aria-label': `${name} 수량` }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), quantityValue(n, onSet, min, max, `${name} 수량`, { unit }), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기`, disabled: n >= max }))
     : btn('+ 담기', onPlus, 'opt pick-add', { ...keep, 'aria-label': `${name} 담기` }));
   // 즐겨찾기(☆): [자주 쓴] 맨 앞에 늘 나온다(이 휴대폰 안에서만)
   const toggleFav = async (rid) => {
@@ -104,12 +104,12 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
       specOnly ? null : btn(fav ? '★' : '☆', () => toggleFav(r.id), 'star pick-star' + (fav ? ' on' : ''), { ...keep, 'aria-label': fav ? `${name} 즐겨찾기 해제` : `${name} 즐겨찾기` }),
       h('div', { class: 'pick-info' }, h('strong', {}, specOnly && r.spec ? r.spec : name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
         r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 담김') : null),
-      ctl(n, () => bump(r, -1), () => bump(r, 1), name, (value) => { setTotal(r, value); onChange(); draw(); redrawSheet(); }, Math.max(1, fixed), fixed + 9999));
+      ctl(n, () => bump(r, -1), () => bump(r, 1), name, (value) => { setTotal(r, value); onChange(); draw(); redrawSheet(); }, Math.max(1, fixed), fixed + 9999, r.unit_label));
   };
   const picked = () => items.map((l) => h('div', { class: 'pick-row on' },
     h('div', { class: 'pick-info' }, h('strong', {}, `${l.name} ${l.spec || ''}`.trim()),
       h('span', { class: 'p' }, l.price_status === 'CONFIRMED' ? `${won(l.unit_price)} / ${l.unit_label}` : '금액 확인 대기')),
-    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); onChange(); draw(); }, () => { setLine(l, l.qty + 1); onChange(); draw(); }, l.name, (value) => { setLine(l, value); onChange(); draw(); })));
+    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); onChange(); draw(); }, () => { setLine(l, l.qty + 1); onChange(); draw(); }, l.name, (value) => { setLine(l, value); onChange(); draw(); }, 1, 9999, l.unit_label)));
   const draw = () => {
     const out = [];
     drawTabs();
@@ -195,11 +195,11 @@ async function installCard() {
     h('p', {}, '✓ 설치한 앱으로 실행 중입니다.'),
     h('p', { class: 'small' }, isIOS() ? '아이폰: 홈 화면 앱과 Safari는 자료를 따로 보관합니다. 업무는 이 앱에서만 하세요.' : '브라우저에서 같은 주소를 열어도 같은 자료가 보입니다. 업무는 이 앱으로 하세요.'));
   const inst = installEvt ? false : await appInstalled();
-  return h('section', { class: 'card install-card notice' }, h('h2', {}, '앱 설치 — 지금은 브라우저에서 실행 중'),
+  return h('section', { class: 'card install-card callout info' }, h('h2', {}, '앱 설치 — 지금은 브라우저에서 실행 중'),
     h('p', { class: 'small' }, '브라우저 탭에서도 똑같이 동작하지만, 설치해 두면 홈 화면 아이콘으로 바로 열리고 주소창 없이 전체 화면으로 씁니다. ' + (isIOS() ? '' : '설치해도 자료는 그대로입니다(같은 자료를 씀).')),
     installEvt ? btn('홈 화면에 앱 설치', doInstall, 'primary big')
       : inst ? h('p', {}, '이 휴대폰에 이미 설치되어 있습니다. 홈 화면이나 앱 목록의 "동구 수거"로 여세요. 홈 화면 아이콘만 지웠다면 앱은 남아 있습니다(휴대폰 설정 → 애플리케이션에서 지울 수 있음).')
-      : isIOS() ? h('p', {}, 'Safari 아래 공유 단추(□↑) → [홈 화면에 추가]. ', h('strong', {}, '아이폰은 Safari에서 쓰던 자료가 설치한 앱으로 옮겨 가지 않습니다'), ' — 보내지 않은 결과를 먼저 보내고, 설치한 앱에서 PIN 설정·기기 등록을 새로 하세요.')
+      : isIOS() ? h('p', {}, 'Safari 아래 공유 단추(□↑) → [홈 화면에 추가]. ', h('strong', {}, '아이폰은 Safari에서 쓰던 자료가 설치한 앱으로 옮겨 가지 않습니다'), ' — 보낼 기록을 먼저 보내고, 설치한 앱에서 PIN 설정·기기 등록을 새로 하세요.')
       : h('p', {}, '브라우저 메뉴(⋮)에서 [앱 설치] 또는 [홈 화면에 추가]를 누르세요. 메뉴에 [앱 열기]만 보이면 이미 설치된 것입니다.'));
 }
 

@@ -76,11 +76,13 @@ def main():
                 expect(page.get_by_label('목록 조회 결과', exact=True)).to_contain_text('3건')
                 expect(page.locator('.stops .stop').first).to_have_attribute('href', '#/stop/workflow-1')
                 expect(page.locator('.stop[href="#/stop/workflow-5"] .stop-state')).to_have_text('보류')
-                page.get_by_role('button', name='수거 목록 바로 보기', exact=True).click()
-                assert page.locator('#collection-list').evaluate('e=>document.activeElement===e')
-                title_y = page.locator('#collection-list').bounding_box()['y']
+                # 2단계: [수거 목록 바로 보기]는 뺐다(지금 할 일 → 경고 → 자주 쓰는 기능 → 목록 순서). 목록 제목은 그대로 둔다.
+                expect(page.get_by_role('button', name='수거 목록 바로 보기', exact=True)).to_have_count(0)
+                page.locator('#collection-list').focus()
+                page.locator('#collection-list').scroll_into_view_if_needed()
+                title = page.locator('#collection-list').bounding_box()
                 bar = page.locator('main > .bar').bounding_box()
-                assert bar['y'] + bar['height'] <= title_y < 160, '목록 제목이 고정 헤더에 가리지 않는다'
+                assert bar['y'] + bar['height'] <= title['y'], '목록 제목이 고정 헤더에 가리지 않는다'
                 page.get_by_role('button', name='날짜·접수 찾기', exact=True).click()
                 page.get_by_label('찾기 처리 상태', exact=True).select_option('OPEN')
                 expect(page.locator('.stops .stop')).to_have_count(3)
@@ -88,7 +90,7 @@ def main():
                 expect(page.locator('.stops .stop')).to_have_count(1)
                 expect(page.locator('.stops .stop')).to_have_attribute('href', '#/stop/workflow-2')
                 assert page.evaluate("import('./core.js').then(C=>JSON.stringify(C.st))") == before
-                print(f'PASS: {mode} 수량만입력/결과재확인/취소의 완료·미처리 분류, 목록바로보기, 찾기 일치, 업무자료 불변', flush=True)
+                print(f'PASS: {mode} 수량만입력/결과재확인/취소의 완료·미처리 분류, 목록 제목, 찾기 일치, 업무자료 불변', flush=True)
 
             inactive = [stop(6, today, removed=True), stop(7, today, status='CANCELLED'),
                         stop(8, today, status='DONE', pii_purged=True, name='', address='', phone=''),

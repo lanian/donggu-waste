@@ -20,6 +20,9 @@
 </head>
 <body>
 <div id="app"><main class="center"><p>불러오는 중…</p></main></div>
+<!-- 스크린리더 알림 영역: 처음부터 있어야 새 글을 읽는다(core.js announce·toast) -->
+<div id="sr-polite" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<div id="sr-alert" class="sr-only" role="alert"></div>
 <noscript>이 앱은 자바스크립트가 필요합니다.</noscript>
 <script src="vendor/jsQR.js"></script>
 <script type="module" src="app.js"></script>

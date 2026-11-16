@@ -4,7 +4,7 @@ import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
 import { isUnlocked } from '../store.js';
-import { addEvent, addrRoute, allStops, btn, commit, digits, dongOf, errMsg, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, st, stepFlush, stepper, toast, todayKST, ui, withWorker } from '../core.js';
+import { addEvent, addrRoute, allStops, btn, commit, digits, dongOf, errMsg, feeTable, fieldEditable, findStop, fmtPhone, go, h, isSolo, nextSeq, normAddr, pcWorkDate, registeredNow, render, say, st, stepFlush, stepper, toast, todayKST, ui, withWorker } from '../core.js';
 import { pickScreen } from '../widgets.js';
 
 // PC 연결 방식 휴대폰에서 받는 접수의 경로(PC 접수 경로와 같은 이름)
@@ -141,7 +141,7 @@ function screenIntake(id) {
       locked.has(it.line_id) ? h('em', { class: 'tag' }, '현장 기록 있음') : null,
       h('div', { class: 'price' }, it.price_status === 'CONFIRMED' ? `${won(it.unit_price)} / ${it.unit_label}` : it.unit_price != null ? `금액 확인 대기 (원문 ${won(it.unit_price)} / ${it.unit_label})` : '금액 확인 대기'),
       h('div', { class: 'row' }, h('span', {}, '수량'), locked.has(it.line_id) ? h('span', { class: 'val' }, it.qty) :
-        stepper(it.qty, (n) => { if (!currentView() || intakeOperations.has(ownerState)) return; it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1, 9999, 0, `${it.name} 접수 수량`, { editable: true })),
+        stepper(it.qty, (n) => { if (!currentView() || intakeOperations.has(ownerState)) return; it.qty = n; it.amount = it.price_status === 'CONFIRMED' ? it.unit_price * n : null; drawItems(); saveDraft(); }, 1, 9999, 0, `${it.name} 접수 수량`, { editable: true, unit: it.unit_label })),
       locked.has(it.line_id) ? null : btn('삭제', () => { f.items.splice(i, 1); drawItems(); saveDraft(); }, 'ghost link'))) :
       [h('p', { class: 'small' }, '[+ 품목 담기]로 버릴 물건을 담으세요.')]));
     const pend = f.items.filter((x) => x.price_status !== 'CONFIRMED').length;
@@ -161,9 +161,9 @@ function screenIntake(id) {
     });
     save.disabled = operation.status === 'saving';
     save.textContent = operation.status === 'saving' ? '저장 중…' : operation.status === 'saved' ? '저장된 접수 보기' : '저장 다시 시도';
-    msg.textContent = operation.status === 'saving' ? '접수를 저장하고 있습니다. 같은 접수의 저장 결과를 기다려 주세요.'
+    say(msg, operation.status === 'saving' ? '접수를 저장하고 있습니다. 같은 접수의 저장 결과를 기다려 주세요.'
       : operation.status === 'saved' ? '접수 저장이 끝났습니다. 저장된 접수를 확인하세요.'
-      : `접수를 저장하지 못했습니다. 입력과 접수번호는 남아 있습니다. 같은 접수를 다시 저장해 주세요.${operation.error ? ' ' + operation.error : ''}`;
+      : `접수를 저장하지 못했습니다. 입력과 접수번호는 남아 있습니다. 같은 접수를 다시 저장해 주세요.${operation.error ? ' ' + operation.error : ''}`, !['saving', 'saved'].includes(operation.status));
   };
   const prepare = (operation, phone) => {
     const now = new Date().toISOString();
@@ -241,26 +241,26 @@ function screenIntake(id) {
       await persist(existing); return;
     }
     const phone = digits(f.phone);
-    if (!f.name.trim()) return (msg.textContent = '이름을 적어 주세요.');
-    if (!/^0\d{8,10}$/.test(phone)) return (msg.textContent = '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
-    if (!f.address.trim()) return (msg.textContent = '배출 주소를 적어 주세요.');
-    if (!f.planned_date) return (msg.textContent = '수거 예정일을 골라 주세요.');
-    if (!f.items.length) return (msg.textContent = '버릴 물건을 하나 이상 추가해 주세요.');
-    if (f.items.some((item) => !Number.isInteger(item.qty) || item.qty < 1 || item.qty > 9999)) return (msg.textContent = '품목 수량은 1~9999 사이의 정수로 입력해 주세요.');
+    if (!f.name.trim()) return say(msg, '이름을 적어 주세요.', true);
+    if (!/^0\d{8,10}$/.test(phone)) return say(msg, '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)', true);
+    if (!f.address.trim()) return say(msg, '배출 주소를 적어 주세요.', true);
+    if (!f.planned_date) return say(msg, '수거 예정일을 골라 주세요.', true);
+    if (!f.items.length) return say(msg, '버릴 물건을 하나 이상 추가해 주세요.', true);
+    if (f.items.some((item) => !Number.isInteger(item.qty) || item.qty < 1 || item.qty > 9999)) return say(msg, '품목 수량은 1~9999 사이의 정수로 입력해 주세요.', true);
     // 주소 확인: 걱정되는 점이 있으면 한 번 보여 주고, 맞으면 한 번 더 눌러 저장(막지 않음)
     const issues = addrIssues();
     if (issues.length && !f.addrAck) {
       f.addrAck = true; addrCheck(true);
-      msg.textContent = '주소를 확인해 주세요: ' + issues.join(' / ') + ` — 맞으면 [${saveLabel}]을 한 번 더 누르세요.`;
+      say(msg, '주소를 확인해 주세요: ' + issues.join(' / ') + ` — 맞으면 [${saveLabel}]을 한 번 더 누르세요.`, true);
       document.querySelector('label.fld input[placeholder^="예: 광주 동구"]')?.scrollIntoView({ block: 'center' });
       return;
     }
-    if (editing && !fieldEdit && !f.reason.trim()) return (msg.textContent = '수정 사유를 적어 주세요.');
+    if (editing && !fieldEdit && !f.reason.trim()) return say(msg, '수정 사유를 적어 주세요.', true);
     if (!editing && !f.dupAck) {
       const dups = allStops().filter((r) => r.status !== 'CANCELLED' && !r.pii_purged && deriveStop(r, st.events).progress !== 'DONE' && (digits(r.phone) === phone || normAddr(r.address) === normAddr(f.address)));
       if (dups.length) {
         f.dupAck = true;
-        dupBox.replaceChildren(h('section', { class: 'card notice' },
+        dupBox.replaceChildren(h('section', { class: 'card callout warn' },
           h('p', {}, `비슷한 접수가 ${dups.length}건 있습니다. ` + (onField ? '같은 건이면 새로 받지 말고 그 지점에서 품목 추가·정정 요청을 하세요.' : '같은 건이면 등록하지 말고 기존 접수를 수정하세요.')),
           h('ul', { class: 'small list' }, ...dups.map((r) => h('li', {}, `${r.receipt_no} · ${r.name} · ${fmtPhone(r.phone)} · ${r.address}` + (r.planned_date ? ` · ${r.planned_date}` : '')))),
           h('p', {}, `별개 접수가 맞으면 [${onField ? '접수 저장' : '접수 등록'}]을 한 번 더 누르세요. (자동으로 합치지 않습니다)`)));
@@ -281,10 +281,11 @@ function screenIntake(id) {
   }, 'ghost');
   view = h('main', {},
     h('header', { class: 'bar' }, cancel, h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
-    onField && !registeredNow ? h('section', { class: 'card notice warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
+    onField && !registeredNow ? h('section', { class: 'card callout warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
       btn('기기 등록', () => go('#/register'), 'ghost')) : null,
-    onField ? h('section', { class: 'card notice' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
-      h('p', { class: 'small' }, '금액은 PC 수수료표로 다시 계산됩니다. 표에 없는 품목은 "확인 대기"로 갑니다. 이미 목록에 있는 집의 품목이 늘었으면 새로 받지 말고 그 지점에서 [품목 추가]를 하세요.')) : null,
+    // 첫머리 설명은 경고가 아니라 안내(.callout.info)
+    onField ? h('section', { class: 'callout info intake-intro' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
+      h('p', { class: 'small' }, '금액은 PC 수수료표로 다시 계산됩니다. 표에 없는 품목은 "확인 대기"로 갑니다. 이미 목록에 있는 집의 품목이 늘었으면 새로 받지 말고 그 지점에서 [+ 현장 품목 추가]를 하세요.')) : null,
     !editing && st.intakeDraft ? h('p', { class: 'small' }, '작성 중이던 내용을 불러왔습니다. ',
       btn('지우고 새로 쓰기', async () => { draft?.cancel(); if (!currentForm()) return; ownerState.intakeDraft = null; await commit(); if (!currentForm()) return; ui.form = null; render(); }, 'ghost')) : null,
     h('section', { class: 'card' },
@@ -325,14 +326,16 @@ function screenIntake(id) {
 const knownDongs = () => [...new Set([...(st.recentDongs || []), ...allStops().map((r) => dongOf(r)).filter(Boolean)])];
 
 // ------------------------------------------------------------ 주소 검색 (행정안전부 도로명주소 API, juso.js)
-function addrSearch({ onPick, forbid = () => [] }) {
+// manual: 검색을 쓸 수 없을 때 대신 할 일(접수 화면은 주소 직접 적기, 위치 지정 화면은 지도·내 위치)
+function addrSearch({ onPick, forbid = () => [], manual = '주소를 직접 적어 주세요.', officeNote = true }) {
   const box = h('div', { class: 'addr-search' }, h('div', { class: 'fld-label' }, '주소 검색'));
   if (addrRoute() === 'pc') {
-    box.append(h('p', { class: 'small addr-status' }, '주소 검색 경로가 "PC 경유"입니다. PC 연결 방식에서는 PC 접수 화면의 [주소 찾기](PC의 주소 자료 + PC가 대신 묻는 행안부 검색)로 주소·위치를 정해 목록으로 보냅니다. 여기서는 직접 적거나 지도에서 위치를 지정하세요.'));
+    // 현장 화면에는 PC·관리자 설명을 두지 않는다(검색 경로·승인키 안내는 설정의 주소 검색 칸에만)
+    box.append(h('p', { class: 'small addr-status' }, manual + (officeNote ? ' 정확한 위치는 사무실이 PC에서 정합니다.' : '')));
     return box;
   }
   const input = h('input', { type: 'search', class: 'search', placeholder: '도로명·건물명·지번 (예: 서남로 1)', 'aria-label': '주소 검색어', autocomplete: 'off', enterkeyhint: 'search', disabled: !st.jusoKey });
-  const status = h('p', { class: 'small addr-status', role: 'status' }, st.jusoKey ? '' : '승인키를 설정에서 입력해 주세요 (설정 → 주소 검색). 지금은 주소를 직접 적고 지도에서 위치를 지정하세요.');
+  const status = h('p', { class: 'small addr-status', role: 'status' }, st.jusoKey ? '' : `주소 검색을 쓸 수 없습니다. ${manual}`);
   const list = h('ul', { class: 'addr-results' });
   let timer = null, seq = 0;
   const leaks = (q) => {
@@ -357,7 +360,7 @@ function addrSearch({ onPick, forbid = () => [] }) {
         if (st.jusoCoordKey) {
           try { ll = await J.coordOf({ key: st.jusoCoordKey, item: it }); } catch (e) { toast(e.message || '위치를 받지 못했습니다', 'bad'); }
         }
-        list.replaceChildren(); input.value = ''; status.textContent = st.jusoCoordKey ? '' : '좌표 승인키가 없어 위치는 채우지 않았습니다(설정 → 주소 검색).';
+        list.replaceChildren(); input.value = ''; status.textContent = st.jusoCoordKey ? '' : '주소만 채웠습니다. 위치는 지도에서 정해 주세요.';
         onPick(it, ll);
       } },
       h('span', { class: 'ai' }, h('strong', {}, it.road), it.jibun ? h('span', {}, '지번 ' + it.jibun) : null,

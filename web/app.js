@@ -56,6 +56,22 @@ function restoreList(view) {
   }
 }
 
+// 같은 화면을 다시 그릴 때 초점 되돌리기: 누른 단추에 고정 키(data-fk, 예: "줄ID:collected:+")가 있으면 다시 그린 뒤 같은 키로.
+// 저장 중에 그 단추가 꺼져(disabled) 초점이 body로 빠졌어도 마지막 초점 요소로 키를 찾는다. 다시 그린 단추가 꺼져 있으면 같은 묶음의 값 단추로.
+let lastFocus = null;
+addEventListener('focusin', (e) => { lastFocus = e.target; });
+function focusKey() {
+  const a = document.activeElement;
+  if (a && a !== document.body) return $app.contains(a) ? a.dataset?.fk || null : null;
+  return lastFocus?.isConnected && lastFocus.disabled && $app.contains(lastFocus) ? lastFocus.dataset?.fk || null : null;
+}
+function restoreFocus(view, key) {
+  const el = [...view.querySelectorAll('[data-fk]')].find((x) => x.dataset.fk === key);
+  if (!el) return;
+  const target = el.disabled ? el.closest('.stepper, [role="group"]')?.querySelector('.qty-value:not(:disabled)') : el;
+  target?.focus({ preventScroll: true });
+}
+
 async function render() {
   const my = ++renderSeq;
   stopCamera();
@@ -101,6 +117,7 @@ async function render() {
   if (!S.isUnlocked() || !st) listReturn = null;
   wantWake(S.isUnlocked() && wakeRoute());
   const sameRoute = ui.lastRoute === location.hash, y = scrollY; // 같은 화면을 다시 그릴 때는 스크롤 유지
+  const fk = sameRoute && S.isUnlocked() && st ? focusKey() : null;
   const helperBack = ui.pcInputBack;
   const helperOwned = helperBack && S.isUnlocked() && st && helperBack.source === st && helperBack.mode === st.mode
     && helperBack.stop === findStop(helperBack.id) && !helperBack.stop?.pii_purged;
@@ -109,6 +126,7 @@ async function render() {
   if (helperBack && !(helperOwned && location.hash === helperRoute || returningFromHelper)) ui.pcInputBack = null;
   $app.replaceChildren(view);
   scrollTo(0, sameRoute ? y : 0);
+  if (fk) restoreFocus(view, fk);
   if (returningFromHelper) {
     const help = [...view.querySelectorAll('button')].find((button) => button.textContent === 'PC 입력 도움');
     help?.focus({ preventScroll: true }); scrollTo(0, ui.pcInputBack.y); ui.pcInputBack = null;

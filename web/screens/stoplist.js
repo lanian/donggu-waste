@@ -5,8 +5,9 @@ import * as S from '../store.js';
 import { LABEL } from '../fees.js';
 import { deriveStop } from '../fees.js';
 import { matchText } from '../fees.js';
-import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dongOf, flushPhotos, go, h, isSolo, pendingPhotos, render, st, toast, ui, unsent, workerName } from '../core.js';
-import { CHECKS, doInstall, installEvt, runningAsApp } from '../widgets.js';
+import * as NAV from '../nav.js';
+import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dial, dongOf, flushPhotos, go, h, isSolo, outbox, pendingPhotos, render, st, toast, ui, workerName } from '../core.js';
+import { CHECKS, doInstall, installEvt, navBtn, runningAsApp } from '../widgets.js';
 
 // 수량 입력만 끝난 상태와 방문 결과까지 저장한 완료를 구분한다.
 const isStopDone = (s, d) => !d.resultNeedsConfirmation && (d.outcome ? d.outcome === 'DONE' && d.progress === 'DONE' : s.status === 'DONE');
@@ -48,14 +49,27 @@ function stopState(s, d) {
 function daySummary(items) {
   const active = items.filter((x) => !x.s.removed && x.s.status !== 'CANCELLED');
   const n = active.length, done = active.filter((x) => isStopDone(x.s, x.d)).length;
-  const hold = active.filter((x) => !x.s.pii_purged && !isStopDone(x.s, x.d)
-    && (x.d.resultNeedsConfirmation || ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.d.outcome) || x.d.contact === 'CALLBACK')).length;
+  // 재방문·보류 수는 거르기 탭에 있으므로 여기서는 되풀이하지 않는다
   const pend = active.filter((x) => x.d.fee.pendingCount).length;
   return h('section', { class: 'summary', 'aria-label': '오늘 진행' },
     h('div', { class: 'sum-top', 'aria-hidden': 'true' }, h('span', {}, '오늘 진행'), h('span', { class: 'sum-pct' }, `${n ? Math.round((done / n) * 100) : 0}%`)),
     h('div', { class: 'sum-main' }, h('b', {}, done), h('span', {}, ` / ${n}곳 완료`)),
     h('div', { class: 'progress track', role: 'progressbar', 'aria-label': `완료 ${done}/${n}`, 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done }, h('div', { class: 'fill', style: `width:${n ? (done / n) * 100 : 0}%` })),
-    h('div', { class: 'sum-sub' }, hold ? h('span', { class: 'chip warn' }, `재방문·보류 ${hold}`) : null, pend ? h('span', { class: 'chip warn' }, `금액 확인 대기 ${pend}`) : null));
+    h('div', { class: 'sum-sub' }, pend ? h('span', { class: 'chip warn' }, `금액 확인 대기 ${pend}`) : null));
+}
+// 지금 할 일이 다음 지점이면 큰 단추 아래 [N번 길안내][N번 전화]. 위치가 없으면 길안내를, 연락처가 없거나 정리됐으면 전화를 끈다.
+function nextQuick(s) {
+  const loc = deriveStop(s, st.events).loc;
+  const nav = NAV.hasCoord(loc) ? navBtn(`${s.seq}번 길안내`, s, loc, NAV.navLabel(s.seq), 'quick-nav')
+    : btn([`${s.seq}번 길안내`, h('small', {}, '위치 없음')], null, 'nav-btn no-loc quick-nav', { disabled: true, 'aria-label': `${s.seq}번 길안내, 위치 없음` });
+  return h('div', { class: 'next-quick', role: 'group', 'aria-label': `${s.seq}번 바로 가기` }, nav,
+    btn(`${s.seq}번 전화`, () => dial(s), 'quick-call', { disabled: !!s.pii_purged || !s.phone }));
+}
+// 거르기 결과가 없을 때: "'재방문·보류'에 해당하는 곳이 없습니다." + [전체 보기]
+// subject: 조사까지 붙인 말('곳이'·'접수가')
+function emptyFilter(names, subject, showAll, allLabel = '전체 보기') {
+  const what = names.filter(Boolean).map((x) => `'${x}'`).join(' · ') || "'전체'";
+  return [h('p', { class: 'empty' }, `${what}에 해당하는 ${subject} 없습니다.`), h('div', { class: 'empty-actions' }, btn(allLabel, showAll, 'big'))];
 }
 // 목록 찾기: 이름·연락처·주소·품목, 초성과 전화번호 뒷자리도 됨.
 function stopSearch(total) {
@@ -201,34 +215,35 @@ function setupCard() {
       h('a', { href, 'aria-label': `${t}${ok ? ' (끝남)' : ''}` }, h('strong', {}, t), h('span', { class: 'small' }, ' ' + hint))))),
     btn('나중에 (닫기)', async () => { st.setupHidden = true; await commit(); render(); }, 'ghost link'));
 }
-// 홈 위 알림: 미전송(PC), 배터리, 보관 기간(단독), 자료 보존 거절, 저장 대기 사진
+// 홈 위 알림(지금 할 일 아래): 저장 대기 사진, 자료 보존 거절, 설치 안내, 보낼 기록(PC), 배터리, 보관 기간(단독).
+// 주 단추(primary)는 두지 않는다 — 화면의 주 행동은 '지금 할 일' 하나다.
 async function homeBanners() {
   const out = [];
-  if (pendingPhotos.length) out.push(h('section', { class: 'card notice pending-photo', role: 'alert' },
+  if (pendingPhotos.length) out.push(h('section', { class: 'card callout warn pending-photo', role: 'alert' },
     h('p', {}, h('strong', {}, `저장 대기 사진 ${pendingPhotos.length}장`), ' — 아직 암호화 저장되지 않았습니다. 앱을 닫지 마세요.'),
-    btn('사진 다시 저장', async () => { await flushPhotos(); render(); }, 'primary big')));
-  if (st.storagePersisted === false && !st.persistHintOff) out.push(h('section', { class: 'card notice persist-banner', role: 'status' },
-    h('p', {}, h('strong', {}, '자료 보존이 허락되지 않았습니다.'), ' 휴대폰 저장 공간이 모자라면 브라우저가 이 앱의 자료(보내지 않은 기록·사진)를 지울 수 있습니다.'),
+    btn('사진 다시 저장', async () => { await flushPhotos(); render(); }, 'big')));
+  if (st.storagePersisted === false && !st.persistHintOff) out.push(h('section', { class: 'card callout warn persist-banner', role: 'status' },
+    h('p', {}, h('strong', {}, '자료 보존이 허락되지 않았습니다.'), ' 휴대폰 저장 공간이 모자라면 브라우저가 이 앱의 자료(보낼 기록·사진)를 지울 수 있습니다.'),
     h('p', { class: 'small' }, '앱을 홈 화면에 설치하고, 결과를 자주 보내 주세요. 설치 뒤 [다시 요청]을 누르면 허락될 수 있습니다.'),
     h('div', { class: 'grid2' }, btn('다시 요청', async () => { const ok = await S.persist(); st.storagePersisted = !!ok; await commit(); toast(ok ? '자료 보존이 허락되었습니다' : '아직 허락되지 않았습니다. 앱을 설치한 뒤 다시 눌러 보세요.', ok ? '' : 'bad'); render(); }, 'big'),
       btn('알겠습니다', async () => { st.persistHintOff = true; await commit(); render(); }, 'ghost'))));
-  if (!runningAsApp() && installEvt && !st.installHintOff) out.push(h('section', { class: 'card notice install-hint' },
+  if (!runningAsApp() && installEvt && !st.installHintOff) out.push(h('section', { class: 'card callout info install-hint' },
     h('p', {}, '지금은 브라우저에서 실행 중입니다. 앱으로 설치하면 홈 화면 아이콘으로 바로 엽니다(자료는 그대로).'),
-    h('div', { class: 'grid2' }, btn('앱 설치', doInstall, 'primary'), btn('다음에', async () => { st.installHintOff = true; await commit(); render(); }, 'ghost'))));
-  const u = F.unsentInfo(st.events, st.releasedSeq);
-  if (!isSolo() && u.count && (u.ageH >= (st.unsentWarnH || 3) || kstHour() >= END_OF_DAY_H)) {
-    const late = kstHour() >= END_OF_DAY_H;
-    out.push(h('section', { class: 'card notice unsent-banner', role: 'status' },
-      h('p', {}, h('strong', {}, `보내지 않은 기록 ${u.count}건`), ` · 가장 오래된 기록 ${ago(u.oldestTs)}`),
-      h('p', { class: 'small' }, late ? '오늘 업무가 끝나기 전에 결과를 보내 주세요. 휴대폰이 고장 나면 보내지 않은 기록은 되살릴 수 없습니다.'
-        : `${st.unsentWarnH || 3}시간 넘게 보내지 않은 기록이 있습니다. 중간 결과를 보내 두면 휴대폰이 고장 나도 안전합니다.`),
-      btn('중간 결과 보내기', () => go('#/export'), 'primary big')));
-  }
+    h('div', { class: 'grid2' }, btn('앱 설치', doInstall, 'big'), btn('다음에', async () => { st.installHintOff = true; await commit(); render(); }, 'ghost'))));
+  // 보낼 기록 경고는 '보낼 기록'(어느 파일에도 없음) 중 가장 오래된 것으로 잰다. 다 보냈고 D-코드만 남았으면 조용한 안내로.
+  const u = F.unsentInfo(st.events, st.releasedSeq), ob = outbox();
+  const late = kstHour() >= END_OF_DAY_H, limit = st.unsentWarnH || 3;
+  if (!isSolo() && ob.toSend && (ob.ageH >= limit || late)) out.push(h('section', { class: 'callout warn band unsent-banner', role: 'status' },
+    h('p', {}, '⚠ ', h('strong', {}, `${late ? '퇴근 전 ' : ''}보낼 기록 ${ob.toSend}건`), ` · 가장 오래된 기록 ${ago(ob.oldestTs)}`),
+    h('a', { href: '#/export', class: 'callout-link' }, '보내기 ›')));
+  else if (!isSolo() && !ob.toSend && ob.waiting && (u.ageH >= limit || late)) out.push(h('section', { class: 'callout info band waiting-note', role: 'status' },
+    h('p', {}, `확인 대기 ${ob.waiting}건 — PC의 D-코드를 넣으세요`),
+    h('a', { href: '#/export', class: 'callout-link' }, '코드 넣기 ›')));
   const bat = await batteryInfo();
   if (bat && bat.level < 0.2 && !bat.charging && u.count) {
-    out.push(h('section', { class: 'card notice battery', role: 'status' },
+    out.push(h('section', { class: 'card callout warn battery', role: 'status' },
       h('p', {}, h('strong', {}, `배터리 ${Math.round(bat.level * 100)}%`), isSolo() ? ' — 지금 백업하세요' : ' — 결과를 지금 보내세요'),
-      btn(isSolo() ? '지금 백업' : '결과 보내기', () => go(isSolo() ? '#/backup' : '#/export'), 'primary big')));
+      btn(isSolo() ? '지금 백업' : '결과 보내기', () => go(isSolo() ? '#/backup' : '#/export'), 'big')));
   }
   if (isSolo()) {
     const cand = F.retentionCandidates(st.requests, st.events, st.retentionDays || 90, (r) => {
@@ -237,7 +252,7 @@ async function homeBanners() {
     });
     if (cand.length) {
       const ready = cand.filter((c) => st.lastBackupAt && Date.parse(st.lastBackupAt) > c.doneAt);
-      out.push(h('section', { class: 'card notice retention', role: 'status' },
+      out.push(h('section', { class: 'card callout warn retention', role: 'status' },
         h('p', {}, h('strong', {}, `보관 기간(${st.retentionDays || 90}일)이 지난 처리 끝난 접수 ${cand.length}건`)),
         ready.length ? h('p', { class: 'small' }, `백업이 끝난 ${ready.length}건의 이름·연락처·주소를 지울 수 있습니다. 접수번호·품목·수거 기록은 남습니다.`)
           : h('p', { class: 'small' }, '백업을 먼저 만들어야 개인정보를 지울 수 있습니다.'),
@@ -248,13 +263,13 @@ async function homeBanners() {
           for (const c of ready) F.purgeStopPII(c.r, at);
           for (const e of st.events) if (ids.has(e.request_id)) F.purgeEventPII(e);
           await commit(); toast(`${ready.length}건의 개인정보를 지웠습니다`); render();
-        }, 'big') : btn('지금 백업', () => go('#/backup'), 'primary big')));
+        }, 'big') : btn('지금 백업', () => go('#/backup'), 'big')));
     }
   }
   return out;
 }
 
 export {
-  batteryInfo, daySummary, dongChips, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextToVisit, routeItems,
+  batteryInfo, daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, kstHour, loadedSummary, needsResult, nextQuick, nextToVisit, routeItems,
   setupCard, setupSteps, stopCard, stopHay, stopSearch, stopState, tripHeads, workerBar,
 };

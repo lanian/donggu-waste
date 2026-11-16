@@ -114,7 +114,6 @@ p { margin: 8px 0; } .small { font-size: 0.9333rem; color: var(--muted); } .hidd
 .home-tools .btn.big { height: 100%; min-height: 60px; margin: 0; padding: 10px 12px; line-height: 1.35;
   justify-content: flex-start; text-align: left; font-weight: 650; border-radius: 12px; box-shadow: none; }
 .home-tools .btn:last-child:nth-child(odd) { grid-column: 1 / -1; }
-.btn.list-jump { margin: 4px 0 12px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--card); font-size: 0.9333rem; }
 
 /* ---- 카드 ---- */
 .card { background: var(--card); border: 0; border-radius: var(--radius); padding: 18px 16px; margin: 12px 0; box-shadow: var(--shadow); }
@@ -141,8 +140,24 @@ p { margin: 8px 0; } .small { font-size: 0.9333rem; color: var(--muted); } .hidd
 .pc-help-page .pc-help-reason { padding-top: 6px; border-top: 1px solid var(--line); }
 .pc-help-page .pc-input-help { min-width: 0; }
 .pc-help-page textarea { width: 100%; box-sizing: border-box; }
-.card.notice, .notice { background: var(--warn-bg); box-shadow: inset 0 0 0 1.5px var(--sticker); }
+/* ---- 안내 상자 네 종류 (기존 색 토큰만 씀, 다크·고대비는 토큰이 바꿈) ----
+   info = 설명·받은 정보(파랑, 왼쪽 띠) · ok = 끝난 일·반영 확인(녹색) · warn = 사람이 봐야 함(노랑) · bad = 막힘·저장 실패(빨강).
+   예전 .notice 는 .callout.warn 과 같은 모양으로만 남긴다(새 코드는 .callout 을 쓴다). */
+.callout { margin: 10px 0; padding: 10px 12px; border-radius: var(--radius-sm); font-weight: 600; line-height: 1.5; color: var(--ink); }
+.card.callout { padding: 14px 16px; }
+.callout > :first-child { margin-top: 0; } .callout > :last-child { margin-bottom: 0; }
+.callout.info { background: var(--field-bg); color: var(--field-ink); box-shadow: inset 4px 0 0 var(--field); }
+.callout.ok { background: var(--ok-bg); color: var(--ok-ink); box-shadow: inset 0 0 0 1.5px var(--ok); }
+.callout.warn, .card.notice, .notice { background: var(--warn-bg); box-shadow: inset 0 0 0 1.5px var(--sticker); }
+.callout.bad { background: var(--bad-bg); color: var(--bad-ink); box-shadow: inset 0 0 0 1.5px var(--bad); }
+.callout.info .small, .callout.ok .small, .callout.bad .small { color: inherit; font-weight: 550; }
 p.notice { padding: 10px 12px; border-radius: var(--radius-sm); font-weight: 600; }
+/* 한 줄 띠(홈의 보낼 기록 경고·확인 대기 안내): 단추 없이 글 + 링크형 이동 */
+.callout.band { display: flex; align-items: center; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
+.callout.band > p { margin: 6px 0; flex: 1 1 12em; }
+.callout-link { display: inline-flex; align-items: center; min-height: 48px; padding: 0 6px; color: inherit; font-weight: 800; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
+/* 스크린리더만 읽는 글(index.html 의 알림 영역 등) */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .card.ask { box-shadow: inset 0 0 0 3px var(--sticker), var(--shadow); }
 .card > h2:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .hint { font-size: 0.8667rem; font-weight: 700; }
@@ -155,6 +170,15 @@ p.notice { padding: 10px 12px; border-radius: var(--radius-sm); font-weight: 600
 .next-action .next-detail { margin: 0 0 12px; color: var(--ink); }
 .next-action .btn { margin: 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .next-action .btn.primary { min-height: max(64px, var(--control-size)); border-radius: 12px; box-shadow: none; }
+/* 지금 할 일이 다음 지점이면 큰 단추 아래 [N번 길안내][N번 전화] — 같은 카드처럼 붙여 보인다 */
+.next-action:has(+ .next-quick) { margin-bottom: 0; padding-bottom: 10px; border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; }
+.next-quick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 12px; padding: 0 16px 16px;
+  background: var(--brand-soft); border: 1px solid var(--brand); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); }
+.next-quick .btn { margin: 0; min-width: 0; flex-direction: column; gap: 0; padding: 8px 10px; white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
+.next-quick .btn small { display: block; font-size: 0.8rem; font-weight: 700; }
+html.text-big .next-quick { grid-template-columns: 1fr; }
+/* 빈 상태의 다음 행동 */
+.empty-actions { display: grid; gap: 8px; margin: -20px 0 24px; }
 
 /* ---- 아래 탭 막대 (목록 · 지도 · 설정) ---- */
 main.with-tabs { padding-bottom: calc(var(--tabbar-h) + 32px + var(--safe-bottom)); }
@@ -680,7 +704,7 @@ body:has(.save-fail) main { padding-bottom: calc(var(--actionbar-space) + var(--
 .receipt-card .rc-code { font-weight: 850; letter-spacing: 3px; }
 .rel-note { margin: 10px 0; }
 /* 지난 날짜 목록 띠 */
-.day-banner { background: var(--warn-bg); box-shadow: inset 0 0 0 3px var(--sticker); }
+.day-banner, .callout.warn.day-banner { background: var(--warn-bg); box-shadow: inset 0 0 0 3px var(--sticker); }
 .day-banner h2 { font-size: 1.333rem; line-height: 1.35; margin: 0 0 10px; }
 /* 처음 설정 */
 .setup-list { list-style: none; padding: 0; margin: 6px 0; }

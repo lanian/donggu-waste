@@ -1,7 +1,7 @@
 // 휴대폰 화면: 하차 기록
 import * as NAV from '../nav.js';
 import { isUnlocked } from '../store.js';
-import { addCrewEvent, btn, commit, errMsg, go, h, isSolo, locking, render, st, toast, todayKST } from '../core.js';
+import { addCrewEvent, btn, commit, errMsg, go, h, isSolo, locking, render, say, st, toast, todayKST } from '../core.js';
 import { NO_LOC, navBtn, unloadLoc } from '../widgets.js';
 
 // 지도에서 위치를 정하고 돌아와도 같은 초안을 쓴다. 잠금을 풀어 상태가 바뀌면 옛 초안을 재사용하지 않는다.
@@ -39,10 +39,9 @@ function screenUnload() {
     save.disabled = op.status === 'saving';
     save.textContent = op.status === 'saved' ? '새 하차 기록' : op.status === 'saving' ? '저장 중…' : '저장 다시 시도';
     save.setAttribute('aria-busy', String(op.status === 'saving'));
-    msg.textContent = op.status === 'saved' ? '하차 저장이 끝났습니다. 새 하차를 기록하려면 [새 하차 기록]을 누르세요.'
+    say(msg, op.status === 'saved' ? '하차 저장이 끝났습니다. 새 하차를 기록하려면 [새 하차 기록]을 누르세요.'
       : op.status === 'saving' ? '하차를 저장하고 있습니다. 같은 기록의 저장 결과를 기다려 주세요.'
-      : `하차를 저장하지 못했습니다. 입력은 남아 있으며 같은 기록을 다시 저장합니다.${op.error ? ' ' + op.error : ''}`;
-    msg.classList.toggle('err', op.status === 'failed');
+      : `하차를 저장하지 못했습니다. 입력은 남아 있으며 같은 기록을 다시 저장합니다.${op.error ? ' ' + op.error : ''}`, op.status === 'failed');
   };
   const persist = async (op) => {
     if (!current() || op.status === 'saving') return;
@@ -80,8 +79,8 @@ function screenUnload() {
     }
     const volume = vol.value === '' ? null : Number(vol.value), weight = kg.value === '' ? null : Number(kg.value);
     if (vol.validity.badInput || kg.validity.badInput || (volume != null && (!Number.isFinite(volume) || volume < 0)) || (weight != null && (!Number.isFinite(weight) || weight < 0))
-      || !(volume > 0 || weight > 0)) { msg.textContent = '부피·중량은 0 이상이고 하나는 0보다 커야 합니다.'; msg.classList.add('err'); return; }
-    if (!place.value.trim()) { msg.textContent = '반입지 이름을 적어 주세요.'; return; }
+      || !(volume > 0 || weight > 0)) { say(msg, '부피·중량은 0 이상이고 하나는 0보다 커야 합니다.', true); return; }
+    if (!place.value.trim()) { say(msg, '반입지 이름을 적어 주세요.', true); return; }
     const op = { status: 'ready', prepared: false, body: {
       place: place.value.trim(), at_time: time.value, volume_m3: volume, weight_kg: weight, note: note.value.trim(),
       work_date: source.daylist ? source.daylist.work_date : todayKST(),
@@ -99,7 +98,7 @@ function screenUnload() {
       uLoc ? h('p', { class: 'small' }, (plannedLabel && plannedLabel.lat != null ? 'PC 목록의 반입지 위치' : '이 휴대폰에 지정한 반입지 위치') + '로 안내합니다. 지도 앱에는 좌표와 "반입지"만 넘깁니다.')
         : h('p', { class: 'small nav-none' }, `길안내: ${NO_LOC}`)),
     list.length ? h('section', { class: 'card' }, h('h2', {}, `하차 내역 ${list.length}회`),
-      h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq > source.releasedSeq ? '(미전송)' : ''}`)))) : null,
+      h('ul', { class: 'list' }, ...list.map((e) => h('li', {}, `${e.body.at_time} ${e.body.place} · ${e.body.volume_m3 ? e.body.volume_m3 + 'm³' : ''} ${e.body.weight_kg ? e.body.weight_kg + 'kg' : ''} ${e.seq <= source.releasedSeq ? '' : (source.exports || []).some((x) => e.seq >= x.from && e.seq <= x.to) ? '(확인 대기)' : '(보낼 기록)'}`)))) : null,
     h('nav', { class: 'dock' }, h('span', {}), h('span', {}), save));
   if (draft.operation) draft.operation.notify = () => { if (current()) sync(); };
   sync();

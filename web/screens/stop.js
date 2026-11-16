@@ -10,7 +10,7 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, saveFailed, saving, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, msgBox, render, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 import { nextToVisit, stopState } from './stoplist.js';
 
@@ -172,8 +172,8 @@ async function screenPcInputHelp(id) {
     h('div', { class: 'pc-help-identity' }, h('p', { class: 'small' }, 'PC에서 찾을 접수번호'),
       h('strong', { class: 'pc-help-receipt', 'aria-label': 'PC에서 찾을 접수번호' }, stop.receipt_no),
       h('p', { class: 'pc-help-date' }, dateText)),
-    h('p', { class: 'pc-help-status small' + (reference ? ' notice' : ''), role: 'status' }, status),
-    dateNote ? h('p', { class: 'notice small pc-help-date-note' }, dateNote) : null,
+    h('p', { class: 'pc-help-status small' + (reference ? ' callout warn' : ''), role: 'status' }, status),
+    dateNote ? h('p', { class: 'callout info small pc-help-date-note' }, dateNote) : null,
     actions, fallback, message,
     h('p', { class: 'small pc-help-matching' }, matching), h('p', { class: 'small pc-help-duplicate' }, duplicate),
     h('section', { class: 'pc-help-items', 'aria-label': '품목별 수량 대조' },
@@ -352,7 +352,7 @@ async function screenStop(id) {
     pcInputHelp(stop);
   }, 'big', { disabled: resultUnsaved || d.resultNeedsConfirmation }) : null;
   const info = h('section', { class: 'card who' },
-    seen ? h('p', { class: 'notice changed-note' }, '새 목록에서 바뀐 곳: ' + seen.map((c) => F.DIFF_LABEL[c] || c).join(', ')) : null,
+    seen ? h('p', { class: 'callout info changed-note' }, '새 목록에서 바뀐 곳: ' + seen.map((c) => F.DIFF_LABEL[c] || c).join(', ')) : null,
     purged ? h('p', { class: 'name' }, '개인정보 정리됨') : h('p', { class: 'name' }, stop.name),
     purged ? h('p', { class: 'small' }, '결과 반영이 확인되어 이 휴대폰에서 이름·연락처·주소를 지웠습니다. 수거 기록은 남아 있습니다.')
       : h('p', { class: 'phone' }, h('a', { href: 'tel:' + stop.phone, onclick: async (e) => { e.preventDefault(); await dial(stop); } }, fmtPhone(stop.phone))),
@@ -362,13 +362,13 @@ async function screenStop(id) {
     stop.memo ? h('p', { class: 'memo' }, '요청: ' + stop.memo) : null,
     h('p', { class: 'small' }, stop.eta ? `${stop.receipt_no} · 도착 예정 ${stop.eta}` : stop.receipt_no),
     helpButton,
-    stop.pc_collection_ver ? h('p', { class: 'notice small' }, 'PC에서 직접 입력한 수거량을 반영한 목록입니다. 이전 수거분에서 이어서 계산합니다.') : null,
+    stop.pc_collection_ver ? h('p', { class: 'callout info small' }, 'PC에서 직접 입력한 수거량을 반영한 목록입니다. 이전 수거분에서 이어서 계산합니다.') : null,
     stop.levy_no ? h('p', { class: 'small levy-no' }, `부과번호 ${stop.levy_no}`) : null,
-    stop.removed ? h('p', { class: 'notice' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
-    stop.field ? h('p', { class: 'notice' }, `이 휴대폰에서 받은 ${stop.channel || '현장'} 접수입니다(임시번호 ${stop.receipt_no}${stop.planned_date ? ` · 예정일 ${stop.planned_date}` : ''}). PC 접수번호는 PC 반영 뒤 목록에 나옵니다.`) : null,
-    cancelAsked(stop.request_id) ? h('p', { class: 'notice' }, '취소를 요청했습니다. PC 담당자가 확인하기 전까지는 원래 접수 그대로입니다.') : null,
-    stop.status === 'CANCELLED' ? h('p', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
-    stop.revisit ? h('p', { class: 'notice' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
+    stop.removed ? h('p', { class: 'callout warn' }, '새 목록에서 빠진 건입니다. PC 담당자 확인이 필요합니다.') : null,
+    stop.field ? h('p', { class: 'callout info' }, `이 휴대폰에서 받은 ${stop.channel || '현장'} 접수입니다(임시번호 ${stop.receipt_no}${stop.planned_date ? ` · 예정일 ${stop.planned_date}` : ''}). PC 접수번호는 PC 반영 뒤 목록에 나옵니다.`) : null,
+    cancelAsked(stop.request_id) ? h('p', { class: 'callout warn' }, '취소를 요청했습니다. PC 담당자가 확인하기 전까지는 원래 접수 그대로입니다.') : null,
+    stop.status === 'CANCELLED' ? h('p', { class: 'callout warn' }, '취소된 접수입니다. 사유: ' + (stop.cancel_reason || '-')) : null,
+    stop.revisit ? h('p', { class: 'callout info' }, '재방문 건입니다. 남은 품목만 표시하며, 이전에 수거한 수량에서 이어서 셉니다.') : null,
     stop.appt ? h('p', { class: 'memo' }, `방문 약속: ${stop.appt[0] || ''}~${stop.appt[1] || ''}`) : null,
     loadGuide(d.lines.map((l) => ({ name: l.name, spec: l.spec, qty: l.remaining ?? l.qty_confirmed }))),
     // 현장 동작: 도착 · 문자 · 길안내
@@ -385,8 +385,8 @@ async function screenStop(id) {
   const contact = h('section', { class: 'card' + (ui.afterCall === id && d.contact === 'NOT_CONTACTED' ? ' ask' : '') },
     h('h2', {}, '연락 결과', ui.afterCall === id ? h('span', { class: 'hint warn' }, ' — 통화 결과를 골라 주세요') : null),
     h('div', { class: 'grid2' }, ...['REACHED', 'NO_ANSWER', 'CALLBACK', 'WRONG_NUMBER'].map((k) =>
-      btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt'))),
-    d.appt ? h('p', { class: 'notice' }, `재방문 약속: ${d.appt.date} ${d.appt.start || ''}${d.appt.end ? '~' + d.appt.end : ''}`) : null,
+      btn(LABEL.contact[k], async () => { ui.afterCall = null; await addEvent(stop, 'CONTACT', { result: k }); render(); }, d.contact === k ? 'opt on' : 'opt', { 'data-fk': `${id}:contact:${k}` }))),
+    d.appt ? h('p', { class: 'callout info' }, `재방문 약속: ${d.appt.date} ${d.appt.start || ''}${d.appt.end ? '~' + d.appt.end : ''}`) : null,
     ['REACHED', 'CALLBACK'].includes(d.contact) && d.progress !== 'DONE' ? revisitForm(stop, d) : null);
 
   const touched = new Set(st.events.filter((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT').map((e) => e.body.line_id));
@@ -396,7 +396,7 @@ async function screenStop(id) {
     return h('div', { class: 'chk', 'data-line': l.line_id },
       h('span', { class: 'chk-label' }, `스티커·필증 · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
       h('div', { class: 'chk-opts', role: 'group', 'aria-label': `${l.name} 스티커·신고필증` },
-        ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k }))),
+        ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k, 'data-fk': `${l.line_id}:sticker:${k}` }))),
       sk ? h('p', { class: 'sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''}${sk.result !== 'OK' ? ` → ${sk.decision === 'LEAVE' ? '미수거 결정' : sk.decision === 'COLLECT' ? '수거 결정' : '결정 전'}` : ''} · 이번 실은 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`) : null,
       sk && l.reason === 'NO_STICKER' && (sk.result === 'OK' || sk.decision === 'COLLECT') ? h('p', { class: 'small sk-review' }, '미수거 사유가 남아 있습니다. 실은 수량·못 실은 사유와 수거 결과를 다시 확인하세요.') : null);
   };
@@ -409,8 +409,8 @@ async function screenStop(id) {
         l.price == null ? h('span', { class: 'amt pending' }, '확인 대기') : h('span', { class: 'amt', 'aria-label': `금액 ${won(l.price * l.qty_confirmed)}` }, won(l.price * l.qty_confirmed))),
       h('div', { class: 'price' }, l.price == null ? '금액 확인 대기' : `${won(l.price)} / ${l.unit_label} × ${l.qty_confirmed}`),
       l.kind === 'RECEIVED' ? h('div', { class: 'row' }, h('span', {}, '접수 수량'), h('span', { class: 'val' }, l.qty_received)) : null,
-      h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }, true), priorQty(stop, l), 9999, 350, `${l.name} 현장 수량`, { editable: true })),
-      h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`, { editable: true })),
+      h('div', { class: 'row' }, h('span', {}, '현장 수량'), stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }, true), priorQty(stop, l), 9999, 350, `${l.name} 현장 수량`, { editable: true, unit: l.unit_label, fk: `${l.line_id}:confirmed` })),
+      h('div', { class: 'row got' }, h('span', {}, '실은 수량'), stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`, { editable: true, unit: l.unit_label, fk: `${l.line_id}:collected` })),
       priorQty(stop, l) ? h('p', { class: 'small quantity-history' }, `이전 수거 ${priorQty(stop, l)}${l.unit_label} · `,
         h('strong', {}, `이번 추가 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`), ` · 누적 ${l.qty_collected}${l.unit_label}`) : null,
       showLeft(l) ? h('div', { class: 'row' + (l.remaining ? ' left' : '') }, h('span', {}, '못 실은 수량'), h('span', { class: 'val' }, `${l.remaining} ${l.unit_label}`)) : null,
@@ -428,7 +428,7 @@ async function screenStop(id) {
   const f = d.fee;
   const units = Object.entries(f.qtyByUnit).map(([u, n]) => `${n}${u}`).join(' · ');
   const extra = feeExtra(d);
-  const noticeLine = d.notice ? h('p', { class: 'notice fee-notice' }, `추가 금액 안내: ${won(d.notice.extra)} · ${LABEL.feeResponse[d.notice.response] || d.notice.response} (${hhmm(d.notice.ts)})`) : null;
+  const noticeLine = d.notice ? h('p', { class: 'callout info fee-notice' }, `추가 금액 안내: ${won(d.notice.extra)} · ${LABEL.feeResponse[d.notice.response] || d.notice.response} (${hhmm(d.notice.ts)})`) : null;
   const fee = h('section', { class: 'card fee' }, h('h2', {}, '계산 내역'),
     h('dl', {},
       h('dt', {}, '접수 당시 금액'), h('dd', {}, won(f.received)),
@@ -482,10 +482,10 @@ async function screenStop(id) {
   }
   const waiting = pendingPhotos.filter((p) => p.stopId === id).length;
   const photos = h('section', { class: 'card' }, h('h2', {}, `사진 ${d.photos.length}장`), d.lines.length > 1 ? photoFor : null, h('div', { class: 'grid2' }, photoIn('BEFORE'), photoIn('AFTER')),
-    waiting ? h('p', { class: 'notice pending-photo' }, `사진 ${waiting}장 저장 중…`) : null, thumbs,
+    waiting ? h('p', { class: 'callout info pending-photo', role: 'status' }, `사진 ${waiting}장 저장 중…`) : null, thumbs,
     h('p', { class: 'small' }, '사진은 앱 안에만 암호화 저장되며 갤러리에 남지 않습니다. 찍은 시각(과 허용했으면 위치)이 함께 기록됩니다.'));
 
-  const msg = h('p', { class: 'msg' });
+  const msg = msgBox();
   const freezeCollection = () => {
     if (helpButton) helpButton.disabled = true;
     for (const section of [lines, outcome]) section.querySelectorAll('button,input,select,textarea').forEach((element) => { element.disabled = true; });
@@ -547,8 +547,8 @@ async function screenStop(id) {
   const choiceLabel = (k, text) => (chosen === k ? [h('span', { 'aria-hidden': 'true' }, '✓ '), text] : text);
   const outcome = h('section', { class: 'card' }, h('h2', { id: 'st-result-title', tabindex: '-1' }, '수거 결과', d.outcome ? h('span', { class: 'hint ' + (chosen ? 'ok' : 'warn') },
     (resultUnsaved ? ' — 저장 대기: ' : d.resultNeedsConfirmation ? ' — 결과 재확인 필요: ' : ' — 저장됨: ') + LABEL.outcome[d.outcome]) : null),
-    d.resultNeedsConfirmation ? h('p', { class: 'notice', role: 'status' }, '수량이나 품목이 바뀌었습니다. 실제 수거 결과를 다시 선택해 저장하세요.') : null,
-    pendingSave ? h('div', { class: 'notice', role: 'status' }, h('strong', {}, '수거 기록 저장 대기'),
+    d.resultNeedsConfirmation ? h('p', { class: 'callout warn', role: 'status' }, '수량이나 품목이 바뀌었습니다. 실제 수거 결과를 다시 선택해 저장하세요.') : null,
+    pendingSave ? h('div', { class: 'callout bad', role: 'alert' }, h('strong', {}, '수거 기록 저장 대기'),
       h('p', { class: 'small' }, '이 창의 수량·결과는 남아 있습니다. 같은 기록을 다시 저장하며 새 수거 기록을 만들지 않습니다.'),
       btn('저장 다시 시도', retryCollection, 'primary big')) : null,
     // 가장 흔한 경우를 한 번에: 모든 품목을 실은 것으로 채우고 완료 저장
@@ -571,7 +571,7 @@ async function screenStop(id) {
       const left = after.lines.filter((l) => l.qty_collected < l.qty_confirmed);
       if (left.length) { savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'PARTIAL' }), `(안 싣기로 한 품목 ${left.length}개는 남김)`, 'PARTIAL'); return; }
       savedResult(await addEvent(stop, 'ATTEMPT', { outcome: 'DONE' }), '', 'DONE');
-    }), chosen ? 'opt big' + (chosen === 'DONE' ? ' on' : '') : 'primary huge', { disabled: pendingSave || busySave }),
+    }), chosen ? 'opt big' + (chosen === 'DONE' ? ' on' : '') : 'primary huge', { disabled: pendingSave || busySave, 'data-fk': `${id}:result:DONE` }),
     outMsg,
     h('div', { class: 'grid3' }, ...['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].map((k) => btn(choiceLabel(k, LABEL.outcome[k]), runCollection(async () => {
       // 사유·수량을 고른 직후 누르면 화면이 아직 다시 그려지기 전일 수 있다: 모아 둔 수량을 먼저 저장하고 지금 기록으로 판단
@@ -596,7 +596,7 @@ async function screenStop(id) {
       if (!current()) return;
       ui.tried = null; ui.outcomeMsg = '';
       savedResult(await addEvent(stop, 'ATTEMPT', body), '', k);
-    }), chosen === k ? 'opt on' : 'opt', { disabled: pendingSave || busySave }))),
+    }), chosen === k ? 'opt on' : 'opt', { disabled: pendingSave || busySave, 'data-fk': `${id}:result:${k}` }))),
     d.outcome ? h('div', { class: 'result-sum' },
       h('p', {}, `${resultUnsaved ? '저장 대기 결과' : d.resultNeedsConfirmation ? '이전 저장 결과' : '저장된 결과'}: ${LABEL.outcome[d.outcome]}`),
       h('p', { class: 'small' }, d.resultNeedsConfirmation ? '변경한 수량에 맞게 수거 결과를 다시 저장해야 합니다.' : '수량을 다시 바꿨다면 수거 결과도 다시 골라 저장하세요.'),
@@ -638,15 +638,22 @@ async function screenStop(id) {
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
       : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
       ? btn(next ? `다음 ${next.seq}번 ▶` : '목록으로', () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
-      : btn(d.resultNeedsConfirmation ? '수거 결과 재확인 ↓' : '수거 결과 선택 ↓', () => document.getElementById('st-result').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }), 'primary dock-next'));
-  // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 이동, 끝난 단계는 ✓
+      : btn(d.resultNeedsConfirmation ? '수거 결과 재확인 ↓' : '수거 결과 선택 ↓', () => goSection('st-result'), 'primary dock-next'));
+  // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 스크롤한 뒤 그 구역 제목에 초점(스크린리더·키보드가 따라가게), 끝난 단계는 ✓
+  const goSection = (sid) => {
+    const section = document.getElementById(sid);
+    if (!section) return;
+    section.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' });
+    const title = section.querySelector('h2');
+    if (title) { title.tabIndex = -1; title.focus({ preventScroll: true }); }
+  };
   contact.id = 'st-contact'; lines.id = 'st-items'; photos.id = 'st-photos'; outcome.id = 'st-result';
   const itemsDone = d.lines.length > 0 && st.events.some((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT');
   const steps = [['st-contact', '연락', d.contact !== 'NOT_CONTACTED'], ['st-items', '품목', itemsDone], ['st-photos', '사진', d.photos.length > 0], ['st-result', '결과', !!d.outcome && resultConfirmed]];
   const nextStep = d.outcome && resultConfirmed ? null : steps.find(([, , done]) => !done);
   const stepNav = h('nav', { class: 'steps', 'aria-label': '처리 단계' }, ...steps.map(([sid, label, done], i) =>
     h('a', { href: '#', class: 'step' + (done ? ' done' : '') + (nextStep && nextStep[0] === sid ? ' next' : ''), 'aria-current': nextStep && nextStep[0] === sid ? 'step' : null,
-      onclick: (e) => { e.preventDefault(); document.getElementById(sid).scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); } },
+      'aria-label': `${i + 1}단계 ${label}, ${done ? '완료' : '남음'}`, onclick: (e) => { e.preventDefault(); goSection(sid); } },
       h('span', { class: 'n' }, done ? '✓' : String(i + 1)), h('span', {}, label))));
   // 머리 칩: 저장 대기·재확인은 그대로, 그 밖은 목록과 같은 판정(stopState) — 결과 없이 수량만 넣었으면 '결과 미저장'(경고색)과 실은 양
   const state = stopState(stop, d);
@@ -716,22 +723,22 @@ function screenFix(id) {
     input.addEventListener('input', () => { f[key] = input.value; });
     return h('label', { class: 'fld' }, h('span', {}, label), input);
   };
-  const msg = h('p', { class: 'msg' });
+  const msg = msgBox();
   const save = btn('정정 요청 남기기', async () => {
     const nv = { name: f.name.trim(), phone: digits(f.phone), address: f.address.trim(), spot_note: f.spot_note.trim(), planned_date: f.planned_date };
-    if (!nv.name) return (msg.textContent = '이름을 적어 주세요.');
-    if (!/^0\d{8,10}$/.test(nv.phone)) return (msg.textContent = '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
-    if (!nv.address) return (msg.textContent = '주소를 적어 주세요.');
-    if (!nv.planned_date) return (msg.textContent = '예정일을 골라 주세요.');
+    if (!nv.name) return say(msg, '이름을 적어 주세요.', true);
+    if (!/^0\d{8,10}$/.test(nv.phone)) return say(msg, '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)', true);
+    if (!nv.address) return say(msg, '주소를 적어 주세요.', true);
+    if (!nv.planned_date) return say(msg, '예정일을 골라 주세요.', true);
     const fields = Object.fromEntries(Object.entries(nv).filter(([k, v]) => v !== cur[k]));
-    if (!Object.keys(fields).length) return (msg.textContent = '바뀐 내용이 없습니다.');
-    if (!f.reason.trim()) return (msg.textContent = '요청 사유를 적어 주세요. (예: 주민이 번호가 바뀌었다고 알려 줌)');
+    if (!Object.keys(fields).length) return say(msg, '바뀐 내용이 없습니다.', true);
+    if (!f.reason.trim()) return say(msg, '요청 사유를 적어 주세요. (예: 주민이 번호가 바뀌었다고 알려 줌)', true);
     await addEvent(stop, 'CORRECTION', { fields, reason: f.reason.trim().slice(0, 200) });
     ui.fix = null; toast('정정 요청을 남겼습니다. 결과 보내기 때 PC로 갑니다'); go(`#/stop/${id}`);
   }, 'primary huge');
   return h('main', {},
     h('header', { class: 'bar' }, btn('← 취소', () => { ui.fix = null; go(`#/stop/${id}`); }, 'ghost'), h('h1', { class: 'bar-title' }, `정정 요청 ${stop.seq}번`)),
-    h('section', { class: 'card notice' }, h('p', {}, '바뀐 칸만 고치세요. 이 휴대폰의 목록은 그대로이고, PC 담당자가 확인해 원본을 고치면(이전 내용은 이력으로 남음) 다음 목록에 반영됩니다.')),
+    h('section', { class: 'callout info' }, h('p', {}, '바뀐 칸만 고치세요. 이 휴대폰의 목록은 그대로이고, PC 담당자가 확인해 원본을 고치면(이전 내용은 이력으로 남음) 다음 목록에 반영됩니다.')),
     h('section', { class: 'card' },
       fld('name', '이름'), fld('phone', '연락처', { type: 'tel', inputmode: 'tel', placeholder: '010-0000-0000' }), fld('address', '주소'),
       fld('spot_note', '상세 배출 위치', { placeholder: '예: 101동 분리수거장 옆' }), fld('planned_date', '수거 예정일', { type: 'date' })),

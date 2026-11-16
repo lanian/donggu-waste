@@ -22,13 +22,16 @@ function screenAdd(id) {
     ? ui.add : { stop: id, q: '', cat: '', items: [] });
   ui.add = a; draftOwners.set(a, source);
   const table = feeTable();
-  if (!table) return h('main', {}, h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost')), h('p', { class: 'msg' }, ERR.FEE_VERSION_MISSING));
+  // 막히는 오류(수수료표 버전 불일치)는 빨간 상자(.callout.bad)로, 나갈 길을 함께 둔다
+  if (!table) return h('main', {}, h('header', { class: 'bar' }, btn('← 취소', () => go(`#/stop/${id}`), 'ghost')),
+    h('section', { class: 'card callout bad', role: 'alert' }, h('p', {}, ERR.FEE_VERSION_MISSING),
+      btn('← 접수로 돌아가기', () => go(`#/stop/${id}`), 'big')));
   let view, frozen = null;
   // 같은 hash로 즉시 돌아와 옛 DOM이 잠시 남아 있어도 이전 화면의 완료 응답은 적용하지 않는다.
   const current = () => st === source && isUnlocked() && view?.isConnected && ui.add === a && navigationEpoch === epoch
     && history.length === historySize && location.hash === `#/add/${id}`;
   const leave = () => { if (ui.add === a) ui.add = null; go(`#/stop/${id}`); };
-  const message = h('p', { class: 'notice small', role: 'status', hidden: true, 'aria-label': '현장 품목 저장 상태' });
+  const message = h('p', { class: 'callout info small', role: 'status', hidden: true, 'aria-label': '현장 품목 저장 상태' });
   const sync = () => {
     const op = writes.get(id), active = !!op;
     if (!view) return;
@@ -47,6 +50,7 @@ function screenAdd(id) {
       : op.status === 'saving' ? '현장 품목을 저장하고 있습니다. 같은 작업의 저장 결과를 기다려 주세요.'
       : op.status === 'saved' ? '현장 품목 저장이 끝났습니다. 저장된 품목을 확인하세요.'
       : `현장 품목을 저장하지 못했습니다. 담은 내용은 남아 있으며 같은 기록을 다시 저장합니다.${op.error ? ' ' + op.error : ''}`;
+    message.className = 'callout small ' + (op.status === 'failed' ? 'bad' : op.status === 'saved' ? 'ok' : 'info');  // 저장 실패는 빨간 상자
     done.textContent = op.status === 'saved' ? '저장된 품목 보기' : op.status === 'failed' ? '저장 다시 시도' : '저장 중…';
     done.disabled = !['saved', 'failed'].includes(op.status);
     done.setAttribute('aria-busy', String(op.status === 'saving' || op.status === 'choosing'));

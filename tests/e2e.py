@@ -148,7 +148,7 @@ def main():
             page.get_by_placeholder("한 번 더").fill(PIN)
             page.get_by_role("button", name="PIN 설정").click()
             page.get_by_role("button", name="PC와 연결해서 사용").click()
-            expect(page.get_by_text("먼저 관리자와 함께 기기 등록")).to_be_visible(timeout=20000)
+            expect(page.locator(".next-action").get_by_role("button", name="기기 등록", exact=True)).to_be_visible(timeout=20000)  # 2단계: 별도 등록 카드 대신 지금 할 일 하나
             page.screenshot(path=SHOTS / "01_home_unregistered.png")
             ok(page.get_by_role("button", name="+ 접수 등록 (현장·전화)").is_enabled(), "기기 등록 전에도 접수 등록 단추는 눌림(보내기만 등록 뒤에)")
             page.get_by_role("button", name="+ 접수 등록 (현장·전화)").click()
@@ -180,7 +180,7 @@ def main():
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(url)
             unlock(page)
-            page.get_by_role("button", name="오늘 목록 받기").click()
+            page.locator(".next-action").get_by_role("button", name="오늘 목록 받기").click()
             expect(page.get_by_text("목록을 받았습니다")).to_be_visible(timeout=60000)
             receipt = page.locator(".fp").inner_text().replace(" ", "")
             page.screenshot(path=SHOTS / "03_received.png")
@@ -739,7 +739,7 @@ def pc_field(pw, url):
     cname = page.locator(".who .name").inner_text()
     page.get_by_role("button", name="취소 요청").click()
     page.get_by_role("dialog").get_by_role("button", name="주민 취소").click()
-    expect(page.locator(".who .notice", has_text="취소를 요청했습니다")).to_be_visible()
+    expect(page.locator(".who .callout.warn", has_text="취소를 요청했습니다")).to_be_visible()
     ok(page.get_by_role("button", name="취소 요청").is_disabled(), f"취소 요청({cname}) → 표시, 같은 요청 두 번 막음, 원래 접수는 그대로")
     page.screenshot(path=SHOTS / "31_pc_change_request.png", full_page=True)
     # 결과 보내기: 현장 접수·정정 요청이 들어간다는 안내 → PC 가져오기
@@ -816,7 +816,7 @@ def pc_sync(pw, url):
        "설정 → [현장 처리 순서] 한 장 도움말 (코드 세 가지 이름 포함)")
     # 1) 안전용 백업: 지금(모든 기록 반영됨) 상태
     page.goto(url + "#/export")
-    ok("미전송" not in page.locator("h2", has_text="결과 보내기").inner_text(), "시작: 보내지 않은 기록 없음")
+    ok("보낼 기록" not in page.locator("h2", has_text="결과 보내기").inner_text(), "시작: 보낼 기록 없음")
     page.goto(url + "#/backup")
     page.get_by_placeholder("백업 비밀번호 (12자 이상)").fill("backup-pass-pc1")
     page.get_by_placeholder("한 번 더").fill("backup-pass-pc1")
@@ -903,9 +903,9 @@ def pc_sync(pw, url):
     ok(not flagged,
        "같은 날 갱신본: PC가 반영한 이 휴대폰 기록이 있는 곳도 '재방문'·'정보 변경'으로 바뀌지 않음")
     page.goto(url + "#/export")
-    ok("미전송 1건" in page.locator("h2", has_text="결과 보내기").inner_text() and page.get_by_text("미회수 0장").is_visible()
+    ok("보낼 기록 1건" in page.locator("h2", has_text="결과 보내기").inner_text() and page.get_by_text("미회수 0장").is_visible()
        and page.get_by_text("반영 확인됨(새 목록)").count() >= 1,
-       "코드 입력 없이: 결과 파일 반영 확인(새 목록)·사진 미회수 0장, rel 뒤의 기록 1건은 미전송 그대로")
+       "코드 입력 없이: 결과 파일 반영 확인(새 목록)·사진 미회수 0장, rel 뒤의 기록 1건은 보낼 기록 그대로")
     # 코드 칸 확인: 사진 회수 코드를 결과 칸에 넣으면 알려 줌
     pcode = re.search(PHOTO_RE, pimp).group(1)
     page.get_by_placeholder("결과 반영 코드 8자리", exact=True).fill(pcode)
@@ -927,7 +927,7 @@ def pc_sync(pw, url):
     page.screenshot(path=SHOTS / "40_yesterday_banner.png")
     page.locator("section.actions").get_by_role("button", name="오늘 목록 받기").click()
     expect(page.locator(".owed-card")).to_be_visible()
-    ok("보내지 않은 기록 1건" in page.locator(".owed-card").inner_text() and page.locator("video.cam").count() == 0,
+    ok("보낼 기록 1건" in page.locator(".owed-card").inner_text() and page.locator("video.cam").count() == 0,
        "목록 받기 전에(QR을 다 읽기 전에) 지난 날짜 미전송 1건을 먼저 알림")
     page.screenshot(path=SHOTS / "41_owed_before_scan.png")
     ctx.close()
@@ -1131,7 +1131,8 @@ def juso_flow(pw, url):
     page.get_by_role("button", name="이 휴대폰만으로 사용").click()
     page.get_by_role("button", name="이 휴대폰만으로 시작").click()
     page.get_by_role("button", name="+ 전화 접수 등록").click()
-    expect(page.locator(".addr-status")).to_contain_text("승인키를 설정에서 입력")
+    expect(page.locator(".addr-status")).to_contain_text("주소 검색을 쓸 수 없습니다. 주소를 직접 적어 주세요.")
+    ok("승인키" not in page.locator("main").inner_text(), "현장 접수 화면에는 승인키 안내가 없음 (설정의 주소 검색 칸에만)")
     page.goto(url + "#/settings")
     page.get_by_label("주소 검색 승인키").fill("TEST-SEARCH-KEY")
     page.get_by_label("좌표 승인키").fill("TEST-COORD-KEY")
@@ -1304,8 +1305,8 @@ def solo(pw, url, video):
     page.get_by_role("button", name="← 목록").first.click()
     page.locator(".stop", has_text="가상일").click()
     page.get_by_role("button", name="위치 지정", exact=True).click()
-    expect(page.locator(".addr-status")).to_contain_text("승인키를 설정에서 입력")
-    ok(page.get_by_label("주소 검색어").is_disabled(), "승인키가 없으면 주소 검색칸은 '승인키를 설정에서 입력' 안내, 지도·내 위치로 지정")
+    expect(page.locator(".addr-status")).to_contain_text("주소 검색을 쓸 수 없습니다. 지도를 움직이거나 [지금 내 위치로 이동]으로 정해 주세요.")
+    ok(page.get_by_label("주소 검색어").is_disabled(), "승인키가 없으면 주소 검색칸은 '주소 검색을 쓸 수 없습니다' 안내, 지도·내 위치로 지정")
     save = page.get_by_role("button", name="이 위치로 저장")
     # 지도 조각에 기대지 않는다: 배출 위치에 서서 휴대폰 위치(가짜 GPS)로 저장
     page.get_by_role("button", name="지금 내 위치로 이동").click()
@@ -1390,8 +1391,8 @@ def solo(pw, url, video):
     expect(page.get_by_role("button", name="+ 전화 접수 등록")).to_be_visible()
 
     # 백업 → 전체 삭제 → 복원
-    ok(page.get_by_text("마지막 백업: 없음").count() == 1, "백업 전 경고 표시")
-    page.get_by_role("button", name="지금 백업").click()
+    ok(page.get_by_text("아직 백업하지 않았습니다. 휴대폰을 잃어버리면 접수 원본이 사라집니다.").count() == 1, "백업 전 경고 띠 표시")
+    page.locator(".backup-warn").get_by_role("link", name="백업 ›").click()
     page.get_by_placeholder("백업 비밀번호 (12자 이상)").fill("backup-pass-1")
     page.get_by_placeholder("한 번 더").fill("backup-pass-1")
     with page.expect_download() as dl:

@@ -1,7 +1,7 @@
 // 휴대폰 화면: 기기 등록
 import * as P from '../proto.js';
 import * as S from '../store.js';
-import { btn, errMsg, flowSteps, footBar, go, h, render, startCamera, stopCamera, toast, ui } from '../core.js';
+import { btn, errMsg, flowSteps, footBar, go, h, msgBox, render, say, startCamera, stopCamera, toast, ui } from '../core.js';
 import { drawQr } from './resultqr.js';
 
 async function screenRegister() {
@@ -16,14 +16,14 @@ async function screenRegister() {
   const STEPS = ['PC 등록 QR 읽기', '기기 코드 전달', '지문 숫자 대조'];
   if (!pc || ui.rescanPc) {
     const video = h('video', { playsinline: true, muted: true, class: 'cam' });
-    const msg = h('p', { class: 'msg' }, '관리자 PC의 [기기 등록 QR]을 비추세요.');
+    const msg = msgBox('관리자 PC의 [기기 등록 QR]을 비추세요.');
     setTimeout(() => startCamera(video, async (text) => {
       try {
         const reg = P.parseRegistration(text);
         stopCamera();
         await S.putRaw('pc', reg); ui.rescanPc = false; render();
-      } catch (e) { msg.textContent = errMsg(e); }
-    }).catch((e) => { msg.textContent = errMsg(e); }), 0);
+      } catch (e) { say(msg, errMsg(e), true); }
+    }).catch((e) => { say(msg, errMsg(e), true); }), 0);
     return h('main', {}, back, flowSteps(STEPS, 0), h('section', { class: 'card cam-card' }, video, msg));
   }
   const kexRaw = await P.exportRaw(dev.kex.publicKey), signRaw = await P.exportRaw(dev.sign.publicKey);

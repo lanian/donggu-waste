@@ -4,7 +4,7 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
-import { addrRoute, allStops, ask, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, render, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
+import { addrRoute, allStops, ask, btn, commit, emptyState, errMsg, flowSteps, flushSteps, footBar, go, h, msgBox, outbox, render, say, setSt, smsTemplates, st, toast, todayKST, ui, unsent, writesPending } from '../core.js';
 import { APP_VERSION } from '../app.js';
 
 async function screenExport() {
@@ -12,7 +12,8 @@ async function screenExport() {
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
   const targetState = st, targetList = st.daylist, targetHash = location.hash;
   let view, cleaning = false;
-  const pending = unsent();
+  const pending = unsent();  // 결과 파일에 담는 기록(D-코드 전 전부) — 전송 형식 그대로
+  const ob = outbox();        // 화면 표시용: 보낼 기록·확인 대기
   const unconfirmedResults = () => allStops().filter((s) => !s.removed && !s.pii_purged && s.status !== 'CANCELLED' && deriveStop(s, st.events).resultNeedsConfirmation);
   const unresolved = unconfirmedResults();
   const checkResultReady = () => {
@@ -20,14 +21,14 @@ async function screenExport() {
     if (unconfirmedResults().length) throw new Error('수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요. 기록 보호가 필요하면 암호화 백업을 사용하세요.');
   };
   const photoMetas = st.events.filter((e) => e.kind === 'PHOTO_META');
-  const msg = h('p', { class: 'msg' }, ui.exportMsg || '');
+  const msg = msgBox(ui.exportMsg || '');
   ui.exportMsg = '';
-  const say = (t) => { ui.exportMsg = t; msg.textContent = t; };
+  const note = (t, bad = false) => { ui.exportMsg = t; say(msg, t, bad); };
   const saveResultFile = (file, name, message) => {
     const u = URL.createObjectURL(file);
     const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(u), 30000);
-    say(message);
+    note(message);
   };
   // 결과 파일: 기록(이벤트)을 그대로, PC 공개키로 암호화 + 기기 서명. 주민 이름·연락처·주소는 현장 접수·정정 요청에만 들어가고,
   // 직원이 적은 글(현장 메모·취소 요청 내용·하차 메모)도 그대로 들어간다 — 화면 안내(sendCard)와 입력칸 안내가 이를 알린다.
@@ -56,23 +57,24 @@ async function screenExport() {
       const { sealed, name, bundleId } = await buildResult();
       ui.resultQr = { frames: P.splitFrames(sealed.bytes, bundleId, 600), name };
       go('#/resultqr');
-    } catch (e) { say('QR을 만들지 못했습니다: ' + errMsg(e)); showQr.disabled = false; }
+    } catch (e) { note('QR을 만들지 못했습니다: ' + errMsg(e), true); showQr.disabled = false; }
   }, 'big', { disabled: !pending.length || !!unresolved.length });
+  // 파일에는 D-코드 전 기록 전부(보낼 기록 + 확인 대기)가 들어간다 — 전송 형식 그대로
   const make = btn(pending.length ? `결과 파일 만들어 보내기 (${pending.length}건)` : '보낼 결과 없음', async () => {
-    make.disabled = true; msg.textContent = '암호화하는 중…';
+    make.disabled = true; note('암호화하는 중…');
     try {
       const { sealed, name } = await buildResult();
       const file = new File([sealed.bytes], name, { type: 'application/octet-stream' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try { await navigator.share({ files: [file], title: '수거 결과 파일' }); say('업무 메일로 보냈다면, PC 담당자가 알려 주는 결과 반영 코드(D-)를 아래에 입력하세요.'); }
+        try { await navigator.share({ files: [file], title: '수거 결과 파일' }); note('업무 메일로 보냈다면, PC 담당자가 알려 주는 결과 반영 코드(D-)를 아래에 입력하세요.'); }
         catch (e) {
-          if (e.name === 'AbortError') say('보내기를 취소했습니다. 결과 반영 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.');
+          if (e.name === 'AbortError') note('보내기를 취소했습니다. 결과 반영 코드를 받기 전에는 다시 만들어 보낼 수 있습니다.');
           else saveResultFile(file, name, '공유창을 열 수 없어 파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
         }
       } else {
         saveResultFile(file, name, '파일을 저장했습니다. 업무 메일에 첨부해 보내 주세요.');
       }
-    } catch (e) { say('파일을 만들지 못했습니다: ' + errMsg(e)); }
+    } catch (e) { note('파일을 만들지 못했습니다: ' + errMsg(e), true); }
     make.disabled = false; render();
   }, 'primary huge', { disabled: !pending.length || !!unresolved.length });
 
@@ -98,9 +100,9 @@ async function screenExport() {
   const recovered = new Set(st.recoveredPhotos || []);
   const allPhotos = [...photoMetas.map((e) => ({ ...e.body, request_id: e.request_id })), ...(st.keptPhotos || [])];
   const notRecovered = allPhotos.filter((p) => !recovered.has(p.photo_id));
-  const pmsg = h('p', { class: 'msg' });
+  const pmsg = msgBox();
   const makePhotos = btn(`사진 파일 만들기 (${notRecovered.length}장)`, async () => {
-    makePhotos.disabled = true; pmsg.textContent = '암호화하는 중…';
+    makePhotos.disabled = true; say(pmsg, '암호화하는 중…');
     try {
       const photos = [];
       for (const p of notRecovered) {
@@ -115,8 +117,8 @@ async function screenExport() {
       await commit();
       const u = URL.createObjectURL(new File([sealed.bytes], name, { type: 'application/octet-stream' }));
       const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
-      pmsg.textContent = `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 사진 회수 코드(P-)를 받으세요.`;
-    } catch (e) { pmsg.textContent = '사진 파일을 만들지 못했습니다: ' + errMsg(e); }
+      say(pmsg, `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 사진 회수 코드(P-)를 받으세요.`);
+    } catch (e) { say(pmsg, '사진 파일을 만들지 못했습니다: ' + errMsg(e), true); }
     makePhotos.disabled = false;
   }, 'big', { disabled: !notRecovered.length });
   const pcode = h('input', { type: 'text', placeholder: '사진 회수 코드 8자리', 'aria-label': '사진 회수 코드 (P-)', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
@@ -198,14 +200,14 @@ async function screenExport() {
   // 직원이 직접 적은 글이 실리는 기록: 현장 메모, 내용을 적은 취소 요청, 메모를 적은 하차 기록
   const freeText = pending.filter((e) => (e.kind === 'FIELD_MEMO' && e.body?.text) || (e.kind === 'CANCEL_REQUEST' && e.body?.text) || (e.kind === 'UNLOAD' && e.body?.note));
   const sendCard = h('section', { class: 'card' },
-    h('h2', {}, h('span', { class: 'stepno' }, '1'), pending.length ? `결과 보내기 · 미전송 ${pending.length}건` : '결과 보내기'),
-    unresolved.length ? h('section', { class: 'notice', 'aria-label': '수거 결과 재확인 필요' },
+    h('h2', {}, h('span', { class: 'stepno' }, '1'), ['결과 보내기', ob.toSend ? `보낼 기록 ${ob.toSend}건` : '', ob.waiting ? `확인 대기 ${ob.waiting}건` : ''].filter(Boolean).join(' · ')),
+    unresolved.length ? h('section', { class: 'callout warn', 'aria-label': '수거 결과 재확인 필요' },
       h('strong', {}, `수거 결과 재확인 ${unresolved.length}건`), h('p', {}, '결과 저장 뒤 수량이 바뀐 접수가 있습니다. 현재 수량에 맞는 결과를 다시 저장한 뒤 보내세요.'),
       ...unresolved.map((s) => btn(`${s.seq}번 결과 재확인`, () => go(`#/stop/${s.request_id}`), 'big')),
       btn('기록 보호용 백업', () => go('#/backup'), 'big')) : null,
-    h('p', {}, '결과 파일은 PC에서만 열 수 있게 암호화됩니다. 주민 이름·연락처·주소는 넣지 않지만(아래 현장 접수·정정 요청은 예외), 현장 메모·취소 요청 내용·하차 메모에 적은 글은 그대로 PC로 갑니다. 그런 칸에는 이름·연락처 등 개인정보를 적지 마세요. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(중간 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다.'),
-    freeText.length ? h('p', { class: 'notice free-text' }, `이번 파일에는 직접 적은 글(현장 메모·취소 요청 내용·하차 메모) ${freeText.length}건이 들어갑니다. 개인정보가 적혀 있지 않은지 확인하세요.`) : null,
-    pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'notice' },
+    h('p', {}, '결과 파일은 PC에서만 열 수 있게 암호화됩니다. 주민 이름·연락처·주소는 넣지 않지만(아래 현장 접수·정정 요청은 예외), 현장 메모·취소 요청 내용·하차 메모에 적은 글은 그대로 PC로 갑니다. 그런 칸에는 이름·연락처 등 개인정보를 적지 마세요. 사진은 넣지 않습니다. 하루 중간에 보내도 되고(지금까지 결과), 그 뒤 기록은 다음 파일에 이어서 들어갑니다. 결과 반영 코드(D-)를 넣기 전까지는 보낸 기록도 "확인 대기"로 남아 다음 파일에 다시 들어갑니다.'),
+    freeText.length ? h('p', { class: 'callout warn free-text' }, `이번 파일에는 직접 적은 글(현장 메모·취소 요청 내용·하차 메모) ${freeText.length}건이 들어갑니다. 개인정보가 적혀 있지 않은지 확인하세요.`) : null,
+    pending.some((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION') ? h('p', { class: 'callout warn' },
       `이번 파일에는 현장 접수·정정 요청 ${pending.filter((e) => e.kind === 'FIELD_INTAKE' || e.kind === 'CORRECTION').length}건의 이름·연락처·주소가 들어갑니다(PC가 원본을 만들거나 고치려면 필요). PC 전용 암호화는 같으며, 업무 메일이나 PC 화면 카메라로만 보내세요.`) : null,
     showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'), msg);
   view = h('main', { class: 'with-dock' },
