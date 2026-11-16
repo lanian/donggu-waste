@@ -76,7 +76,7 @@ def read_server():
             self.end_headers()
             self.wfile.write(body)
 
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server = type('BurstServer', (http.server.ThreadingHTTPServer,), {'request_queue_size': 128})(('127.0.0.1', 0), Handler)  # Windows 대기열 5면 모듈 동시 요청이 거부됨
     server.counts, server.modes, server.gates = {}, {}, {}
     server.body_started = threading.Event()
     worker = threading.Thread(target=server.serve_forever, daemon=True)

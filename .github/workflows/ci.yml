@@ -74,6 +74,7 @@ jobs:
       - run: python tests/test_privacy_write_guards.py
       - run: python tests/test_pc_device_revocation.py
       - run: python tests/test_pc_server_bind.py
+      - run: python tests/test_pc_unread_body.py   # 본문을 읽기 전 거절해도 응답이 끊기지 않음(Windows RST)
       - run: python tests/test_dong_work.py
       - run: python tests/test_default_dongs.py
       - run: python tests/test_dong_order.py
@@ -175,6 +176,7 @@ jobs:
           - test_mobile_review_fixes
           - test_mobile_ui_phase1
           - test_mobile_ui_phase2
+          - test_mobile_ui_phase3
           - test_pc_table_sort
     steps:
       - uses: actions/checkout@v7

@@ -32,7 +32,7 @@ def fixture_server():
                 return str(ROOT / "pc" / "ui" / "fonts" / Path(path).name)
             return super().translate_path(path)
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(ROOT)))
+    server = type('BurstServer', (http.server.ThreadingHTTPServer,), {'request_queue_size': 128})(("127.0.0.1", 0), partial(Quiet, directory=str(ROOT)))  # Windows 대기열 5면 모듈 동시 요청이 거부됨
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

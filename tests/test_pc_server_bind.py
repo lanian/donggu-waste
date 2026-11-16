@@ -58,5 +58,33 @@ class ServerBindingTests(unittest.TestCase):
         second.server_close()
 
 
+class ConnectionBurstTests(unittest.TestCase):
+    """브라우저는 첫 화면에서 ES 모듈 수십 개를 동시에 연다. Windows는 listen 대기열(기본 5)이 차면
+    연결을 대기시키지 않고 거부해(ERR_CONNECTION_REFUSED) 화면이 '불러오는 중'에 멈출 수 있다."""
+
+    BURST = 30
+
+    def test_listen_queue_holds_a_module_burst(self):
+        import socket
+        for server_class in (Server, DesktopServer):
+            with self.subTest(server=server_class.__name__):
+                self.assertGreaterEqual(server_class.request_queue_size, 64, "listen 대기열이 모듈 동시 요청을 받을 만큼 커야 함")
+                server = server_class(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)  # serve_forever 없이: 아무것도 accept 하지 않는 순간
+                clients, refused = [], 0
+                try:
+                    for _ in range(self.BURST):
+                        c = socket.socket(); c.settimeout(2)
+                        try:
+                            c.connect(server.server_address)
+                        except OSError:
+                            refused += 1
+                        clients.append(c)
+                    self.assertEqual(refused, 0, f"서버가 바쁜 순간 동시 연결 {self.BURST}개 중 {refused}개 거부")
+                finally:
+                    for c in clients:
+                        c.close()
+                    server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

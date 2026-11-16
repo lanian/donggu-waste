@@ -500,6 +500,22 @@ class Handler(BaseHTTPRequestHandler):
             self.body_cache = self.rfile.read(n) if n else b""
         return self.body_cache
 
+    def _drain_unread_body(self):
+        """응답 뒤 읽지 않은 요청 본문을 비운다. 권한·주소 검사는 본문을 읽기 전에 답하는데, 읽지 않은 자료를 남긴 채
+        연결을 닫으면 Windows가 RST를 보내 클라이언트가 이미 받은 응답을 읽기 전에 끊긴다(ConnectionAbortedError 10053).
+        한도(MAX_BODY)를 넘는 본문은 비우지 않는다(이미 거절했고, 큰 자료를 끝까지 받을 이유가 없다)."""
+        if getattr(self, "body_cache", None) is not None:
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (AttributeError, ValueError):
+            return
+        if 0 < n <= MAX_BODY:
+            try:
+                self.rfile.read(n)
+            except OSError:
+                pass
+
     def json_body(self) -> dict:
         if getattr(self, "json_body_cache", None) is not None:
             return self.json_body_cache
@@ -548,6 +564,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route(method)
         finally:
+            self._drain_unread_body()
             u = (self.user or {}).get("username") or "-"
             ms = int((time.time() - t0) * 1000)
             LOG.info("%s %s %s %dms user=%s client=%s", method, path_template(self.path), self._status, ms, u,
@@ -2261,6 +2278,9 @@ def dt_now() -> str:
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # 브라우저는 첫 화면에서 ES 모듈 수십 개를 동시에 연다. Windows는 listen 대기열(기본 5)이 차면 연결을 대기시키지 않고
+    # 거부해(ERR_CONNECTION_REFUSED) 화면이 '불러오는 중'에 멈춘다(동시 연결 30개 중 25개 거부를 실측). 넉넉히 받는다.
+    request_queue_size = 128
     # Windows의 SO_REUSEADDR는 듣고 있는 포트에도 다른 서버를 바인딩할 수 있다.
     # CLI·서비스·실행 앱 모두 같은 주소에서 서로 다른 DB를 제공하지 않게 한다.
     allow_reuse_address = os.name != "nt"

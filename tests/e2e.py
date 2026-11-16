@@ -82,6 +82,11 @@ def write_y4m(path: Path, images: list[Image.Image], hold: int = 4, w: int = 128
                     f.write(b"FRAME\n" + fr)
 
 
+class _BurstServer(http.server.ThreadingHTTPServer):
+    # Windows는 listen 대기열(기본 5)이 차면 연결을 거부한다 → 첫 화면의 ES 모듈 동시 요청이 끊겨 '불러오는 중'에 멈춤(시험이 가끔 실패하던 원인)
+    request_queue_size = 128
+
+
 def serve(directory: Path) -> int:
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
     class Quiet(http.server.SimpleHTTPRequestHandler):
@@ -92,7 +97,7 @@ def serve(directory: Path) -> int:
         def log_message(self, *a):
             pass
     handler = partial(Quiet, directory=str(directory))
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv = _BurstServer(("127.0.0.1", 0), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv.server_address[1]
 
