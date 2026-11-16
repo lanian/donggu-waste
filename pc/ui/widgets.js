@@ -3,7 +3,7 @@ import * as M from '/web/map.js';
 import { BUILTIN_FEES } from '/web/fees-data.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { FEES, api, btn, grid, h, kst, liveMaps, toast } from './core.js';
+import { FEES, api, btn, cell, grid, h, kst, liveMaps, toast } from './core.js';
 
 let pickerSequence = 0;
 function itemPicker(onAdd, { usagePath = 'fee-usage' } = {}) {
@@ -210,8 +210,8 @@ async function webcamReadOnce(video, accept, { signal } = {}) {
     loop();
   });
 }
-const purgeLogTable = (log) => grid(['일시', '건수', '작업자', '실행', '기준'], log.map((x) => [kst(x.at), x.count, x.actor || '', ({ MANUAL: '화면', CLOSE_APPROVE: '마감 확인', CLI: '명령' })[x.trigger] || x.trigger,
-  `보유 ${x.criteria.retention_years}년 · ${x.criteria.cutoff} 이전 ${x.criteria.basis}`]), { num: [1], empty: '파기 기록이 없습니다.' });
+const purgeLogTable = (log) => grid(['일시', '건수', '작업자', '실행', '기준'], log.map((x) => [cell(kst(x.at), x.at), x.count, x.actor || '', ({ MANUAL: '화면', CLOSE_APPROVE: '마감 확인', CLI: '명령' })[x.trigger] || x.trigger,
+  `보유 ${x.criteria.retention_years}년 · ${x.criteria.cutoff} 이전 ${x.criteria.basis}`]), { num: [1], empty: '파기 기록이 없습니다.', sort: { key: 'purge-log', cols: ['date', 'num', 'text', 'text', 'text'] } });
 
 // ------------------------------------------------------------ 통계·보고서 (개인정보 없이 집계)
 

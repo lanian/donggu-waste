@@ -59,7 +59,7 @@ async function screenStats() {
   const itemBody = h('div');
   const drawItems = () => {
     const part = d.items.slice((s.itemPage - 1) * IP, s.itemPage * IP);
-    itemBody.replaceChildren(grid(['순위', '품목', '규격', '확인 수량', '수거 수량'], part.map((x, i) => [(s.itemPage - 1) * IP + i + 1, x.name, x.spec, `${x.requested}${x.unit_label}`, `${x.collected}${x.unit_label}`]), { num: [0, 3, 4], empty: '없음' }),
+    itemBody.replaceChildren(grid(['순위', '품목', '규격', '확인 수량', '수거 수량'], part.map((x, i) => [(s.itemPage - 1) * IP + i + 1, x.name, x.spec, `${x.requested}${x.unit_label}`, `${x.collected}${x.unit_label}`]), { num: [0, 3, 4], empty: '없음', sort: { key: 'stats-items', cols: ['num', 'text', 'text', 'num', 'num'], note: '이 쪽(20종) 안에서만 정렬합니다' } }),
       ipages > 1 ? h('div', { class: 'pager' }, btn('‹ 이전', () => { s.itemPage -= 1; drawItems(); }, 'small', { disabled: s.itemPage <= 1 }), h('span', { class: 'pg' }, `${s.itemPage} / ${ipages}쪽 · ${d.items.length}종`), btn('다음 ›', () => { s.itemPage += 1; drawItems(); }, 'small', { disabled: s.itemPage >= ipages })) : null);
   };
   drawItems();
@@ -76,19 +76,19 @@ async function screenStats() {
         h('span', { class: 'muted small' }, `하차 ${T.unload_m3}m³ · ${T.unload_kg.toLocaleString()}kg · 현장 추가 품목 ${T.field_added_lines}건${T.lead_days_avg != null ? ` · 접수→수거 평균 ${T.lead_days_avg}일` : ''}`), btn('날짜별 CSV', csv('days', '날짜별'), 'small'))),
       d.days.length ? dayChart(d.days) : h('p', { class: 'empty' }, '이 기간에 자료가 없습니다. 기간이나 집계 기준을 바꿔 보세요.'),
       d.days.length ? h('details', { class: 'tableview' }, h('summary', {}, '표로 보기'),
-        grid(['날짜', '접수', '예정', '완료', '일부', '미수거', '취소', '계산 금액', '부과 금액', '납부 기록', '하차'], d.days.map((x) => [x.date, x.received, x.planned, x.done, x.partial, x.not_collected, x.cancelled, won(x.calculated), won(x.levied), won(x.paid), x.unload_m3 ? `${x.unload_m3}m³` : '']), { num: [1, 2, 3, 4, 5, 6, 7, 8, 9] })) : null),
-    card('월별 추이', 'months', '월별', grid(['월', '건수', '완료', '재방문·보류', '취소', '계산 금액', '감면액', '부과 금액', '납부 기록'], d.months.map((m) => [m.month, m.count, m.done, m.revisit, m.cancelled, won(m.calculated), won(m.reduction), won(m.levied), won(m.paid)]), { num: [1, 2, 3, 4, 5, 6, 7, 8], empty: '없음' })),
+        grid(['날짜', '접수', '예정', '완료', '일부', '미수거', '취소', '계산 금액', '부과 금액', '납부 기록', '하차'], d.days.map((x) => [x.date, x.received, x.planned, x.done, x.partial, x.not_collected, x.cancelled, won(x.calculated), won(x.levied), won(x.paid), x.unload_m3 ? `${x.unload_m3}m³` : '']), { num: [1, 2, 3, 4, 5, 6, 7, 8, 9], sort: { key: 'stats-days', cols: ['date', ...Array(10).fill('num')] } })) : null),
+    card('월별 추이', 'months', '월별', grid(['월', '건수', '완료', '재방문·보류', '취소', '계산 금액', '감면액', '부과 금액', '납부 기록'], d.months.map((m) => [m.month, m.count, m.done, m.revisit, m.cancelled, won(m.calculated), won(m.reduction), won(m.levied), won(m.paid)]), { num: [1, 2, 3, 4, 5, 6, 7, 8], empty: '없음', sort: { key: 'stats-months', cols: ['date', ...Array(8).fill('num')] } })),
     h('div', { class: 'grid2' },
-      card('행정동별', 'dongs', '동별', grid(['행정동', '건수', '완료', '재방문·보류', '취소', '완료율', '부과 금액'], d.dongs.map((x) => { const act = x.planned - x.cancelled; return [x.dong || '(동 미지정)', x.planned, x.done, x.revisit, x.cancelled, `${act ? Math.round((x.done / act) * 100) : 0}%`, won(x.levied)]; }), { num: [1, 2, 3, 4, 5, 6], empty: '없음' })),
-      card('품목 분류별', 'categories', '분류별', grid(['분류', '품목 행', '확인 수량', '수거 수량', '계산 금액'], d.categories.map((x) => [x.category, x.lines, x.requested, x.collected, won(x.amount)]), { num: [1, 2, 3, 4], empty: '없음' }))),
+      card('행정동별', 'dongs', '동별', grid(['행정동', '건수', '완료', '재방문·보류', '취소', '완료율', '부과 금액'], d.dongs.map((x) => { const act = x.planned - x.cancelled; return [x.dong || '(동 미지정)', x.planned, x.done, x.revisit, x.cancelled, `${act ? Math.round((x.done / act) * 100) : 0}%`, won(x.levied)]; }), { num: [1, 2, 3, 4, 5, 6], empty: '없음', sort: { key: 'stats-dongs', cols: ['text', ...Array(6).fill('num')] } })),
+      card('품목 분류별', 'categories', '분류별', grid(['분류', '품목 행', '확인 수량', '수거 수량', '계산 금액'], d.categories.map((x) => [x.category, x.lines, x.requested, x.collected, won(x.amount)]), { num: [1, 2, 3, 4], empty: '없음', sort: { key: 'stats-categories', cols: ['text', 'num', 'num', 'num', 'num'] } }))),
     h('div', { class: 'grid2' },
       h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '세입 (납부 방법별, 납부일 기준)'), h('a', { href: '#/revenue', class: 'small' }, '세입·대사 →')),
-        grid(['납부 방법', '납부 건수', '납부액', '환불액', '순수입'], d.revenue.methods.map((x) => [x.method, x.pay_n, won(x.pay), won(x.refund), won(x.net)]), { num: [1, 2, 3, 4], empty: '이 기간 납부 기록 없음' })),
-      card('감면', 'reductions', '감면', grid(['감면 사유', '감면율', '건수', '감면액'], d.reductions.map((x) => [x.label, `${x.rate}%`, x.count, won(x.amount)]), { num: [1, 2, 3], empty: '감면 없음' }))),
+        grid(['납부 방법', '납부 건수', '납부액', '환불액', '순수입'], d.revenue.methods.map((x) => [x.method, x.pay_n, won(x.pay), won(x.refund), won(x.net)]), { num: [1, 2, 3, 4], empty: '이 기간 납부 기록 없음', sort: { key: 'stats-revenue', cols: ['text', 'num', 'num', 'num', 'num'] } })),
+      card('감면', 'reductions', '감면', grid(['감면 사유', '감면율', '건수', '감면액'], d.reductions.map((x) => [x.label, `${x.rate}%`, x.count, won(x.amount)]), { num: [1, 2, 3], empty: '감면 없음', sort: { key: 'stats-reductions', cols: ['text', 'num', 'num', 'num'] } }))),
     h('div', { class: 'grid2' },
       card('많이 나온 품목 (전체)', 'items', '품목별', itemBody),
-      h('div', {}, card('접수 경로별', 'channels', '경로별', grid(['접수 경로', '건수', '완료', '취소'], d.channels.map((x) => [x.channel, x.planned, x.done, x.cancelled]), { num: [1, 2, 3], empty: '없음' })),
-        card('팀별', null, null, grid(['팀', '배정', '완료', '재방문·보류', '완료율'], d.crews.map((c) => [c.crew, c.assigned, c.done, c.partial_or_not, `${c.assigned ? Math.round((c.done / c.assigned) * 100) : 0}%`]), { num: [1, 2, 3, 4], empty: '배정 기록 없음' })))),
+      h('div', {}, card('접수 경로별', 'channels', '경로별', grid(['접수 경로', '건수', '완료', '취소'], d.channels.map((x) => [x.channel, x.planned, x.done, x.cancelled]), { num: [1, 2, 3], empty: '없음', sort: { key: 'stats-channels', cols: ['text', 'num', 'num', 'num'] } })),
+        card('팀별', null, null, grid(['팀', '배정', '완료', '재방문·보류', '완료율'], d.crews.map((c) => [c.crew, c.assigned, c.done, c.partial_or_not, `${c.assigned ? Math.round((c.done / c.assigned) * 100) : 0}%`]), { num: [1, 2, 3, 4], empty: '배정 기록 없음', sort: { key: 'stats-crews', cols: ['text', 'num', 'num', 'num', 'num'] } })))),
     h('p', { class: 'muted' }, 'CSV는 엑셀에서 바로 열립니다. 이름·연락처·주소·메모는 넣지 않고, 상태는 한글 이름과 코드를 함께 담습니다. 월보 제목은 설정 → 기본에서 바꿉니다. 내보낸 기록은 변경 이력에 남습니다.'));
 }
 

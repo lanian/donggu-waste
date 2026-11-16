@@ -2,7 +2,7 @@
 import { BUILTIN_FEES } from '/web/fees-data.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { FEES, api, boot, btn, can, chip, grid, h, kst, pagehead, post, render, setBoot, toast, wrap } from '../core.js';
+import { FEES, api, boot, btn, can, cell, chip, grid, h, kst, pagehead, post, render, setBoot, sortable, toast, wrap } from '../core.js';
 
 async function screenFees() {
   const d = await api('fee-table');
@@ -52,7 +52,7 @@ async function screenFees() {
   const drawAll = () => {
     const rows = q.value ? searchFees(FEES(), q.value) : FEES().rows;
     allBody.replaceChildren(...rows.slice(0, 200).map((r) => h('tr', {}, h('td', {}, r.category || ''), h('td', {}, r.name), h('td', {}, r.spec), h('td', {}, r.unit_label),
-      h('td', {}, r.status === 'CONFIRMED' ? won(r.price) : chip('금액 확인 대기', 'warn'), r.overridden ? chip('개정 확정', 'ok') : null))));
+      cell([r.status === 'CONFIRMED' ? won(r.price) : chip('금액 확인 대기', 'warn'), r.overridden ? chip('개정 확정', 'ok') : null], r.status === 'CONFIRMED' ? r.price : ''))));
   };
   q.addEventListener('input', drawAll); drawAll();
   return h('div', {}, pagehead('수수료표', h('a', { href: '#/settings/fees', class: 'small' }, '감면 사유 설정 →')),
@@ -66,11 +66,12 @@ async function screenFees() {
     h('div', { class: 'card' }, h('h2', {}, `확인 필요 행 ${d.review_rows.length}개`), h('div', { class: 'tablewrap' }, reviewTable),
       isAdmin ? h('div', {}, h('div', { class: 'row', style: 'margin-top:12px' }, '시행일', eff, '확인자', who, note), h('div', { class: 'row' }, btn('개정안 저장', saveDraft, 'primary'),
         h('span', { class: 'muted' }, '비워 둔 행은 금액 확인 대기로 남습니다. 0원이나 최저가로 정하지 마세요.'))) : h('p', { class: 'muted' }, '개정안 작성은 운영 관리자가 합니다. 승인은 작성자가 아닌 담당자가 할 수 있습니다.'), msg),
-    h('div', { class: 'card' }, h('h2', {}, '개정 이력'), d.revisions.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['개정', '상태', '시행일', '확인자', '작성', '승인·반려', '확정 행'].map((t) => h('th', {}, t)))),
+    h('div', { class: 'card' }, h('h2', {}, '개정 이력'), d.revisions.length ? h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['개정', '상태', '시행일', '확인자', '작성', '승인·반려', '확정 행'].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...d.revisions.map((r) => h('tr', {}, h('td', {}, r.version_id), h('td', {}, r.active ? chip('적용 중', 'ok') : r.status === 'APPROVED' ? chip(r.effective_from > boot.today ? '시행 전' : '이전 승인') : r.status === 'DRAFT' ? chip('승인 대기', 'warn') : chip('반려', 'bad')),
         h('td', {}, r.effective_from), h('td', {}, r.confirmed_by), h('td', {}, `${r.created_by} ${kst(r.created_at)}`), h('td', {}, r.approved_by ? `${r.approved_by} ${kst(r.approved_at)}${r.reject_reason ? ' · ' + r.reject_reason : ''}` : ''),
-        h('td', {}, Object.keys(r.overrides).length + '행')))))) : h('p', { class: 'empty' }, '아직 개정이 없습니다.')),
-    h('div', { class: 'card' }, h('h2', {}, '전체 표'), q, h('div', { class: 'tablewrap tall' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['분류', '품목', '규격', '단위', '단가'].map((t) => h('th', {}, t)))), allBody))));
+        h('td', {}, Object.keys(r.overrides).length + '행'))))), { key: 'fee-revisions', cols: ['text', 'text', 'date', 'text', 'text', 'text', 'num'] })) : h('p', { class: 'empty' }, '아직 개정이 없습니다.')),
+    h('div', { class: 'card' }, h('h2', {}, '전체 표'), q, h('div', { class: 'tablewrap tall' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['분류', '품목', '규격', '단위', '단가'].map((t) => h('th', {}, t)))), allBody),
+      { key: 'fee-table', cols: ['text', 'text', 'text', 'text', 'num'], note: '보이는 행(최대 200행) 안에서만 정렬합니다 · 세 번 누르면 원문 순서' }))));
 }
 
 // ------------------------------------------------------------ 주소 위치 자료 (운영 관리자)

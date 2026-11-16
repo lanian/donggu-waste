@@ -1,5 +1,5 @@
 // 동별 통합 업무. 전역 접수·배정 API를 재사용하지 않고 서버가 허용한 범위만 다룬다.
-import { FEES, api, apiRaw, boot, btn, chip, confirmDlg, fmtPhone, go, h, modal, post, postOnce, reasonFields, routeEpoch, statusChip, toast, wrap } from '../core.js';
+import { FEES, api, apiRaw, boot, btn, chip, confirmDlg, fmtPhone, go, h, modal, post, postOnce, reasonFields, routeEpoch, sortable, statusChip, toast, wrap } from '../core.js';
 import { itemPicker } from '../widgets.js';
 import { won } from '/web/fees.js';
 import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
@@ -88,17 +88,18 @@ async function screenDongs(arg = null) {
       h('small', {}, i < 4 ? '선택일' : '전체 기간'), h('span', { class: 'dw-metric-label' }, label), h('strong', {}, String(data.summary?.[key] || 0))),
       () => pickBucket(bucket), `dw-metric${s.bucket === bucket ? ' on' : ''}`, { 'aria-pressed': s.bucket === bucket ? 'true' : 'false' }))),
     h('div', { class: 'dw-table-card' }, h('div', { class: 'dw-section-head' }, h('h2', {}, '동별 현황'), h('span', { class: 'muted small' }, '숫자를 누르면 접수 목록으로 이동')),
-      h('div', { class: 'tablewrap' }, h('table', { class: 'grid dw-summary' }, head, rows)),
+      h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid dw-summary' }, head, rows), { key: 'dong-work-summary', cols: ['text', ...METRICS.map(() => 'num')] })),
         !(data.rows || []).length ? h('p', { class: 'dw-idle' }, '표시할 담당 동이 없습니다. 관리자에게 담당 동 지정을 요청하세요.') : null));
   }
   function drawList(result) {
     s.page = result.page;
     const rows = (result.rows || []).map((r) => h('tr', {},
-      h('td', {}, btn(r.receipt_no, () => enterDetail(r.id), 'dw-receipt', { 'data-request-id': r.id }), statusChip(r.status)),
-      h('td', {}, h('span', {}, r.planned_date || '예정일 없음'), h('small', {}, r.dong || '동 미지정')),
-      h('td', {}, h('span', {}, r.name), h('small', {}, fmtPhone(r.phone))),
-      h('td', {}, h('span', {}, r.address), h('small', {}, (r.items || []).map((i) => `${i.name} ${i.spec || ''} ${i.qty}${i.unit_label || '개'}`).join(', ')))));
-    const table = h('table', { class: 'grid dw-requests' }, h('thead', {}, h('tr', {}, ...['접수번호 / 상태', '예정일 / 동', '신청인 / 연락처', '배출 주소 / 품목'].map((v) => h('th', { scope: 'col' }, v)))), h('tbody', {}, ...rows));
+      h('td', { 'data-sort': r.receipt_no }, btn(r.receipt_no, () => enterDetail(r.id), 'dw-receipt', { 'data-request-id': r.id }), statusChip(r.status)),
+      h('td', { 'data-sort': r.planned_date || '' }, h('span', {}, r.planned_date || '예정일 없음'), h('small', {}, r.dong || '동 미지정')),
+      h('td', { 'data-sort': r.name || '' }, h('span', {}, r.name), h('small', {}, fmtPhone(r.phone))),
+      h('td', { 'data-sort': r.address || '' }, h('span', {}, r.address), h('small', {}, (r.items || []).map((i) => `${i.name} ${i.spec || ''} ${i.qty}${i.unit_label || '개'}`).join(', ')))));
+    const table = sortable(h('table', { class: 'grid dw-requests' }, h('thead', {}, h('tr', {}, ...['접수번호 / 상태', '예정일 / 동', '신청인 / 연락처', '배출 주소 / 품목'].map((v) => h('th', { scope: 'col' }, v)))), h('tbody', {}, ...rows)),
+      { key: 'dong-work-requests', cols: ['text', 'date', 'text', 'text'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' });
     list.replaceChildren(h('div', { class: 'dw-section-head' }, h('div', {}, h('h2', {}, BUCKET[s.bucket] || BUCKET.day), h('p', { class: 'muted small' }, `총 ${Number(result.total || 0).toLocaleString()}건 · ${s.dong === 'all' ? (scoped ? '담당 동 전체' : '전체 동') : dong.selectedOptions[0]?.textContent || ''}`)),
       h('select', { 'aria-label': '접수 목록 구분', onchange: (e) => pickBucket(e.target.value) }, ...Object.entries(BUCKET).map(([key, text]) => h('option', { value: key, selected: key === s.bucket }, text)))),
       h('div', { class: 'tablewrap' }, table),

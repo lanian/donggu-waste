@@ -2,7 +2,7 @@
 import * as M from '/web/map.js';
 import { searchFees } from '/web/fees.js';
 import { won } from '/web/fees.js';
-import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, can, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, sessionOwner, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, FEES, IDLE_RESET_MS, NAV_APP, NOTICE, NO_PHOTO, PAY, REASON, REFUND_CAUSE, REFUND_ST, SMS_T, STATUS, STICKER, api, boot, btn, can, canWork, chip, confirmDlg, copyNotice, dongOpts, fmtPhone, go, grid, h, isPlaceholderContact, isStale, kst, modal, pagehead, post, postOnce, promptDlg, reasonDlg, render, reqDone, sessionOwner, sortable, statusChip, toast, wrap } from '../core.js';
 import { itemPicker, mapIn } from '../widgets.js';
 import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
@@ -572,8 +572,8 @@ function contactCard(r, ctx = {}) {
   const kind = h('select', { 'aria-label': '유형' }, ...boot.contact_kinds.map((k) => h('option', { value: k }, k)));
   const content = h('input', { placeholder: '내용 (예: 수거 날짜 문의, 오후 방문 요청)', class: 'fill', 'aria-label': '내용' });
   return h('div', { class: 'card' }, h('h2', {}, `민원·통화 기록 ${r.contacts.length}건`),
-    r.contacts.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['일시', '유형', '내용', '담당자'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, ...r.contacts.map((c) => h('tr', {}, h('td', { class: 'nowrap' }, c.at.replace('T', ' ')), h('td', {}, chip(c.kind, c.kind === '불만' ? 'bad' : c.kind === '독촉' ? 'warn' : '')), h('td', {}, c.content), h('td', {}, c.actor || ''))))) : h('p', { class: 'empty' }, '기록 없음'),
+    r.contacts.length ? sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['일시', '유형', '내용', '담당자'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...r.contacts.map((c) => h('tr', {}, h('td', { class: 'nowrap' }, c.at.replace('T', ' ')), h('td', {}, chip(c.kind, c.kind === '불만' ? 'bad' : c.kind === '독촉' ? 'warn' : '')), h('td', {}, c.content), h('td', {}, c.actor || ''))))), { key: 'request-contacts', cols: ['date', 'text', 'text', 'text'] }) : h('p', { class: 'empty' }, '기록 없음'),
     canWork() ? h('div', { class: 'row' }, at, kind, content, btn('기록', wrap(async () => { await postOnce(`contact:${r.id}`, `requests/${r.id}/contacts`, { at: at.value, kind: kind.value, content: content.value }); toast('기록했습니다'); await (ctx.after ? ctx.after() : render()); }, msg), 'primary'), msg) : null);
 }
 
@@ -600,10 +600,10 @@ function paymentCard(r, ctx = {}) {
       h('div', { class: 'main' }, h('span', {}, '부과 금액'), h('b', {}, p.levied == null ? '미확정' : won(p.levied))),
       h('div', {}, h('span', {}, '납부 확인 금액'), h('b', {}, won(p.paid)))),
     p.calculated == null ? h('p', { class: 'small muted' }, '금액 확인 대기 품목이 있어 부과 금액이 정해지지 않았습니다.') : null,
-    p.records.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['날짜', '구분', '금액', '방법', '영수번호', '출처', '메모', ''].map((t) => h('th', {}, t)))),
+    p.records.length ? h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['날짜', '구분', '금액', '방법', '영수번호', '출처', '메모', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...p.records.map((x) => h('tr', { class: x.void_reason ? 'muted' : '' }, h('td', {}, x.paid_on), h('td', {}, x.kind === 'PAY' ? '납부' : '환불'),
         h('td', { class: 'num' }, x.void_reason ? h('s', {}, won(x.amount)) : won(x.amount)), h('td', {}, x.method), h('td', { class: 'code' }, x.receipt_ref || ''), h('td', {}, x.source || '수기'), h('td', {}, x.note || '', x.void_reason ? chip('정정: ' + x.void_reason) : null),
-        h('td', {}, x.void_reason ? '' : btn('정정', wrap(async () => { const why = await promptDlg('수납 기록 정정', '정정 사유', { ok: '정정', lead: [h('p', { class: 'muted' }, '기록은 지워지지 않고 정정 표시와 사유가 남습니다.' + (r.closed ? ' 마감한 날의 접수라 "마감 후 수정"으로 기록됩니다.' : ''))] }); if (!why) return; await post(`payments/${x.id}/void`, { reason: why }); await after(); }, msg), 'small'))))))) : null,
+        h('td', {}, x.void_reason ? '' : btn('정정', wrap(async () => { const why = await promptDlg('수납 기록 정정', '정정 사유', { ok: '정정', lead: [h('p', { class: 'muted' }, '기록은 지워지지 않고 정정 표시와 사유가 남습니다.' + (r.closed ? ' 마감한 날의 접수라 "마감 후 수정"으로 기록됩니다.' : ''))] }); if (!why) return; await post(`payments/${x.id}/void`, { reason: why }); await after(); }, msg), 'small')))))), { key: 'request-payments', cols: ['date', 'text', 'num', 'text', 'text', 'text', 'text', null] })) : null,
     p.status === 'REFUND_NEEDED' ? h('div', { class: 'notice bad' }, `취소된 접수에 납부 기록 ${won(p.paid)}이 남아 있습니다. `, h('a', { href: '#/refunds' }, '환불 목록'), '에서 신청 → 결재 → 지급 기록을 남기세요.') : null,
     (r.refunds || []).length ? h('div', { class: 'notice info' }, h('strong', {}, '환불 '), ...(r.refunds || []).map((f) => h('span', { class: 'block' }, chip(REFUND_ST[f.status] || f.status, f.status === 'PAID' ? 'ok' : f.status === 'REJECTED' || f.status === 'VOID' ? 'neutral' : 'warn'),
       ` ${REFUND_CAUSE[f.cause] || f.cause} ${won(f.amount)}${f.approved_by ? ' · 결재 ' + f.approved_by : ''}${f.paid_on ? ' · 지급 ' + f.paid_on : ''}`)), ' ', h('a', { href: '#/refunds' }, '환불 목록 →')) : null,

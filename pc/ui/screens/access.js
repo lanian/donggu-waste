@@ -1,5 +1,5 @@
 // PC 화면: 개인정보 접속기록
-import { ACCESS, api, boot, btn, chip, download, grid, gridbar, h, kst, pagehead, post, render, runJob, searchbox, toast, wrap } from '../core.js';
+import { ACCESS, api, boot, btn, cell, chip, download, grid, gridbar, h, kst, pagehead, post, render, runJob, searchbox, sortable, toast, wrap } from '../core.js';
 
 async function screenAccess() {
   const s = (screenAccess.s ||= { date_from: boot.today.slice(0, 8) + '01', date_to: boot.today, actor: '', action: '', page: 1 });
@@ -15,7 +15,7 @@ async function screenAccess() {
     Object.assign(s, { date_from: from.value, date_to: to.value, actor: actor.value, action: action.value });
     const r = await api(`access?${qs()}&page=${s.page}&size=100`);
     s.page = r.page; info.textContent = r.total.toLocaleString();
-    tbody.replaceChildren(...(r.rows.length ? r.rows.map((a) => h('tr', {}, h('td', { class: 'num rn' }, a.id), h('td', { class: 'nowrap' }, kst(a.at)), h('td', {}, a.actor), h('td', {}, ACCESS[a.action] || a.action),
+    tbody.replaceChildren(...(r.rows.length ? r.rows.map((a) => h('tr', {}, h('td', { class: 'num rn' }, a.id), cell(kst(a.at), a.at, 'nowrap'), h('td', {}, a.actor), h('td', {}, ACCESS[a.action] || a.action),
       h('td', {}, a.receipt_no ? h('a', { href: `#/request/${a.target}` }, a.receipt_no) : (a.target ? a.target.slice(0, 8) : '')), h('td', { class: 'num' }, a.count ?? ''), h('td', { class: 'detail' }, a.filter), h('td', {}, a.client)))
       : [h('tr', {}, h('td', { colspan: 8, class: 'muted' }, '기록이 없습니다.'))]));
     pager.replaceChildren(btn('‹ 이전', () => { s.page -= 1; load(); }, 'small', { disabled: r.page <= 1 }), h('span', { class: 'pg' }, `${r.page} / ${r.pages}쪽`), btn('다음 ›', () => { s.page += 1; load(); }, 'small', { disabled: r.page >= r.pages }));
@@ -36,10 +36,11 @@ async function screenAccess() {
       h('div', { class: 'row' }, h('input', { id: 'acc-note', class: 'fill', placeholder: '점검 메모 (예: 이상 없음, 대량 조회 1건 사유 확인)', 'aria-label': '점검 메모' }),
         btn('점검 완료', wrap(async () => { const v = await post('access/check', { note: document.getElementById('acc-note').value }); showVerify(v); toast(v.ok ? '점검을 기록했습니다' : '점검을 기록했습니다 — 무결성 검사 실패, 정보보호 담당에 알리세요', !v.ok); render(); }), 'primary')),
       vres,
-      st.checks.length ? h('details', { class: 'tableview' }, h('summary', {}, `점검 기록 ${st.checks.length}건`), grid(['월', '시각', '점검자', '결과', '메모'], st.checks.map((c) => [c.month, kst(c.at), c.actor, chip(c.ok ? '정상' : '실패', c.ok ? 'ok' : 'bad'), c.note || '']))) : null),
+      st.checks.length ? h('details', { class: 'tableview' }, h('summary', {}, `점검 기록 ${st.checks.length}건`), grid(['월', '시각', '점검자', '결과', '메모'], st.checks.map((c) => [c.month, cell(kst(c.at), c.at), c.actor, chip(c.ok ? '정상' : '실패', c.ok ? 'ok' : 'bad'), c.note || '']), { sort: { key: 'access-checks', cols: ['date', 'date', 'text', 'text', 'text'] } })) : null),
     searchbox([['기간', [from, '~', to]], ['사용자', actor], ['작업', action]], btn('검색', () => { s.page = 1; load(); }, 'dark')),
     h('div', { class: 'gridbar' }, h('span', { class: 'cnt' }, '총 ', info, '건'), h('span', { class: 'grow' })),
-    h('div', { class: 'card tablecard' }, h('table', { class: 'grid audit' }, h('thead', {}, h('tr', {}, ...['번호', '시각', '사용자', '작업', '대상', '건수', '조건', '접속'].map((t) => h('th', { scope: 'col' }, t)))), tbody)), pager,
+    h('div', { class: 'card tablecard' }, sortable(h('table', { class: 'grid audit' }, h('thead', {}, h('tr', {}, ...['번호', '시각', '사용자', '작업', '대상', '건수', '조건', '접속'].map((t) => h('th', { scope: 'col' }, t)))), tbody),
+      { key: 'access-log', cols: ['num', 'date', 'text', 'text', 'text', 'num', null, 'text'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' })), pager,
     h('p', { class: 'muted' }, '접수 상세·목록·사진·출력·개인정보 포함 내보내기를 기록합니다. 목록은 내용 없이 건수와 조건만, 검색어 값은 남기지 않습니다. 각 행은 이전 행의 해시를 이어 받아 고치거나 지우면 무결성 검사에서 드러납니다. 2년 이상 보관합니다(설정 → 개인정보).'));
 }
 

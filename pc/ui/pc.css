@@ -452,6 +452,15 @@ table.grid tr.sel > td { background: var(--navy-tint); }
 th button.sort { background: none; border: 0; min-height: 0; padding: 0; font: inherit; font-weight: 700; color: inherit; display: inline-flex; gap: 4px; align-items: center; }
 th button.sort .arr { color: #8a96a5; font-size: 0.7143rem; } th button.sort.on .arr { color: var(--navy-2); }
 th button.sort:hover { color: var(--navy-2); background: none; }
+th button.sort .arr2 { font-size: 0.6429rem; font-weight: 700; color: var(--navy-2); margin-left: -2px; vertical-align: super; }
+table caption.sortnote { caption-side: bottom; text-align: left; padding: 4px 8px; }
+td .rcv { display: block; font-size: 0.7857rem; color: var(--muted); white-space: nowrap; }
+.sortbox { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sortbox > select { width: auto; min-width: 0; }
+.sortbox .sort-presets { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 6px; }
+/* 정렬 프리셋은 빠른 조회(.qchip, 거르기)와 다르게 네모·점선 테두리 */
+.sortchip { min-height: 24px; padding: 2px 10px; border-radius: var(--r-s); font-size: 0.8571rem; font-weight: 600; background: var(--surface); border: 1px dashed var(--line); }
+.sortchip.on { border-style: solid; border-color: var(--navy-2); color: var(--navy-2); background: var(--navy-tint); }
 .pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin: 4px 0 12px; }
 .pager .pg { font-size: 0.9286rem; font-weight: 600; min-width: 72px; text-align: center; }
 .pager select { min-height: 26px; padding: 1px 4px; font-size: 0.8929rem; }

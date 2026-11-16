@@ -1,5 +1,5 @@
 // PC 화면: 숫자 배출표 원장. 번호는 문자열로 다루며 인쇄와 사용 기록을 구분한다.
-import { api, boot, btn, canWork, chip, grid, h, kst, modal, pagehead, postOnce, routeEpoch, searchbox, toast, wrap, STATUS } from '../core.js';
+import { api, boot, btn, canWork, cell, chip, grid, h, kst, modal, pagehead, postOnce, routeEpoch, searchbox, toast, wrap, STATUS } from '../core.js';
 import { collectionLabelUsage } from './label_usage.js';
 import { labelStock } from './label_stock.js';
 
@@ -61,7 +61,8 @@ async function screenNumberedLabels() {
       summary.replaceChildren(...[['ALL', '전체'], ...Object.entries(STATES)].map(([code, label]) => h('div', { class: 'kpi' }, h('span', { class: 'k' }, label), h('b', { class: 'v' }, `${Number(d.counts?.[code] || 0).toLocaleString('ko-KR')}개`), h('span', { class: 's' }, '전체 원장 기준'))));
       rows.replaceChildren(grid(['번호', '상태', '배부처', '접수 연결', '입고 일시', '마지막 변경'], d.rows.map((x) => [
         btn(x.number, () => openDetail(x.number), 'small code', { 'aria-label': x.number }), stateChip(x.status), x.destination || '-',
-        x.request_id ? h('a', { href: `#/request/${encodeURIComponent(x.request_id)}` }, '연결된 접수 보기') : '-', kst(x.received_at), kst(x.updated_at)]), { empty: '조건에 맞는 번호가 없습니다.' }));
+        x.request_id ? h('a', { href: `#/request/${encodeURIComponent(x.request_id)}` }, '연결된 접수 보기') : '-', cell(kst(x.received_at), x.received_at), cell(kst(x.updated_at), x.updated_at)]), { empty: '조건에 맞는 번호가 없습니다.',
+        sort: { key: 'numbered-labels', cols: ['text', 'text', 'text', null, 'date', 'date'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' } }));
       pager.replaceChildren(btn('‹ 이전', () => { s.page = result.page - 1; load(); }, 'small', { disabled: d.page <= 1 }), h('span', { class: 'pg' }, `${d.page} / ${d.pages}쪽 · 50개씩`), btn('다음 ›', () => { s.page = result.page + 1; load(); }, 'small', { disabled: d.page >= d.pages }));
       message.textContent = '';
     } catch (e) {

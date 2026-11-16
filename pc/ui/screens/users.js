@@ -1,6 +1,6 @@
 // PC 화면: 내 계정·사용자·변경 이력·진단
 import { BUILTIN_FEES } from '/web/fees-data.js';
-import { ACTION, ENTITY, api, boot, btn, chip, download, go, grid, h, kst, mb, pagehead, post, prefsControls, render, setBoot, toast, wrap } from '../core.js';
+import { ACTION, ENTITY, api, boot, btn, cell, chip, download, go, grid, h, kst, mb, pagehead, post, prefsControls, render, setBoot, sortable, toast, wrap } from '../core.js';
 import { purgeLogTable } from '../widgets.js';
 
 function screenMe() {
@@ -58,7 +58,7 @@ async function screenUsers() {
     h('tbody', {}, ...users.map((u) => h('tr', {}, h('td', {}, u.username), h('td', {}, u.display_name), h('td', {}, ROLE[u.role]),
       h('td', {}, u.role === 'FIELD' ? crewSel(u) : u.role === 'DONG' ? dongSel(u) : h('span', { class: 'muted' }, '전체 동')),
       h('td', {}, u.active ? (u.must_change ? chip('임시 비밀번호', 'warn') : chip('사용', 'ok')) : chip('중지', 'bad')),
-      h('td', {}, u.last_login_at ? kst(u.last_login_at) : '—'),
+      cell(u.last_login_at ? kst(u.last_login_at) : '—', u.last_login_at || ''),
       h('td', {}, btn(u.active ? '중지' : '다시 사용', wrap(async () => { await post(`users/${u.id}/active`, { active: !u.active }); render(); }, msg), 'small'), ' ',
         (() => {
           // 임시 비밀번호는 화면에 그대로 보이지 않게 가린 입력칸으로 받는다
@@ -66,6 +66,7 @@ async function screenUsers() {
           const ok = btn('저장', wrap(async () => { await post(`users/${u.id}/password`, { password: pw.value }); toast('재설정했습니다. 다음 로그인 때 바꾸게 됩니다.'); render(); }, msg), 'small primary', { hidden: true });
           return h('span', { class: 'row' }, btn('비밀번호 재설정', () => { pw.hidden = !pw.hidden; ok.hidden = pw.hidden; if (!pw.hidden) pw.focus(); }, 'small'), pw, ok);
         })())))));
+  sortable(utable, { key: 'users', cols: ['text', 'text', 'text', null, 'text', 'date', null] });
   // 변경 이력: 기간·대상·작업자로 거르고 쪽 나눔, 거른 목록 CSV(개인정보 없음)
   const ents = boot.audit_entities || ENTITY;
   const fEntity = h('select', { 'aria-label': '대상' }, h('option', { value: '' }, '전체 대상'), ...Object.entries(ents).map(([v, t]) => h('option', { value: v }, t)));
@@ -78,7 +79,7 @@ async function screenUsers() {
     const res = await api(`audit?${qs()}&page=${page}&size=100`);
     page = res.page;
     info.textContent = `총 ${res.total.toLocaleString()}건`;
-    tbody.replaceChildren(...(res.rows.length ? res.rows.map((a) => h('tr', {}, h('td', { class: 'nowrap' }, kst(a.at)), h('td', {}, a.actor || '—'), h('td', {}, ents[a.entity] || a.entity), h('td', {}, ACTION[a.action] || a.action,
+    tbody.replaceChildren(...(res.rows.length ? res.rows.map((a) => h('tr', {}, cell(kst(a.at), a.at, 'nowrap'), h('td', {}, a.actor || '—'), h('td', {}, ents[a.entity] || a.entity), h('td', {}, ACTION[a.action] || a.action,
       a.detail && a.detail.includes('"after_close"') ? chip('마감 후 수정', 'warn') : null),
       h('td', { class: 'mono' }, a.entity_id ? a.entity_id.slice(0, 8) : ''), h('td', { class: 'detail' }, summarizeDetail(a.detail)))) : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '기록이 없습니다.'))]));
     pager.replaceChildren(btn('‹ 이전', () => { page -= 1; load(); }, 'small', { disabled: page <= 1 }), h('span', { class: 'pg' }, `${res.page} / ${res.pages}쪽`), btn('다음 ›', () => { page += 1; load(); }, 'small', { disabled: page >= res.pages }));
@@ -94,7 +95,8 @@ async function screenUsers() {
       h('p', { class: 'muted' }, '접수 담당자: 전체 동의 접수·배정·전송·결과·수납·마감 기록. 동 담당자: 지정한 동에서만 현황·접수·배정 업무. 팀장(검토자): 전체 동 조회·변경 이력·마감 확인(사용자·설정 관리와 업무 변경은 못 함). 수거팀: 연결한 팀에 배정된 접수만 조회, 그 팀 휴대폰의 결과·사진 가져오기, 그 팀 하차 기록. 운영 관리자: 전체와 설정·사용자·백업. 계정은 지우지 않고 중지합니다.'), msg) : null,
     h('div', { class: 'card' }, h('h2', {}, '변경 이력'), h('div', { class: 'row' }, '기간', fFrom, '~', fTo, fEntity, fActor, btn('새로 고침', load, 'small'), info, h('span', { class: 'grow' }),
       btn('CSV 내보내기', wrap(async () => { await download(`audit.csv?${qs()}`, `동구-변경이력-${fFrom.value || '처음'}_${fTo.value || '끝'}.csv`); toast('내려받았습니다 (내보낸 기록이 이력에 남습니다)'); }), 'small')),
-      h('div', { class: 'tablewrap tall' }, h('table', { class: 'audit grid' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '번호', '내용'].map((t) => h('th', {}, t)))), tbody)), pager,
+      h('div', { class: 'tablewrap tall' }, sortable(h('table', { class: 'audit grid' }, h('thead', {}, h('tr', {}, ...['시각', '작업자', '대상', '작업', '번호', '내용'].map((t) => h('th', {}, t)))), tbody),
+        { key: 'audit', cols: ['date', 'text', 'text', 'text', 'text', null], note: '이 쪽에 보이는 행 안에서만 정렬합니다' })), pager,
       h('p', { class: 'muted' }, '이력은 지우거나 고칠 수 없습니다. 새 기록은 해시 사슬로 이어져 고치거나 지우면 [접속기록 → 무결성 검사]에서 드러납니다. 내용에는 이름·연락처·주소를 넣지 않습니다(사유·건수·코드만). CSV도 같은 내용만 담습니다.')),
     admin ? diagCard() : null,
     purge ? h('div', { class: 'card' }, h('div', { class: 'panel-h' }, h('h2', {}, '개인정보 파기 대장'), h('span', { class: 'muted small' }, `보유기간 ${purge.retention_years}년 · 지금 대상 ${purge.preview.count}건`)),
@@ -109,8 +111,8 @@ function diagCard() {
         h('dt', {}, '사진'), h('dd', {}, `${(d.photos.count || 0).toLocaleString()}장 · ${mb(d.photos.bytes)}`),
         d.pre_migration ? [h('dt', {}, '업데이트 사본'), h('dd', {}, d.pre_migration.count ? `${d.pre_migration.count}개 · ${mb(d.pre_migration.bytes)} (state/pre-migration, 개인정보 포함 — 가장 새 1개 외에는 ${d.pre_migration.keep}개·${d.pre_migration.days}일 넘으면 자동 삭제)` : '없음')] : null,
         h('dt', {}, '서버'), h('dd', {}, `로그인 세션 ${d.sessions} · 대기 작업 ${d.jobs_queued} · 예약 확인 ${d.scheduler_tick ? kst(d.scheduler_tick) : '—'}`)),
-      grid(['예약 작업', '마지막 실행', '상태'], o.items.map((x) => [x.label, x.last_at ? `${kst(x.last_at)} (${x.age_days}일 전)` : '기록 없음', chip(x.stale ? '확인 필요' : '정상', x.stale ? 'bad' : 'ok')]), { cls: 'ops-tbl' }),
-      h('details', { class: 'tableview' }, h('summary', {}, '표별 건수'), grid(['표', '건수'], Object.entries(d.tables).map(([t, n]) => [t, n == null ? '—' : n.toLocaleString()]), { num: [1] })),
+      grid(['예약 작업', '마지막 실행', '상태'], o.items.map((x) => [x.label, x.last_at ? `${kst(x.last_at)} (${x.age_days}일 전)` : '기록 없음', chip(x.stale ? '확인 필요' : '정상', x.stale ? 'bad' : 'ok')]), { cls: 'ops-tbl', sort: { key: 'ops', cols: ['text', null, 'text'] } }),
+      h('details', { class: 'tableview' }, h('summary', {}, '표별 건수'), grid(['표', '건수'], Object.entries(d.tables).map(([t, n]) => [t, n == null ? '—' : n.toLocaleString()]), { num: [1], sort: { key: 'db-tables', cols: ['text', 'num'] } })),
       diagHint());
   });
   load();

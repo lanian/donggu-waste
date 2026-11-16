@@ -1,5 +1,5 @@
 // 수거 개수 기준 사용 장수. 번호 원장과 독립된 읽기 전용 누적 집계.
-import { api, boot, btn, grid, h, kst, searchbox } from '../core.js';
+import { api, boot, btn, cell, grid, h, kst, searchbox } from '../core.js';
 
 const number = (value) => Number(value || 0).toLocaleString('ko-KR');
 
@@ -49,7 +49,8 @@ function collectionLabelUsage(parentCurrent) {
       rows.replaceChildren(grid(['접수번호', '행정동', '품목별 사용 장수', '사용 합계', '마지막 확정 일시'], d.rows.map((r) => [
         h('a', { href: `#/request/${encodeURIComponent(r.id)}` }, r.receipt_no), r.dong || '(동 미지정)',
         h('div', {}, ...r.lines.map((line) => h('p', { class: 'small' }, `${line.name || '(품목)'} ${line.spec || ''} · ${number(line.used)}장`))),
-        `${number(r.used)}장`, kst(r.at)]), { num: [3], empty: '조건에 맞는 확정 수거 사용분이 없습니다.' }));
+        `${number(r.used)}장`, cell(kst(r.at), r.at)]), { num: [3], empty: '조건에 맞는 확정 수거 사용분이 없습니다.',
+        sort: { key: 'label-usage', cols: ['text', 'text', null, 'num', 'date'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' } }));
       pager.replaceChildren(btn('집계 이전', () => { s.page = d.page - 1; load(); }, 'small', { disabled: d.page <= 1 }),
         h('span', { class: 'pg' }, `${d.page} / ${d.pages}쪽 · ${number(d.total)}건 · 50건씩`),
         btn('집계 다음', () => { s.page = d.page + 1; load(); }, 'small', { disabled: d.page >= d.pages }));

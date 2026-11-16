@@ -16,7 +16,7 @@ function labelStock(parentCurrent) {
         h('div', { class: 'kpis compact' }, ...[['필요 장수', d.required], ['배정 장수', d.assigned], ['미배정 장수', d.pending]].map(([label, value]) =>
           h('div', { class: 'kpi' }, h('span', { class: 'k' }, label), h('b', { class: 'v', 'aria-label': label }, number(value) + '장')))),
         d.manual_excess || d.conflicts ? h('p', { class: 'notice bad' }, `수동 사용 초과 ${number(d.manual_excess)}장 · 동·일자 확인 필요 ${number(d.conflicts)}장. 번호 상세에서 연결과 재고 동을 확인해 주세요.`) : null,
-        grid(['행정동', '배정 가능 재고', '사용', '무효'], d.dongs.map((dong) => [dong.name, number(dong.available) + '장', number(dong.used) + '장', number(dong.voided) + '장']), { num: [1, 2, 3] }));
+        grid(['행정동', '배정 가능 재고', '사용', '무효'], d.dongs.map((dong) => [dong.name, number(dong.available) + '장', number(dong.used) + '장', number(dong.voided) + '장']), { num: [1, 2, 3], sort: { key: 'label-stock', cols: ['text', 'num', 'num', 'num'] } }));
       message.textContent = d.pending ? '미배정 수거분이 있습니다. 해당 동의 재고와 실제 수령일을 등록하면 자동 배정합니다.' : '';
     } catch (error) { if (current() && my === sequence) message.textContent = error.message; }
     finally { if (current() && my === sequence) query.disabled = false; }

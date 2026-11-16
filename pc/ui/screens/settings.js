@@ -1,6 +1,6 @@
 // PC 화면: 설정(기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소·백업·개인정보)
 import * as M from '/web/map.js';
-import { api, boot, btn, can, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, sessionOwner, setBoot, toast, wrap } from '../core.js';
+import { api, boot, btn, can, chip, confirmDlg, download, grid, h, isPlaceholderContact, kst, modal, pagehead, post, postOnce, render, runJob, sessionOwner, setBoot, sortable, toast, wrap } from '../core.js';
 import { mapIn, purgeLogTable, webcamReadOnce } from '../widgets.js';
 
 const WD = '월화수목금토일';
@@ -286,7 +286,8 @@ function holidayCard() {
       : [h('tr', {}, h('td', { colspan: 3, class: 'muted' }, '등록한 휴무일이 없습니다. 공휴일은 미리 들어 있지 않으니 담당자가 넣으세요.'))]));
   }, msg);
   load();
-  return h('div', { class: 'card' }, h('h2', {}, '휴무일·공휴일'), h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['날짜', '이름', ''].map((t) => h('th', {}, t)))), list)),
+  return h('div', { class: 'card' }, h('h2', {}, '휴무일·공휴일'), h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['날짜', '이름', ''].map((t) => h('th', {}, t)))), list),
+      { key: 'holidays', cols: ['date', 'text', null] })),
     h('div', { class: 'row' }, hd, hl, btn('휴무일 추가', wrap(async () => { await post('holidays', { day: hd.value, label: hl.value }); hd.value = ''; hl.value = ''; toast('추가했습니다'); load(); }, msg), 'small primary')), msg);
 }
 // 접수 시 안내: 품목 낱말이 맞으면 접수 화면에 안내문 (예: 폐가전 무상수거)
@@ -317,8 +318,8 @@ function volumeCard() {
     chk.replaceChildren(h('h3', {}, `추정치 ↔ 하차 기록 (${r.start} ~ ${r.end})`),
       h('p', {}, `추정 ${r.est_m3}m³ · ${r.est_kg.toLocaleString()}kg ↔ 하차 기록 ${r.rec_m3}m³ · ${r.rec_kg.toLocaleString()}kg  (부피 ${pct(r.m3_pct)} · 중량 ${pct(r.kg_pct)})`),
       h('p', { class: 'muted small' }, '100%에서 많이 벗어나면(예: 70% 미만, 130% 넘음) 자주 쓰는 품목의 보정값을 고치세요. 재방문 건이 섞이면 근사치입니다.'),
-      h('table', {}, h('thead', {}, h('tr', {}, ...['날짜', '하차', '추정 m³', '기록 m³', '추정 kg', '기록 kg'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, ...r.days.map((d) => h('tr', {}, ...[d.date, `${d.unloads}회`, d.est_m3, d.rec_m3 ?? '—', d.est_kg.toLocaleString(), d.rec_kg == null ? '—' : d.rec_kg.toLocaleString()].map((v) => h('td', {}, String(v))))))));
+      sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['날짜', '하차', '추정 m³', '기록 m³', '추정 kg', '기록 kg'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, ...r.days.map((d) => h('tr', {}, ...[d.date, `${d.unloads}회`, d.est_m3, d.rec_m3 ?? '—', d.est_kg.toLocaleString(), d.rec_kg == null ? '—' : d.rec_kg.toLocaleString()].map((v) => h('td', {}, String(v))))))), { key: 'load-check', cols: ['date', 'num', 'num', 'num', 'num', 'num'] }));
   }).catch(() => {});
   return h('div', { class: 'card' }, h('h2', {}, '적재량 보정'), h('p', { class: 'muted' }, '자주 쓰는 품목의 1단위 부피·무게와 취급 표시(품목별 적재 기준표의 추정치)입니다. 추정치는 그대로 두고, 실측한 부피가 있으면 보정값에 적으세요(비우면 추정치 사용).'),
     h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '부피 추정', '무게 추정', '취급', '부피 보정값', ''].map((t) => h('th', {}, t)))), tbody), msg, chk);
@@ -332,8 +333,8 @@ function unloadCard(d) {
   const vol = h('input', { type: 'number', step: '0.1', placeholder: 'm³', style: 'width:90px' }), kg = h('input', { type: 'number', placeholder: 'kg', style: 'width:100px' });
   const note = h('input', { placeholder: '메모', style: 'flex:1' });
   return h('div', { class: 'card' }, h('h2', {}, `하차 기록 · 합계 ${d.unload_total.volume_m3}m³ · ${d.unload_total.weight_kg}kg`),
-    d.unloads.length ? h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '시각', '반입지', '부피', '중량', '메모'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, ...d.unloads.map((u) => h('tr', {}, h('td', {}, u.crew_name), h('td', {}, u.at_time || ''), h('td', {}, u.place), h('td', {}, u.volume_m3 ?? ''), h('td', {}, u.weight_kg ?? ''), h('td', {}, u.note || ''))))) : h('p', { class: 'muted' }, '기록 없음'),
+    d.unloads.length ? sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['팀', '시각', '반입지', '부피', '중량', '메모'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, ...d.unloads.map((u) => h('tr', {}, h('td', {}, u.crew_name), h('td', {}, u.at_time || ''), h('td', {}, u.place), h('td', {}, u.volume_m3 ?? ''), h('td', {}, u.weight_kg ?? ''), h('td', {}, u.note || ''))))), { key: 'unloads', cols: ['text', 'date', 'text', 'num', 'num', 'text'] }) : h('p', { class: 'muted' }, '기록 없음'),
     // 입력 줄은 POST unloads 권한(can('unloadWrite'): 관리자·접수·수거팀)만. 팀장은 표만 본다.
     boot.crews.length && can('unloadWrite') ? h('div', { class: 'row' }, crew, at, place, vol, kg, note, btn('하차 기록', wrap(async () => {
       await postOnce(`unload:${d.work_date}`, 'unloads', { crew_id: crew.value, work_date: d.work_date, at_time: at.value, place: place.value, volume_m3: vol.value, weight_kg: kg.value, note: note.value });
@@ -725,7 +726,8 @@ function backupCard() {
       toast(`백업했습니다: ${r.name} (${(r.bytes / 1024 / 1024).toFixed(1)}MB)`); load();
     }, msg), 'primary')),
     h('p', { class: 'small muted' }, '백업 폴더: ', dirEl),
-    h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['파일', '종류', '만든 시각', '크기', '확인'].map((t) => h('th', {}, t)))), list)),
+    h('div', { class: 'tablewrap' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['파일', '종류', '만든 시각', '크기', '확인'].map((t) => h('th', {}, t)))), list),
+      { key: 'backups', cols: ['text', 'text', 'date', 'num', null], note: '보이는 최근 20개 안에서만 정렬합니다' })),
     h('p', { class: 'small muted' }, '복원은 PC 업무 화면을 끄고 명령으로 실행합니다: ', h('code', {}, 'python pc/pc_tool.py restore <백업 파일>'), ' (기존 DB는 지우지 않고 옆에 보관)'),
     h('hr'),
     h('div', { class: 'row' }, '회수한 사진 보관', days, '일', h('span', { class: 'grow' })),
