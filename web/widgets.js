@@ -35,9 +35,20 @@ const unloadLoc = (u) => (u && u.lat != null && u.lon != null ? { lat: u.lat, lo
 // 여러 품목을 연달아 담기 쉽게: 담기 단추를 눌러도 검색칸 포커스(키보드)를 유지하고 검색어를 선택해 두어, 바로 다음 품목을 치면 바뀐다.
 function pickScreen({ items, state: P, table, locked = new Set(), onChange = () => {}, onDone, doneLabel = () => '완료', title = '품목 담기', back = null, intro = null }) {
   const keep = { onmousedown: (e) => e.preventDefault() };  // 단추를 눌러도 검색칸 포커스(키보드) 유지
-  const q = h('input', { type: 'search', class: 'search', value: P.q, placeholder: '이름으로 찾기 (예: 의자, ㅈㄹ)', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '품목 찾기' });
+  const q = h('input', { type: 'search', class: 'search', value: P.q, placeholder: '소파·의자·ㅈㄹ로 찾기', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '품목 찾기' });
   const list = h('div', { class: 'pick-list' });
   const bar = h('div', { class: 'pick-sum', 'aria-live': 'polite' });
+  const resultStatus = h('p', { class: 'small pick-results-status', role: 'status' });
+  const qtyText = (n, unit = '개') => unit.endsWith('당') ? `${unit} ${n}` : `${n}${unit}`;
+  let resultLimit = 40;
+  const showPicked = () => {
+    if (P.q || P.cat !== 'PICKED') P.returnTo = { q: P.q || '', cat: P.cat === 'PICKED' ? (P.returnTo?.cat || 'FREQ') : (P.cat || 'FREQ') };
+    P.cat = 'PICKED'; P.q = ''; q.value = ''; draw(); scrollTo(0, 0);
+  };
+  const returnToSearch = () => {
+    P.q = P.returnTo?.q || ''; P.cat = P.returnTo?.cat || 'FREQ'; q.value = P.q; draw(); scrollTo(0, 0);
+  };
+  const basket = btn('', () => P.cat === 'PICKED' && !P.q ? returnToSearch() : showPicked(), 'ghost pick-basket');
   const lineOf = (rid) => items.find((x) => x.fee_rate_id === rid && !locked.has(x.line_id));
   const qtyOf = (rid) => items.filter((x) => x.fee_rate_id === rid).reduce((a, x) => a + x.qty, 0);
   const setLine = (l, n) => {
@@ -67,9 +78,9 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   // 분류 → 품목 이름 단추 → (규격이 여러 개면) 규격 고르기 창. 글자를 치지 않고 눌러서 담는다.
   const CATS = [...new Set(table.rows.map((r) => r.category))];
   const catLabel = (c) => ({ 가전제품류: '가전', 가구류: '가구', 생활용품: '생활' })[c] || c;
-  const openSpecs = async (cat, name) => {
-    const rows = table.rows.filter((r) => r.category === cat && r.name === name);
-    if (rows.length === 1) { bump(rows[0], 1); toast(`${name} ${rows[0].spec} — ${qtyOf(rows[0].id)}개`); return; }
+  const openSpecs = async (cat, name, subset = null) => {
+    const rows = subset || table.rows.filter((r) => r.category === cat && r.name === name);
+    if (rows.length === 1) { bump(rows[0], 1); toast(`${name} ${rows[0].spec} — ${qtyText(qtyOf(rows[0].id), rows[0].unit_label)}`); return; }
     const box = h('div', { class: 'pick-list sheet-list' });
     redrawSheet = () => box.replaceChildren(...rows.map((r) => row(r, true)));
     redrawSheet();
@@ -80,15 +91,37 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   const nameChips = (cat) => {
     const names = [...new Set(table.rows.filter((r) => r.category === cat).map((r) => r.name))];
     return h('div', { class: 'name-chips' }, ...names.map((nm) => {
-      const ids = table.rows.filter((r) => r.category === cat && r.name === nm).map((r) => r.id);
+      const variants = table.rows.filter((r) => r.category === cat && r.name === nm), ids = variants.map((r) => r.id);
       const n = ids.reduce((a2, id) => a2 + qtyOf(id), 0);
       const multi = ids.length > 1;
+      const units = new Set(variants.map((r) => r.unit_label || '개')), unit = units.size === 1 ? [...units][0] : '';
       return btn([h('span', {}, nm), n ? h('b', { class: 'nc-n' }, n) : h('span', { class: 'nc-i', 'aria-hidden': 'true' }, multi ? '›' : '+')],
-        () => openSpecs(cat, nm), 'name-chip' + (n ? ' on' : ''), { 'aria-label': `${nm}${n ? ` (${n}개 담김)` : ''}${multi ? ' 규격 고르기' : ' 1개 담기'}` });
+        () => openSpecs(cat, nm), 'name-chip' + (n ? ' on' : ''), { 'aria-label': `${nm}${n ? ` (${unit ? `${qtyText(n, unit)} 담김` : `담은 수량 ${n}`})` : ''}${multi ? ' 규격 고르기' : unit ? ` ${qtyText(1, unit)} 담기` : ' 바로 담기'}` });
     }));
   };
-  const ctl = (n, onMinus, onPlus, name, onSet, min = 1, max = 9999, unit = '') => (n
-    ? h('span', { class: 'pick-ctl', role: 'group', 'aria-label': `${name} 수량` }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기` }), quantityValue(n, onSet, min, max, `${name} 수량`, { unit }), btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기`, disabled: n >= max }))
+  const quickChoices = () => {
+    const options = [], seen = new Set();
+    const addChoice = (label, matches) => {
+      const first = matches[0];
+      if (!first) return;
+      const key = JSON.stringify([first.category, first.name]);
+      if (seen.has(key)) return;
+      seen.add(key);
+      options.push({ label, first, rows: matches.filter((r) => r.category === first.category && r.name === first.name) });
+    };
+    for (const label of ['소파', '장롱', '매트리스', '의자', '책상', '냉장고', '세탁기', '식탁']) addChoice(label, searchFees(table, label));
+    for (const r of table.rows) {
+      if (options.length >= 8) break;
+      addChoice(r.name, table.rows.filter((x) => x.category === r.category && x.name === r.name));
+    }
+    return h('div', { class: 'name-chips pick-quick', role: 'group', 'aria-label': '빠른 품목 선택' }, ...options.map(({ label, first, rows }) =>
+      btn(h('span', { class: 'pick-quick-copy' }, h('strong', {}, label), h('span', { class: 'pick-quick-meta' },
+        `${label !== first.name ? first.name + ' · ' : ''}규격 ${rows.length}개`)),
+      () => openSpecs(first.category, first.name, rows), 'name-chip', { 'aria-label': `${label} · ${first.name} · 규격 ${rows.length}개 고르기` })));
+  };
+  const ctl = (n, onMinus, onPlus, name, onSet, min = 1, max = 9999, unit = '', canReduce = true) => (n
+    ? h('span', { class: 'pick-ctl', role: 'group', 'aria-label': `${name} 수량` }, btn('−', onMinus, 'step', { ...keep, 'aria-label': `${name} 빼기`, disabled: !canReduce }), quantityValue(n, onSet, min, max, `${name} 수량`, { unit }),
+      unit ? h('span', { class: 'pick-unit', 'aria-hidden': 'true' }, unit) : null, btn('+', onPlus, 'step', { ...keep, 'aria-label': `${name} 더하기`, disabled: n >= max }))
     : btn('+ 담기', onPlus, 'opt pick-add', { ...keep, 'aria-label': `${name} 담기` }));
   // 즐겨찾기(☆): [자주 쓴] 맨 앞에 늘 나온다(이 휴대폰 안에서만)
   const toggleFav = async (rid) => {
@@ -100,40 +133,66 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
     const n = qtyOf(r.id), name = `${r.name} ${r.spec}`.trim();
     const fixed = n - (lineOf(r.id)?.qty || 0);
     const fav = (st.feeFavs || []).includes(r.id);
-    return h('div', { class: 'pick-row' + (n ? ' on' : '') },
+    const confirmed = r.status === 'CONFIRMED' && r.price != null;
+    return h('div', { class: 'pick-row' + (n ? ' on' : ''), 'data-fee-id': r.id },
       specOnly ? null : btn(fav ? '★' : '☆', () => toggleFav(r.id), 'star pick-star' + (fav ? ' on' : ''), { ...keep, 'aria-label': fav ? `${name} 즐겨찾기 해제` : `${name} 즐겨찾기` }),
-      h('div', { class: 'pick-info' }, h('strong', {}, specOnly && r.spec ? r.spec : name), h('span', { class: 'p' }, `${won(r.price)} / ${r.unit_label}`),
-        r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요 — 금액 확인 대기로 담김') : null),
-      ctl(n, () => bump(r, -1), () => bump(r, 1), name, (value) => { setTotal(r, value); onChange(); draw(); redrawSheet(); }, Math.max(1, fixed), fixed + 9999, r.unit_label));
+      h('div', { class: 'pick-info' }, h('strong', {}, specOnly && r.spec ? r.spec : r.name),
+        !specOnly && r.spec ? h('span', { class: 'pick-spec' }, r.spec) : null,
+        h('span', { class: 'p' }, confirmed ? `${won(r.price)} / ${r.unit_label}` : '금액 확인 대기'),
+        r.status === 'REVIEW' ? h('span', { class: 'p warnp' }, '규격 확인 필요') : null,
+        n ? h('span', { class: 'pick-line-amount' }, confirmed ? `${qtyText(n, r.unit_label)} · ${won(r.price * n)}` : '금액 확인 대기') : null),
+      ctl(n, () => bump(r, -1), () => bump(r, 1), name, (value) => { setTotal(r, value); onChange(); draw(); redrawSheet(); }, Math.max(1, fixed), fixed + 9999, r.unit_label, n > fixed));
   };
-  const picked = () => items.map((l) => h('div', { class: 'pick-row on' },
-    h('div', { class: 'pick-info' }, h('strong', {}, `${l.name} ${l.spec || ''}`.trim()),
-      h('span', { class: 'p' }, l.price_status === 'CONFIRMED' ? `${won(l.unit_price)} / ${l.unit_label}` : '금액 확인 대기')),
-    locked.has(l.line_id) ? h('b', { class: 'val' }, l.qty) : ctl(l.qty, () => { setLine(l, l.qty - 1); onChange(); draw(); }, () => { setLine(l, l.qty + 1); onChange(); draw(); }, l.name, (value) => { setLine(l, value); onChange(); draw(); }, 1, 9999, l.unit_label)));
+  const picked = () => items.map((l) => {
+    const name = `${l.name} ${l.spec || ''}`.trim(), fixed = locked.has(l.line_id);
+    const change = (n) => { setLine(l, n); onChange(); draw(); };
+    return h('div', { class: 'pick-row on' },
+      h('div', { class: 'pick-info' }, h('strong', {}, l.name), l.spec ? h('span', { class: 'pick-spec' }, l.spec) : null,
+        h('span', { class: 'p' }, l.price_status === 'CONFIRMED' ? `${won(l.unit_price)} / ${l.unit_label}` : '금액 확인 대기'),
+        h('span', { class: 'pick-line-amount' }, l.price_status === 'CONFIRMED' ? `${qtyText(l.qty, l.unit_label)} · ${won(l.unit_price * l.qty)}` : '금액 확인 대기'),
+        fixed ? h('span', { class: 'p' }, '현장 기록이 있어 품목·수량 변경 불가') : null),
+      fixed ? h('b', { class: 'pick-locked' }, qtyText(l.qty, l.unit_label)) : h('div', { class: 'pick-edit' },
+        btn('삭제', () => change(0), 'ghost pick-remove', { 'aria-label': `${name} 품목 삭제` }),
+        ctl(l.qty, () => change(l.qty - 1), () => change(l.qty + 1), name, change, 1, 9999, l.unit_label)));
+  });
   const draw = () => {
     const out = [];
     drawTabs();
     if (!P.q) {
       const cat = P.cat || 'FREQ';
       if (cat === 'PICKED') {
+        resultStatus.textContent = items.length ? '숫자를 누르면 수량을 직접 입력할 수 있습니다.' : '품목 검색으로 돌아가 물건을 담아 주세요.';
         out.push(...(items.length ? picked() : [h('p', { class: 'small' }, '아직 담은 품목이 없습니다.')]));
       } else if (cat === 'FREQ') {
         const favs = st.feeFavs || [], use = st.feeUsage || {};
         const ids = [...favs, ...Object.keys(use).sort((a, b) => use[b] - use[a]).filter((x) => !favs.includes(x))].slice(0, 15);
         const quick = ids.map((x) => table.rows.find((r) => r.id === x)).filter(Boolean);
-        out.push(...(quick.length ? quick.map(row) : [h('p', { class: 'small' }, '자주 쓴 품목이 아직 없습니다. 위 분류(가전·가구·생활·기타)를 눌러 고르거나 이름을 검색하세요.')]));
+        resultStatus.textContent = '물건과 규격을 확인해 담으세요. 숫자를 누르면 수량을 직접 입력합니다.';
+        if (quick.length) out.push(h('h2', { class: 'section-label' }, '즐겨찾기·자주 쓴 품목'), ...quick.map((r) => row(r)));
+        out.push(h('h2', { class: 'section-label' }, '물건 빠른 선택'), quickChoices());
       } else {
+        resultStatus.textContent = `${catLabel(cat)} · 품목을 누르면 규격을 고를 수 있습니다.`;
         out.push(nameChips(cat));
       }
     } else {
-      const rows = searchFees(table, P.q).slice(0, 40);
-      out.push(...(rows.length ? rows.map(row) : [h('p', { class: 'small' }, '찾는 품목이 없습니다. 아래 [목록에 없는 품목]으로 담으세요.')]));
+      const matches = searchFees(table, P.q), rows = matches.slice(0, resultLimit);
+      resultStatus.textContent = `검색 결과 ${matches.length}개${matches.length > rows.length ? ` · ${rows.length}개 표시` : ''} · 규격을 확인해 담으세요.`;
+      out.push(...(rows.length ? rows.map((r) => row(r)) : [h('p', { class: 'small' }, '찾는 품목이 없습니다. 이름을 다르게 검색하거나 직접 입력하세요.'),
+        btn('목록에 없는 품목 직접 입력', () => { free.open = true; freeName.value = P.q.trim(); freeName.focus(); }, 'big')]));
+      if (matches.length > rows.length) out.push(btn(`검색 결과 더 보기 (${matches.length - rows.length}개 남음)`, () => { resultLimit += 40; draw(); }, 'big pick-more'));
     }
     list.replaceChildren(...out);
-    const n = items.reduce((a, x) => a + x.qty, 0);
+    const units = new Map();
+    for (const item of items) { const unit = item.unit_label || '개'; units.set(unit, (units.get(unit) || 0) + item.qty); }
+    const quantity = [...units].map(([unit, n]) => qtyText(n, unit)).join(' · ');
     const pend = items.filter((x) => x.price_status !== 'CONFIRMED').length;
     const sum = items.filter((x) => x.price_status === 'CONFIRMED').reduce((a, x) => a + x.unit_price * x.qty, 0);
-    bar.textContent = items.length ? `${items.length}종 · ${n}개 · ${won(sum)}${pend ? ` + 확인 대기 ${pend}` : ''}` : '담은 품목 없음';
+    const money = pend ? `${pend < items.length ? `확정 소계 ${won(sum)} · ` : '금액 '}확인 대기 ${pend}종` : won(sum);
+    bar.replaceChildren(...(items.length ? [h('span', {}, `${items.length}종 · ${quantity}`), h('span', { class: 'pick-sum-price' }, money)] : ['담은 품목 없음']));
+    const inBasket = P.cat === 'PICKED' && !P.q;
+    basket.textContent = inBasket ? '← 계속 찾기' : `담음 ${items.length}`;
+    basket.setAttribute('aria-label', inBasket ? '품목 검색으로 돌아가기' : `담은 품목 ${items.length}종 확인`);
+    basket.disabled = !inBasket && !items.length;
     if (typeof doneBtn !== 'undefined') doneBtn.textContent = doneLabel(items);
   };
   const tabs = h('div', { class: 'pick-tabs', role: 'group', 'aria-label': '품목 분류' });
@@ -142,9 +201,9 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
     const n = items.length;
     // 담은 것이 있으면 [담음]에 개수 뱃지(테두리 색이 아니라 숫자로 알림)
     tabs.replaceChildren(...[['FREQ', '자주 쓴'], ...CATS.map((c) => [c, catLabel(c)]), ['PICKED', n ? ['담음 ', h('span', { class: 'badge ok' }, String(n))] : '담음']].map(([k, t]) =>
-      btn(t, () => { P.cat = k; P.q = ''; q.value = ''; draw(); scrollTo(0, 0); }, 'tab' + (cur === k ? ' on' : ''), { ...keep, 'aria-pressed': cur === k ? 'true' : 'false' })));
+      btn(t, () => { if (k === 'PICKED') { showPicked(); return; } P.cat = k; P.q = ''; q.value = ''; draw(); scrollTo(0, 0); }, 'tab' + (cur === k ? ' on' : ''), { ...keep, 'aria-pressed': cur === k ? 'true' : 'false' })));
   };
-  q.addEventListener('input', () => { P.q = q.value; draw(); list.scrollTop = 0; });
+  q.addEventListener('input', () => { P.q = q.value; resultLimit = 40; draw(); scrollTo(0, 0); });
   q.addEventListener('focus', () => q.select());
   const clear = btn('지우기', () => { P.q = ''; q.value = ''; draw(); q.focus(); }, 'ghost q-clear', { ...keep, 'aria-label': '검색어 지우기' });
   // 목록에 없는 품목: 금액 확인 대기로 담는다(0원 아님)
@@ -163,9 +222,9 @@ function pickScreen({ items, state: P, table, locked = new Set(), onChange = () 
   const doneBtn = btn(doneLabel(items), done, 'primary big');
   draw();
   return h('main', { class: 'pick-screen' },
-    h('div', { class: 'pick-head' }, h('header', { class: 'bar pick-top' }, back ? btn(back.label, back.fn, 'ghost') : btn('← 완료', done, 'ghost'), h('h1', { class: 'bar-title' }, title)),
+    h('div', { class: 'pick-head' }, h('header', { class: 'bar pick-top' }, back ? btn(back.label, back.fn, 'ghost') : btn('← 완료', done, 'ghost'), h('h1', { class: 'bar-title' }, title), basket),
       h('div', { class: 'qrow' }, q, clear), tabs),
-    intro, free, list,
+    intro, resultStatus, list, free,
     h('nav', { class: 'footbar pick-foot', 'aria-label': '담은 품목' }, bar, doneBtn),
     h('p', { class: 'small pick-table' }, `수수료표: ${table.label}`));
 }

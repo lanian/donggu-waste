@@ -315,7 +315,7 @@ function screenIntake(id) {
       field('memo', '요청 메모', { multiline: true }),
       h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
     h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox,
-      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', () => { f.picking = true; render(); }, 'big')),  // 주 단추는 아래 [접수 저장] 하나
+      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', async () => { f.picking = true; await render(); if (currentForm() && f.picking && location.hash === targetHash) scrollTo(0, 0); }, 'big')),  // 주 단추는 아래 [접수 저장] 하나
     editing && !fieldEdit ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
     dupBox, h('div', { class: 'cta' }, msg, save));
   const operation = intakeOperations.get(ownerState);

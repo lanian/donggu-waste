@@ -147,6 +147,7 @@ jobs:
           - test_mobile_unload_save
           - test_mobile_layout
           - test_mobile_intake_save
+          - test_mobile_intake_picker
           - test_mobile_result_confirmation
           - test_mobile_field_layout
           - test_mobile_photo_preview

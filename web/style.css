@@ -673,20 +673,32 @@ html.text-big .seg:not(.theme-seg) { grid-auto-flow: row; grid-template-columns:
 /* 접수 '품목 담기' 화면: 검색칸 위 고정, 결과마다 [+ 담기]/[− N +], 아래 요약·완료 고정 */
 .pick-head { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 0 8px; }
 .pick-list { display: flex; flex-direction: column; gap: 8px; }
-.pick-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--r-card); }
+.pick-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--control-size); align-items: start; gap: 10px; padding: 12px; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--r-card); }
 .pick-row.on { border-color: var(--brand); background: var(--brand-soft); }
-.pick-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pick-info { grid-column: 1; grid-row: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+.pick-row:not(:has(.pick-star)) .pick-info { grid-column: 1 / -1; }
+.pick-spec { font-size: var(--t-sm); line-height: 1.45; }
+.pick-line-amount { color: var(--brand-soft-ink); font-weight: 700; font-size: var(--t-sm); }
+.pick-unit { font-size: var(--t-sm); }
+.pick-results-status { margin: 6px 0 12px; }
+.pick-screen .pick-basket { flex: none; min-width: 80px; padding: 8px; font-size: var(--t-sm); white-space: normal; }
+.pick-edit { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.pick-edit .pick-remove { margin: 0; min-width: var(--control-size); }
+.pick-locked { grid-column: 1 / -1; justify-self: end; }
 .pick-info .p { font-size: var(--t-xs); color: var(--muted); } .pick-info .p.warnp { color: var(--warn); }
-.pick-ctl { display: inline-flex; align-items: center; gap: 6px; flex: none; } .pick-ctl .val { min-width: 1.6em; text-align: center; font-size: var(--t-lg); }
-.pick-row .btn.pick-add { flex: none; width: auto; min-width: 92px; margin: 0; }
+.pick-ctl { grid-column: 1 / -1; justify-self: end; display: inline-flex; align-items: center; gap: 6px; flex: none; } .pick-ctl .val { min-width: var(--control-size); text-align: center; font-size: var(--t-lg); }
+.pick-row .btn.pick-add { grid-column: 1 / -1; justify-self: end; width: auto; min-width: 110px; margin: 0; }
 .pick-row .pick-ctl .btn.step { margin: 0; }
-.pick-free { margin: 0 0 10px; padding: 4px 12px; background: var(--card); border-radius: var(--r-card); } .pick-free summary { font-weight: 700; cursor: pointer; }
+.pick-free { margin: 14px 0 10px; padding: 4px 12px; background: var(--card); border-radius: var(--r-card); } .pick-free summary { font-weight: 700; cursor: pointer; }
 .pick-free .qrow { margin: 8px 0; }
-.footbar.pick-foot { display: flex; align-items: center; gap: 12px; } .pick-sum { flex: 1; min-width: 0; font-weight: 700; color: var(--brand-soft-ink); }
+.footbar.pick-foot { display: flex; align-items: center; gap: 12px; } .pick-sum { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: var(--t-sm); font-weight: 700; color: var(--brand-soft-ink); overflow-wrap: anywhere; }
+.pick-sum-price { font-weight: 500; }
 .footbar.pick-foot .btn.big { width: auto; min-width: 110px; flex: none; }
 .pick-head .bar { position: static; margin: 0 -16px 8px; }
 html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .pick-screen { padding-bottom: 110px; }
+html.text-big:has(.pick-screen) { --actionbar-space: calc(var(--control-size) + 100px); scroll-padding-bottom: calc(var(--actionbar-space) + var(--safe-bottom)); }
+html.text-big .pick-screen { padding-bottom: calc(var(--actionbar-space) + var(--safe-bottom)); }
 /* 품목 담기: 분류 탭(가로로 밀기), 품목 이름 단추, 규격 고르기 창 */
 .pick-tabs { display: flex; gap: 6px; overflow-x: auto; margin-top: 8px; padding: 6px; scrollbar-width: thin; }
 .pick-tabs::-webkit-scrollbar { display: none; }
@@ -696,9 +708,12 @@ html:has(.pick-screen) { scroll-padding-bottom: 110px; }
 .name-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .name-chips .btn.name-chip { width: 100%; margin: 0; min-height: 56px; justify-content: space-between; gap: 6px; text-align: left; padding: 8px 12px; font-weight: 700; }
 .name-chips .btn.name-chip > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.25; }
+.pick-quick-copy { display: flex; flex-direction: column; gap: 5px; }
+.pick-quick-meta { font-size: var(--t-xs); font-weight: 500; color: var(--muted); line-height: 1.4; }
+.pick-quick .btn.name-chip { min-height: 80px; }
 .nc-i { color: var(--muted); font-size: var(--t-lg); } .nc-n { min-width: 26px; padding: 2px 8px; border-radius: var(--r-pill); background: var(--brand); color: var(--brand-ink); text-align: center; }
 .sheet-list { max-height: 55vh; overflow-y: auto; margin: 8px 0; }
-.pick-row .btn.pick-star { flex: none; width: var(--control-size); min-height: var(--control-size); margin: 0; padding: 0; border: 1.5px solid var(--line-strong); background: var(--card); font-size: var(--t-lg); }
+.pick-row .btn.pick-star { grid-column: 2; grid-row: 1; width: var(--control-size); min-height: var(--control-size); margin: 0; padding: 0; border: 1.5px solid var(--line-strong); background: var(--card); font-size: var(--t-lg); }
 .pick-row .btn.pick-star.on { color: var(--warn); border-color: var(--sticker); background: var(--warn-bg); }
 /* 좌표가 없는 길안내 단추: 눌리지만(이유 안내) 흐리게 */
 .btn.nav-btn.no-loc { opacity: .75; border-style: dashed; }
