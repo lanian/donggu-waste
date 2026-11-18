@@ -1364,14 +1364,14 @@ def solo(pw, url, video):
     page.goto(url + "#/settings")
     page.locator("details.set-group.admin > summary").click()  # 단가는 관리자 설정(기본 접힘) 안
     mline = page.locator(".line", has_text="6인용 이상(대리석)")
-    mline.get_by_placeholder("원", exact=True).fill("15000")
+    mline.get_by_placeholder("원", exact=True).fill("15500")
     mline.get_by_role("button", name="저장").click()
     expect(page.get_by_text("근거를 적어 주세요")).to_be_visible()
     mline = page.locator(".line", has_text="6인용 이상(대리석)")
-    mline.get_by_placeholder("원", exact=True).fill("15000")
+    mline.get_by_placeholder("원", exact=True).fill("15500")
     mline.get_by_placeholder(re.compile("^근거")).fill("가상 확인 11/3")
     mline.get_by_role("button", name="저장").click()
-    expect(page.locator(".line", has_text="6인용 이상(대리석)").get_by_text("확정 15,000원")).to_be_visible()
+    expect(page.locator(".line", has_text="6인용 이상(대리석)").get_by_text("확정 15,500원")).to_be_visible()
     fs = lambda: page.evaluate("[getComputedStyle(document.body).fontSize, document.documentElement.className]")
     ok(fs()[0] == "15px", "글자 크기 기본 '보통' = 본문 15px")
     page.get_by_role("button", name="크게", exact=True).click()
@@ -1397,7 +1397,7 @@ def solo(pw, url, video):
     page.get_by_role("button", name=re.compile(r"^\+ 품목 (더 )?담기$")).click()
     page.get_by_label("품목 찾기").fill("대리석")
     expect(page.locator(".pick-row", has_text="6인용 이상").first).to_be_visible()
-    ok("15,000" in page.locator(".pick-row", has_text="6인용 이상").first.inner_text(),
+    ok("15,500" in page.locator(".pick-row", has_text="6인용 이상").first.inner_text(),
        "단독: 하차 기록, 확인 필요 단가는 근거와 함께 정한 뒤 새 접수에 적용, 큰 글씨 설정")
     page.goto(url + "#/home")
     # 첫 화면 위 ☀/🌙: 지금 보이는 것의 반대로 바로 바꾸기

@@ -171,6 +171,39 @@ def pending_case(browser, url, shots):
         context.close()
 
 
+def approved_rate_case(browser, url, _shots):
+    context, page = open_picker(browser, url, mode='SOLO')
+    try:
+        query = page.get_by_role('searchbox', name='품목 찾기', exact=True)
+        query.fill('대리석')
+        row = page.locator('.pick-list > .pick-row', has_text='6인용 이상(대리석)')
+        expect(row).to_contain_text('금액 확인 대기')
+        expect(row).not_to_contain_text('15,000원')
+        rate_id = row.get_attribute('data-fee-id')
+        await_ready = """async id=>{
+            const C=await import('./core.js');
+            C.st.feeOverrides={[id]:{price:15500,reason:'가상 단가 확인'}};
+            C.st.feeRev=1;
+            if (!await C.commit()) throw Error('단가 기록 실패');
+            await C.render();
+        }"""
+        page.evaluate(await_ready, rate_id)
+        expect(row).to_contain_text('15,500원', timeout=2000)
+        expect(row).not_to_contain_text('금액 확인 대기')
+        row.locator('.pick-add').click()
+        selected = lines(page)[0]
+        assert selected['price_status'] == 'CONFIRMED', selected
+        assert selected['unit_price'] == 15500 and selected['amount'] == 15500, selected
+        page.locator('.pick-foot > button').click()
+        page.get_by_role('button', name='접수 등록', exact=True).click()
+        expect(page).to_have_url(url + '#/home')
+        saved = page.evaluate("import('./core.js').then(C=>C.st.requests[0].items[0])")
+        assert saved == selected, saved
+        print('PASS: 단독 접수에서 확정 전 표시·설정 단가 선택·확정 금액 저장', flush=True)
+    finally:
+        context.close()
+
+
 def layout_case(browser, url, shots):
     context, page = open_picker(browser, url)
     try:
@@ -224,7 +257,7 @@ def layout_case(browser, url, shots):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=('all', 'quick', 'search', 'quantity', 'pending', 'layout'), default='all')
+    parser.add_argument('--case', choices=('all', 'quick', 'search', 'quantity', 'pending', 'approved-rate', 'layout'), default='all')
     args = parser.parse_args()
     shots = Path(os.environ.get('DG_TEST_DIR') or 'shots/mobile-intake-picker')
     shots.mkdir(parents=True, exist_ok=True)
@@ -233,7 +266,7 @@ def main():
         browser = pw.chromium.launch(executable_path=os.environ.get('CHROME') or pw.chromium.executable_path, headless=True)
         try:
             for name, case in [('quick', quick_case), ('search', search_case), ('quantity', quantity_case),
-                               ('pending', pending_case), ('layout', layout_case)]:
+                               ('pending', pending_case), ('approved-rate', approved_rate_case), ('layout', layout_case)]:
                 if args.case not in ('all', name):
                     continue
                 try:

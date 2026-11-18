@@ -44,4 +44,5 @@
 - 접수→품목 화면의 이전 스크롤이 첫 안내를 가리는 실패를 재현·수정했다. 360/390/430px, 보통/큰 글자, 밝게/어둡게, 높이 400px에서 수량·삭제·완료 버튼의 실제 좌표 접근을 확인했다. 최대 수량·4개 부과 단위·긴 금액의 하단 요약 높이 129px에 기존 여유가 110px뿐인 경우도 재현·수정했다.
 - 기존 `test_mobile_intake_save.py`, `test_mobile_add_save.py`, `test_mobile_field_layout.py --case picker/aggregate`, `test_mobile_layout.py --case picker/auto-hc`가 통과했다. 저장 실패·재시도·연타·중복·잠금·늦은 완료·기록으로 잠긴 행 보존을 포함한다.
 - `node tests/fees.test.mjs` 43개, JS/Python 구문, 버전 일치, 생성물 대조, `git diff --check`가 통과했다. 새 npm 명령과 CI 모바일 시험 행렬을 연결했다.
-- 로컬 Chromium·실제 PIN/IndexedDB·가상 접수의 소스 검증이다. 전체 `tests/e2e.py`, 원격 CI, 실제 휴대폰과 PWA 배포는 수행하지 않았다. 앞선 동별 기본팀 변경은 보존했다.
+- 구현 당시에는 로컬 Chromium·실제 PIN/IndexedDB·가상 접수로 검증했다.
+- 배포 준비 중 전체 종단 검사에서 단독 접수의 품목 선택기가 설정에서 확정한 단가를 읽지 못하는 문제를 발견했다. 접수에서도 현장 품목 추가와 같은 수수료표를 읽도록 수정했다. 원문에 적힌 금액과 다른 단가로 표시와 저장을 확인하는 회귀를 추가했다.

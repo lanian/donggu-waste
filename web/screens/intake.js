@@ -77,7 +77,7 @@ function screenIntake(id) {
   const fieldEdit = id && onField ? fieldEditable(id) : null;
   const editing = id ? (onField ? (fieldEdit && fieldEdit.stop) : findStop(id)) : null;
   if (id && !editing) { go('#/home'); return h('main'); }
-  const table = (onField && feeTable()) || BUILTIN_FEES;
+  const table = feeTable() || BUILTIN_FEES;
   // 현장 기록(품목 결과·스티커 확인·품목 사진 등)이 가리키는 품목 줄은 고치기에서 빼거나 바꾸지 못한다
   const locked = new Set(editing ? st.events.filter((e) => e.request_id === id && e.body && e.body.line_id).map((e) => e.body.line_id) : []);
   if (!ui.form || ui.form.id !== (id || null)) {
