@@ -3,6 +3,7 @@ import { FEES, api, apiRaw, boot, btn, chip, confirmDlg, fmtPhone, go, h, modal,
 import { itemPicker } from '../widgets.js';
 import { won } from '/web/fees.js';
 import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
+import { followupCard, followupQueue } from './followups.js';
 import { kstDay, moveDay } from '../date_filters.js';
 
 const READ = new Set(['ADMIN', 'INTAKE', 'LEAD', 'DONG']);
@@ -216,6 +217,17 @@ async function screenDongs(arg = null) {
       const query = picker.querySelector('input[type=search]');
       query.setAttribute('aria-label', '품목명·규격 검색');
     }
+    const context = () => [`${isNew ? '새 접수' : request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, request ? statusChip(request.status) : null];
+    const taskCard = () => followupCard(request.id, { afterRevisit: (saved, previousVersion) => {
+      if (version !== previousVersion) { notice.textContent = '접수 버전이 바뀌었습니다. 편집 중인 접수를 다시 확인하세요.'; return; }
+      const { date, start, end } = saved.appointment;
+      if (F.planned_date.value === (request.planned_date || '')) F.planned_date.value = date;
+      Object.assign(request, { planned_date: date, appt_start: start, appt_end: end, req_ver: saved.req_ver, status: saved.request_status });
+      version = saved.req_ver;
+      if (s.drafts.has(draftKey)) remember();
+      form.querySelector('.dw-form-context').replaceChildren(...context());
+    } });
+    let followup = isNew ? null : taskCard();
     form = h('div', { class: 'dong-workspace dw-form', 'data-dong-owner': identity, oninput: remember, onchange: remember },
       h('p', { class: 'dw-form-context' }, `${isNew ? '새 접수' : request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, request ? statusChip(request.status) : null),
       !isNew && !readonly && !request.pii_purged_at ? collectionButton(request, { path: 'dong-work/requests', current: alive,
@@ -227,6 +239,7 @@ async function screenDongs(arg = null) {
           if (fresh.req_ver !== result.req_ver) { notice.textContent = '접수가 다시 바뀌었습니다. 최신 내용을 확인하세요.'; return; }
           version = fresh.req_ver; Object.assign(request, fresh); locked.clear(); fresh.locked_lines.forEach((line) => locked.add(line)); drawItems(); remember();
           form.querySelector('.dw-form-context').replaceChildren(`${request.receipt_no} · 원래 동: ${dongs.find((d) => d.id === origin)?.name || '미지정'}`, statusChip(fresh.status));
+          const next = taskCard(); followup.replaceWith(next); followup = next;
         } }) : null,
       saved ? h('p', { class: 'notice small' }, '보관한 초안을 복구했습니다. 저장 전 현재 예정일과 행정동을 확인하세요.') : null,
       h('div', { class: 'dw-form-grid' }, ...fields, h('label', { class: 'f' }, '행정동', F.dong_id), h('label', { class: 'f' }, '접수 경로', F.channel)),
@@ -284,7 +297,7 @@ async function screenDongs(arg = null) {
     form.setAttribute('role', 'region'); form.setAttribute('aria-label', title);
     form.append(h('div', { class: 'dw-detail-actions' }, save, error));
     view.replaceChildren(h('div', { class: 'dw-heading' }, h('div', {}, h('span', { class: 'dw-eyebrow' }, '동별 통합 업무'), heading,
-      h('p', { class: 'muted small' }, '접수 내용과 수거 결과를 이 화면에서 확인하세요.')), back), msg, form);
+      h('p', { class: 'muted small' }, '접수 내용과 수거 결과를 이 화면에서 확인하세요.')), back), msg, followup, form);
     heading.focus({ preventScroll: true }); scrollTo(0, 0);
   }
   async function calculate() {
@@ -369,7 +382,7 @@ async function screenDongs(arg = null) {
     h('div', { class: 'row', role: 'group', 'aria-label': '날짜 빠른 조회' }, btn('이전날', () => selectDay(moveDay(s.date, -1)), 'small'),
       btn('오늘', () => selectDay(kstDay()), 'small'), btn('다음날', () => selectDay(moveDay(s.date, 1)), 'small'),
       btn('전체 기간 조회', () => pickBucket('all'), 'small'), h('span', { class: 'muted small' }, '전체 기간 조회는 완료·취소도 포함합니다. 집계·노선은 기준일을 따릅니다.')),
-    teamBox, msg, body, list, routes);
+    teamBox, msg, body, followupQueue({ scoped: true }), list, routes);
   invalidate(); setTimeout(load, 0);
   return view;
 }

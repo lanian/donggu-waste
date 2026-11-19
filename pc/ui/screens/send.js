@@ -1,13 +1,15 @@
 // PC 화면: 목록 전송
-import { api, boot, btn, chip, h, pagehead, post, searchbox, toast, wrap } from '../core.js';
+import { api, boot, btn, chip, go, h, pagehead, post, searchbox, toast, wrap } from '../core.js';
 
-async function screenSend() {
+async function screenSend(batchArg) {
   const s = (screenSend.s ||= { date: boot.today });
   const date = h('input', { type: 'date', value: s.date });
+  const selected = batchArg ? new Set(batchArg.split(',')) : null;
   const body = h('div');
   const load = wrap(async () => {
     s.date = date.value;
-    const batches = await api('batches?date=' + s.date);
+    const all = await api('batches?date=' + s.date);
+    const batches = selected ? all.filter((b) => b.status === 'ACTIVE' && selected.has(b.id)) : all;
     body.replaceChildren(...(batches.length ? batches.map((b) => {
       const last = b.bundles[0];
       const code = h('input', { placeholder: '휴대폰 화면의 수신 코드 (R-XXXX XXXX)', 'aria-label': '수신 코드', style: 'width:260px' });
@@ -27,11 +29,13 @@ async function screenSend() {
         last ? h('div', { class: 'row' }, last.receipt_confirmed_at ? chip('휴대폰 수신 확인됨', 'ok') : [chip('QR 표시함 · 수신 미확인', 'warn'), h('span', { class: 'muted small' }, '수신 코드(R-):')],
           last.receipt_confirmed_at ? null : code, last.receipt_confirmed_at ? null : btn('수신 확인', wrap(async () => { await post(`bundles/${last.id}/receipt`, { code: code.value }); toast('수신이 확인되었습니다'); load(); }, msg)), msg)
           : h('p', { class: 'muted' }, '아직 전송하지 않았습니다.'));
-    }) : [h('p', { class: 'muted' }, '이 날짜의 배정이 없습니다. [배정·노선]에서 확정하세요.')]));
+    }) : [h('p', { class: 'muted' }, selected ? '전송할 변경 갱신본을 찾을 수 없습니다. 현재 배정을 확인하세요.' : '이 날짜의 배정이 없습니다. [배정·노선]에서 확정하세요.')]));
   });
-  date.addEventListener('change', load); load();
+  const showAll = () => go('#/send?date=' + encodeURIComponent(date.value));
+  date.addEventListener('change', selected ? showAll : load); load();
   date.setAttribute('aria-label', '수거일'); date.id = 'send-date';
   return h('div', {}, pagehead('목록 전송 (QR)'),
+    selected ? h('div', { class: 'notice info row' }, '변경 팀의 최신 목록', btn('전체 팀 보기', showAll, 'small')) : null,
     h('div', { class: 'card searchbox', role: 'search', 'aria-label': '조회조건' }, h('div', { class: 'cond' }, h('label', { class: 'cond-l', for: 'send-date' }, '수거일'), h('div', { class: 'cond-v' }, date),
       h('span', { class: 'cond-l' }, '안내'), h('div', { class: 'cond-v wide2' }, h('span', { class: 'muted small' }, 'QR 화면 표시와 휴대폰 수신은 다릅니다. 휴대폰이 보여 주는 수신 코드(R-)를 입력해야 "수신 확인"이 됩니다.')))), body);
 }

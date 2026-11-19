@@ -76,12 +76,16 @@ jobs:
       - run: python tests/test_pc_server_bind.py
       - run: python tests/test_pc_unread_body.py   # 본문을 읽기 전 거절해도 응답이 끊기지 않음(Windows RST)
       - run: python tests/test_dong_work.py
+      - run: python tests/test_request_followups.py
+      - run: python tests/test_team_result_recovery.py
+      - run: python tests/test_recon_exceptions.py
       - run: python tests/test_default_dongs.py
       - run: python tests/test_dong_order.py
       - run: python tests/test_dong_depots.py
       - run: python tests/test_routing_depots.py
       - run: python tests/test_route_review.py
       - run: python tests/test_route_review_api.py
+      - run: python tests/test_assignment_change_review.py
       - run: python tests/test_dong_depots_api.py
       - run: python tests/test_dong_centers.py
       - run: python tests/test_dong_centers_api.py
@@ -152,12 +156,16 @@ jobs:
           - test_mobile_field_layout
           - test_mobile_photo_preview
           - test_dispatch_workflow_ui
+          - test_assignment_change_review_ui
           - test_collection_help_mobile
           - test_mobile_pc_input_help
           - test_date_visibility_ui
           - test_date_visibility_mobile
           - test_vworld_ui
           - test_dong_work_e2e
+          - test_request_followups_ui
+          - test_team_result_recovery_ui
+          - test_recon_exceptions_ui
           - test_pc_item_picker
           - test_pc_item_picker_flow
           - test_workflow

@@ -444,6 +444,7 @@ def pseudonymize(con, rid: str, ts: str):
         d["pii_purged"] = True
         con.execute("UPDATE request_version SET snapshot_json=? WHERE request_id=? AND req_ver=?", (json.dumps(d, ensure_ascii=False), rid, ver))
     con.execute("UPDATE contact_log SET content=? WHERE request_id=?", (PURGED, rid))
+    con.execute("UPDATE request_followup SET next_action=NULL WHERE request_id=?", (rid,))
     con.execute("UPDATE request_version SET reason=? WHERE request_id=? AND reason IS NOT NULL", (PURGED, rid))  # 수정 사유 글
     con.execute("UPDATE audit_note SET note=NULL WHERE request_id=?", (rid,))  # 변경 이력의 사유 글(해시는 남아 사슬 검사는 그대로)
     con.execute("UPDATE result_event SET resolved_reason=? WHERE request_id=? AND resolved_reason IS NOT NULL", (PURGED, rid))  # 충돌 판단 사유
@@ -470,6 +471,7 @@ def _pii_repair_candidates(con, ids=None) -> list[dict]:
         OR COALESCE(r.spot_note,'')<>'' OR COALESCE(r.memo,'')<>'' OR r.lat IS NOT NULL OR r.lon IS NOT NULL
         OR COALESCE(r.cancel_reason,?1)<>?1
         OR EXISTS (SELECT 1 FROM contact_log c WHERE c.request_id=r.id AND c.content IS NOT ?1)
+        OR EXISTS (SELECT 1 FROM request_followup f WHERE f.request_id=r.id AND f.next_action IS NOT NULL)
         OR EXISTS (SELECT 1 FROM audit_note n WHERE n.request_id=r.id AND n.note IS NOT NULL)
         OR EXISTS (SELECT 1 FROM request_version v WHERE v.request_id=r.id AND (COALESCE(v.reason,?1)<>?1
             OR NOT json_valid(v.snapshot_json)

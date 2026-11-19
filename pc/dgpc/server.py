@@ -38,7 +38,7 @@ from typing import Callable
 import contextlib
 import queue
 
-from . import area as A, backup as BK, dong_work as DW, external as X, finance as FN, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
+from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
 from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
@@ -864,6 +864,27 @@ class Handler(BaseHTTPRequestHandler):
 
     # 동별 조회는 현재 범위 확인과 원문 읽기를 같은 짧은 잠금으로 묶는다.
     # 기존 조회 전용 autocommit 연결에서 검사 뒤 동 이관·권한 변경이 끼어드는 것을 막는다.
+    @endpoint("GET", "dong-work/followups", DW.READ_ROLES, lock="write")
+    def ep_followups(self, qs):
+        """담당 범위의 후속조치 목록과 조회 조건."""
+        return FU.list_followups(self.c, self.user, qs)
+
+    @endpoint("GET", "dong-work/followups/{id}", DW.READ_ROLES, lock="write",
+              access=("VIEW", lambda h, out, qs, rid: (rid, 1, "접수 후속조치")))
+    def ep_followup(self, qs, rid):
+        """접수별 후속조치·현장 결과·민원 및 배정 이력."""
+        return FU.detail(self.c, self.user, rid)
+
+    @endpoint("POST", "dong-work/followups/{id}", DW.WRITE_ROLES)
+    def ep_followup_save(self, qs, rid):
+        """접수별 후속조치 저장·담당 변경·완료."""
+        return FU.save(self.c, self.user, rid, self.json_body())
+
+    @endpoint("POST", "dong-work/followups/{id}/revisit", DW.WRITE_ROLES)
+    def ep_followup_revisit(self, qs, rid):
+        """담당 범위 접수에 기존 재방문 약속 반영."""
+        return FU.confirm_revisit(self.c, self.user, rid, self.json_body())
+
     @endpoint("GET", "dong-work", DW.READ_ROLES, lock="write")
     def ep_dong_work(self, qs):
         """현재 허용된 동의 기준일 현황과 안전한 배정 정보."""
@@ -1267,6 +1288,16 @@ class Handler(BaseHTTPRequestHandler):
         """대사 가져오기 이력."""
         return FN.recon_history(self.c)
 
+    @endpoint("GET", "recon-exceptions", VIEW)
+    def ep_recon_exceptions(self, qs):
+        """대사 불일치 목록(반입·처리 상태별)."""
+        return FN.recon_exceptions(self.c, qs.get("import_id", ""), qs.get("status", "pending"), qs.get("page", "1"))
+
+    @endpoint("GET", "recon-exceptions/{id}", VIEW)
+    def ep_recon_exception(self, qs, case_id):
+        """대사 불일치 건과 처리 이력."""
+        return FN.recon_exception(self.c, case_id)
+
     @endpoint("GET", "refunds", VIEW)
     def ep_refunds(self, qs):
         """환불 목록."""
@@ -1468,7 +1499,12 @@ class Handler(BaseHTTPRequestHandler):
             error = self._write_session_error()
             if error:
                 return error
-            return FN.import_recon(CON, body, preview=False)
+            return FN.import_recon(CON, body, preview=False, preview_token=qs.get("preview_token", ""))
+
+    @endpoint("POST", "recon-exceptions/{id}", WORK)
+    def ep_recon_exception_review(self, qs, case_id):
+        """대사 불일치 검토 상태·근거 기록."""
+        return FN.review_recon_exception(self.c, case_id, self.json_body())
 
     @endpoint("POST", "addr-import", ADMIN, lock="none")
     def ep_addr_import(self, qs):
@@ -1520,7 +1556,7 @@ class Handler(BaseHTTPRequestHandler):
     @endpoint("POST", "route", WORK, lock="none",
               access=("LIST", lambda h, out, qs: None if isinstance(out, Raw) else ("", len(out.get("requests") or {}), "노선 계산(이름·주소 포함 결과)")))
     def ep_route(self, qs):
-        """노선 계산(OR-Tools·카카오 길찾기는 잠금 밖)."""
+        """노선 계산과 확정 배정 변경 검토(OR-Tools·카카오 길찾기는 잠금 밖)."""
         return self.route_plan(self.json_body())
 
     # 오래 걸리는 관리 작업 → 백그라운드 작업 번호
@@ -1720,9 +1756,15 @@ class Handler(BaseHTTPRequestHandler):
 
     @endpoint("POST", "assign/edit", WORK)
     def ep_assign_edit(self, qs):
-        """확정 배정 부분 수정(넣기·빼기·순서·팀 옮기기)."""
+        """순서 유지 재계산으로 검토한 확정 배정 변경 반영."""
         d = self.json_body()
-        return S.edit_assignment(self.c, d.get("date", ""), d.get("op", ""), d)
+        with S.tx(self.c):
+            review = DW._read_proof(d.get("review_basis"))
+            if review.get("kind") != "assignment_edit" or review.get("date") != d.get("date") or review.get("user_id") != self.user["user_id"]:
+                raise S.StaleError("배정 변경 검토를 다시 불러와 주세요.")
+            prepared = self.check_assignment_review(self.c, review)
+            return AS.apply_edit(self.c, review["date"], review["change"]["op"], {**review["change"], "reason": d.get("reason")},
+                                 prepared, review["plan"], reviewed=review)
 
     @endpoint("POST", "imports/{id}/confirm", CREW)
     def ep_import_confirm(self, qs, iid):
@@ -2004,18 +2046,51 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, TypeError, ValueError, S.UserError):
             raise S.StaleError('접수·차고지·수거팀·배정 또는 계산 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
 
+    def check_assignment_review(self, con, review):
+        """검토했던 팀의 배정과 관련 접수·계산 조건을 다시 검사한다."""
+        date, change = review["date"], review["change"]
+        if review["inputs"] != self.route_inputs(con, date, review["request_ids"], list(change["assign_ver"])):
+            raise S.StaleError("계산 뒤 접수·현장 결과·팀 배정 또는 설정이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.")
+        self.check_depot_basis(con, review["depot_basis"], date, review.get("plan"))
+        try:
+            return AS.prepare_edit(con, date, change["op"], change, review=True)
+        except S.UserError as error:
+            raise S.StaleError("처리된 접수나 팀 배정이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.") from error
+
     def route_plan(self, d):
         """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이력 저장만 다시 잠금 안(카카오 이동시간은 저장하지 않음)."""
-        date = d["date"]
-        ids = set(d.get("request_ids") or [])
+        date = d.get("date")
+        if not S._date_ok(date):
+            raise S.UserError("배정 날짜를 골라 주세요.")
+        change = d.get("assignment_change")
+        ids = set(d.get("request_ids") or []) if change is None else set()
+        review = None
+        departure = ""
         with LOCK:
             denied = self._write_session_error()
             if denied:
                 return denied
             c = CON
-            crews = [x for x in S.list_crews(c) if x["id"] in set(d.get("crew_ids") or []) and x["active"]]
             fixed = d.get('fixed_plan')
-            if fixed is not None:
+            if change is not None:
+                if not isinstance(change, dict):
+                    raise S.UserError("확정 배정에서 변경할 접수와 팀을 확인하세요.")
+                departure = change.get("start_after") or ""
+                if not isinstance(departure, str) or (departure and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", departure)):
+                    raise S.UserError("재계산을 시작할 시각을 확인하세요.")
+                draft = AS.prepare_edit(c, date, change.get("op"), change, review=True)
+                fixed = {cid: [s["request_id"] for s in stops] for cid, stops in draft["changes"].items()}
+                crew_ids = list(fixed)
+                crews = [draft["crews"][cid] for cid in crew_ids]
+                ids = {rid for stops in fixed.values() for rid in stops}
+                affected = ids | {s["request_id"] for cid in crew_ids for s in draft["current"].get(cid, {}).get("stops", [])}
+                change = {k: change[k] for k in ("op", "request_id", "crew_id", "to_crew_id", "position", "order", "assign_ver", "expected_order") if k in change}
+                review = {"kind": "assignment_edit", "date": date, "user_id": self.user["user_id"], "change": change,
+                          "request_ids": sorted(affected), "inputs": self.route_inputs(c, date, sorted(affected), crew_ids)}
+            else:
+                wanted = set(d.get("crew_ids") or [])
+                crews = [x for x in S.list_crews(c) if x["id"] in wanted and x["active"]]
+            if fixed is not None and review is None:
                 if not isinstance(fixed, dict) or any(not isinstance(ids, list) or any(not isinstance(rid, str) for rid in ids) for ids in fixed.values()):
                     raise S.UserError('수거팀별 접수 순서를 확인하세요.')
                 self.check_depot_basis(c, d.get('depot_basis'), date, {cid: [{'request_id': rid} for rid in ids] for cid, ids in fixed.items()}, refresh_inputs=True)
@@ -2023,10 +2098,12 @@ class Handler(BaseHTTPRequestHandler):
                 if set(proof['crew_ids']) != {crew['id'] for crew in crews}:
                     raise S.StaleError('수거팀 선택이 바뀌었습니다. 자동 추천을 다시 계산하세요.')
             reqs = []
-            candidates = S.search_requests(c, {'date': date, 'size': 500, 'page': 1}, scope_ids=ids or None, with_counts=False)
-            collected = candidates['rows']
-            for page in range(2, candidates['pages'] + 1):
-                collected.extend(S.search_requests(c, {'date': date, 'size': 500, 'page': page}, scope_ids=ids or None, with_counts=False)['rows'])
+            collected = []
+            if ids or review is None:
+                candidates = S.search_requests(c, {'date': date, 'size': 500, 'page': 1}, scope_ids=ids or None, with_counts=False)
+                collected = candidates['rows']
+                for page in range(2, candidates['pages'] + 1):
+                    collected.extend(S.search_requests(c, {'date': date, 'size': 500, 'page': page}, scope_ids=ids or None, with_counts=False)['rows'])
             for r in collected:
                 if r["status"] in ("CANCELLED", "DONE") or (ids and r["id"] not in ids):
                     continue
@@ -2034,6 +2111,8 @@ class Handler(BaseHTTPRequestHandler):
                 if r["state"]["has_field_records"]:  # 재방문: 남은 품목만 적재·작업시간에 반영
                     r["items"] = [{"name": l["name"], "spec": l["spec"], "qty": l["remaining"], "fee_rate_id": l["fee_rate_id"]} for l in r["state"]["lines"] if l["remaining"]]
                 reqs.append(r)
+            if review is not None and {r["id"] for r in reqs} != ids:
+                raise S.StaleError("남은 접수나 예정일이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.")
             st = S.settings(c)
             dongs = {x["name"]: x for x in A.list_dongs(c)}
             method = S.travel_method(c)
@@ -2045,20 +2124,37 @@ class Handler(BaseHTTPRequestHandler):
                                'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews])})
         pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
             if st["capacity"]["prefer_dong_crew"] else {}
-        res = routing.plan(reqs, crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
+        late = {crew["id"] for crew in crews if departure and fixed[crew["id"]]
+                and routing.to_min(departure, 0) >= routing.to_min(crew["shift_end"], 1020)}
+        if late:
+            res = {"routes": [], "matrix_source": None, "infeasible": True, "unassigned": [
+                {"request_id": rid, "reason": "재계산 시작 시각이 팀 근무 종료 시각과 같거나 더 늦습니다."} for cid in late for rid in fixed[cid]]}
+        else:
+            plan_crews = [{**crew, "shift_start": departure} if departure and fixed[crew["id"]] and departure > crew["shift_start"] else crew
+                          for crew in crews]
+            res = routing.plan(reqs, plan_crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
                            travel_method=method, kakao_key=kakao_key,
                            service_per_item=st["service_min_per_item"], time_limit_s=routing.clamp_time_limit(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
                            volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
                            unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"],
-                           crew_depots=context['crew_depots'], crew_required=context['crew_required'], fixed_plan=fixed)
+                           crew_depots=context['crew_depots'], crew_required=context['crew_required'], fixed_plan=fixed if ids or review is None else None)
         res['fixed_order'] = fixed is not None
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
         with LOCK:
             denied = self._write_session_error()
             if denied:
                 return denied
-            self.check_depot_basis(CON, basis, date)
+            if review is None:
+                self.check_depot_basis(CON, basis, date)
+            else:
+                review["depot_basis"] = basis
+                self.check_assignment_review(CON, review)
+                if not res.get("infeasible"):
+                    plan = {r["crew_id"]: [S._clean_stop(s) for s in r["stops"]] for r in res["routes"]}
+                    if {cid: [s["request_id"] for s in stops] for cid, stops in plan.items()} != fixed:
+                        raise S.StaleError("변경할 접수가 달라졌습니다. 현재 배정을 다시 불러와 주세요.")
+                    res["review_basis"] = DW._proof({**review, "plan": plan, "matrix_source": res["matrix_source"], "at": time.time()})
         res['depot_basis'] = basis
         if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만). 받은 이동시간은 저장하지 않는다(다음 계산은 다시 묻는다)
             mi = res.get("matrix_info") or {}

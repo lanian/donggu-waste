@@ -2686,8 +2686,12 @@ def v13_refactor():
                  "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
         ("POST", ("dong-work/requests", "dong-work/requests/{id}", "dong-work/requests/{id}/cancel",
                   "dong-work/requests/{id}/collection", "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
+        ("GET", ("dong-work/followups", "dong-work/followups/{id}"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
+        ("POST", ("dong-work/followups/{id}", "dong-work/followups/{id}/revisit"), ("ADMIN", "INTAKE", "DONG")),
         ("POST", ("users/{id}/dongs", "dongs/order", "dongs/centers"), ("ADMIN",)),
         ("POST", ("vworld/locate",), ("ADMIN", "INTAKE")),
+        ("GET", ("recon-exceptions", "recon-exceptions/{id}"), ("ADMIN", "INTAKE", "LEAD")),
+        ("POST", ("recon-exceptions/{id}",), ("ADMIN", "INTAKE")),
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}
@@ -2705,7 +2709,7 @@ def v13_refactor():
     ok(all(SV.match(x["method"], sample(x["path"]))[0] is cur[(x["method"], x["path"])] for x in snap),
        "견본 주소가 모두 자기 경로로 맞춰짐(앞 경로에 가려지는 것 없음)")
     scoped_reads = {"bootstrap", "me", "dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
-                    "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"}
+                    "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv", "dong-work/followups", "dong-work/followups/{id}"}
     ok(all(r.lock == ("write" if r.pattern in scoped_reads else "read") for r in SV.ROUTES if r.method == "GET") and
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
                                                              "external/test", "route", "backup", "backup/auto", "backup/retention", "privacy/purge",

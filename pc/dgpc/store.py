@@ -511,6 +511,31 @@ def _m12_default_dong_crews(con):
     seed_default_dong_crews(con)
 
 
+def _m13_request_followups(con):
+    con.execute("""CREATE TABLE request_followup (
+        request_id TEXT PRIMARY KEY REFERENCES request(id) ON DELETE CASCADE,
+        assignee_id TEXT REFERENCES app_user(id), due_date TEXT, next_action TEXT,
+        status TEXT NOT NULL CHECK (status IN ('OPEN','IN_PROGRESS','DONE')),
+        version INTEGER NOT NULL, contact_count INTEGER NOT NULL, attempt_count INTEGER NOT NULL,
+        outcome TEXT, updated_at TEXT NOT NULL
+    )""")
+
+
+def _m14_recon_exceptions(con):
+    # NULL은 행별 자료 없이 집계만 있는 이전 반입을 뜻한다.
+    con.execute("ALTER TABLE recon_import ADD COLUMN exception_count INTEGER")
+    con.execute("""CREATE TABLE recon_exception (
+        id TEXT PRIMARY KEY, import_id TEXT NOT NULL REFERENCES recon_import(id), file_line INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('AMOUNT_DIFF','UNMATCHED','CANCELLED','AMOUNT_PENDING','DUPLICATE','BAD')),
+        levy_no TEXT, amount INTEGER, paid_on TEXT, request_id TEXT REFERENCES request(id) ON DELETE SET NULL,
+        levied INTEGER, paid INTEGER,
+        status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','IN_REVIEW','RESOLVED')),
+        basis TEXT, version INTEGER NOT NULL DEFAULT 1, UNIQUE(import_id, file_line)
+    )""")
+    con.execute("CREATE INDEX ix_recon_exception_status ON recon_exception(status, import_id, file_line)")
+    con.execute("CREATE INDEX ix_recon_exception_request ON recon_exception(request_id)")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
@@ -518,7 +543,8 @@ MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색
               (9, "동구 기본 행정동 누락분 자동 등록", _m9_default_dongs),
               (10, "행정동별 배출표 재고와 수거 번호 자동 배정", _m10_dong_label_stock),
               (11, "동별 담당 수거팀의 차고지", _m11_dong_depots),
-              (12, "기본 행정동마다 담당 수거팀 자동 연결", _m12_default_dong_crews)]
+              (12, "기본 행정동마다 담당 수거팀 자동 연결", _m12_default_dong_crews),
+              (13, "접수별 후속조치", _m13_request_followups), (14, "수납 대사 불일치 후속처리", _m14_recon_exceptions)]
 LATEST = MIGRATIONS[-1][0]
 
 

@@ -471,8 +471,10 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             for idx in range(model.Size()):
                 visit[idx] = service[mgr.IndexToNode(idx)]
             for k in range(v):
-                if starts[k] < brk[1] and ends[k] > brk[0] + brk[2]:  # 근무시간에 쉬는 시간 창이 걸칠 때만
-                    iv = model.solver().FixedDurationIntervalVar(max(brk[0], starts[k]), min(brk[1], ends[k]) - brk[2], brk[2], False, f"lunch{k}")
+                first = max(brk[0], starts[k])
+                last = min(brk[1], ends[k]) - brk[2]
+                if first <= last:
+                    iv = model.solver().FixedDurationIntervalVar(first, last, brk[2], False, f"lunch{k}")
                     tdim.SetBreakIntervalsOfVehicle([iv], k, visit)
                     breaks.append((k, iv))
         dims = [("Load", demand, caps, max(caps))]
@@ -518,6 +520,32 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                                           else routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
         params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
         params.time_limit.seconds = clamp_time_limit(time_limit_s)
+        if fixed_plan is not None and use_unload:
+            # 고정 순서·용량 조건에서 일반 삽입 휴리스틱은 필수 하차를 먼저 넣지 못할 수 있다.
+            # 가능한 방문·하차 순서를 시작 해로 주고 같은 시간·운영 제약으로 검사한다.
+            node_for = {g["members"][0][0]["id"]: node for node, g in enumerate(groups, start=1)}
+            seed = []
+            for k, crew in enumerate(crews):
+                path, load, kg, count = [], 0, 0, 0
+                for rid in fixed_plan.get(crew["id"], []):
+                    node = node_for[rid]
+                    if load + demand[node] > caps[k] or kg + kdemand[node] > kcaps[k]:
+                        if count >= max_unloads or demand[node] > caps[k] or kdemand[node] > kcaps[k]:
+                            break
+                        path.append(unload_nodes[k * max_unloads + count])
+                        load, kg, count = 0, 0, count + 1
+                    path.append(node)
+                    load += demand[node]
+                    kg += kdemand[node]
+                else:
+                    seed.append(path)
+            if len(seed) == len(crews):
+                model.CloseModelWithParameters(params)
+                start = model.ReadAssignmentFromRoutes(seed, True)
+                if start:
+                    solution = model.SolveFromAssignmentWithParameters(start, params)
+                    if solution:
+                        return solution, mgr, model, tdim, breaks
         return model.SolveWithParameters(params), mgr, model, tdim, breaks
 
     has_must = any(g["must"] for g in groups)
@@ -527,8 +555,42 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         sol, mgr, model, tdim, breaks = solve(False)
         relaxed = bool(sol)
     if not sol:
+        issues = []
+        if fixed_plan is not None:
+            by_request = {g["members"][0][0]["id"]: (node, g) for node, g in enumerate(groups, start=1)}
+            for k, crew in enumerate(crews):
+                clock, prev, volume, weight, unloads = starts[k], start_nodes[k], 0, 0, 0
+                ids = fixed_plan.get(crew["id"], [])
+                for rid in ids:
+                    node, group = by_request[rid]
+                    too_big = demand[node] > caps[k] or kdemand[node] > kcaps[k]
+                    exceeds = volume + demand[node] > caps[k] or weight + kdemand[node] > kcaps[k]
+                    reason = None
+                    if too_big:
+                        reason = "이 접수의 부피 또는 중량이 차량 적재한도를 넘습니다."
+                    elif exceeds:
+                        if not unload_nodes or unloads >= max_unloads:
+                            reason = "누적 적재한도를 넘습니다. 반입지 설정과 하차 횟수를 확인하세요."
+                        else:
+                            site = unload_nodes[0]
+                            arrive = max(clock + tmat[prev][site], uh[0] if uh else 0)
+                            if uh and arrive + unload_min > uh[1]:
+                                reason = "적재한도 전에 필요한 하차를 반입지 운영시간 안에 마칠 수 없습니다."
+                            else:
+                                clock, prev, volume, weight = arrive + unload_min, site, 0, 0
+                                unloads += 1
+                    clock = max(clock + tmat[prev][node], group["lo"]) + service[node]
+                    prev, volume, weight = node, volume + demand[node], weight + kdemand[node]
+                    if reason:
+                        issues.append({"request_id": rid, "reason": reason})
+                    if clock > group["hi"]:
+                        r = group["members"][0][0]
+                        if r.get("appt_end") or r.get("appt_start"):
+                            issues.append({"request_id": rid, "reason": "이 순서에서 방문 약속 시간 안에 작업을 마칠 수 없습니다."})
+                if ids and clock + tmat[prev][end_nodes[k]] > ends[k]:
+                    issues.append({"request_id": ids[-1], "reason": "마지막 방문과 복귀가 팀 근무 종료 시각을 넘습니다."})
         return {"routes": [], "matrix_source": source, "infeasible": True, "matrix_note": matrix_note(source, minfo),
-                "unassigned": unassigned + [{"request_id": r["id"], "reason": "해를 찾지 못함: 근무시간·쉬는 시간·반입지 시간을 확인하세요"} for r in reqs]}
+                "unassigned": unassigned + (issues or [{"request_id": r["id"], "reason": "해를 찾지 못함: 근무시간·쉬는 시간·반입지 시간을 확인하세요"} for r in reqs])}
     routes, visited = [], set()
     unload_set = set(unload_nodes)
     lunch_by = {}  # 쉬는 시간 시작(분): 해의 구간 변수에서 이름으로 찾는다

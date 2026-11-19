@@ -255,7 +255,9 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
         assigned = label_auto.sync(con, touched)
         counts.update(labels_assigned=assigned["new_assigned"], labels_pending=assigned["pending"], labels_voided=assigned["voided"])
         con.execute("UPDATE result_import SET summary_json=? WHERE id=?", (json.dumps(counts), imp))
-        audit(con, "import", imp, "RESULT", counts)
+        # 파일 날짜는 회수 출처를 대조할 때만 쓴다. 접수별 갱신본·전송 이력을 대신하지 않는다.
+        work_date = payload.get("work_date")
+        audit(con, "import", imp, "RESULT", {**counts, **({"work_date": work_date} if _date_ok(work_date) else {})})
     return {**counts, "release_code": release, "import_id": imp}
 
 
@@ -305,7 +307,7 @@ def _sanitize_item_event(con, kind: str, b: dict):
         b.update(fee_rate_id=None, unit_price=None, price_status="PENDING")
 
 
-def _apply_revisit(con, rid: str, b: dict):
+def _apply_revisit(con, rid: str, b: dict, *, office=False):
     """현장에서 통화로 약속한 재방문 날짜·시간을 접수 일정에 반영한다(이전 일정은 버전으로 보존)."""
     r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     date = b.get("date") or ""
@@ -313,17 +315,23 @@ def _apply_revisit(con, rid: str, b: dict):
         return
     start = b.get("start") if re.fullmatch(r"\d\d:\d\d", b.get("start") or "") else None
     end = b.get("end") if re.fullmatch(r"\d\d:\d\d", b.get("end") or "") else None
+    detail = {"date": date, "start": start, "end": end}
+    if office:
+        detail.update(source="PC", **_after_close(con, rid))
     if (r["planned_date"], r["appt_start"], r["appt_end"]) == (date, start, end):
+        if office:
+            audit(con, "request", rid, "REVISIT_APPT", detail)
         return
     con.execute("INSERT INTO request_version VALUES (?,?,?,?,?)",
-                (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), "현장 통화로 재방문 약속(휴대폰 기록)", now()))
+                (rid, r["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False),
+                 "후속조치 재방문 약속 확정" if office else "현장 통화로 재방문 약속(휴대폰 기록)", now()))
     con.execute("UPDATE request SET req_ver=req_ver+1, planned_date=?, appt_start=?, appt_end=?, updated_at=? WHERE id=?", (date, start, end, now(), rid))
     released = False
     if date != r["planned_date"]:  # 날짜가 바뀌면 옛 날짜 배정을 푼다(그날 마감 점검·새 날짜 배정이 막히지 않게)
         released = bool(con.execute("DELETE FROM active_assignment WHERE request_id=?", (rid,)).rowcount)
         if released and r["status"] == "ASSIGNED":
             con.execute("UPDATE request SET status='RECEIVED' WHERE id=?", (rid,))
-    audit(con, "request", rid, "REVISIT_APPT", {"date": date, "start": start, "end": end, **({"released": True} if released else {})})
+    audit(con, "request", rid, "REVISIT_APPT", {**detail, **({"released": True} if released else {})})
 
 
 def list_conflicts(con, include_resolved=False):

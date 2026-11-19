@@ -4,7 +4,7 @@
   settings(등록표)·paths·geo·dong_defaults·operation_print → store → core → fees·external → derive·routing
   → collection·payments·devices·users·auditlog·addresses → area·finance·label_auto·photos·dong_centers·route_depots·form_files
   → numbered_labels·official_forms → intake → results → privacy·pc_collection → assign·backup → close·reports → config
-  → addrsearch·vworld → dong_work → (service 겉면) → ops → server
+  → addrsearch·vworld → dong_work → followups → (service 겉면) → ops → server
 위 계층은 순환을 피하려 함수 안 늦은 import 로만 부르며, 그 허용 목록과 이 순서는 tests/test_module_layers.py 가 검사한다
 (모듈·import 를 바꾸면 그 시험의 LAYERS·LAZY_UP 과 이 문단을 함께 고친다).
 새 코드는 필요한 모듈을 직접 불러 써도 된다(아래 import 목록이 곧 모듈 지도). 설정 키는 docs/settings.md, API 경로는 docs/routes.md (둘 다 tools/ 가 만든다).

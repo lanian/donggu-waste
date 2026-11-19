@@ -83,7 +83,7 @@ class Phone:
     def ev(self, stop, kind, body):
         self.seq += 1
         return {"event_id": str(uuid.uuid4()), "seq": self.seq, "request_id": stop["request_id"], "assign_ver": stop["assign_ver"],
-                "base_req_ver": stop["req_ver"], "kind": kind, "body": body, "device_ts": f"2026-11-03T02:{self.seq:02d}:00Z"}
+                "base_req_ver": stop["req_ver"], "kind": kind, "body": body, "device_ts": S.now()}
 
     def seal(self, payload, btype):
         head = P.Header(btype, uuid.uuid4().bytes, self.id, 1, 1, P.key_id(P.pub_raw(self.sign)))
@@ -283,6 +283,7 @@ def run():
         chooser = page.get_by_role("dialog", name="어느 팀에 연결할까요?")
         expect(chooser).to_be_visible()
         ok(S.list_devices(store.connect())[0]["confirmed_at"], "지문 확인을 눌러야 사용 시작(그 전에는 목록을 보낼 수 없음)")
+        chooser.get_by_role("combobox").select_option("__new")
         chooser.get_by_label("새 팀 이름").fill("가상 1팀")
         chooser.get_by_role("button", name="연결").click()
         # 팀 저장이 끝나 대화상자가 닫힌 뒤 이동한다. 기기의 '사용' 표시는 연결 전에도 이미 참이다.
@@ -412,6 +413,8 @@ def run():
         # 노선·배정
         page.goto(URL + "#/dispatch")
         page.get_by_label("수거일").fill(today)
+        page.get_by_role("button", name="선택 해제", exact=True).click()
+        page.locator(".crewpick label").filter(has_text=re.compile(r"^가상 1팀 ")).get_by_role("checkbox").check()
         page.get_by_role("button", name="노선 계산").click()
         expect(page.get_by_role("heading", name=re.compile("미배정 1건"))).to_be_visible(timeout=20000)
         ok(page.get_by_text(re.compile("직선거리 추정\\(도로 아님\\)")).is_visible() and page.get_by_text(re.compile("좌표가 없음")).is_visible(),
@@ -445,7 +448,9 @@ def run():
         page.get_by_role("button", name="배정 확정").click()
         expect(page.get_by_role("heading", name="목록 전송 (QR)")).to_be_visible()
 
-        # 확정된 배정 부분 수정(다시 계산 없이): 넣기 → 순서 → 빼기, 409(다른 곳에서 먼저 고침) → 다시 불러오기
+        # 확정 배정 변경: 넣기·순서·빼기를 검토한 뒤 확정, 409가 나면 다시 불러오기
+        extra = S.one(con, "SELECT id FROM request WHERE name='가상셋'")
+        S.set_location(con, extra["id"], 35.147, 126.924)
         page.goto(URL + "#/dispatch")
         page.get_by_label("수거일").fill(today)
         page.get_by_role("button", name="현재 배정 불러오기").click()
@@ -454,27 +459,29 @@ def run():
         ver0 = int(re.search(r"갱신본 (\d+)", ec.inner_text()).group(1))
         ec.get_by_label("가상 1팀에 넣을 접수").select_option(ec.get_by_label("가상 1팀에 넣을 접수").locator("option", has_text="가상셋").get_attribute("value"))
         ec.get_by_role("button", name="가상 1팀에 넣기").click()
+        page.get_by_role("button", name="변경 배정 확정", exact=True).click(timeout=30000)
         expect(ec).to_contain_text("3곳")
         expect(ec.locator(".stopline").nth(2)).to_contain_text("가상셋")
         ec.get_by_role("button", name="가상 1팀 3번 위로").click()
+        page.get_by_role("button", name="변경 배정 확정", exact=True).click(timeout=30000)
         expect(ec.locator(".stopline").nth(1)).to_contain_text("가상셋")
         page.screenshot(path=SHOTS / "pc_03b_assign_edit.png", full_page=True)
         v13shot(page, "dispatch-edit")
-        ok(f"갱신본 {ver0 + 2}" in ec.inner_text() and page.get_by_text(re.compile("목록을 휴대폰에 다시 보내야")).first.is_visible(),
+        ok(f"갱신본 {ver0 + 2}" in ec.inner_text() and page.get_by_role("link", name="변경 팀 목록 전송 →").is_visible(),
            f"현재 배정 불러오기 → 넣기(끝)·순서 바꾸기: 고칠 때마다 새 갱신본({ver0}→{ver0 + 2}), 다시 보내기 안내")
         # 다른 화면(다른 담당자)이 먼저 고침 → 이 화면의 다음 수정은 409
         cur_now = page.evaluate("async (d) => (await (await fetch('/api/assign/current?date=' + d, {headers: {'X-DG-CSRF': '1'}})).json())", today)
         b0 = cur_now[0]
-        st_edit = page.evaluate("""async ([d, b]) => (await fetch('/api/assign/edit', {method: 'POST', headers: {'X-DG-CSRF': '1', 'Content-Type': 'application/json'},
-            body: JSON.stringify({date: d, op: 'reorder', crew_id: b.crew_id, order: b.stops.map((x) => x.request_id), assign_ver: {[b.crew_id]: b.assign_ver}})})).status""", [today, b0])
+        st_edit = page.evaluate("""async ([d, b]) => (await fetch('/api/assign', {method: 'POST', headers: {'X-DG-CSRF': '1', 'Content-Type': 'application/json'},
+            body: JSON.stringify({date: d, plan: {[b.crew_id]: b.stops}})})).status""", [today, b0])
         ec.get_by_role("button", name="가상 1팀 1번 아래로").click()
-        expect(page.get_by_text("배정이 다른 곳에서 바뀌었습니다")).to_be_visible()
-        ok(st_edit == 200, "부분 수정 409: 다른 곳에서 먼저 고친 배정은 고치지 않고 '배정이 다른 곳에서 바뀌었습니다' + [다시 불러오기]")
+        expect(page.get_by_text("배정이나 계산 자료가 바뀌었습니다.", exact=False)).to_be_visible()
+        ok(st_edit == 200, "부분 수정 409: 다른 담당자가 먼저 변경하면 현재 배정 다시 불러오기")
         page.get_by_role("button", name="다시 불러오기").click()
         ec = page.locator(".edit-cols .route").first
         expect(ec).to_contain_text(f"갱신본 {ver0 + 3}")
         ec.get_by_role("button", name="가상 1팀 2번 빼기").click()
-        page.locator(".dlg").get_by_role("button", name="빼기").click()
+        page.get_by_role("button", name="변경 배정 확정", exact=True).click(timeout=30000)
         expect(ec).to_contain_text("2곳")
         cur_end = page.evaluate("async (d) => (await (await fetch('/api/assign/current?date=' + d, {headers: {'X-DG-CSRF': '1'}})).json())", today)
         ok(len(cur_end[0]["stops"]) == 2 and cur_end[0]["assign_ver"] == ver0 + 4 and S.get_request(store.connect(), S.one(store.connect(), "SELECT id FROM request WHERE name='가상셋'")["id"])["status"] == "RECEIVED",
@@ -599,9 +606,9 @@ def run():
         expect(page.locator("#conflicts tr.ev")).to_have_count(4)
         grp = page.locator("#conflicts tr.grp", has_text="가상셋")
         expect(grp).to_contain_text("기록 4건")
-        expect(page.locator("nav.side a[data-k=results] .nav-badge")).to_have_text("4")
+        expect(page.locator("nav.side a[data-k=results] .nav-badge")).to_have_text("5")
         ok(page.locator("#conflicts tr.ev").first.inner_text().find("배정") >= 0 or "빠진" in page.locator("#conflicts").inner_text(),
-           "충돌함: 접수별로 묶어 보이고(기록 4건), 메뉴 [결과 가져오기]에 숫자 4")
+           "충돌함: 접수별로 4건 묶어 표시, 메뉴 배지는 미회수 팀 1곳을 더해 5")
         page.screenshot(path=SHOTS / "pc_05d_conflicts.png", full_page=True)
         page.locator("#conflicts").scroll_into_view_if_needed()
         v13shot(page, "conflicts")
@@ -668,7 +675,7 @@ def run():
         carry_ids = [r["id"] for r in S.rows(store.connect(), "SELECT id FROM request WHERE planned_date=? AND status NOT IN ('DONE','CANCELLED')", (today,))]
         page.get_by_role("button", name="마감 기록").click()
         expect(page.get_by_role("dialog")).to_contain_text("미처리 2건")
-        page.locator(".dlg").get_by_role("button", name="마감 기록").click()
+        page.locator(".dlg").get_by_role("button", name="그래도 마감 기록", exact=True).click()
         expect(page.get_by_text("마감 기록됨")).to_be_visible()
         from dgpc import area as A
         c_ = store.connect()

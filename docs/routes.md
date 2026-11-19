@@ -24,6 +24,8 @@
 | 경로 | 관리자 | 접수 | 수거팀 | 팀장 | 지정 동 | 잠금 | 임시 비번 | 접속기록 | 설명 |
 |---|---|---|---|---|---|---|---|---|---|
 | `bootstrap` | ✓ | ✓ | ✓ | ✓ | ✓ | write | ✓ |  | 화면 시작 자료: 설정·팀·기기·오늘·나·수수료표·동·코드 목록. |
+| `dong-work/followups` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 담당 범위의 후속조치 목록과 조회 조건. |
+| `dong-work/followups/{id}` | ✓ | ✓ |  | ✓ | ✓ | write |  | VIEW | 접수별 후속조치·현장 결과·민원 및 배정 이력. |
 | `dong-work` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 현재 허용된 동의 기준일 현황과 안전한 배정 정보. |
 | `dong-work/requests` | ✓ | ✓ |  | ✓ | ✓ | write |  | LIST | 현재 범위·기준일·처리 종류로 50건씩 접수 조회. |
 | `dong-work/requests/{id}` | ✓ | ✓ |  | ✓ | ✓ | write |  | VIEW | 다른 동 접수의 원문을 포함하지 않는 상세 권한 검사. |
@@ -73,6 +75,8 @@
 | `revenue.csv` | ✓ | ✓ |  | ✓ |  | read |  |  | 세입 CSV. |
 | `recon-template` | ✓ | ✓ |  | ✓ |  | read |  |  | 대사(납부 자료) CSV 서식. |
 | `recon-history` | ✓ | ✓ |  | ✓ |  | read |  |  | 대사 가져오기 이력. |
+| `recon-exceptions` | ✓ | ✓ |  | ✓ |  | read |  |  | 대사 불일치 목록(반입·처리 상태별). |
+| `recon-exceptions/{id}` | ✓ | ✓ |  | ✓ |  | read |  |  | 대사 불일치 건과 처리 이력. |
 | `refunds` | ✓ | ✓ |  | ✓ |  | read |  |  | 환불 목록. |
 | `addr-stats` | ✓ |  |  | ✓ |  | read |  |  | 주소 자료 건수. |
 | `fee-table` | ✓ | ✓ | ✓ | ✓ |  | read |  |  | 운영 수수료표 상태·검토 행·개정 목록. |
@@ -100,6 +104,8 @@
 
 | 경로 | 관리자 | 접수 | 수거팀 | 팀장 | 지정 동 | 잠금 | 임시 비번 | 접속기록 | 설명 |
 |---|---|---|---|---|---|---|---|---|---|
+| `dong-work/followups/{id}` | ✓ | ✓ |  |  | ✓ | write |  |  | 접수별 후속조치 저장·담당 변경·완료. |
+| `dong-work/followups/{id}/revisit` | ✓ | ✓ |  |  | ✓ | write |  |  | 담당 범위 접수에 기존 재방문 약속 반영. |
 | `dong-work/requests` | ✓ | ✓ |  |  | ✓ | write |  |  | 현재 담당 동으로 접수 등록(멱등 재시도도 최신 범위 검사). |
 | `dong-work/requests/{id}` | ✓ | ✓ |  |  | ✓ | write |  |  | 원래 동과 이동할 동을 모두 검사한 접수 수정. |
 | `dong-work/requests/{id}/cancel` | ✓ | ✓ |  |  | ✓ | write |  |  | 담당 접수만 버전·사유 코드 계약으로 취소. |
@@ -119,10 +125,11 @@
 | `import/solo` | ✓ | ✓ |  |  |  | none |  |  | 단독 휴대폰 백업 옮기기(접수를 만든다). PBKDF2 60만 회는 잠금 밖. |
 | `requests/import` | ✓ | ✓ |  |  |  | none |  |  | 접수 CSV 일괄 등록(preview=1 은 조회 전용 연결에서 미리보기). |
 | `recon` | ✓ | ✓ |  |  |  | none |  |  | 세외수입 납부 자료 대사(preview=1 은 미리보기). |
+| `recon-exceptions/{id}` | ✓ | ✓ |  |  |  | write |  |  | 대사 불일치 검토 상태·근거 기록. |
 | `addr-import` | ✓ |  |  |  |  | none |  |  | 주소 자료 가져오기(큰 파일 읽기는 잠금 밖). |
 | `external/test` | ✓ |  |  |  |  | none |  |  | 외부 서비스 연결 시험(잠금 밖). |
 | `vworld/locate` | ✓ | ✓ |  |  |  | none |  |  | VWorld 위치 참고 조회. 결과 비저장, 외부 호출은 잠금 밖, 전후 세션 재검사. |
-| `route` | ✓ | ✓ |  |  |  | none |  | LIST | 노선 계산(OR-Tools·카카오 길찾기는 잠금 밖). |
+| `route` | ✓ | ✓ |  |  |  | none |  | LIST | 노선 계산과 확정 배정 변경 검토(OR-Tools·카카오 길찾기는 잠금 밖). |
 | `backup` | ✓ |  |  |  |  | none |  |  | 수동 백업(백그라운드 작업). |
 | `backup/auto` | ✓ |  |  |  |  | none |  |  | 자동 백업 지금 실행(백그라운드 작업). |
 | `backup/retention` | ✓ |  |  |  |  | none |  |  | 백업 보관 정리(백그라운드 작업). |
@@ -154,7 +161,7 @@
 | `requests/{id}/contacts` | ✓ | ✓ |  |  |  | write |  |  | 민원·통화 기록. |
 | `requests/{id}/location` | ✓ | ✓ |  |  |  | write |  |  | 위치 직접 지정. |
 | `assign` | ✓ | ✓ |  |  |  | write |  |  | 배정 확정. |
-| `assign/edit` | ✓ | ✓ |  |  |  | write |  |  | 확정 배정 부분 수정(넣기·빼기·순서·팀 옮기기). |
+| `assign/edit` | ✓ | ✓ |  |  |  | write |  |  | 순서 유지 재계산으로 검토한 확정 배정 변경 반영. |
 | `imports/{id}/confirm` | ✓ | ✓ | ✓ |  |  | write |  |  | 휴대폰 반영 확인. |
 | `conflicts/bulk` | ✓ | ✓ |  |  |  | write |  |  | 충돌 일괄 처리(접수별·가져오기별). |
 | `bundles` | ✓ | ✓ |  |  |  | write |  |  | 휴대폰 목록 묶음 만들기. |
@@ -195,4 +202,4 @@
 | `password` | ✓ | ✓ | ✓ | ✓ | ✓ | write | ✓ |  | 본인 비밀번호 변경. |
 | `settings` | ✓ |  |  |  |  | write |  |  | 설정 저장 → 새 설정 묶음. |
 
-경로 166개 (로그인 전 4개 제외).
+경로 173개 (로그인 전 4개 제외).

@@ -3,6 +3,8 @@ import * as M from '/web/map.js';
 import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, sortable, workEnd } from '../core.js';
 import { mapIn } from '../widgets.js';
 import { screenRequests } from './requests.js';
+import { followupQueue } from './followups.js';
+import { recoveryCounts, recoveryTags } from './team_recovery.js';
 
 // 처리할 일(전체 기간, GET /api/pending) → 화면 링크. 결과 미회수 팀은 근무가 끝난 팀만 센다.
 function pendingTodos(pd) {
@@ -62,9 +64,11 @@ function workflowCard(sum, batches, unassigned, pd, date) {
   const role = boot.me.role, office = ['ADMIN', 'INTAKE'].includes(role);
   const field = role === 'FIELD', resultsAllowed = office || field;
   const active = batches.filter((b) => b.status === 'ACTIVE');
-  const unsent = active.filter((b) => !b.bundles[0]).length;
-  const resend = active.filter((b) => b.resend_needed).length;
-  const unreceived = active.filter((b) => b.bundles[0] && !b.bundles[0].receipt_confirmed_at && !b.resend_needed).length;
+  const receiptByBatch = new Map((sum.result_recovery || []).map((r) => [r.batch_id, r.receipt_status]));
+  const receipt = (b) => receiptByBatch.get(b.id) || (!b.bundles[0] ? 'UNSENT' : b.bundles[0].receipt_confirmed_at ? 'CONFIRMED' : 'UNCONFIRMED');
+  const unsent = active.filter((b) => receipt(b) === 'UNSENT').length;
+  const resend = active.filter((b) => receipt(b) !== 'UNSENT' && b.resend_needed).length;
+  const unreceived = active.filter((b) => receipt(b) === 'UNCONFIRMED' && !b.resend_needed).length;
   const disconnected = active.filter((b) => !b.device_id || !(boot.devices || []).some((d) => d.id === b.device_id && d.status === 'ACTIVE' && d.confirmed_at)).length;
   const ended = afterWork(date), future = date > boot.today, closed = sum.closed;
   const noResult = (sum.no_result || []).length, photos = sum.photos_missing || 0;
@@ -165,7 +169,7 @@ async function screenHome() {
     role0 === 'ADMIN' ? h('a', { href: '#/settings/addr' }, '설정 → 주소 위치 자료 →') : '운영 관리자에게 알리세요.') : null;
   const backlogCard = notField ? h('div', { class: 'card backlog dash-backlog' }, h('div', { class: 'panel-h' }, h('h2', {}, '밀린 일 (전체 기간)'), backlog.length ? h('span', { class: 'muted small' }, `${backlog.length}종`) : null),
     backlog.length ? h('ul', { class: 'todo' }, ...backlog.map((x) => h('li', {}, h('a', { href: x.href, class: 'todo-a ' + x.cls, 'data-key': x.key }, h('span', {}, x.text), h('span', { class: 'arr' }, '→')))))
-      : h('p', { class: 'empty' }, '지난 날짜에 밀린 일이 없습니다.')) : null;
+      : h('p', { class: 'empty' }, '지난 날짜에 밀린 일이 없습니다.'), followupQueue()) : null;
   const act = batches.filter((b) => b.status === 'ACTIVE');
   // 배차 지도: 팀 색 핀 + 순서 선 (핀은 이 화면에서만 그림, 지도 서버로 보내지 않음)
   const mapBox = h('div', { class: 'mapbox dash-map' });
@@ -206,17 +210,19 @@ async function screenHome() {
         x.working ? null : chip('수거일 아님', 'neutral')),
         h('td', {}, x.crew || '-'), h('td', { class: 'num' }, x.total), h('td', { class: 'num' }, x.done), h('td', { class: 'num' }, x.open),
         h('td', {}, x.limit ? chip(`${x.total}/${x.limit}건`, x.total > x.limit ? 'bad' : x.total === x.limit ? 'warn' : 'ok') : '-', x.limit_m3 ? chip(`${x.m3}/${x.limit_m3}m³`, x.m3 > x.limit_m3 ? 'bad' : '') : null))))), { key: 'home-dongs', cols: ['text', 'text', 'num', 'num', 'num', null] }))) : null;
+  const recovery = new Map((sum.result_recovery || []).map((x) => [x.batch_id, x]));
   const crewsCard = h('div', { class: 'card today-crews' }, h('div', { class: 'panel-h' }, h('h2', {}, '팀별 진행'), act.length ? h('span', { class: 'legend small' }, h('span', { class: 'lg ok' }, '완료'), h('span', { class: 'lg warn' }, '재방문'), h('span', { class: 'lg track' }, '남음')) : null),
     act.length ? h('div', { class: 'crews' }, ...act.map((b, bi) => {
       const n = b.stops.length, d = b.stops.filter((x) => x.status === 'DONE').length, w = b.stops.filter((x) => ['PARTIAL', 'NOT_COLLECTED', 'ON_HOLD'].includes(x.status)).length;
-      const last = b.bundles[0];
+      const r = recovery.get(b.id);
       return h('div', { class: `crew route c${(bi % 4) + 1}` }, h('div', { class: 'row crew-h' }, h('span', { class: 'swatch', 'aria-hidden': 'true' }), h('b', {}, b.crew_name), h('span', { class: 'muted small' }, `갱신본 ${b.assign_ver}`), h('span', { class: 'grow' }),
-          !last ? chip('미전송', 'warn') : last.receipt_confirmed_at ? chip('수신 확인', 'ok') : chip('수신 미확인', 'warn'), b.resend_needed ? chip('재전송 필요', 'bad') : null),
+          r ? recoveryTags(r) : null, b.resend_needed && r?.receipt_status !== 'UNSENT' ? chip('재전송 필요', 'bad') : null),
+        r ? recoveryCounts(r) : null,
         h('div', { class: 'seg' }, h('i', { class: 'ok', style: `flex:${d}` }), h('i', { class: 'warn', style: `flex:${w}` }), h('i', { class: 'rest', style: `flex:${Math.max(0, n - d - w)}` })),
         h('div', { class: 'row small' }, `${n}곳 중 완료 ${d} · 재방문 ${w}`),
         n ? h('ol', { class: 'tline', 'aria-label': `${b.crew_name} 방문 순서` }, ...b.stops.map((x, i) => h('li', { class: nodeCls(x.status), title: `${i + 1}. ${x.name} · ${STATUS[x.status] || x.status}` },
           h('b', {}, i + 1), h('small', {}, x.eta || '—'), h('span', { class: 'sr-only' }, ` ${x.name} ${STATUS[x.status] || ''}`)))) : null);
-    })) : h('p', { class: 'empty' }, '확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null));
+    })) : h('p', { class: 'empty' }, chip('배정 전', 'neutral'), ' 확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null));
   const tasksCard = h('div', { class: 'card dash-tasks' }, h('div', { class: 'panel-h' }, h('h2', {}, '처리할 일'), todo.length ? h('span', { class: 'muted small' }, `${todo.length}종`) : null),
     todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls, , pre]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls, onclick: pre || null }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
       : h('p', { class: 'empty' }, sum.total ? (s.date === boot.today && !showNoResult && sum.no_result.length ? `지금 처리할 일이 없습니다. 결과 미회수는 근무가 끝난 뒤(${workEnd()}) 표시합니다.` : '지금 처리할 일이 없습니다. 결과를 가져오면 미회수·충돌·수납 확인이 여기에 모입니다.') : '이 날짜의 접수가 없습니다. 다른 날짜를 고르거나 접수를 등록하세요.'));

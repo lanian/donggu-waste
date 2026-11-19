@@ -58,10 +58,17 @@ DISPATCH_FIXTURE = r"""async () => {
     const date = body?.date || u.searchParams.get('date') || '2026-11-09';
     let out = [];
     if (endpoint === 'route') {
-      const id = `route-${date}`;
-      out = {routes:[{crew_id:body.crew_ids[0],crew_name:'가상1팀',capacity_m3:8,
+      if (body.assignment_change) {
+        const order = body.assignment_change.order;
+        out = {routes:[{crew_id:'c1',crew_name:'가상1팀',start:'09:00',end:'09:35',drive_min:5,
+          stops:order.map(id=>({request_id:id,eta:'09:10',load_m3:1}))}], unassigned:[], review_basis:'fixture-review',
+          requests:Object.fromEntries(order.map(id=>[id,{name:`가상 ${id}`,receipt_no:`DG-${id}`}])), matrix_source:'ESTIMATE'};
+      } else {
+        const id = `route-${date}`;
+        out = {routes:[{crew_id:body.crew_ids[0],crew_name:'가상1팀',capacity_m3:8,
         stops:[{request_id:id,eta:'09:10'}]}],unassigned:[],
         requests:{[id]:{name:`${date} 계산`,address:'가상길',m3:1,appt:[],items:[],lat:null}}};
+      }
     } else if (endpoint === 'assign/current') {
       out = [{crew_id:'c1',work_date:date,assign_ver:1,
         stops:__stops.map((id,i)=>({request_id:id,receipt_no:`DG-${id}`,seq:i+1}))}];
@@ -71,8 +78,8 @@ DISPATCH_FIXTURE = r"""async () => {
     } else if (endpoint === 'requests') out = {rows:[]};
     else if (endpoint === 'assign') out = [{count:1,assign_ver:1}];
     else if (endpoint === 'assign/edit') {
-      if (body.op === 'reorder') __stops = body.order;
-      out = {resend_needed:['c1']};
+      if (body.review_basis) __stops = __calls.find(call=>call.body?.assignment_change).body.assignment_change.order;
+      out = {resend_needed:['c1'],batches:[{crew_id:'c1',batch_id:'fixture-assigned'}]};
     }
     const json = JSON.stringify(out);
     const fail = __fail === endpoint; if (fail) __fail = null;
@@ -238,11 +245,13 @@ class DispatchResponseTests(unittest.TestCase):
         self.page.get_by_role("button", name="현재 배정 불러오기", exact=True).click()
         self.page.wait_for_function("__C.pendingActions.size === 0")
         self.page.get_by_role("button", name="가상1팀 1번 아래로", exact=True).click()
+        self.page.get_by_role("dialog", name="배정 변경 검토").get_by_role("button", name="변경 배정 확정").click()
         self.page.wait_for_function("__C.pendingActions.size === 0")
-        body = self.page.evaluate("__calls.find(call=>call.endpoint==='assign/edit').body")
+        body = self.page.evaluate("__calls.find(call=>call.body?.assignment_change).body")
         self.assertEqual(body["date"], "2026-11-09")
-        self.assertEqual(body["assign_ver"], {"c1": 1})
-        self.assertEqual(body["order"], ["current-2", "current-1"])
+        self.assertEqual(body["assignment_change"]["assign_ver"], {"c1": 1})
+        self.assertEqual(body["assignment_change"]["order"], ["current-2", "current-1"])
+        self.assertEqual(self.page.evaluate("__calls.find(call=>call.endpoint==='assign/edit').body.review_basis"), "fixture-review")
 
 
 class MobileDraftLifetimeTests(unittest.TestCase):

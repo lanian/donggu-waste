@@ -377,7 +377,7 @@ def lead_links(page, url):
     fresh(page, url, "#/close")
     page.evaluate(LEAD_PATCH)
     page.evaluate("location.hash = '#/close?date=2026-01-05'")
-    expect(page.get_by_text("결과를 가져오지 않은 팀:", exact=False)).to_be_visible()
+    expect(page.locator("main .notice strong").get_by_text("결과 미회수 팀", exact=True)).to_be_visible()
     expect(page.locator('main a[href^="#/results"]')).to_have_count(0)
     ok(True, "팀장 마감 화면의 결과 미회수 안내에 갈 수 없는 결과 가져오기 링크가 없다")
     page.evaluate("location.hash = '#/home'")

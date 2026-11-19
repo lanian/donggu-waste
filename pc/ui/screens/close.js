@@ -3,6 +3,7 @@ import { won } from '/web/fees.js';
 import { ACTION, ENTITY, IDLE_RESET_MS, PAY, STATUS, afterWork, api, boot, btn, canOpen, cell, chip, confirmDlg, h, kst, modal, pagehead, post, postOnce, sortable, statusChip, toast, workEnd, wrap } from '../core.js';
 import { refreshBadges } from './home.js';
 import { unloadCard } from './settings.js';
+import { recoveryCounts, recoveryTags } from './team_recovery.js';
 
 const closeT0 = {}, closeSeen = {};
 async function screenClose() {
@@ -22,15 +23,25 @@ async function screenClose() {
     const note = h('input', { placeholder: '마감 메모', style: 'flex:1' });
     const role = boot.me.role;
     const last = d.closed;
+    const teams = d.result_recovery || [];
+    const missing = d.crews_no_result || [];
+    const teamMissing = (c) => c.missing == null ? c.crew : `${c.crew} · 갱신본 ${c.assign_ver} · 미회수 ${c.missing}건`;
     const list = (title, arr, fmt) => h('div', { class: 'card' }, h('h2', {}, `${title} ${arr.length}건`), arr.length ? h('ul', { class: 'linklist' }, ...arr.map((x) => h('li', {}, x.id ? h('a', { href: `#/request/${x.id}` }, fmt(x)) : fmt(x)))) : h('p', { class: 'empty' }, '없음'));
     body.replaceChildren(...[
       h('div', { class: 'card' }, h('h2', {}, `${s.date} 접수 ${d.total}건`), h('div', { class: 'row' }, ...Object.entries(d.by_status).map(([k, v]) => { const el = statusChip(k); el.textContent = `${STATUS[k] || k} ${v}`; return el; })),
         h('p', {}, `충돌 미처리 ${d.conflicts}건 · 사진 미회수 ${d.photos_missing}장 · 수신 미확인 전송 ${d.unconfirmed_bundles}건`),
-        (d.crews_no_result || []).length ? h('div', { class: 'notice bad' }, h('strong', {}, '결과를 가져오지 않은 팀: '), d.crews_no_result.map((c) => `${c.crew}(${kst(c.sent_at)} 전송)`).join(', '),
+        missing.length ? h('div', { class: 'notice bad' }, h('strong', {}, '결과 미회수 팀 '), missing.map(teamMissing).join(', '),
           afterWork(s.date) ? ' — 수거팀에 [결과 보내기]를 요청하세요. ' : ` — 근무 끝(${workEnd()}) 전이면 아직 수거 중일 수 있습니다. `, canOpen('results') ? h('a', { href: '#/results' }, '결과 가져오기 →') : null) : null,
         d.working ? h('p', { class: 'notice warn small' }, `${s.date}은(는) ${d.working}입니다.`) : null,
         last ? h('p', {}, chip('마감 기록됨', 'ok'), chip(last.status === 'APPROVED' ? `팀장 확인 (${last.approved_by})` : '팀장 확인 전', last.status === 'APPROVED' ? 'ok' : 'warn'),
           ` ${last.seq}회차 · ${kst(last.closed_at)} · ${last.closed_by || '-'} ${last.note || ''}`) : null),
+      h('section', { class: 'card', 'aria-label': '팀별 결과 회수' }, h('h2', {}, '팀별 결과 회수'),
+        teams.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'grid' },
+          h('thead', {}, h('tr', {}, ...['수거팀', '목록 수신·현장 결과', '접수 건수·반영 시각'].map((label) => h('th', { scope: 'col' }, label)))),
+          h('tbody', {}, ...teams.map((r) => h('tr', {}, h('th', { scope: 'row' }, r.crew, h('div', { class: 'muted small' }, `갱신본 ${r.assign_ver}`)),
+            h('td', {}, h('div', { class: 'row' }, ...recoveryTags(r))), h('td', {}, recoveryCounts(r)))))))
+          : h('p', { class: 'empty' }, chip('배정 전', 'neutral'), ' 확정된 배정이 없습니다.'),
+        teams.length ? h('p', { class: 'muted small' }, '현장 반영은 해당 날짜·팀·갱신본에서 확인된 최종 방문 결과를 셉니다.') : null),
       // 마감 이월 대상: 마감 기록 때 예정일을 다음 업무일로 옮긴다
       h('div', { class: 'card' }, h('h2', {}, `마감 이월 대상 ${d.carry.length}건`),
         d.carry.length ? sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['접수', '동', '상태', '까닭', '옮길 날'].map((t) => h('th', {}, t)))),
@@ -55,13 +66,11 @@ async function screenClose() {
         h('tbody', {}, ...d.closes.map((c) => h('tr', {}, h('td', {}, `${c.seq}회차`), cell(kst(c.closed_at), c.closed_at, 'nowrap'), h('td', {}, c.closed_by || '-'), h('td', {}, `${c.carried}건`), h('td', {}, c.note || ''),
           h('td', {}, c.status === 'APPROVED' ? `${c.approved_by} · ${kst(c.approved_at)}${c.approve_note ? ' · ' + c.approve_note : ''}` : chip('확인 전', 'warn')))))), { key: 'close-log', cols: ['num', 'date', 'text', 'num', 'text', null] })) : null,
       h('div', { class: 'card row' }, ['ADMIN', 'INTAKE'].includes(role) ? [note, btn(last ? '마감 다시 기록' : '마감 기록', wrap(async () => {
-        // 목록을 보냈는데 결과 파일을 가져오지 않은 팀: 마감을 막지는 않지만 확인창에 먼저 보여 준다
-        const nr = d.crews_no_result || [];
-        const warnBox = nr.length ? h('div', { class: 'notice bad close-warn' }, h('strong', {}, `결과를 가져오지 않은 팀 ${nr.length}곳`),
-          h('ul', {}, ...nr.map((c) => h('li', {}, `${c.crew}: ${kst(c.sent_at)}에 목록을 보냈는데 그 뒤 결과 파일이 없습니다.`))),
-          h('p', { class: 'small' }, '수거팀에 [결과 보내기]를 요청해 가져온 뒤 마감하는 것이 좋습니다. 그대로 마감하면 그 팀 접수는 이월됩니다.')) : null;
+        const warnBox = missing.length ? h('div', { class: 'notice bad close-warn' }, h('strong', {}, `결과 미회수 팀 ${missing.length}곳`),
+          h('ul', {}, ...missing.map((c) => h('li', {}, teamMissing(c)))),
+          h('p', { class: 'small' }, '수거팀에 결과를 요청하거나 마감을 계속 기록할 수 있습니다. 이월은 위 마감 이월 대상에 적용됩니다.')) : null;
         if (!(await confirmDlg(last ? '마감 다시 기록' : '마감 기록', `${s.date} 마감을 기록합니다.` + (d.carry.length ? ` 미처리 ${d.carry.length}건의 예정일이 다음 업무일로 옮겨집니다.` : '') + ' 기록은 회차로 쌓이며 팀장 확인을 받아야 합니다.',
-          { ok: nr.length ? '그래도 마감 기록' : '마감 기록', more: warnBox ? [warnBox] : [] }))) return;
+          { ok: missing.length ? '그래도 마감 기록' : '마감 기록', more: warnBox ? [warnBox] : [] }))) return;
         const r = await postOnce(`close:${s.date}`, 'close', { date: s.date, note: note.value, close_secs: closeT0[s.date] ? Math.round((Date.now() - closeT0[s.date]) / 1000) : null }); delete closeT0[s.date];
         toast(`마감을 기록했습니다 (${r.seq}회차${r.carried.length ? ` · 이월 ${r.carried.length}건` : ''})`); (r.warnings || []).forEach((w) => toast(w, true)); load(true); refreshBadges(true);
       }), 'primary')] : null,

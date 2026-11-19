@@ -7,6 +7,7 @@ import { itemPicker, mapIn } from '../widgets.js';
 import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
 import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
+import { followupCard } from './followups.js';
 
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
@@ -401,7 +402,22 @@ async function screenRequest(id) {
   const lower = h('div', { class: 'req-lower' });
   const versionsCard = (rr) => (rr.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...rr.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${kst(v.at)} · ${v.reason}`)))) : null);
   const ctx = { ver: () => baseVer, stale: () => showStale(), after: () => afterAction() };
-  const lowerCards = (rr) => (isNew ? [] : [fieldCard(rr), paymentCard(rr, ctx), reductionCard(rr, ctx), contactCard(rr, ctx), versionsCard(rr)]);
+  const lowerCards = (rr) => (isNew ? [] : [
+    boot.me.role !== 'FIELD' ? followupCard(id, { afterRevisit: (saved, previousVersion) => {
+      if (baseVer !== previousVersion) { showStale(); return; }
+      const { date, start, end } = saved.appointment, baseline = JSON.parse(baseSnap);
+      const schedule = { planned_date: date, appt_start: start, appt_end: end };
+      for (const [key, value] of Object.entries(schedule)) {
+        if (F[key].value === baseline[key]) F[key].value = value || '';
+        baseline[key] = value || '';
+      }
+      baseSnap = JSON.stringify(baseline);
+      baseVer = saved.req_ver;
+      Object.assign(rr, schedule, { req_ver: saved.req_ver, status: saved.request_status });
+      syncFieldReview();
+    } }) : null,
+    fieldCard(rr), paymentCard(rr, ctx), reductionCard(rr, ctx), contactCard(rr, ctx), versionsCard(rr),
+  ]);
   // 아래 카드의 작업(수납·감면·통화·유사 품목·확인 완료)이 끝난 뒤: 수정 중이면 아래 카드만 새로, 아니면 화면 전체를 새로
   const afterAction = async () => {
     if (!dirty()) return render();

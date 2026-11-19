@@ -70,9 +70,11 @@ class DepotAPITests(SessionHTTPTestCase):
         status, assigned, _ = self.post('assign', {'date': self.day, 'plan': {self.a: [{'request_id': self.ra}]}}, self.admin_cookie)
         self.assertEqual(status, 200, assigned)
         before = self.con.execute('SELECT * FROM assignment_batch ORDER BY id').fetchall()
-        status, value, _ = self.post('assign/edit', {'date': self.day, 'op': 'move', 'request_id': self.ra,
-            'to_crew_id': self.b, 'assign_ver': {self.a: 1}, 'reason': '가상 팀 이동'}, self.admin_cookie)
-        self.assertIn(status, (400, 409), value)
+        status, value, _ = self.post('route', {'date': self.day, 'assignment_change': {
+            'op': 'move', 'request_id': self.ra, 'to_crew_id': self.b, 'assign_ver': {self.a: 1, self.b: 0},
+            'expected_order': {self.a: [self.ra], self.b: []}}}, self.admin_cookie)
+        self.assertEqual(status, 400, value)
+        self.assertIn('고정 담당 수거팀', value['error'])
         self.assertEqual(self.con.execute('SELECT * FROM assignment_batch ORDER BY id').fetchall(), before)
 
     def test_changed_depot_invalidates_global_calculation_confirmation(self):

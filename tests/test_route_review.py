@@ -54,6 +54,15 @@ class RouteReviewTests(unittest.TestCase):
         self.assertEqual([s['request_id'] for s in route['stops']], ['r2', 'r1'])
         self.assertEqual(route['unloads'], 1)
 
+    def test_single_fixed_route_finds_needed_unload_in_input_order(self):
+        for row in self.requests:
+            row['items'] = [{'name': '가상 물건', 'fee_rate_id': 'fixture', 'qty': 1}]
+        result = routing.plan(self.requests[:2], self.crews[:1], self.depot, fixed_plan={'a': ['r1', 'r2']},
+                              volume_overrides={'fixture': .7}, unload_site=self.depot, unload_min=5, max_unloads=1,
+                              time_limit_s=1, travel_method='ESTIMATE')
+        self.assertEqual([s['request_id'] for s in result['routes'][0]['stops']], ['r1', 'r2'])
+        self.assertEqual(result['routes'][0]['unloads'], 1)
+
     def test_time_windows_cannot_reverse_or_drop_selected_stops(self):
         self.requests[0].update(appt_start='09:00', appt_end='09:10')
         self.requests[1].update(appt_start='10:00', appt_end='10:10')

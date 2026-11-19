@@ -56,14 +56,110 @@ def _post_close_edits(con, work_date: str) -> list[dict]:
     return out
 
 
+def _recovery_visits(con, batch_ids):
+    """전송 이력으로 확인되는 최종 결과와 PC 직접 수거를 접수·회차에 연결한다."""
+    return rows(con, """WITH visits AS (
+        SELECT s.request_id, b.id AS batch_id, b.crew_id, b.work_date, b.created_at,
+            r.planned_date, r.receipt_no, r.name, a.batch_id AS active_batch_id
+        FROM assignment_batch b JOIN assignment_stop s ON s.batch_id=b.id
+        JOIN request r ON r.id=s.request_id LEFT JOIN active_assignment a ON a.request_id=r.id
+        WHERE b.id IN (SELECT value FROM json_each(?)) AND r.status<>'CANCELLED'
+    ), attempts AS (
+        SELECT e.event_id,e.request_id,e.assign_ver,e.device_id,e.base_req_ver,
+            i.imported_at,COALESCE(e.resolved_at,i.imported_at) AS applied_at,
+            CASE WHEN julianday(e.device_ts)<=julianday(i.imported_at,'+10 minutes')
+                AND e.device_ts>='2020' THEN julianday(e.device_ts) END AS device_at,
+            log.id AS import_audit_id,json_extract(log.detail,'$.work_date') AS file_date
+        FROM result_event e JOIN result_import i ON i.id=e.import_id
+        LEFT JOIN audit_log log ON log.entity='import' AND log.entity_id=i.id AND log.action='RESULT'
+        WHERE e.request_id IN (SELECT request_id FROM visits)
+            AND e.kind='ATTEMPT' AND e.apply_status='APPLIED' AND e.assign_ver>0
+            AND e.device_id=i.device_id
+            AND json_extract(e.body_json,'$.outcome') IN ('DONE','PARTIAL','NOT_COLLECTED','ON_HOLD')
+    ), origins AS (
+        SELECT e.event_id,e.request_id,e.applied_at,e.file_date,e.device_at,b.id AS batch_id,b.work_date,
+            COUNT(*) OVER (PARTITION BY e.event_id) AS candidates
+        FROM attempts e JOIN assignment_stop s ON s.request_id=e.request_id
+        JOIN assignment_batch b ON b.id=s.batch_id AND b.assign_ver=e.assign_ver
+        LEFT JOIN request_version v ON v.request_id=e.request_id AND v.req_ver=e.base_req_ver-1
+        WHERE EXISTS (SELECT 1 FROM transfer_bundle t
+            LEFT JOIN audit_log sent ON sent.entity='bundle' AND sent.entity_id=t.id AND sent.action='DISPLAY'
+            WHERE t.batch_id=b.id
+            AND t.work_date=b.work_date AND t.assign_ver=b.assign_ver AND t.device_id=e.device_id
+            AND t.displayed_at<=e.imported_at AND (v.at IS NULL OR t.displayed_at>=v.at)
+            AND (sent.id IS NULL OR e.import_audit_id IS NULL OR sent.id<e.import_audit_id)
+            AND (e.device_at IS NULL OR julianday(t.displayed_at)<=e.device_at)
+            AND (json_type(sent.detail,'$.stop_versions') IS NULL OR EXISTS (
+                SELECT 1 FROM json_each(sent.detail,'$.stop_versions') AS stop
+                WHERE stop.key=e.request_id AND (e.base_req_ver IS NULL OR stop.value=e.base_req_ver))))
+    ), mobile AS (
+        -- 날짜마다 갱신본 번호가 다시 시작한다. 접수·갱신본·기기만으로 후보가 둘이면 임의로 택하지 않는다.
+        SELECT request_id,batch_id,MAX(CASE WHEN verified THEN applied_at END) AS at,
+            MAX(NOT verified) AS uncertain
+        FROM (SELECT *, candidates=1 AND (CASE WHEN file_date IS NULL THEN device_at IS NOT NULL ELSE file_date=work_date END) AS verified
+            FROM origins)
+        GROUP BY request_id,batch_id
+    ), pc_entry AS (
+        SELECT v.request_id,v.batch_id,MAX(e.at) AS at
+        FROM visits v JOIN audit_log e ON e.entity_id=v.request_id AND e.entity='request' AND e.action='PC_COLLECTION'
+        LEFT JOIN request_version prior ON prior.request_id=v.request_id AND prior.req_ver=json_extract(e.detail,'$.req_ver')-1
+        WHERE json_extract(e.detail,'$.collected_on')=v.work_date AND (
+            json_extract(e.detail,'$.batch_id')=v.batch_id OR (
+                json_type(e.detail,'$.batch_id') IS NULL
+                AND json_extract(prior.snapshot_json,'$.active_crew_id')=v.crew_id
+                AND json_extract(prior.snapshot_json,'$.planned_date')=v.work_date AND v.created_at<=e.at
+                AND (SELECT COUNT(*) FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
+                    WHERE s.request_id=v.request_id AND b.crew_id=v.crew_id AND b.work_date=v.work_date AND b.created_at<=e.at)=1
+            )
+        ) GROUP BY v.request_id,v.batch_id
+    )
+    SELECT v.request_id,v.batch_id,v.receipt_no,v.name,m.at AS mobile_at,p.at AS pc_at,m.uncertain
+    FROM visits v LEFT JOIN mobile m ON m.request_id=v.request_id AND m.batch_id=v.batch_id
+    LEFT JOIN pc_entry p ON p.request_id=v.request_id AND p.batch_id=v.batch_id
+    WHERE m.at IS NOT NULL OR m.uncertain OR p.at IS NOT NULL OR v.active_batch_id=v.batch_id
+        OR (v.active_batch_id IS NULL AND v.planned_date=v.work_date)
+        OR EXISTS (SELECT 1 FROM audit_log e WHERE e.entity='request' AND e.entity_id=v.request_id AND e.action='CARRY'
+            AND e.at>=v.created_at AND json_extract(e.detail,'$.from')=v.work_date)
+    ORDER BY v.receipt_no""", (json.dumps(batch_ids),))
+
+
+def _team_recovery(con, work_date, crew_id=None):
+    batches = rows(con, """SELECT b.id AS batch_id,b.work_date,b.crew_id,c.name AS crew,b.assign_ver,
+        t.displayed_at AS sent_at,t.receipt_confirmed_at
+        FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
+        LEFT JOIN transfer_bundle t ON t.id=(
+            SELECT id FROM transfer_bundle WHERE batch_id=b.id AND device_id=c.device_id
+                AND work_date=b.work_date AND assign_ver=b.assign_ver AND displayed_at IS NOT NULL
+            ORDER BY displayed_at DESC,rowid DESC LIMIT 1
+        ) WHERE b.work_date=? AND b.status='ACTIVE'""" + (" AND b.crew_id=?" if crew_id is not None else "") +
+        " ORDER BY c.name,b.id", (work_date,) if crew_id is None else (work_date, crew_id))
+    grouped = {b["batch_id"]: [] for b in batches}
+    if grouped:
+        for visit in _recovery_visits(con, list(grouped)):
+            grouped[visit["batch_id"]].append(visit)
+    outstanding = []
+    for b in batches:
+        visits = grouped[b["batch_id"]]
+        waiting = [v for v in visits if not v["mobile_at"] and not v["pc_at"]]
+        applied = sum(bool(v["mobile_at"]) for v in visits)
+        pc = sum(bool(v["pc_at"]) and not v["mobile_at"] for v in visits)
+        last = max((at for v in visits for at in (v["mobile_at"], v["pc_at"]) if at), default=None)
+        stage = "EMPTY" if not visits else "COMPLETE" if not waiting else "PARTIAL" if applied or pc else "WAITING"
+        receipt = "UNSENT" if not b["sent_at"] else "CONFIRMED" if b["receipt_confirmed_at"] else "UNCONFIRMED"
+        b.update(total=len(visits), applied=applied, pc=pc, missing=len(waiting),
+                 uncertain=sum(bool(v["uncertain"]) for v in waiting), last_applied_at=last,
+                 stage=stage, receipt_status=receipt)
+        outstanding.extend({"id": v["request_id"], "receipt_no": v["receipt_no"], "name": v["name"]} for v in waiting)
+    return batches, outstanding
+
+
+def _missing_teams(recovery):
+    return [{k: b[k] for k in ("crew_id", "crew", "sent_at", "work_date", "assign_ver", "missing")}
+            for b in recovery if b["sent_at"] and b["missing"]]
+
+
 def crews_without_result(con, work_date: str) -> list[dict]:
-    """그날 목록을 휴대폰에 보냈는데(전송 묶음 있음) 마지막으로 보낸 뒤 그 휴대폰 결과 파일을 하나도 가져오지 않은 팀(마감 때 경고, 막지 않음)."""
-    out = []
-    for b in rows(con, """SELECT t.device_id, MAX(t.displayed_at) AS sent_at, c.id AS crew_id, c.name AS crew FROM transfer_bundle t
-            JOIN assignment_batch b ON b.id=t.batch_id JOIN crew c ON c.id=b.crew_id WHERE t.work_date=? GROUP BY t.device_id, c.id ORDER BY c.name""", (work_date,)):
-        if not one(con, "SELECT 1 AS x FROM result_import WHERE device_id=? AND imported_at > ? LIMIT 1", (b["device_id"], b["sent_at"])):
-            out.append({"crew_id": b["crew_id"], "crew": b["crew"], "sent_at": b["sent_at"], "work_date": work_date})
-    return out
+    return _missing_teams(_team_recovery(con, work_date)[0])
 
 
 def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
@@ -74,9 +170,8 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         mine = crew_request_ids(con, crew_id)
         reqs = [r for r in reqs if r["id"] in mine]
     by_status: dict[str, int] = {}
-    pending_fee, revisit, no_result = [], [], []
-    assigned_ids = {r["request_id"] for r in rows(con, """SELECT s.request_id FROM assignment_stop s JOIN assignment_batch b ON b.id=s.batch_id
-        WHERE b.work_date=? AND b.status='ACTIVE'""", (work_date,))}
+    pending_fee, revisit = [], []
+    result_recovery, no_result = _team_recovery(con, work_date, crew_id)
     pre = prefetch(con, [r["id"] for r in reqs], ("items", "events", "links", "payments", "partial"))
     derived = {}
     for r in reqs:
@@ -87,8 +182,6 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         if r["status"] in ("PARTIAL", "NOT_COLLECTED", "ON_HOLD"):
             revisit.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"], "status": r["status"], "remaining": st["remaining_total"],
                             "next_date": r["planned_date"] if r["planned_date"] != work_date else None, "appt": [r["appt_start"], r["appt_end"]] if r["appt_start"] else None})
-        if r["id"] in assigned_ids and r["status"] == "ASSIGNED":
-            no_result.append({"id": r["id"], "receipt_no": r["receipt_no"], "name": r["name"]})
     # 휴대폰 v0.10 기록 확인: 스티커 없음·불일치, 추가 금액 고지 거부, 미수거인데 사진도 사진 없는 사유도 없음
     sticker_issues, fee_refused, no_evidence = [], [], []
     for r in reqs:
@@ -109,8 +202,6 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     photos = [x for x in rows(con, """SELECT p.photo_id, p.request_id, r.receipt_no FROM photo p JOIN request r ON r.id=p.request_id
         WHERE r.planned_date=? AND p.recovery_status!='RECOVERED'""", (work_date,)) if x["request_id"] in ids]
     conflicts = [c for c in list_conflicts(con) if c["request_id"] in ids]
-    unconfirmed = rows(con, """SELECT t.id, t.work_date, t.assign_ver FROM transfer_bundle t LEFT JOIN assignment_batch b ON b.id=t.batch_id
-        WHERE t.work_date=? AND t.receipt_confirmed_at IS NULL""" + (" AND b.crew_id=?" if scoped else ""), (work_date, crew_id) if scoped else (work_date,))
     unpaid = []
     for r in reqs:
         if r["status"] in ("DONE", "PARTIAL", "NOT_COLLECTED", "ON_HOLD", "CANCELLED"):
@@ -150,10 +241,11 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
     for c in closes:
         c["carried"] = len(json.loads(c.pop("carried_json") or "[]"))
     cap = area.capacity_settings(con)
-    crews_nr = [c for c in crews_without_result(con, work_date) if not scoped or c["crew_id"] == crew_id]
+    crews_nr = _missing_teams(result_recovery)
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
-            "crews_no_result": crews_nr,
-            "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts), "unconfirmed_bundles": len(unconfirmed),
+            "crews_no_result": crews_nr, "result_recovery": result_recovery,
+            "revisit": revisit, "photos_missing": len(photos), "conflicts": len(conflicts),
+            "unconfirmed_bundles": sum(b["receipt_status"] == "UNCONFIRMED" for b in result_recovery),
             "field_intakes": len(field_intakes(con)),
             "payments": unpaid, "unloads": unloads, "sticker_issues": sticker_issues, "fee_refused": fee_refused, "no_evidence": no_evidence,
             "unload_total": {"volume_m3": round(sum(u["volume_m3"] or 0 for u in unloads), 2), "weight_kg": round(sum(u["weight_kg"] or 0 for u in unloads), 1)},
@@ -186,7 +278,7 @@ def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
                                                    json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
         audit(con, "day", work_date, "CLOSE", {"seq": seq, "open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"],
                                                "carried": len(carry), **_secs("close_secs", close_secs)})
-    warns = [f"{c['crew']}: 목록을 보냈는데 결과 파일을 아직 가져오지 않았습니다." for c in s.get("crews_no_result") or []]
+    warns = [f"{c['crew']}: 갱신본 {c['assign_ver']}에 반영되지 않은 결과가 {c['missing']}건 있습니다." for c in s["crews_no_result"]]
     return {**s, "seq": seq, "carried": carry, "warnings": warns}
 
 

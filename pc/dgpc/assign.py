@@ -124,92 +124,120 @@ def current_assignment(con, work_date: str) -> list[dict]:
 ASSIGN_OPS = ("insert", "remove", "reorder", "move")
 
 
-def edit_assignment(con, work_date: str, op: str, data: dict) -> dict:
-    """확정된 배정을 다시 계산하지 않고 고친다: insert(팀 끝·지정 위치에 넣기) · remove(빼기) · reorder(순서 바꾸기) · move(다른 팀으로).
-    고친 팀마다 새 갱신본(assign_ver+1)을 만든다(휴대폰에는 다시 보내야 함). data["assign_ver"]: {팀ID: 화면이 본 갱신본}이 지금과 다르면 StaleError."""
+def prepare_edit(con, work_date: str, op: str, data: dict, *, review=False) -> dict:
+    """현재 확정 배정으로부터 변경할 팀과 남은 방문 순서를 만든다."""
     if not _date_ok(work_date or ""):
         raise UserError("배정 날짜를 골라 주세요.")
     if op not in ASSIGN_OPS:
         raise UserError("배정 수정 종류가 올바르지 않습니다.")
-    reason = str(data.get("reason") or "").strip()[:200]
+    if review and any(key in data and not isinstance(data[key], str) for key in ("request_id", "crew_id", "to_crew_id")):
+        raise UserError("변경할 접수와 수거팀을 확인하세요.")
     crews = {c["id"]: c for c in list_crews(con)}
     rid = data.get("request_id") or ""
-    with tx(con):
-        cur = {b["crew_id"]: b for b in current_assignment(con, work_date)}
-        seen = data.get("assign_ver") or {}
-        if isinstance(seen, dict):
-            for cid, v in seen.items():
-                have = cur.get(cid, {}).get("assign_ver", 0)
-                if str(v) != str(have):
-                    raise StaleError("배정이 다른 곳에서 바뀌었습니다. 다시 열어 확인하세요", crew_id=cid, assign_ver=have)
+    cur = {b["crew_id"]: b for b in current_assignment(con, work_date)}
+    seen = data.get("assign_ver") or {}
+    if isinstance(seen, dict):
+        for cid, v in seen.items():
+            have = cur.get(cid, {}).get("assign_ver", 0)
+            if str(v) != str(have):
+                raise StaleError("배정이 다른 곳에서 바뀌었습니다. 다시 열어 확인하세요", crew_id=cid, assign_ver=have)
 
-        def stops_of(cid):
-            return [{"request_id": x["request_id"], "eta": x["eta"] or "", **({"unload_after": x["unload_after"]} if x.get("unload_after") else {})}
-                    for x in cur.get(cid, {}).get("stops", [])]
+    if review:
+        expected = data.get("expected_order")
+        if not isinstance(seen, dict) or not seen or not isinstance(expected, dict) or set(expected) != set(seen):
+            raise UserError("변경할 팀의 갱신본과 현재 방문 순서를 확인하세요.")
+        for cid, order in expected.items():
+            if order != [s["request_id"] for s in cur.get(cid, {}).get("stops", [])]:
+                raise StaleError("처리된 접수나 방문 순서가 바뀌었습니다. 현재 배정을 다시 불러와 주세요.", crew_id=cid)
 
-        def where(r_):
-            return next((cid for cid, b in cur.items() if any(x["request_id"] == r_ for x in b["stops"])), None)
+    def stops_of(cid):
+        return [{"request_id": x["request_id"], "eta": x["eta"] or "", **({"unload_after": x["unload_after"]} if x.get("unload_after") else {})}
+                for x in cur.get(cid, {}).get("stops", [])]
 
-        def place(lst, item, pos):
-            try:
-                pos = int(pos) if pos not in (None, "") else None
-            except (TypeError, ValueError):
-                raise UserError("넣을 위치는 숫자(1부터)입니다.")
-            if pos is None or pos > len(lst):
-                lst.append(item)
-            else:
-                lst.insert(max(0, pos - 1), item)
+    def where(r_):
+        return next((cid for cid, b in cur.items() if any(x["request_id"] == r_ for x in b["stops"])), None)
 
-        changes: dict[str, list] = {}
-        if op in ("insert", "move"):
-            to = data.get("crew_id") if op == "insert" else data.get("to_crew_id")
-            if to not in crews:
-                raise UserError("넣을 팀을 골라 주세요.")
-            req = one(con, "SELECT status FROM request WHERE id=?", (rid,))
-            if not req:
-                raise UserError("접수를 찾을 수 없습니다.")
-            if req["status"] in ("CANCELLED", "DONE"):
-                raise UserError("취소·완료된 접수는 배정할 수 없습니다.")
-            src = where(rid)
-            if op == "insert":
-                if src:
-                    raise UserError(f"이미 이날 {crews[src]['name']} 배정에 들어 있습니다. [다른 팀으로 옮기기]를 쓰세요.")
-                act = one(con, """SELECT b.work_date, c.name FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id JOIN crew c ON c.id=b.crew_id
-                    WHERE a.request_id=?""", (rid,))
-                if act:
-                    raise UserError(f"이미 다른 배정({act['work_date']} {act['name']})에 들어 있는 접수입니다. 먼저 그 배정에서 빼 주세요.")
-            else:
-                if not src:
-                    raise UserError("이날 배정에 없는 접수입니다.")
-                if src == to:
-                    raise UserError("같은 팀입니다. 순서 바꾸기를 쓰세요.")
-                changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
-            lst = changes.get(to) or stops_of(to)
-            place(lst, {"request_id": rid, "eta": str(data.get("eta") or "")[:5]}, data.get("position"))
-            changes[to] = lst
-        elif op == "remove":
-            src = where(rid)
+    def place(lst, item, pos):
+        try:
+            pos = int(pos) if pos not in (None, "") else None
+        except (TypeError, ValueError):
+            raise UserError("넣을 위치는 숫자(1부터)입니다.")
+        if pos is None or pos > len(lst):
+            lst.append(item)
+        else:
+            lst.insert(max(0, pos - 1), item)
+
+    changes: dict[str, list] = {}
+    if op in ("insert", "move"):
+        to = data.get("crew_id") if op == "insert" else data.get("to_crew_id")
+        if to not in crews:
+            raise UserError("넣을 팀을 골라 주세요.")
+        req = one(con, "SELECT status,planned_date FROM request WHERE id=?", (rid,))
+        if not req:
+            raise UserError("접수를 찾을 수 없습니다.")
+        if req["status"] in ("CANCELLED", "DONE"):
+            raise UserError("취소·완료된 접수는 배정할 수 없습니다.")
+        src = where(rid)
+        if op == "insert":
+            if review and req["planned_date"] != work_date:
+                raise StaleError("접수의 수거 예정일이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.")
+            if src:
+                raise UserError(f"이미 이날 {crews[src]['name']} 배정에 들어 있습니다. [다른 팀으로 옮기기]를 쓰세요.")
+            act = one(con, """SELECT b.work_date, c.name FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id JOIN crew c ON c.id=b.crew_id
+                WHERE a.request_id=?""", (rid,))
+            if act:
+                raise UserError(f"이미 다른 배정({act['work_date']} {act['name']})에 들어 있는 접수입니다. 먼저 그 배정에서 빼 주세요.")
+        else:
             if not src:
                 raise UserError("이날 배정에 없는 접수입니다.")
+            if src == to:
+                raise UserError("같은 팀입니다. 순서 바꾸기를 쓰세요.")
             changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
-        else:  # reorder
-            cid = data.get("crew_id")
-            if cid not in cur:
-                raise UserError("순서를 바꿀 팀의 배정이 없습니다.")
-            order = [x for x in (data.get("order") or []) if isinstance(x, str)]
-            old = stops_of(cid)
-            if sorted(order) != sorted(x["request_id"] for x in old) or len(set(order)) != len(order):
-                raise UserError("순서 목록이 지금 배정과 다릅니다(빠지거나 더해진 접수). 다시 열어 확인하세요.")
-            by = {x["request_id"]: x for x in old}
-            changes[cid] = [by[i] for i in order]
-        out, old_ids = [], []
-        for cid, lst in changes.items():
-            if cid in cur:
-                old_ids.append(cur[cid]["batch_id"])
-            out.append(_write_batch(con, cid, work_date, lst, crews[cid]["name"], {"edit": op, **({"reason": reason} if reason else {}),
-                                                                                   **({"request": rid} if rid else {})}, action="EDIT"))
+        lst = changes.get(to) or stops_of(to)
+        place(lst, {"request_id": rid, "eta": str(data.get("eta") or "")[:5]}, data.get("position"))
+        changes[to] = lst
+    elif op == "remove":
+        src = where(rid)
+        if not src:
+            raise UserError("이날 배정에 없는 접수입니다.")
+        changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
+    else:  # reorder
+        cid = data.get("crew_id")
+        if cid not in cur:
+            raise UserError("순서를 바꿀 팀의 배정이 없습니다.")
+        order = [x for x in (data.get("order") or []) if isinstance(x, str)]
+        old = stops_of(cid)
+        if sorted(order) != sorted(x["request_id"] for x in old) or len(set(order)) != len(order):
+            raise UserError("순서 목록이 지금 배정과 다릅니다(빠지거나 더해진 접수). 다시 열어 확인하세요.")
+        by = {x["request_id"]: x for x in old}
+        if review and order == [x["request_id"] for x in old]:
+            raise UserError("방문 순서에 변경이 없습니다.")
+        changes[cid] = [by[i] for i in order]
+    if review and (set(seen) != set(changes) or any(not crews[cid]["active"] for cid in changes)):
+        raise StaleError("변경 대상 팀이 달라졌습니다. 현재 배정을 다시 불러와 주세요.")
+    return {"current": cur, "changes": changes, "crews": crews}
+
+
+def apply_edit(con, work_date, op, data, prepared, plan, *, reviewed=None):
+    """검토 또는 기존 부분 수정의 변경 팀만 새 갱신본으로 기록한다."""
+    cur, crews = prepared["current"], prepared["crews"]
+    reason = str(data.get("reason") or "").strip()[:200]
+    rid = data.get("request_id")
+    old_ids = [cur[cid]["batch_id"] for cid in plan if cid in cur]
+    detail = {"edit": op, **({"reason": reason} if reason else {}), **({"request": rid} if rid else {})}
+    if reviewed:
+        detail.update(reviewed=True, matrix_source=reviewed["matrix_source"])
+    with tx(con):
+        out = [_write_batch(con, cid, work_date, stops, crews[cid]["name"], detail, action="EDIT") for cid, stops in plan.items()]
         _release_dropped(con, old_ids)
     return {"batches": out, "resend_needed": [b["crew_id"] for b in out]}
+
+
+def edit_assignment(con, work_date: str, op: str, data: dict) -> dict:
+    """기존 즉시 부분 수정 호출을 처리한다."""
+    with tx(con):
+        prepared = prepare_edit(con, work_date, op, data)
+        return apply_edit(con, work_date, op, data, prepared, prepared["changes"])
 
 
 def list_batches(con, work_date: str) -> list[dict]:
@@ -320,8 +348,10 @@ def release_info(con, device_id: str) -> dict:
 
 def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, device_id: str | None = None,
                 chunk: int = 700) -> dict:
+    stop_versions = {}
     if batch_id:
         payload, b = build_daylist(con, batch_id)
+        stop_versions = {s["request_id"]: s["req_ver"] for s in payload["stops"]}
         device_id = b["device_id"]
         if not device_id:
             raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정에서 기기를 연결하세요.")
@@ -345,7 +375,8 @@ def make_bundle(con, batch_id: str | None = None, payload: dict | None = None, d
                     (bid, device_id, batch_id, payload["work_date"], payload["assign_ver"], len(frames),
                      hashlib.sha256(env).hexdigest(), code, json.dumps(frames), now(),
                      (rel or {}).get("seq"), json.dumps(rel) if rel else None))
-        audit(con, "bundle", bid, "DISPLAY", {"batch": batch_id, "frames": len(frames)})
+        audit(con, "bundle", bid, "DISPLAY", {"batch": batch_id, "frames": len(frames),
+                                             **({"stop_versions": stop_versions} if batch_id else {})})
     return {"bundle_id": bid, "frames": frames, "bytes": len(env), "count": len(payload.get("s") or payload.get("stops") or []),
             "work_date": payload["work_date"], "assign_ver": payload["assign_ver"]}
 

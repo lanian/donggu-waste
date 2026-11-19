@@ -58,6 +58,8 @@ def _save(con, req, data):
     day = data.get('collected_on')
     if not isinstance(day, str) or not C._date_ok(day) or day < '2020-01-01' or day > C.today_kst():
         raise C.UserError('실제 수거일은 오늘까지의 올바른 날짜로 입력해 주세요.')
+    batch = C.one(con, """SELECT b.id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
+        WHERE a.request_id=? AND b.work_date=?""", (rid, day))
     items = data.get('items')
     if not isinstance(items, list) or len(items) != len(current['lines']) or not items:
         raise C.UserError('모든 품목의 이번 수거 개수를 확인해 주세요.')
@@ -111,5 +113,6 @@ def _save(con, req, data):
     response = {'id': rid, 'req_ver': version, 'status': outcome, 'collected_on': day, 'added': sum(values.values()), 'total': total,
                 'labels_assigned': counts['new_assigned'], 'labels_pending': counts['pending']}
     con.execute('UPDATE result_import SET summary_json=? WHERE id=?', (json.dumps({'source': 'PC', 'applied': sequence - first_sequence, **response}), imp))
-    C.audit(con, 'request', rid, 'PC_COLLECTION', {**response, 'reason': reason.strip(), **C._after_close(con, rid)})
+    C.audit(con, 'request', rid, 'PC_COLLECTION', {**response, 'batch_id': batch['id'] if batch else None,
+                                                  'reason': reason.strip(), **C._after_close(con, rid)})
     return response

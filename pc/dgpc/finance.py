@@ -191,6 +191,19 @@ def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "metho
 
 
 # ------------------------------------------------------------------ 대사 (세외수입 납부 자료 CSV: 부과번호·금액·납부일)
+RECON_EXCEPTION_KINDS = frozenset(('AMOUNT_DIFF', 'UNMATCHED', 'CANCELLED', 'AMOUNT_PENDING', 'DUPLICATE', 'BAD'))
+RECON_REVIEW_STATUS = {'OPEN': '미해결', 'IN_REVIEW': '검토 중', 'RESOLVED': '해결 완료'}
+RECON_REVIEW_BASIS = {
+    'LEVY_CHECKED': '부과·고지 자료 대조',
+    'LEDGER_CHECKED': '수납 원장 대조',
+    'CANCELLATION_CHECKED': '접수 취소 기록 확인',
+    'REFUND_CHECKED': '환불 결재 이력 확인',
+    'CORRECTION_CHECKED': '정정 자료 확인',
+    'DUPLICATE_CHECKED': '중복 자료 확인',
+    'PAYMENT_RECHECK': '납부 자료 재확인 필요',
+}
+
+
 def recon_template() -> bytes:
     buf = io.StringIO()
     w = C.safe_csv_writer(buf)
@@ -209,10 +222,16 @@ def _recon_method(method: str) -> str:
 
 def parse_recon(con, raw: bytes) -> dict:
     text = geo.decode(raw)
-    rd = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
+    reader = csv.reader(io.StringIO(text))
+    rd = []
+    line = 1
+    for row in reader:
+        if any(c.strip() for c in row):
+            rd.append((line, row))
+        line = reader.line_num + 1
     if not rd:
         raise C.UserError("빈 파일입니다.")
-    head = [c.strip().replace(" ", "") for c in rd[0]]
+    head = [c.strip().replace(" ", "") for c in rd[0][1]]
     def col(*names):
         return next((head.index(n) for n in names if n in head), None)
     ci = {"levy": col("부과번호", "고지번호"), "amount": col("금액", "납부금액", "수납금액"), "date": col("납부일", "수납일", "납부일자"),
@@ -223,7 +242,7 @@ def parse_recon(con, raw: bytes) -> dict:
         raise C.UserError("한 번에 5,000행까지 넣을 수 있습니다.")
     get = lambda r, k: (r[ci[k]].strip() if ci[k] is not None and ci[k] < len(r) else "")
     out, seen = [], {}
-    for n, r in enumerate(rd[1:], start=2):
+    for n, r in rd[1:]:
         levy, ref, method = get(r, "levy"), get(r, "ref")[:40], get(r, "method")[:20]
         date = get(r, "date").replace(".", "-").replace("/", "-")
         if re.fullmatch(r"\d{8}", date):
@@ -233,7 +252,7 @@ def parse_recon(con, raw: bytes) -> dict:
         except ValueError:
             amount = None
         row = {"line": n, "levy_no": levy, "amount": amount, "paid_on": date, "ref": ref, "method": method}
-        if not levy or amount is None or amount <= 0 or not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
+        if not levy or amount is None or not 0 < amount < 2**63 or not C._date_ok(date):
             row.update(status="BAD", note="부과번호·금액·납부일 형식 확인")
             out.append(row); continue
         q = C.one(con, "SELECT * FROM request WHERE levy_no=?", (levy,))
@@ -265,21 +284,51 @@ def parse_recon(con, raw: bytes) -> dict:
     counts: dict[str, int] = {}
     for x in out:
         counts[x["status"]] = counts.get(x["status"], 0) + 1
-    return {"rows": out, "counts": counts, "total": len(out)}
+    return {"rows": out, "counts": counts, "total": len(out),
+            "exception_count": sum(counts.get(kind, 0) for kind in RECON_EXCEPTION_KINDS)}
 
 
-def import_recon(con, raw: bytes, preview: bool = True) -> dict:
-    """미리보기(일치·불일치 목록) → 확인 뒤 일치 행만 납부(출처 '대사')로 기록. 같은 파일은 한 번만."""
-    res = parse_recon(con, raw)
+def _record_recon_exception(con, iid, row):
+    # 확인된 형식의 정산 필드만 남긴다. 원본 셀·영수번호·납부방법·설명은 미리보기 자료다.
+    levy = row['levy_no']
+    amount = row['amount']
+    date = row['paid_on']
+    con.execute("""INSERT INTO recon_exception (id, import_id, file_line, kind, levy_no, amount, paid_on, request_id, levied, paid)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), iid, row['line'], row['status'],
+                 levy if re.fullmatch(r'[0-9]{4}-[0-9A-Za-z]{1,4}-[0-9]{5,19}', levy) else None,
+                 amount if amount is not None and 0 < amount < 2**63 else None,
+                 date if C._date_ok(date) else None, row.get('request_id'), row.get('levied'), row.get('paid')))
+
+
+def _recon_preview_token(sha: str, result: dict) -> str:
+    plan = json.dumps(result['rows'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256((sha + plan).encode('utf-8')).hexdigest()
+
+
+def import_recon(con, raw: bytes, preview: bool = True, *, preview_token: str = '') -> dict:
+    """확정할 때 파일·일치 납부·불일치 검토 건을 한 트랜잭션에 기록한다."""
     sha = hashlib.sha256(raw).hexdigest()
-    prev = C.one(con, "SELECT at, matched FROM recon_import WHERE sha256=?", (sha,))
-    res["already_imported"] = prev
+    prior = "SELECT id, at, matched, exception_count FROM recon_import WHERE sha256=?"
     if preview:
-        return res
-    if prev:
-        raise C.UserError(f"이미 반영한 파일입니다({C._kst_date(prev['at'])}, {prev['matched']}건).")
-    matched = [x for x in res["rows"] if x["status"] == "MATCH"]
+        res = parse_recon(con, raw)
+        return {**res, "already_imported": C.one(con, prior, (sha,)), "preview_token": _recon_preview_token(sha, res)}
     with C.tx(con):
+        prev = C.one(con, prior, (sha,))
+        if prev:
+            raise C.UserError(f"이미 반영한 파일입니다({C._kst_date(prev['at'])}, {prev['matched']}건).")
+        res = parse_recon(con, raw)
+        if preview_token and preview_token != _recon_preview_token(sha, res):
+            raise C.StaleError('미리보기 이후 대사 판정이 바뀌었습니다. 미리보기를 다시 실행해 주세요.')
+        matched = [x for x in res["rows"] if x["status"] == "MATCH"]
+        iid = str(uuid.uuid4())
+        con.execute("""INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json, exception_count)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (iid, sha, C.now(), C.ACTOR.get(), res["total"], len(matched),
+                     json.dumps(res["counts"], ensure_ascii=False), res["exception_count"]))
+        for row in res["rows"]:
+            if row["status"] in RECON_EXCEPTION_KINDS:
+                _record_recon_exception(con, iid, row)
         for x in matched:
             pid = str(uuid.uuid4())
             method = _recon_method(x["method"])
@@ -288,18 +337,74 @@ def import_recon(con, raw: bytes, preview: bool = True) -> dict:
                 VALUES (?,?,?,?,?,?,?,?,?,'대사')""", (pid, x["request_id"], "PAY", x["amount"], method, x["paid_on"], note, C.now(), x["ref"] or None))
             C.audit(con, "payment", pid, "PAY", {"request": x["request_id"], "amount": x["amount"], "method": method, "source": "대사",
                                                  **C._after_close(con, x["request_id"])})
-        iid = str(uuid.uuid4())
-        con.execute("INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json) VALUES (?,?,?,?,?,?,?)",
-                    (iid, sha, C.now(), C.ACTOR.get(), res["total"], len(matched), json.dumps(res["counts"], ensure_ascii=False)))
         C.audit(con, "revenue", iid, "RECON", {"rows": res["total"], "matched": len(matched), **res["counts"]})
-    return {**res, "recorded": len(matched)}
+    return {**res, "recorded": len(matched), "import_id": iid, "already_imported": None}
 
 
 def recon_history(con) -> list[dict]:
-    out = C.rows(con, "SELECT at, actor, rows, matched, summary_json FROM recon_import ORDER BY at DESC LIMIT 50")
+    out = C.rows(con, "SELECT id, at, actor, rows, matched, summary_json, exception_count FROM recon_import ORDER BY at DESC, rowid DESC LIMIT 50")
     for r in out:
         r["counts"] = json.loads(r.pop("summary_json"))
     return out
+
+
+_RECON_EXCEPTION_SELECT = """SELECT e.id, e.import_id, e.file_line, e.kind, e.levy_no, e.amount, e.paid_on,
+    e.request_id, e.levied, e.paid, e.status, e.basis, e.version, i.at AS import_at, q.receipt_no FROM recon_exception e
+    JOIN recon_import i ON i.id=e.import_id LEFT JOIN request q ON q.id=e.request_id"""
+_RECON_PAGE_SIZE = 50
+
+
+def recon_exceptions(con, import_id: str = '', status: str = 'pending', page: str = '1') -> dict:
+    if status not in ('pending', 'all', *RECON_REVIEW_STATUS) or not re.fullmatch(r'[1-9][0-9]{0,7}', page):
+        raise C.UserError('조회할 상태와 쪽 번호를 확인해 주세요.')
+    clauses, args = [], []
+    if import_id:
+        clauses.append('e.import_id=?')
+        args.append(import_id)
+    if status == 'pending':
+        clauses.append("e.status IN ('OPEN','IN_REVIEW')")
+    elif status != 'all':
+        clauses.append('e.status=?')
+        args.append(status)
+    where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
+    total = C.one(con, 'SELECT COUNT(*) AS n FROM recon_exception e' + where, args)['n']
+    pages = max(1, (total + _RECON_PAGE_SIZE - 1) // _RECON_PAGE_SIZE)
+    current = min(int(page), pages)
+    rows = C.rows(con, _RECON_EXCEPTION_SELECT + where + ' ORDER BY i.at DESC, i.rowid DESC, e.file_line LIMIT ? OFFSET ?',
+                  (*args, _RECON_PAGE_SIZE, (current - 1) * _RECON_PAGE_SIZE))
+    return {'rows': rows, 'total': total, 'page': current, 'pages': pages, 'statuses': RECON_REVIEW_STATUS}
+
+
+def recon_exception(con, case_id: str) -> dict:
+    case = C.one(con, _RECON_EXCEPTION_SELECT + ' WHERE e.id=?', (case_id,))
+    if not case:
+        raise C.UserError('대사 불일치 건을 찾을 수 없습니다.')
+    history = C.rows(con, """SELECT at, actor, detail FROM audit_log
+        WHERE entity='recon_exception' AND entity_id=? AND action='REVIEW' ORDER BY id DESC""", (case_id,))
+    for event in history:
+        event.update(json.loads(event.pop('detail')))
+    return {'case': case, 'history': history, 'statuses': RECON_REVIEW_STATUS, 'bases': RECON_REVIEW_BASIS}
+
+
+def review_recon_exception(con, case_id: str, data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise C.UserError('처리 상태와 근거를 골라 주세요.')
+    status, basis, version = data.get('status'), data.get('basis'), data.get('version')
+    if (not isinstance(status, str) or status not in RECON_REVIEW_STATUS
+            or not isinstance(basis, str) or basis not in RECON_REVIEW_BASIS or type(version) is not int or version < 1):
+        raise C.UserError('처리 상태와 근거를 골라 주세요.')
+    with C.tx(con):
+        case = C.one(con, 'SELECT status, basis, version FROM recon_exception WHERE id=?', (case_id,))
+        if not case:
+            raise C.UserError('대사 불일치 건을 찾을 수 없습니다.')
+        same = case['status'] == status and case['basis'] == basis
+        if same and version in (case['version'], case['version'] - 1):
+            return {'version': case['version']}
+        if version != case['version']:
+            raise C.StaleError('불일치 건의 처리 상태가 바뀌었습니다. 다시 열어 확인해 주세요.')
+        con.execute('UPDATE recon_exception SET status=?, basis=?, version=version+1 WHERE id=?', (status, basis, case_id))
+        C.audit(con, 'recon_exception', case_id, 'REVIEW', {'from': case['status'], 'to': status, 'basis': basis})
+        return {'version': version + 1}
 
 
 # ------------------------------------------------------------------ 환불

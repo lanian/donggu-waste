@@ -189,7 +189,7 @@ async function startPc() {
           // 첫 비밀번호 변경으로 다른 화면을 보여 줄 때는 원래 날짜·조건을 그 화면 진입까지 남긴다.
           if (r0 === cur || !core.boot.me.must_change) history.replaceState(null, '', pathPart);
         }
-        const content = await screen(...(cur === route && ['request', 'settings', 'dongs'].includes(cur) ? [arg] : []));
+        const content = await screen(...(cur === route && ['request', 'settings', 'dongs', 'send'].includes(cur) ? [arg] : []));
         const active = cur === 'request' ? 'requests' : cur;
         // 메뉴 묶음 (행정 업무 시스템처럼 업무 단위로 묶는다). 묶음 이름은 제목(heading)이 아니라 글자로만 둔다.
         const GROUPS = [['업무 현황', ['home', 'dongs']], ['접수 업무', ['requests', 'calculator', 'labels']], ['배차·수거', ['dispatch', 'send', 'results']], ['정산·마감', ['close', 'revenue', 'refunds', 'stats', 'reports', 'pilot']], ['관리', ['fees', 'qrtest', 'settings', 'users', 'access']]];
