@@ -78,10 +78,12 @@ class DepotMigrationTests(DepotCase):
             os.environ['DG_STATE'] = self.env_old_state
         super().tearDown()
 
-    def test_v10_migrates_without_replacing_any_existing_dong_fields(self):
+    def test_v10_to_v11_preserves_all_existing_dong_fields(self):
         self.old()
-        self.con = store.connect()
-        self.assertGreaterEqual(store.LATEST, 11)
+        # 차고지 열 추가 단계만 검증한다. 이후 기본 담당팀 보충 단계는 별도 회귀에서 다룬다.
+        with patch.object(store, 'LATEST', 11), patch.object(store, 'MIGRATIONS', [m for m in store.MIGRATIONS if m[0] <= 11]):
+            self.con = store.connect()
+        self.assertEqual(self.con.execute('PRAGMA user_version').fetchone()[0], 11)
         self.assertEqual([row[:-1] for row in self.con.execute('SELECT * FROM dong ORDER BY id')], self.before)
         self.assertTrue(all(row[-1] is None for row in self.con.execute('SELECT * FROM dong')))
 

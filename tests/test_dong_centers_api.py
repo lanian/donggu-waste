@@ -2,6 +2,7 @@
 import unittest
 from test_pc_session_revocation import SessionHTTPTestCase
 from dgpc import area as A, core as C, service as S
+from dgpc.dong_defaults import DONGGU_DONGS
 
 
 class CenterDepotAPITests(SessionHTTPTestCase):
@@ -17,7 +18,7 @@ class CenterDepotAPITests(SessionHTTPTestCase):
         self.assertIsNone(A.get_dong(self.con, '충장동')['depot'])
         status, result, _ = self.post('dongs/centers', {}, self.admin_cookie)
         self.assertEqual(status, 200, result)
-        self.assertEqual(result['applied'], 1)
+        self.assertEqual(result['applied'], len(DONGGU_DONGS))
         self.assertEqual(self.post('dongs/centers', {}, self.admin_cookie)[1]['applied'], 0)
 
     def test_center_is_used_for_route_start_and_return_without_changing_team(self):

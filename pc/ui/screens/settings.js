@@ -247,7 +247,7 @@ function dongCard() {
     } finally { notifyCenterViews(); }
   }, msg), 'small primary');
   card = h('div', { class: 'card' }, h('h2', {}, '행정동 관리'),
-    h('p', { class: 'muted' }, '동구 기본 행정동은 자동 등록됩니다. 동별 담당 팀·차고지·수거 요일·한도를 확인하세요. 차고지를 지정하면 해당 팀으로 고정 배정하며, 미지정 동은 공통 차고지를 사용합니다.'),
+    h('p', { class: 'muted' }, '동구 기본 행정동은 동마다 수거팀 1개가 연결되어 자동 등록됩니다. 기존 담당팀은 유지하며, 첫 업데이트에는 담당팀이 없는 사용 중 기본 동만 보충합니다. 동별 담당 팀·차고지·수거 요일·한도를 확인하세요. 차고지를 지정하면 해당 팀으로 고정 배정하며, 미지정 동은 공통 차고지를 사용합니다.'),
     h('div', { class: 'notice info' }, h('strong', {}, '동마다 담당팀 1개 · 행정복지센터 차고지'),
       h('p', { class: 'small' }, '공식 센터 13곳의 위치를 제공합니다. 저장된 담당팀이 있는 동의 비어 있는 차고지만 채웁니다. 기존 차고지와 담당팀은 유지하며, 팀 미연결·중복 연결·사용 중지 동은 미적용 내역에서 확인하세요.'), centerBulk, centerStatus), centerFeedback,
     h('div', { class: 'row' }, orderSave, orderReset), orderHint, orderMsg,

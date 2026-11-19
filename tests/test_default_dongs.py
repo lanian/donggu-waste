@@ -29,9 +29,11 @@ class DefaultDongsTest(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         self.assertTrue(store.ENCRYPTED, "이 회귀는 실제 SQLCipher가 필요함")
 
-    def connect(self, *, legacy=False, **kwargs):
+    def connect(self, *, legacy=False, version=None, **kwargs):
         if legacy:
-            with patch.object(store, "LATEST", 8), patch.object(store, "MIGRATIONS", [m for m in store.MIGRATIONS if m[0] <= 8]):
+            version = 8
+        if version is not None:
+            with patch.object(store, "LATEST", version), patch.object(store, "MIGRATIONS", [m for m in store.MIGRATIONS if m[0] <= version]):
                 con = store.connect(**kwargs)
         else:
             con = store.connect(**kwargs)
@@ -42,15 +44,23 @@ class DefaultDongsTest(unittest.TestCase):
     def snapshot(con, table):
         return con.execute("SELECT * FROM " + table + " ORDER BY rowid").fetchall()
 
-    def test_new_database_contains_all_official_dongs_with_unassigned_operating_settings(self):
+    def test_new_database_contains_one_dedicated_crew_per_default_dong(self):
         con = self.connect(create=True)
         dongs = area.list_dongs(con)
         self.assertEqual(tuple(d["name"] for d in dongs), EXPECTED)
         self.assertEqual(len({d["id"] for d in dongs}), 13)
+        crews = {c["id"]: c for c in S.list_crews(con)}
+        self.assertEqual(len(crews), 13)
+        self.assertEqual({d["crew_id"] for d in dongs}, set(crews))
         self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], store.LATEST)
         for dong in dongs:
             self.assertTrue(dong["active"])
-            for key in ("crew_id", "daily_limit", "daily_limit_m3", "code"):
+            crew = crews[dong["crew_id"]]
+            self.assertEqual(crew["name"], dong["name"] + " 수거팀")
+            self.assertTrue(crew["active"])
+            self.assertIsNone(crew["device_id"])
+            self.assertEqual((crew["capacity_m3"], crew["capacity_kg"], crew["shift_start"], crew["shift_end"]), (8, 0, "09:00", "17:00"))
+            for key in ("daily_limit", "daily_limit_m3", "code", "depot"):
                 self.assertIsNone(dong[key], key)
             self.assertEqual(dong["weekdays"], [])
             self.assertEqual(dong["keywords"], [])
@@ -68,7 +78,8 @@ class DefaultDongsTest(unittest.TestCase):
         S.create_request(con, {"name": "가상 보존 주민", "phone": "01000000000", "address": "가상구 시험로 99999", "dong": EXPECTED[0],
                                "items": [{"fee_rate_id": fee, "qty": 1}]})
         original = self.snapshot(con, "dong")
-        tables = ("crew", "request", "request_item", "app_user", "app_user_dong", "pc_key", "audit_log", "meta")
+        original_crew = self.snapshot(con, "crew")
+        tables = ("request", "request_item", "app_user", "app_user_dong", "pc_key", "audit_log", "meta")
         before = {table: self.snapshot(con, table) for table in tables}
         con.close()
         upgraded = self.connect()
@@ -77,7 +88,90 @@ class DefaultDongsTest(unittest.TestCase):
                 self.assertEqual(upgraded.execute("SELECT * FROM dong WHERE id=?", (row[0],)).fetchone()[:len(row)], row)
         for table, rows in before.items():
             self.assertEqual(self.snapshot(upgraded, table), rows, table)
+        for row in original_crew:
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+        self.assertEqual(len(S.list_crews(upgraded)), 13)
         self.assertEqual(upgraded.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v11_upgrade_preserves_existing_assignments_and_other_dong_settings(self):
+        con = self.connect(create=True, version=11)
+        crew = S.save_crew(con, {"name": "가상 기존 공용팀", "capacity_m3": 4, "shift_end": "16:00"})
+        for name in EXPECTED[:2]:
+            area.save_dong(con, {**area.get_dong(con, name), "crew_id": crew})
+        area.save_dong(con, {**area.get_dong(con, EXPECTED[2]), "active": False})
+        spaced = area.save_dong(con, {**area.get_dong(con, EXPECTED[3]), "name": "계림 2동", "weekdays": [1, 3],
+                                      "daily_limit": 7, "daily_limit_m3": 2.5, "code": "G2", "keywords": ["가상 보존로"]})
+        custom = area.save_dong(con, {"name": "가상 맞춤동"})
+        area.delete_dong(con, area.get_dong(con, EXPECTED[-1])["id"])
+        before = {row[0]: row for row in self.snapshot(con, "dong")}
+        columns = [row[1] for row in con.execute("PRAGMA table_info(dong)")]
+        original_crew = self.snapshot(con, "crew")
+        con.close()
+        upgraded = self.connect()
+        for name in EXPECTED[:2]:
+            self.assertEqual(area.get_dong(upgraded, name)["crew_id"], crew)
+        for did in (area.get_dong(upgraded, EXPECTED[2])["id"], custom):
+            self.assertEqual(upgraded.execute("SELECT * FROM dong WHERE id=?", (did,)).fetchone(), before[did])
+        self.assertIsNone(area.get_dong(upgraded, EXPECTED[-1]))
+        self.assertIsNone(area.get_dong(upgraded, EXPECTED[3]))
+        self.assertEqual(area.get_dong(upgraded, "계림 2동")["id"], spaced)
+        self.assertEqual(area.get_dong(upgraded, "계림 2동")["crew_name"], "계림2동 수거팀")
+        for row in self.snapshot(upgraded, "dong"):
+            for index, column in enumerate(columns):
+                if column not in ("crew_id", "updated_at"):
+                    self.assertEqual(row[index], before[row[0]][index], column)
+        for row in original_crew:
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+        self.assertEqual(upgraded.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_existing_crew_names_are_preserved_instead_of_adopted(self):
+        con = self.connect(create=True, version=11)
+        first = S.save_crew(con, {"name": "충장동 수거팀", "active": False, "capacity_m3": 3})
+        second = S.save_crew(con, {"name": "충장동 수거팀 (2)", "capacity_m3": 11})
+        before = self.snapshot(con, "crew")
+        con.close()
+        upgraded = self.connect()
+        dong = area.get_dong(upgraded, EXPECTED[0])
+        self.assertNotIn(dong["crew_id"], (first, second))
+        self.assertEqual(dong["crew_name"], "충장동 수거팀 (3)")
+        for row in before:
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+
+    def test_cleared_default_crew_stays_unassigned_after_restart(self):
+        con = self.connect(create=True)
+        dong = area.get_dong(con, EXPECTED[0])
+        self.assertIsNotNone(dong["crew_id"])
+        area.save_dong(con, {**dong, "crew_id": None})
+        before = {table: self.snapshot(con, table) for table in ("dong", "crew")}
+        con.close()
+        reopened = self.connect()
+        self.assertIsNone(area.get_dong(reopened, EXPECTED[0])["crew_id"])
+        for table, rows in before.items():
+            self.assertEqual(self.snapshot(reopened, table), rows)
+        self.assertEqual(reopened.total_changes, 0)
+
+    def test_readonly_v11_connection_does_not_create_default_crews(self):
+        con = self.connect(create=True, version=11)
+        con.close()
+        readonly = self.connect(readonly=True)
+        self.assertEqual(readonly.execute("SELECT COUNT(*) FROM crew").fetchone()[0], 0)
+        self.assertEqual(readonly.execute("PRAGMA user_version").fetchone()[0], 11)
+        readonly.close()
+        upgraded = self.connect()
+        self.assertEqual(len({d["crew_id"] for d in area.list_dongs(upgraded)}), 13)
+        self.assertEqual(len(S.list_crews(upgraded)), 13)
+
+    def test_failed_crew_seed_rolls_back_teams_and_links_and_can_retry(self):
+        con = self.connect(create=True, version=11)
+        before = {table: self.snapshot(con, table) for table in ("dong", "crew")}
+        with patch.object(store, "_TEST_FAIL_STEP", 12), self.assertRaises(RuntimeError):
+            store.run_migrations(con)
+        self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 11)
+        for table, rows in before.items():
+            self.assertEqual(self.snapshot(con, table), rows)
+        self.assertEqual(store.run_migrations(con), list(range(12, store.LATEST + 1)))
+        self.assertEqual(len(S.list_crews(con)), 13)
+        self.assertTrue(all(d["crew_id"] for d in area.list_dongs(con)))
 
     def test_whitespace_variant_is_not_duplicated_or_renamed(self):
         con = self.connect(create=True, legacy=True)

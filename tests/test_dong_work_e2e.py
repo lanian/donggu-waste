@@ -34,7 +34,8 @@ def main():
         try:
             api(admin, url, "setup", {"username": "dong_e2e_admin", "display_name": "가상 동관리자", "password": PASSWORD})
             dongs = [api(admin, url, "dongs", {"name": name})["id"] for name in ("통합가상A동", "통합가상B동", "통합가상C동")]
-            crew = api(admin, url, "crews", {"name": "통합가상팀", "capacity_m3": 20})["id"]
+            crew_name = "통합가상팀"
+            crew = api(admin, url, "crews", {"name": crew_name, "capacity_m3": 20})["id"]
             fee = next(row for row in json.loads((ROOT / "data/fee_table.json").read_text(encoding="utf-8"))["rows"]
                        if row["status"] == "CONFIRMED" and row.get("price", 0) > 0)
             seed = {"phone": "01000001111", "address": "가상구 검증로 10", "planned_date": DAY,
@@ -82,6 +83,10 @@ def main():
             assert len(created) == 1 and created[0]["name"] == "통합신규B주민"
             detail = api(scoped, url, "dong-work/requests/" + created[0]["id"])
             assert (detail["lat"], detail["lon"], detail["dong"]) == (35.147, 126.924, "통합가상B동")
+            # 이 시험은 선택한 팀 하나로 배정하는 흐름을 검증한다. 기본 동의 수거팀은 계산에서 제외한다.
+            expect(page.get_by_role("checkbox", name=crew_name, exact=True)).to_be_checked()
+            for other in page.locator(".dw-teams label").filter(has_not_text=crew_name).get_by_role("checkbox").all():
+                other.uncheck()
             page.get_by_role("button", name="노선 계산", exact=True).click()
             expect(page.get_by_role("button", name="배정 확정", exact=True)).to_be_enabled(timeout=25000)
             assert not api(admin, url, "batches?date=" + DAY)

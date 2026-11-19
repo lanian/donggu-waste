@@ -505,13 +505,20 @@ def _m11_dong_depots(con):
     con.execute("ALTER TABLE dong ADD COLUMN depot_json TEXT")
 
 
+def _m12_default_dong_crews(con):
+    """담당팀이 없는 기본 동마다 전용팀을 연결한다. 기존 배치와 이후 수동 변경은 보존한다."""
+    from dgpc.dong_defaults import seed_default_dong_crews
+    seed_default_dong_crews(con)
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
               (7, "숫자 배출표 재고와 사용 이력", _m7_numbered_labels), (8, "담당 동 계정과 권한 연결", _m8_dong_users),
               (9, "동구 기본 행정동 누락분 자동 등록", _m9_default_dongs),
               (10, "행정동별 배출표 재고와 수거 번호 자동 배정", _m10_dong_label_stock),
-              (11, "동별 담당 수거팀의 차고지", _m11_dong_depots)]
+              (11, "동별 담당 수거팀의 차고지", _m11_dong_depots),
+              (12, "기본 행정동마다 담당 수거팀 자동 연결", _m12_default_dong_crews)]
 LATEST = MIGRATIONS[-1][0]
 
 

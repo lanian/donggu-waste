@@ -30,7 +30,7 @@ class CenterDepotTests(fixture.DepotCase):
         did = self.dong('충장동', self.crew, code='CJ', weekdays=[0, 2], daily_limit=7, keywords=['가상길'])
         before = C.one(self.con, 'SELECT * FROM dong WHERE id=?', (did,))
         result = DC.apply_missing(self.con)
-        self.assertEqual(result['applied'], 1)
+        self.assertEqual(result['applied'], len(DONGGU_DONGS))
         after = C.one(self.con, 'SELECT * FROM dong WHERE id=?', (did,))
         for field in before:
             if field not in ('depot_json', 'updated_at'):
@@ -47,7 +47,7 @@ class CenterDepotTests(fixture.DepotCase):
         self.dong('계림1동', shared)
         self.dong('계림2동', shared)
         result = DC.apply_missing(self.con)
-        self.assertEqual(result['applied'], 0)
+        self.assertEqual(result['applied'], len(DONGGU_DONGS) - 5)
         self.assertEqual(A.get_dong(self.con, '충장동')['depot'], custom)
         for name in ('동명동', '산수1동', '계림1동', '계림2동'):
             self.assertIsNone(A.get_dong(self.con, name)['depot'])
@@ -58,7 +58,7 @@ class CenterDepotTests(fixture.DepotCase):
         row = A.get_dong(self.con, '충장동')
         self.assertEqual(row['center_depot']['label'], '충장동 행정복지센터')
         self.assertIsNone(row['depot'])
-        self.assertEqual(DC.apply_missing(self.con)['applied'], 1)
+        self.assertEqual(DC.apply_missing(self.con)['applied'], len(DONGGU_DONGS))
         count = C.one(self.con, 'SELECT COUNT(*) AS n FROM audit_log')['n']
         self.assertEqual(DC.apply_missing(self.con)['applied'], 0)
         self.assertEqual(C.one(self.con, 'SELECT COUNT(*) AS n FROM audit_log')['n'], count)
