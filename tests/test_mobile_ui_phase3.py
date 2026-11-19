@@ -442,7 +442,7 @@ def qty_one_line(browser, url):
         page.wait_for_function("async () => (await import('./core.js')).st.events.some(e => e.kind === 'ITEM_RESULT' && e.body.qty_collected === 1)")
         line = page.locator(".line").first
         ok(line.locator(".row.left .val").inner_text().strip() == "1 개" and line.get_by_label("가상 의자 못 실은 사유", exact=True).count() == 1
-           and line.locator(".chk").count() == 1, "못 실은 수량·사유 칸·스티커 확인 그대로")
+           and page.locator("#st-result .sticker-options:not([open]) .chk").count() == 1, "못 실은 수량·사유 칸 유지, 스티커는 결과 아래 기본 접힘")
         # 현장 추가 품목은 접수 수량이 없어 현장 수량 스테퍼를 늘 보임
         add = event(1, "FIELD_ITEM_ADD", line_id="field-1", name="가상 추가 물건", spec="", unit="EA", unit_label="개",
                     price_status="CONFIRMED", unit_price=3000, qty=1)

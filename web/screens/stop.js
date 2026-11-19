@@ -10,7 +10,7 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
-import { addEvent, ask, backBtn, backName, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, msgBox, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, reduceMotion, render, ro, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
+import { addEvent, ask, backBtn, backName, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, msgBox, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, quantityInput, reduceMotion, render, ro, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 import { loadChip, nextToVisit, stateBadge, stopState } from './stoplist.js';
 
@@ -19,6 +19,7 @@ const collectionWrites = new WeakMap();
 const settledStateWrites = new WeakSet();
 const collectionPending = () => saveFailed || S.hasPendingSecure('state');
 const priorQty = (stop, line) => Math.max(0, Number(stop.items.find((item) => item.line_id === line.line_id)?.prior_collected) || 0);
+const KEEP_OUT = ['FEE_REFUSED', 'NO_STICKER'];
 let photoViewerController = null;
 const memoOperations = new WeakMap(), memoRecoveries = new Map();
 // 저장에 실패한 메모는 잠금 뒤 다시 시도할 수 있게 이벤트 ID만 남긴다. 원문(text·draft)과 저장 중 작업(promise, 옛 업무 상태를 붙잡음)은
@@ -459,11 +460,25 @@ async function screenStop(id) {
   const stickerRow = (l) => {
     const sk = d.stickers[l.line_id];
     return h('div', { class: 'chk', 'data-line': l.line_id },
-      h('span', { class: 'section-label chk-label' }, `스티커·필증 · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
+      h('span', { class: 'section-label chk-label' }, `${l.name}${l.spec ? ' ' + l.spec : ''} · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
       h('div', { class: 'chk-opts', role: 'group', 'aria-label': `${l.name} 스티커·신고필증` },
         ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k, 'data-fk': `${l.line_id}:sticker:${k}` }))),
       sk ? h('p', { class: 'sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''}${sk.result !== 'OK' ? ` → ${sk.decision === 'LEAVE' ? '미수거 결정' : sk.decision === 'COLLECT' ? '수거 결정' : '결정 전'}` : ''} · 이번 실은 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`) : null,
       sk && l.reason === 'NO_STICKER' && (sk.result === 'OK' || sk.decision === 'COLLECT') ? h('p', { class: 'small sk-review' }, '미수거 사유가 남아 있습니다. 실은 수량·못 실은 사유와 수거 결과를 다시 확인하세요.') : null);
+  };
+  const increaseCollected = async (line) => {
+    await flushSteps();
+    if (!current() || !S.isUnlocked() || collectionPending()) return;
+    const now = deriveStop(stop, source.events).lines.find((item) => item.line_id === line.line_id);
+    if (!now || now.qty_collected !== now.qty_confirmed || now.qty_confirmed >= 9999 || KEEP_OUT.includes(now.reason)) return;
+    const previous = priorQty(stop, now), unit = now.unit_label || '개';
+    const min = now.qty_confirmed + 1;
+    const n = await quantityInput(min, min, 9999, `새 누적 실은 수량 (${unit})`, {
+      title: '수량 늘려 수거', applyLabel: '수량 늘리기',
+      text: `${now.name}${now.spec ? ' · ' + now.spec : ''}. 이전 수거 ${previous}${unit}를 포함한 수량을 적으세요. 현장 수량과 실은 수량을 함께 바꿉니다. 금액이 늘면 수거 결과 저장 전에 확인합니다.`,
+    });
+    if (n == null || !current() || !S.isUnlocked() || collectionPending()) return;
+    await setLine(now, { qty_confirmed: n, qty_collected: n }, true);
   };
   // 수량 한 줄: 기본은 "실은 수량 [− n +] / 현장 m개". 현장 수량 스테퍼는 [수량이 접수와 다름]을 눌러야 펼친다.
   // 현장 수량이 접수 수량과 이미 다르면(현장 추가 품목은 접수 수량이 없어 늘) 처음부터 펼치고 "현장 3개(접수 2)"로 강조한다.
@@ -472,6 +487,8 @@ async function screenStop(id) {
     const unit = l.unit_label || '', received = l.kind === 'RECEIVED' ? l.qty_received : null;
     const differs = received == null || l.qty_confirmed !== received, key = `${id}:${l.line_id}`, confId = `qty-confirmed-${l.line_id}`;
     const open = differs || !!ui.qtyOpen[key];
+    const collectedFocus = `${l.line_id}:collected`;
+    const canIncrease = l.qty_confirmed < 9999 && !KEEP_OUT.includes(l.reason);
     const confirmedRow = h('div', { class: 'row confirmed', id: confId, hidden: !open }, h('span', {}, '현장 수량'),
       stepper(l.qty_confirmed, (n) => setLine(l, { qty_confirmed: n }, true), priorQty(stop, l), 9999, 350, `${l.name} 현장 수량`, { editable: true, unit, fk: `${l.line_id}:confirmed` }));
     const toggle = received != null && !differs ? btn('수량이 접수와 다름', () => {
@@ -482,12 +499,20 @@ async function screenStop(id) {
       // 360px에서도 한 줄로: 왼쪽에 "실은 수량"과 그 아래 "/ 현장 m개", 오른쪽에 스테퍼
       h('div', { class: 'row got' }, h('span', { class: 'qty-label' }, '실은 수량',
         h('span', { class: 'qty-of' + (received != null && differs ? ' diff' : '') }, received != null && differs ? `/ 현장 ${l.qty_confirmed}${unit}(접수 ${received})` : `/ 현장 ${l.qty_confirmed}${unit}`)),
-        stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`, { editable: true, unit, fk: `${l.line_id}:collected` })),
+        stepper(l.qty_collected, (n) => setLine(l, { qty_collected: n }, true), priorQty(stop, l), l.qty_confirmed, 350, `${l.name} 실은 수량`, {
+          editable: true, unit, fk: collectedFocus,
+          atMax: canIncrease ? () => runCollection(() => increaseCollected(l), { focusKey: `${collectedFocus}:+` })() : null,
+          maxLabel: `${l.name} 현장·실은 수량 늘리기`,
+        })),
       toggle, confirmedRow];
   };
   const stickerCounts = d.lines.reduce((counts, line) => { const sk = d.stickers[line.line_id]; counts[!sk ? 'unchecked' : sk.result === 'OK' ? 'ok' : 'problem']++; return counts; }, { ok: 0, problem: 0, unchecked: 0 });
-  const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
+  const stickerOptions = d.lines.length ? h('details', { class: 'sticker-options', open: ui.stickerOpen === id },
+    h('summary', { onclick: (event) => { ui.stickerOpen = event.currentTarget.parentElement.open ? null : id; } },
+      '스티커·필증 기록 (선택)', stickerCounts.problem ? h('span', { class: 'small sk-review' }, ` · 문제 ${stickerCounts.problem}`) : null),
     h('p', { class: 'sticker-summary' }, `스티커·필증: 확인 ${stickerCounts.ok} · 문제 ${stickerCounts.problem} · 미확인 ${stickerCounts.unchecked}`),
+    ...d.lines.map((line) => stickerRow(line))) : null;
+  const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
     ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
       h('div', { class: 'lhead' },
         h('div', { class: 'lname' }, h('em', { class: 'badge ' + (l.kind === 'FIELD' ? 'field' : 'neutral') }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
@@ -504,8 +529,7 @@ async function screenStop(id) {
           'aria-describedby': need ? noteId : null, onchange: (e) => setLine(l, { reason: e.target.value }) },
           ...Object.entries(LABEL.reason).map(([k, t]) => h('option', { value: k, selected: k === l.reason }, t)));
         return need ? [sel, h('p', { class: 'reason-need-note', id: noteId }, '사유를 고르세요')] : sel;
-      })() : null,
-      stickerRow(l))),
+      })() : null)),
     btn('+ 현장 품목 추가', () => { ui.add = { stop: id, q: '', cat: '', items: [] }; go(`#/add/${id}`); }, 'big'));
 
   const f = d.fee;
@@ -580,7 +604,7 @@ async function screenStop(id) {
     const nextButton = dock.querySelector('.dock-next');
     if (nextButton) { nextButton.disabled = true; nextButton.textContent = '저장 중…'; }
   };
-  const runCollection = (fn, { retry = false, focusSticker = null } = {}) => () => {
+  const runCollection = (fn, { retry = false, focusSticker = null, focusKey = null } = {}) => () => {
     if (!current() || writes.has(id)) return;
     if (collectionPending() && !retry) { ui.tried = id; ui.outcomeMsg = '대기 중인 수거 기록을 먼저 다시 저장하세요.'; render(); return; }
     const operation = { kind: 'collection' };
@@ -594,6 +618,9 @@ async function screenStop(id) {
           if (focusSticker && owned() && location.hash === route) {
             const row = [...document.querySelectorAll('.chk')].find((node) => node.dataset.line === focusSticker.line);
             row?.querySelector(`[data-result="${focusSticker.result}"]`)?.focus({ preventScroll: true });
+          }
+          if (focusKey && owned() && location.hash === route) {
+            document.querySelector(`[data-fk="${CSS.escape(focusKey)}"]:not(:disabled)`)?.focus({ preventScroll: true });
           }
         }
       }
@@ -616,7 +643,6 @@ async function screenStop(id) {
     savedResult(saved, '수거 기록을 다시 저장했습니다');
   }, { retry: true });
   // 추가 금액을 거부했거나 스티커가 없어 두고 가기로 한 품목은 [전부 실음]에서도 싣지 않은 채로 둔다
-  const KEEP_OUT = ['FEE_REFUSED', 'NO_STICKER'];
   const fillAll = async () => {
     await flushSteps();
     if (!current()) return null;
@@ -712,6 +738,7 @@ async function screenStop(id) {
       Object.values(d.stickers).some((x) => x.result !== 'OK') ? h('p', {}, '스티커·필증 문제 품목 있음') : null) : null,
     btn('품목 수량을 모두 실음으로 채우기', runCollection(async () => { await fillAll(); }), 'ghost link', { disabled: pendingSave || busySave }),
     h('p', { class: 'small quantity-fill-hint' }, '수량 채우기 뒤에도 수거 결과를 선택해 저장하세요.'),
+    stickerOptions,
     msg);
   const memo = h('section', { class: 'card memo-card' }, h('h2', {}, '메모'), fieldMemo(stop, d));
 

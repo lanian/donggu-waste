@@ -560,16 +560,17 @@ const mdOf = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); retur
 // 빠르게 여러 번 눌러도 수량이 빠지지 않게: 화면 숫자는 바로 바꾸고 저장은 잠깐 모아서 한 번
 const stepFlush = new Map();  // 모아 두었다 저장할 수량 변경: 다른 동작(결과 저장·화면 이동) 전에 먼저 저장
 async function flushSteps() { for (const f of [...stepFlush.values()]) await f(); }
-async function quantityInput(value, min = 0, max = 9999, label = '수량') {
+async function quantityInput(value, min = 0, max = 9999, label = '수량', options = {}) {
   if (!st || !S.isUnlocked()) return null;
   const ownerState = st, ownerHash = location.hash, controller = new AbortController();
   const leave = () => controller.abort();
   window.addEventListener('hashchange', leave, { once: true });
   try {
-    const result = await sheet({ title: '수량 직접 입력', text: `${min}~${max} 사이의 정수를 입력하세요.`, signal: controller.signal,
+    const result = await sheet({ title: options.title || '수량 직접 입력',
+      text: options.text || `${min}~${max} 사이의 정수를 입력하세요.`, signal: controller.signal,
       input: { type: 'number', inputmode: 'numeric', label, value, min, max, step: 1,
         validate: (raw) => /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw)) && Number(raw) >= min && Number(raw) <= max ? '' : `${min}~${max} 사이의 정수를 입력해 주세요.` },
-      choices: [{ label: '적용', value: true, cls: 'primary' }] });
+      choices: [{ label: options.applyLabel || '적용', value: true, cls: 'primary' }] });
     return result && st === ownerState && location.hash === ownerHash && S.isUnlocked() ? Number(result.text) : null;
   } finally { window.removeEventListener('hashchange', leave); }
 }
@@ -604,14 +605,18 @@ function stepper(value, onChange, min = 0, max = 99, delay = 0, label = '', opti
   const key = Symbol('step'), fk = options.fk || null;
   const v = options.editable ? quantityValue(value, (n) => change(n, true), min, max, label, { unit: options.unit, fk }) : h('span', { class: 'val', 'aria-live': 'polite' }, value);
   const minus = btn('−', () => bump(-1), 'step', { 'aria-label': `${label} 빼기`.trim(), disabled: value <= min, 'data-fk': fk ? `${fk}:-` : null });
-  const plus = btn('+', () => bump(1), 'step', { 'aria-label': `${label} 더하기`.trim(), disabled: value >= max, 'data-fk': fk ? `${fk}:+` : null });
+  const plusLabel = () => cur >= max && options.atMax ? options.maxLabel : `${label} 더하기`.trim();
+  const plus = btn('+', () => cur >= max && options.atMax ? options.atMax() : bump(1), 'step',
+    { 'aria-label': plusLabel(), disabled: cur >= max && !options.atMax, 'data-fk': fk ? `${fk}:+` : null });
   function bump(dlt) {
     const n = Math.min(max, Math.max(min, cur + dlt));
     return change(n);
   }
   function change(n, direct = false) {
     if (n === cur) return;
-    cur = n; v.textContent = n; v.setQuantityName?.(n); minus.disabled = n <= min; plus.disabled = n >= max;
+    cur = n; v.textContent = n; v.setQuantityName?.(n); minus.disabled = n <= min;
+    plus.disabled = n >= max && !options.atMax;
+    plus.setAttribute('aria-label', plusLabel());
     if (!delay) return onChange(cur);
     restoreValueFocus = direct;
     if (options.editable) v.disabled = true;

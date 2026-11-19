@@ -597,6 +597,8 @@ html.text-big .reason-chips { grid-template-columns: 1fr; }
 .step-state.now { background: var(--brand-soft); color: var(--brand-soft-ink); }
 .send-lead { font-weight: 700; margin-bottom: 2px; } .send-lead + .small { margin-top: 0; }
 .send-more > summary { min-height: var(--tap); display: flex; align-items: center; cursor: pointer; font-weight: 700; color: var(--brand-soft-ink); }
+.sticker-options { margin-top: 8px; border-top: 1px solid var(--line); }
+.sticker-options > summary { min-height: var(--tap); align-content: center; cursor: pointer; font-weight: 700; }
 .chk { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line-strong); }
 .chk-opts { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 6px; }
 .chk-opts .btn { min-height: 56px; padding: 8px 4px; font-size: var(--t-md); white-space: normal; overflow-wrap: anywhere; }

@@ -287,7 +287,8 @@ def main():
             page.get_by_role("button", name="도착", exact=True).click()
             expect(page.get_by_text(re.compile("도착 기록 \\d\\d:\\d\\d · 위치 오차"))).to_be_visible(timeout=15000)
             ok(True, "[도착] → 도착 시각·휴대폰 위치(오차) 기록")
-            # 스티커·신고필증 확인: 없음 → 그래도 수거
+            # 선택 기록을 펼쳐 스티커·신고필증 없음 → 그래도 수거
+            page.locator("#st-result .sticker-options > summary").click()
             page.get_by_role("group", name=re.compile("스티커·신고필증")).first.get_by_role("button", name="없음").click()
             page.get_by_role("button", name="그래도 수거").click()
             expect(page.locator(".sk-note").first).to_contain_text("없음 → 수거")

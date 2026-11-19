@@ -8,10 +8,16 @@ import tempfile
 
 from playwright.sync_api import expect, sync_playwright
 
-from test_mobile_collection_save import disk_state, hold_failed_write, open_case
+from test_mobile_collection_save import disk_state, hold_failed_write, open_case as open_collection_case, open_sticker_options
 from test_review_ui import mobile_server
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def open_case(browser, url, **options):
+    context, page, record = open_collection_case(browser, url, **options)
+    open_sticker_options(page)
+    return context, page, record
 
 
 def sticker(page):

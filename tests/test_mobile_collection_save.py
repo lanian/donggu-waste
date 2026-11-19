@@ -26,6 +26,12 @@ def open_case(browser, url, qty=1, previous=0, two_lines=False):
     return context, page, first
 
 
+def open_sticker_options(page):
+    options = page.locator('#st-result .sticker-options')
+    if options.get_attribute('open') is None:
+        options.locator('summary').click()
+
+
 def quantity_case(browser, url, output):
     context, page, _ = open_case(browser, url, qty=150, previous=1)
     try:
@@ -67,6 +73,7 @@ def prior_case(browser, url, output):
         page.wait_for_function('()=>window.__collectionFees.deriveStop(window.__collectionCore.st.daylist.stops[0],window.__collectionCore.st.events).lines[0].qty_confirmed===2')
         expect(page.get_by_role('button', name='가상 의자 현장 수량 빼기', exact=True)).to_be_disabled()
         labels = json.loads((ROOT / 'data/labels.json').read_text(encoding='utf-8'))
+        open_sticker_options(page)
         page.get_by_role('group', name='가상 의자 스티커·신고필증', exact=True).get_by_role('button', name=labels['sticker']['MISSING'], exact=True).click()
         page.get_by_role('button', name='미수거 (사유 기록)', exact=True).click()
         page.wait_for_function('()=>window.__collectionCore.st.events.some(e=>e.kind==="STICKER_CHECK")')
@@ -77,6 +84,65 @@ def prior_case(browser, url, output):
                    for event in disk_state(page)['events'] if event['kind'] == 'ITEM_RESULT')
         page.screenshot(path=str(output / 'mobile-collection-prior.png'), full_page=True)
         print('모바일 수거: 앞선2개 보존·오늘1개만 되돌리기·현장 수량/스티커 결정 하한 통과', flush=True)
+    finally:
+        context.close()
+
+
+def increase_case(browser, url, output):
+    context, page, _ = open_case(browser, url, qty=3, previous=2)
+    try:
+        page.set_viewport_size({'width': 360, 'height': 640})
+        picker = page.locator('.row.got')
+        picker.get_by_role('button', name='가상 의자 실은 수량 더하기', exact=True).click()
+        more = picker.get_by_role('button', name='가상 의자 현장·실은 수량 늘리기', exact=True)
+        expect(more).to_be_enabled(timeout=1800)
+        more.click()
+        dialog = page.get_by_role('dialog', name='수량 늘려 수거', exact=True)
+        number = dialog.get_by_role('spinbutton')
+        expect(number).to_have_value('4')
+        expect(dialog).to_contain_text('이전 수거 2개')
+        dialog.get_by_role('button', name='취소', exact=True).click()
+        expect(dialog).to_have_count(0)
+        expect(more).to_be_focused()
+        assert [e['body']['qty_collected'] for e in disk_state(page)['events']] == [3]
+        more.click()
+        number.fill('3')
+        apply = dialog.get_by_role('button', name='수량 늘리기', exact=True)
+        apply.click()
+        expect(dialog.get_by_role('alert')).not_to_be_empty()
+        number.fill('5')
+        apply.click()
+        expect(picker.locator('.qty-value')).to_have_text('5')
+        expect(more).to_be_focused()
+        expect(page.get_by_text('이전 수거 2개 · 이번 추가 3개 · 누적 5개', exact=True)).to_be_visible()
+        state = disk_state(page)
+        results = [e['body'] for e in state['events'] if e['kind'] == 'ITEM_RESULT']
+        assert [(r['qty_confirmed'], r['qty_collected']) for r in results] == [(3, 3), (5, 5)], results
+        expect(page.get_by_role('button', name='추가 금액 2,000원 안내 기록', exact=True)).to_be_visible()
+        page.screenshot(path=str(output / 'collection-increase.png'))
+        print('실은 + 상한 · 확인/취소 · 이전 수거 보존 · 1회 동시 저장 · 추가 금액 통과', flush=True)
+    finally:
+        context.close()
+
+
+def optional_sticker_case(browser, url, output):
+    context, page, _ = open_case(browser, url)
+    try:
+        group = page.get_by_role('group', name='가상 의자 스티커·신고필증', exact=True)
+        expect(group).to_be_hidden(timeout=1800)
+        expect(page.locator('#st-result .sticker-options > summary')).to_have_text('스티커·필증 기록 (선택)')
+        page.get_by_role('button', name='가상 의자 실은 수량 더하기', exact=True).click()
+        expect(page.locator('.row.got .qty-value')).to_have_text('1')
+        page.get_by_role('button', name='전부 실음 · 수거 완료', exact=True).click()
+        expect(page.get_by_text('저장된 결과: 수거 완료', exact=True)).to_be_visible()
+        assert not any(e['kind'] == 'STICKER_CHECK' for e in disk_state(page)['events'])
+        open_sticker_options(page)
+        expect(group).to_be_visible()
+        group.get_by_role('button', name='확인', exact=True).click()
+        expect(page.locator('.sticker-summary')).to_contain_text('확인 1')
+        expect(group.get_by_role('button', name='확인', exact=True)).to_be_focused()
+        expect(page.get_by_text('저장된 결과: 수거 완료', exact=True)).to_be_visible()
+        print('스티커 기본 접힘 · 기록 없이 수거 완료 · 필요할 때 기록과 초점 복귀 통과', flush=True)
     finally:
         context.close()
 
@@ -358,6 +424,7 @@ def direct_write_help_case(browser, url, output):
         expect(page.get_by_text('저장된 결과: 수거 완료', exact=True)).to_be_visible()
         hold_failed_write(page, 2)
         labels = json.loads((ROOT / 'data/labels.json').read_text(encoding='utf-8'))
+        open_sticker_options(page)
         page.get_by_role('group', name='가상 의자 스티커·신고필증', exact=True).get_by_role('button', name=labels['sticker']['MISSING'], exact=True).click()
         page.get_by_role('button', name='미수거 (사유 기록)', exact=True).click()
         page.wait_for_function('()=>typeof window.__releaseCollectionFailure==="function"')
@@ -378,7 +445,7 @@ def main(case):
     with mobile_server() as url, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get('CHROME') or pw.chromium.executable_path, headless=True)
         try:
-            for name, fn in [('quantity', quantity_case), ('prior', prior_case), ('save', save_case), ('late', late_case), ('flush', flush_case), ('help', help_case), ('copy', help_copy_case), ('help-quantity', help_quantity_case), ('multi-write', multi_write_case), ('queued-failure', queued_failure_case), ('direct-help', direct_write_help_case)]:
+            for name, fn in [('quantity', quantity_case), ('prior', prior_case), ('increase', increase_case), ('optional-sticker', optional_sticker_case), ('save', save_case), ('late', late_case), ('flush', flush_case), ('help', help_case), ('copy', help_copy_case), ('help-quantity', help_quantity_case), ('multi-write', multi_write_case), ('queued-failure', queued_failure_case), ('direct-help', direct_write_help_case)]:
                 if case in ('all', name):
                     fn(browser, url, output)
         finally:
@@ -388,5 +455,5 @@ def main(case):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=('all', 'quantity', 'prior', 'save', 'late', 'flush', 'help', 'copy', 'help-quantity', 'multi-write', 'queued-failure', 'direct-help'), default='all')
+    parser.add_argument('--case', choices=('all', 'quantity', 'prior', 'increase', 'optional-sticker', 'save', 'late', 'flush', 'help', 'copy', 'help-quantity', 'multi-write', 'queued-failure', 'direct-help'), default='all')
     main(parser.parse_args().case)
