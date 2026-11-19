@@ -462,11 +462,17 @@ def screen_reader(browser, url):
         f = focused(page)
         ok(f["fk"] == "line-1:collected:+" and not f["disabled"], f"다시 그린 뒤 초점이 같은 [+]에 돌아옴 ({f})")
         ok(page.get_by_role("button", name="가상 의자 실은 수량 2개, 눌러서 직접 입력", exact=True).count() == 1, "값 단추 이름에 새 숫자 '2개'")
-        page.keyboard.press("Enter")  # 3/3 → + 가 꺼짐
+        page.keyboard.press("Enter")  # 현장 수량을 다 채우면 같은 + 로 수량을 더 적을 수 있다.
         page.wait_for_function("async () => (await import('./core.js')).st.events.some(e => e.kind === 'ITEM_RESULT' && e.body.qty_collected === 3)")
-        page.wait_for_function("() => document.activeElement?.dataset?.fk === 'line-1:collected:value'")
-        ok(page.get_by_role("button", name="가상 의자 실은 수량 3개, 눌러서 직접 입력", exact=True).evaluate("e => e === document.activeElement"),
-           "다 채워 [+]가 꺼지면 같은 묶음의 값 단추로 초점")
+        more = page.get_by_role("button", name="가상 의자 현장·실은 수량 늘리기", exact=True)
+        expect(more).to_be_focused()
+        page.keyboard.press("Enter")
+        increase = page.get_by_role("dialog", name="수량 늘려 수거", exact=True)
+        expect(increase).to_be_visible()
+        increase.get_by_role("button", name="취소", exact=True).click()
+        expect(more).to_be_focused()
+        ok(page.get_by_role("button", name="가상 의자 실은 수량 3개, 눌러서 직접 입력", exact=True).count() == 1,
+           "다 채운 뒤에도 [+] 초점을 유지하고 수량 늘리기 취소 뒤 이전 수량을 보존")
 
         # 연락 결과·결과 단추도 같은 키로 초점 복원
         page.get_by_role("button", name="통화 완료", exact=True).focus()
