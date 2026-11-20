@@ -36,6 +36,7 @@ def main():
             dongs = [api(admin, url, "dongs", {"name": name})["id"] for name in ("통합가상A동", "통합가상B동", "통합가상C동")]
             crew_name = "통합가상팀"
             crew = api(admin, url, "crews", {"name": crew_name, "capacity_m3": 20})["id"]
+            api(admin, url, "dongs", {"id": dongs[1], "name": "통합가상B동", "crew_id": crew})
             fee = next(row for row in json.loads((ROOT / "data/fee_table.json").read_text(encoding="utf-8"))["rows"]
                        if row["status"] == "CONFIRMED" and row.get("price", 0) > 0)
             seed = {"phone": "01000001111", "address": "가상구 검증로 10", "planned_date": DAY,

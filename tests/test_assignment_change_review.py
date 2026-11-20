@@ -166,12 +166,20 @@ class AssignmentChangeReviewTest(UsageHTTPCase):
         review = self.review(change)
         self.assertTrue(review["routes"], review.get("unassigned"))
         route = review["routes"][0]
-        self.assertEqual(route["unloads"], 1)
-        self.assertEqual(route["stops"][0]["unload_after"]["label"], "가상 반입지")
+        self.assertTrue(review["final_unload_return"])
+        self.assertEqual(route["unloads"], 2)
+        middle, final = (s["unload_after"] for s in route["stops"])
+        self.assertEqual((middle["label"], final["label"]), ("가상 반입지", "가상 반입지"))
+        self.assertNotIn("final", middle)
+        self.assertIs(final["final"], True)
         self.assertEqual([s["load_m3"] for s in route["stops"]], [.7, .7])
+        self.assertEqual(route["end_load_m3"], 0)
         self.commit(review)
         saved = self.current()[a]["stops"]
-        self.assertEqual(saved[0]["unload_after"]["eta"], route["stops"][0]["unload_after"]["eta"])
+        self.assertEqual(saved[0]["unload_after"], middle)
+        saved_final = saved[1]["unload_after"]
+        self.assertEqual({key: saved_final[key] for key in final}, final)
+        self.assertEqual(saved_final["depot"], route["depot"])
 
     def test_dong_account_cannot_review_or_confirm_office_assignment_edit(self):
         a = self.crews[0]
