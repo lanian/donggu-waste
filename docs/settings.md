@@ -12,14 +12,14 @@
 | 키 | 기본값 | 묶음 | 저장 모듈 | 화면 묶음 | 설명 |
 |---|---|---|---|---|---|
 | `depot` | `{"lat": 35.1462, "lon": 126.9233, "label": "차고지(기본값: 동구청 부근)"}` | 노선 | config | 예 | 공통 차고지 좌표와 이름. 동별 차고지를 지정하지 않은 팀에 적용하며 미설정 기본값은 동구청 부근. |
-| `osrm_url` | `""` | 노선 | config | 예 | 이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 쓰지 않음. |
-| `travel_method` | `null` | 노선 | config |  | 이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 비어 있으면 OSRM 주소가 있을 때 OSRM. |
+| `osrm_url` | `""` | 노선 | config | 예 | 이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 Windows EXE의 동봉 팩을 사용합니다(OSRM 방식). |
+| `travel_method` | `null` | 노선 | config |  | 이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 자동은 OSRM 주소나 동봉 팩이 있으면 OSRM. |
 | `service_min_base` | `5` | 노선 | config | 예 | 한 곳 작업 기본 시간(분). |
 | `service_min_per_item` | `3` | 노선 | config | 예 | 품목 하나당 더하는 작업 시간(분). |
 | `unload_site` | `null` | 노선 | config | 예 | 반입지(하차 장소) 좌표·이름. 비우면 하차를 노선에 넣지 않음. |
-| `end_site` | `null` | 노선 | config | 예 | 종료지 좌표·이름. 비우면 차고지로 돌아옴. |
+| `end_site` | `null` | 노선 | config | 예 | 종료지 좌표·이름. 비우면 반입지에서 최종 하차한 뒤 출발 차고지로 돌아옴. |
 | `unload_min` | `20` | 노선 | config | 예 | 하차 한 번에 걸리는 시간(분, 0~180). |
-| `max_unloads` | `2` | 노선 | config | 예 | 하루 최대 하차 횟수(0~5). |
+| `max_unloads` | `2` | 노선 | config | 예 | 차량당 수거 중 최대 하차 횟수(0~5). |
 | `unload_hours` | `null` | 노선 | config | 예 | 반입지가 받는 시간 {start, end}(HH:MM). 비우면 따지지 않음. |
 | `lunch` | `null` | 노선 | config | 예 | 쉬는(점심) 시간 창 {start, end, minutes}. 비우면 없음. |
 | `base_first` | `true` | 노선 | config | 예 | 차고지에서 가까운 곳부터 도는 쪽을 먼저 고려. |

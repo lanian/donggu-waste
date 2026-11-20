@@ -1,9 +1,8 @@
 // PC 화면: 오늘 현황(대시보드)·처리할 일 배지
-import * as M from '/web/map.js';
-import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, sortable, workEnd } from '../core.js';
-import { mapIn } from '../widgets.js';
+import { STATUS, afterWork, api, boot, btn, canOpen, chip, go, grid, h, kst, md, pagehead, render, routeEpoch, sortable, workEnd } from '../core.js';
 import { screenRequests } from './requests.js';
 import { followupQueue } from './followups.js';
+import { confirmedMapRoutes, routeMap } from './route_map.js?v=confirmed-map';
 import { recoveryCounts, recoveryTags } from './team_recovery.js';
 
 // 처리할 일(전체 기간, GET /api/pending) → 화면 링크. 결과 미회수 팀은 근무가 끝난 팀만 센다.
@@ -125,11 +124,12 @@ function workflowCard(sum, batches, unassigned, pd, date) {
 
 async function screenHome() {
   const s = (screenHome.s ||= { date: boot.today });
+  const day = s.date, epoch = routeEpoch;
   const date = h('input', { type: 'date', value: s.date, onchange: (e) => { s.date = e.target.value; render(); } });
   const role0 = boot.me.role, overseer = ['ADMIN', 'LEAD'].includes(role0);
   const notField = role0 !== 'FIELD';
   const read = (path) => api(path, { timeoutMs: 10_000 });
-  const [sum, batches, accSt, bkSt, pd, rd, ops, unassigned] = await Promise.all([read('close?date=' + s.date), read('batches?date=' + s.date),
+  const [sum, batches, accSt, bkSt, pd, rd, ops, unassigned] = await Promise.all([read('close?date=' + s.date), read('batches?date=' + s.date + '&route_map=1'),
     overseer ? read('access/status').catch(() => null) : null, overseer ? read('backup-status').catch(() => null) : null,
     notField ? read('pending').catch(() => null) : null, role0 === 'ADMIN' ? read('readiness').catch(() => null) : null, overseer ? read('ops-status').catch(() => null) : null,
     ['ADMIN', 'INTAKE'].includes(role0) ? read('requests?' + new URLSearchParams({ quick: 'UNASSIGNED', date_field: 'planned', date_from: s.date, date_to: s.date, size: 1, page: 1 })).then((r) => r.total).catch(() => null) : null]);
@@ -171,30 +171,11 @@ async function screenHome() {
     backlog.length ? h('ul', { class: 'todo' }, ...backlog.map((x) => h('li', {}, h('a', { href: x.href, class: 'todo-a ' + x.cls, 'data-key': x.key }, h('span', {}, x.text), h('span', { class: 'arr' }, '→')))))
       : h('p', { class: 'empty' }, '지난 날짜에 밀린 일이 없습니다.'), followupQueue()) : null;
   const act = batches.filter((b) => b.status === 'ACTIVE');
-  // 배차 지도: 팀 색 핀 + 순서 선 (핀은 이 화면에서만 그림, 지도 서버로 보내지 않음)
-  const mapBox = h('div', { class: 'mapbox dash-map' });
-  const dep = boot.settings.depot;
-  setTimeout(async () => {
-    try {
-      const { map, ml } = await mapIn(mapBox, { center: [dep.lon, dep.lat], zoom: 13 });
-      const bnd = new ml.LngLatBounds(); bnd.extend([dep.lon, dep.lat]);
-      M.pin(ml, map, { lng: dep.lon, lat: dep.lat, label: '출발', cls: 'me' });
-      const lines = [];
-      act.forEach((b, bi) => {
-        const coords = [[dep.lon, dep.lat]];
-        b.stops.forEach((x, i) => { if (x.lat == null) return; coords.push([x.lon, x.lat]); bnd.extend([x.lon, x.lat]); M.pin(ml, map, { lng: x.lon, lat: x.lat, label: `${bi + 1}-${i + 1}`, cls: x.status === 'DONE' ? 'done' : 'c' + ((bi % 4) + 1) }); });
-        lines.push({ type: 'Feature', properties: { c: bi % 4 }, geometry: { type: 'LineString', coordinates: coords } });
-      });
-      // 핀이 모두 보이게 먼저 맞춘다 (바탕 지도가 늦거나 못 와도 핀은 보이게)
-      if (lines.length) map.fitBounds(bnd, { padding: 50, maxZoom: 15, duration: 0 });
-      const whenStyle = (f) => (map.isStyleLoaded() ? f() : map.once('style.load', f));
-      whenStyle(() => {
-        map.addSource('routes', { type: 'geojson', data: { type: 'FeatureCollection', features: lines } });
-        map.addLayer({ id: 'routes', type: 'line', source: 'routes', paint: { 'line-width': 3, 'line-dasharray': [2, 1], 'line-color': ['match', ['get', 'c'], 0, '#2557a7', 1, '#a5560d', 2, '#6c3fb5', '#0e7490'] } });
-      });
-    } catch { mapBox.replaceChildren(h('p', { class: 'pad muted' }, '지도를 불러오지 못했습니다(인터넷 연결 확인). 팀별 진행은 이 화면 아래에서 볼 수 있습니다.')); }
-  }, 30);
-  if (!act.length) mapBox.append(h('div', { class: 'map-empty' }, h('b', {}, '확정된 배정이 없습니다'), h('span', {}, role0 === 'FIELD' ? '배정이 확정되면 방문 순서가 표시됩니다.' : '[배정·노선]에서 확정하면 팀별 핀과 방문 순서가 지도에 표시됩니다.')));
+  const map = routeMap({
+    routes: confirmedMapRoutes(act), depot: boot.settings.depot, boxClass: 'dash-map',
+    empty: !act.length ? h('div', { class: 'map-empty' }, h('b', {}, '확정된 배정이 없습니다'), h('span', {}, role0 === 'FIELD' ? '배정이 확정되면 방문 순서가 표시됩니다.' : '[배정·노선]에서 확정하면 팀별 핀과 방문 순서가 지도에 표시됩니다.')) : null,
+    isCurrent: () => day === s.date && epoch === routeEpoch,
+  });
   // 관리자·팀장: 접속기록 월 점검, 최근 백업
   const overseeCard = overseer ? h('div', { class: 'card dash-oversee' }, h('div', { class: 'panel-h' }, h('h2', {}, '점검'), null),
     h('dl', { class: 'kv compact' },
@@ -221,7 +202,7 @@ async function screenHome() {
         h('div', { class: 'seg' }, h('i', { class: 'ok', style: `flex:${d}` }), h('i', { class: 'warn', style: `flex:${w}` }), h('i', { class: 'rest', style: `flex:${Math.max(0, n - d - w)}` })),
         h('div', { class: 'row small' }, `${n}곳 중 완료 ${d} · 재방문 ${w}`),
         n ? h('ol', { class: 'tline', 'aria-label': `${b.crew_name} 방문 순서` }, ...b.stops.map((x, i) => h('li', { class: nodeCls(x.status), title: `${i + 1}. ${x.name} · ${STATUS[x.status] || x.status}` },
-          h('b', {}, i + 1), h('small', {}, x.eta || '—'), h('span', { class: 'sr-only' }, ` ${x.name} ${STATUS[x.status] || ''}`)))) : null);
+          map.visitButton(x.request_id, i + 1, 'route-map-step') || h('b', {}, i + 1), h('small', {}, x.eta || '—'), h('span', { class: 'sr-only' }, ` ${x.name} ${STATUS[x.status] || ''}`)))) : null);
     })) : h('p', { class: 'empty' }, chip('배정 전', 'neutral'), ' 확정된 배정이 없습니다.', role !== 'FIELD' ? h('a', { href: '#/dispatch' }, ' 배정·노선으로 →') : null));
   const tasksCard = h('div', { class: 'card dash-tasks' }, h('div', { class: 'panel-h' }, h('h2', {}, '처리할 일'), todo.length ? h('span', { class: 'muted small' }, `${todo.length}종`) : null),
     todo.length ? h('ul', { class: 'todo' }, ...todo.map(([, t, href, cls, , pre]) => h('li', {}, h('a', { href, class: 'todo-a ' + cls, onclick: pre || null }, h('span', {}, t), h('span', { class: 'arr' }, '→')))))
@@ -238,8 +219,8 @@ async function screenHome() {
       kpi('하차 기록', sum.unload_total.volume_m3, sum.unloads.length ? `${sum.unloads.length}회 · ${sum.unload_total.weight_kg}kg` : '기록 없음', '', null, 'm³')),
     opsWarn, addrWarn,
     h('div', { class: 'dash-grid today-activity-grid' },
-      h('div', { class: 'card mapcard dash-map-card' }, h('div', { class: 'panel-h' }, h('h2', {}, '배차 지도'), h('span', { class: 'muted small' }, act.length ? `확정 배정 ${act.length}팀 · ${act.reduce((a, b) => a + b.stops.length, 0)}곳` : '확정된 배정 없음')), mapBox,
-        h('p', { class: 'muted small' }, '핀 번호는 팀-방문 순서, 녹색 핀은 수거 완료. 선은 방문 순서를 잇는 직선이며 실제 도로가 아닙니다.')),
+      h('div', { class: 'card mapcard dash-map-card' }, h('div', { class: 'panel-h' }, h('h2', {}, '배차 지도'), h('span', { class: 'muted small' }, act.length ? `확정 배정 ${act.length}팀 · ${act.reduce((a, b) => a + b.stops.length, 0)}곳` : '확정된 배정 없음')), map.element,
+        h('p', { class: 'muted small' }, '핀 번호는 팀-방문 순서, 녹색 핀은 수거 완료입니다. 실선은 도로, 점선은 직선입니다.')),
       h('div', { class: 'dash-side' }, tasksCard, backlogCard)),
     h('div', { class: 'today-detail-grid' }, dongCard, crewsCard),
     h('div', { class: 'today-operations-grid' }, readinessCard(rd), overseeCard),

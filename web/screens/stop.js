@@ -10,6 +10,7 @@ import { deriveStop } from '../fees.js';
 import { feeExtra } from '../fees.js';
 import { needsFeeNotice } from '../fees.js';
 import { won } from '../fees.js';
+import { finalUnloadState } from '../final-unload.js';
 import { addEvent, ask, backBtn, backName, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, msgBox, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, quantityInput, reduceMotion, render, ro, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 import { loadChip, nextToVisit, stateBadge, stopState } from './stoplist.js';
@@ -765,6 +766,8 @@ async function screenStop(id) {
   // 결과 저장 전에는 전화·길안내 모두 이 지점, 저장한 뒤에는 모두 다음 지점: [← · N번 전화 · N번 길안내 · 다음 N번 ▶].
   // 다음 지점이 없으면 [목록으로]이고 전화는 이 지점 그대로.
   const saved = resultConfirmed && (d.outcome || stop.status === 'CANCELLED');
+  const final = saved && !next && !busySave && !pendingSave && !collectionPending() ? finalUnloadState(st, todayKST()) : null;
+  const goFinal = final?.ready && final.hasLoad && !final.recorded;
   const nextLoc = next ? deriveStop(next, st.events).loc : null;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
     btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))} 돌아가기` }),
@@ -774,7 +777,8 @@ async function screenStop(id) {
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
       : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
-      ? btn(next ? `다음 ${next.seq}번 ▶` : `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))}`, () => go(next ? `#/stop/${next.request_id}` : ui.stopBackTo || '#/home'), 'primary dock-next')
+      ? btn(next ? `다음 ${next.seq}번 ▶` : goFinal ? '최종 하차 기록' : `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))}`,
+        () => go(next ? `#/stop/${next.request_id}` : goFinal ? '#/unload/final' : ui.stopBackTo || '#/home'), 'primary dock-next')
       : btn(d.resultNeedsConfirmation ? '수거 결과 재확인 ↓' : '수거 결과 선택 ↓', () => goSection('st-result'), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 스크롤한 뒤 그 구역 제목에 초점(스크린리더·키보드가 따라가게), 끝난 단계는 ✓
   const goSection = (sid) => {

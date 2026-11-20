@@ -36,6 +36,49 @@ function screenScanOwed(o) {
       btn('PC가 이미 가져왔음 — 목록 QR 읽기', () => { ui.scanAck = true; render(); }, 'big'),
       h('p', { class: 'small' }, 'PC가 결과를 가져왔다면 새 목록에 반영 정보가 함께 와서 코드 없이 확인됩니다. 아직이면 목록을 다 읽은 뒤에도 받지 않습니다.')));
 }
+
+function beginListDay(pl) {
+  for (const e of st.events) if (e.seq <= st.releasedSeq && e.request_id) F.purgeEventPII(e);
+  st.listChanges = {};
+  // 전날의 같은 접수 기록은 오늘 방문에 섞지 않는다.
+  for (const s of pl.stops) s.since_seq = st.seq;
+}
+
+function reconcileFieldStops(pl) {
+  const inList = new Set(pl.stops.map((s) => s.request_id));
+  const sentIntake = (s) => st.events.some((e) => e.kind === 'FIELD_INTAKE' && e.request_id === s.request_id && e.seq <= st.releasedSeq);
+  const keep = (st.fieldStops || []).filter((s) => !inList.has(s.request_id) && !(sentIntake(s) && s.planned_date !== pl.work_date));
+  const dropped = new Set((st.fieldStops || []).filter((s) => !keep.includes(s)).map((s) => s.request_id));
+  for (const e of st.events) if (dropped.has(e.request_id) && e.seq <= st.releasedSeq) F.purgeEventPII(e);
+  st.fieldStops = keep;
+}
+
+function mergePrintedVisit(pl) {
+  const old = st.daylist, [visit] = pl.stops;
+  const reject = (code) => { throw Object.assign(new Error(''), { code }); };
+  if (pl.stops.length !== 1 || !visit?.request_id) reject('BAD_VERSION');
+  if (pl.work_date < todayKST() || (old && pl.work_date < old.work_date)) reject('QR_OLD_DATE');
+  if (old?.work_date !== pl.work_date) {
+    if (unsent().length) reject('UNSENT_PREVIOUS');
+    beginListDay(pl);
+    st.daylist = { ...pl, printed_since_seq: st.seq };
+    st.localOrder = null;
+    st.lastBundleHash = null;
+  } else {
+    const prior = old.stops.find((s) => s.request_id === visit.request_id);
+    if (pl.crew !== old.crew || pl.assign_ver > old.assign_ver || prior?.removed || (!prior && old.printed_since_seq == null)) reject('QR_VISIT_REFRESH');
+    if (pl.assign_ver < old.assign_ver || (prior && visit.req_ver < prior.req_ver)) reject('QR_STALE_VERSION');
+    if (prior?.req_ver === visit.req_ver) return visit.request_id;
+    if (!prior) visit.since_seq = old.printed_since_seq;
+    F.carryOver(old, pl, st.events);
+    if (prior?.pii_purged) F.purgeStopPII(visit, prior.pii_purged);
+    const stops = prior ? old.stops.map((s) => s === prior ? visit : s) : [...old.stops, visit];
+    st.daylist = { ...old, stops: stops.sort((a, b) => a.seq - b.seq) };
+  }
+  reconcileFieldStops(pl);
+  return visit.request_id;
+}
+
 async function screenScan() {
   const owed = prevDayOwed();
   if (owed && !ui.scanAck) return screenScanOwed(owed);
@@ -47,6 +90,9 @@ async function screenScan() {
   const count = h('p', { class: 'count' }, '목록 QR을 비추세요');
   const miss = h('p', { class: 'small' });
   const msg = msgBox();
+  const retry = btn('QR 다시 읽기', () => render(), 'big', { hidden: true });
+  const owner = st, scanRoute = location.hash;
+  const stillScanning = () => st === owner && S.isUnlocked() && location.hash === scanRoute;
   const show = () => {
     if (!current) return;
     const b = col.bundles[current], got = Object.keys(b.parts).length;
@@ -72,9 +118,19 @@ async function screenScan() {
         go('#/qrtest-result');
         return;
       }
-      const pl = P.expandDaylist(opened.payload, BUILTIN_FEES);
+      const printed = opened.payload.schema === 'dg.visit/1';
+      const pl = P.expandDaylist(printed ? { ...opened.payload, schema: 'dg.daylist/2' } : opened.payload, BUILTIN_FEES);
       if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
       if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.base_version === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
+      if (printed) {
+        if (!stillScanning()) return;
+        if (opened.header.btype !== P.TYPE_DAYLIST || opened.header.assignVer !== pl.assign_ver) throw Object.assign(new Error(''), { code: 'BAD_VERSION' });
+        const id = mergePrintedVisit(pl);
+        if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
+        col.drop(current); await S.putRaw('collect', col.bundles);
+        if (stillScanning()) { toast('수거 건을 가져왔습니다'); go('#/stop/' + id); }
+        return;
+      }
       const hash = P.toHex(await P.sha256(envBytes));
       const old = st.daylist;
       // v0.13 결과 반영 정보(rel): PC가 이미 가져온 기록·사진을 코드 입력 없이 반영됨으로. 목록을 받지 않게 되더라도(지난 날짜 등)
@@ -96,6 +152,9 @@ async function screenScan() {
         // 새 갱신본: 이름·주소·품목·순서만 바꾸고, 현장 기록(이벤트)은 그대로 둔다.
         let diff = null;
         if (old && old.work_date === pl.work_date) {
+          if (old.printed_since_seq != null) {
+            for (const s of pl.stops) s.since_seq = old.printed_since_seq;
+          }
           // 같은 날 갱신본: 이 휴대폰이 이미 기록한 지점을 PC가 재방문처럼 돌려보낸 부분은 이 휴대폰 기록 기준으로(기록이 낡은 것으로 보이지 않게)
           F.carryOver(old, pl, st.events);
           diff = F.diffDaylist(old, pl);
@@ -111,20 +170,11 @@ async function screenScan() {
         } else {
           // 새 날짜 목록: 이전 목록(결과 반영이 확인된 것)의 이름·연락처·주소는 이미 이 목록으로 바뀌어 남지 않는다.
           // 이전 날짜 기록에 남은 메모 글·좌표도 지운다(수량·결과 기록은 사진 회수 때까지 남김).
-          for (const e of st.events) if (e.seq <= st.releasedSeq && e.request_id) F.purgeEventPII(e);
-          st.listChanges = {};
-          // 재방문 건: 전날 기록(도착·연락·결과·사진·금액 고지)이 오늘 방문 상태로 섞이지 않게, 이 목록을 받은 시점 이후 기록만 본다
-          for (const s of pl.stops) s.since_seq = st.seq;
+          beginListDay(pl);
         }
         st.daylist = pl; st.lastBundleHash = hash;
         // 현장 접수: PC 목록에 들어왔으면(같은 접수 ID) PC 것을 쓰고, PC 반영이 확인된 다른 날 건은 이 휴대폰에서 내린다
-        const inList = new Set(pl.stops.map((s) => s.request_id));
-        const sentIntake = (s) => st.events.some((e) => e.kind === 'FIELD_INTAKE' && e.request_id === s.request_id && e.seq <= st.releasedSeq);
-        const keepFs = (st.fieldStops || []).filter((s) => !inList.has(s.request_id) && !(sentIntake(s) && s.planned_date !== pl.work_date));
-        const dropped = new Set((st.fieldStops || []).filter((s) => !keepFs.includes(s)).map((s) => s.request_id));
-        // 내린 현장 접수의 보낸 기록(이름·연락처·주소)은 바로 지운다(PC가 원본을 가짐)
-        for (const e of st.events) if (dropped.has(e.request_id) && e.seq <= st.releasedSeq) F.purgeEventPII(e);
-        st.fieldStops = keepFs;
+        reconcileFieldStops(pl);
         // 이 휴대폰에서 바꾼 방문 순서는 새 목록(새 날짜·갱신본)에는 쓰지 않는다
         if (st.localOrder && (st.localOrder.work_date !== pl.work_date || st.localOrder.assign_ver !== pl.assign_ver)) st.localOrder = null;
         ui.diffSummary = diff && diff.summary ? diff.summary : '';
@@ -141,8 +191,9 @@ async function screenScan() {
       go('#/received');
     } catch (e) {
       say(msg, errMsg(e), true);
-      if (['AUTH_FAIL', 'WRONG_DEVICE', 'QR_STALE_VERSION', 'BAD_VERSION'].includes(e.code)) { col.drop(current); await S.putRaw('collect', col.bundles); current = null; }
-      finishing = false;
+      retry.hidden = false;
+      col.drop(current); await S.putRaw('collect', col.bundles);
+      current = null;
     }
   };
   setTimeout(() => startCamera(video, async (text) => {
@@ -159,8 +210,8 @@ async function screenScan() {
   return h('main', {},
     h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '오늘 목록 받기')),
     flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], current ? 1 : 0),
-    h('section', { class: 'card cam-card' }, video, bar, count, miss, msg,
-      h('p', { class: 'small' }, '다 받기 전에는 저장하지 않습니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.')),
+    h('section', { class: 'card cam-card' }, video, bar, count, miss, msg, retry,
+      h('p', { class: 'small' }, '팀 목록은 수신 코드를 표시하고, 종이 배차표 QR은 해당 수거 건을 엽니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.')),
     current ? btn('받던 조각 버리고 처음부터', async () => { col.drop(current); await S.putRaw('collect', col.bundles); render(); }, 'ghost link') : null);
 }
 

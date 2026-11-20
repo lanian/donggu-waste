@@ -1125,7 +1125,9 @@ def run():
         expect(page.locator(".kpi").first).to_be_visible()
         ok(page.locator(".todo-a", has_text="이번 달 접속기록 점검").count() == 0, "점검 완료 뒤 오늘 현황 알림 사라짐")
         page.goto(URL + "#/settings/basic")
-        ok(page.locator("nav.tabs a").count() == 10 and page.locator("nav.tabs a.on").inner_text() == "기본", "설정: 기본·수거팀·기기·행정동·한도·휴무일·수수료/감면·주소·외부 서비스·백업·개인정보 탭")
+        ok(page.locator("nav.tabs a").count() == 11 and page.locator("nav.tabs a.on").inner_text() == "기본"
+           and page.locator("nav.tabs").get_by_role("link", name="도로 통행 정보", exact=True).is_visible(),
+           "설정: 기존 탭과 도로 통행 정보 탭, 기본 탭으로 진입")
         page.screenshot(path=SHOTS / "pc_24_settings.png", full_page=True)
 
         # 통계·보고서 + 배차표 인쇄
@@ -1146,6 +1148,7 @@ def run():
             page.get_by_role("button", name="배차표 인쇄").first.click()
         pr = pp.value
         pr.wait_for_load_state()
+        pr.get_by_role("link", name="일반 인쇄", exact=True).click()
         # 가상둘은 위 일일 마감에서 다음 업무일로 이월(배정 풀림) → 오늘 배정 기록에는 남아 있어도 배차표·목록 재전송에는 싣지 않는다
         moved = S.one(store.connect(), "SELECT planned_date FROM request WHERE name='가상둘'")["planned_date"]
         pbody = pr.locator("tbody").inner_text()

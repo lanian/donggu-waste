@@ -1,7 +1,7 @@
 """PC 업무 로직의 겉면(façade): 예전 `from dgpc import service as S` 로 쓰던 이름을 모두 그대로 내보낸다.
 
 실제 코드는 업무 모듈에 있다. 계층(아래 → 위, 맨 위 import 는 아래 계층만 부른다):
-  settings(등록표)·paths·geo·dong_defaults·operation_print → store → core → fees·external → derive·routing
+  settings(등록표)·paths·geo·dong_defaults·operation_print·dispatch_print_map·osrm → store → core → fees·external → derive·routing
   → collection·payments·devices·users·auditlog·addresses → area·finance·label_auto·photos·dong_centers·route_depots·form_files
   → numbered_labels·official_forms → intake → results → privacy·pc_collection → assign·backup → close·reports → config
   → addrsearch·vworld → dong_work → followups → (service 겉면) → ops → server
@@ -88,7 +88,7 @@ from dgpc.backup import (
 )
 from dgpc.config import (
     PAYMENT_GUIDE_DEFAULT, CONTACT_PLACEHOLDER, settings, save_settings, EXTERNAL_KEYS, TRAVEL_METHODS, secret, travel_method,
-    external_settings, _save_external, external_test,
+    external_settings, _save_external, external_test, local_osrm, managed_road_revision,
 )
 from dgpc.addrsearch import (
     _known_names, _dong_for_juso, juso_search, juso_coord, addr_search, coord_available, NO_LOCAL,

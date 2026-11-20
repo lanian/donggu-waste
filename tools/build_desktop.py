@@ -12,6 +12,7 @@ import importlib.metadata as metadata
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -87,6 +88,39 @@ def zip_distribution(directory: Path, destination: Path) -> None:
             archive.write(path, (Path(directory.name) / path.relative_to(directory)).as_posix())
 
 
+def osrm_pack_files(source: Path) -> list[Path]:
+    assert_public_files(source)
+    sys.path.insert(0, str(ROOT / 'pc'))
+    try:
+        from dgpc.osrm import pack_files
+        return pack_files(source)
+    finally:
+        sys.path.pop(0)
+
+
+def copy_osrm_pack(source: Path, app: Path) -> None:
+    files = osrm_pack_files(source)
+    for relative in files:
+        destination = app / 'osrm-pack' / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, destination)
+
+
+def osrm_edit_kit_files(source: Path, pack: Path) -> list[Path]:
+    assert_public_files(source)
+    sys.path.insert(0, str(ROOT / 'pc'))
+    try:
+        from desktop_road_build import graph_fingerprint, kit_files
+        return kit_files(source, graph_fingerprint(pack))
+    finally:
+        sys.path.pop(0)
+
+
+def sha256_file(path: Path) -> str:
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
 def write_release_info(directory: Path) -> None:
     distributions = {}
     licenses = ["동구 대형폐기물 PC — 포함된 외부 구성 요소", ""]
@@ -95,10 +129,14 @@ def write_release_info(directory: Path) -> None:
         distributions[name] = distribution.version
         license_name = distribution.metadata.get("License-Expression") or distribution.metadata.get("License") or "포함된 dist-info 고지 참조"
         licenses.append(f"{name} {distribution.version}\n{license_name}\n")
+    if (directory / 'osrm-pack').is_dir():
+        licenses.append('OSRM 및 OpenStreetMap 도로 자료\nosrm-pack/SOURCES.md · osrm-pack/licenses 참조\n')
+    if (directory / 'osrm-edit-kit').is_dir():
+        licenses.append('도로 통행 편집용 도구와 원본 도로 자료\nosrm-edit-kit/SOURCES.md · osrm-edit-kit/licenses 참조\n')
     (directory / "THIRD-PARTY.txt").write_text("\n".join(licenses), encoding="utf-8")
     (directory / "사용안내.txt").write_text(
         "Donggu-PC.exe를 실행하세요. Python이나 터미널 명령은 필요하지 않습니다.\n"
-        "_internal 폴더를 포함한 압축 해제 폴더 전체를 함께 보관하세요.\n"
+        "_internal과 동봉된 osrm-pack 폴더를 포함해 압축 해제 폴더 전체를 함께 보관하세요.\n"
         "업무 자료 위치는 실행 앱에 표시됩니다. 기존 자료는 자료 폴더 선택으로 연결하세요.\n"
         "새 버전을 받을 때 프로그램 폴더만 교체하고 업무 자료 폴더는 삭제하지 마세요.\n",
         encoding="utf-8-sig")
@@ -121,7 +159,7 @@ def write_release_info(directory: Path) -> None:
                 "runtime_distributions": distributions, "files": {}}
     for path in assert_public_files(directory):
         manifest["files"][path.relative_to(directory).as_posix()] = {
-            "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            "bytes": path.stat().st_size, "sha256": sha256_file(path)}
     (directory / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -140,11 +178,28 @@ def resolve_dist_dir(directory: Path | None = None) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist-dir", type=Path, help="dist/desktop 내부의 배포 출력 폴더 (상대 경로는 저장소 기준)")
+    parser.add_argument("--osrm-pack", type=Path, help="동봉할 Windows OSRM 및 광주권 MLD 자료 팩 폴더")
+    parser.add_argument("--osrm-edit-kit", type=Path, help="동봉 도로 팩과 같은 원본 및 Windows 도로 편집 도구 폴더")
     args = parser.parse_args()
     distribution = resolve_dist_dir(args.dist_dir)
     app = distribution / "Donggu-PC"
     if not app.resolve().is_relative_to(distribution):
         raise ValueError("기존 앱 폴더가 선택한 배포 출력 바깥을 가리킵니다.")
+    pack = args.osrm_pack
+    if pack is not None:
+        pack = (ROOT / pack).resolve()
+        if pack.is_relative_to(app) or app.is_relative_to(pack):
+            raise ValueError('OSRM 팩 입력은 빌드가 다시 만드는 프로그램 폴더와 분리해 주세요.')
+        osrm_pack_files(pack)
+    edit_kit = args.osrm_edit_kit
+    edit_files = []
+    if edit_kit is not None:
+        if pack is None:
+            parser.error('--osrm-edit-kit과 함께 --osrm-pack을 지정해 주세요.')
+        edit_kit = (ROOT / edit_kit).resolve()
+        if edit_kit.is_relative_to(app) or app.is_relative_to(edit_kit):
+            raise ValueError('도로 편집 입력은 빌드가 다시 만드는 프로그램 폴더와 분리해 주세요.')
+        edit_files = osrm_edit_kit_files(edit_kit, pack)
     if app.exists():
         assert_public_files(app)  # --noconfirm이 기존 폴더를 정리하기 전에 업무 자료를 보호한다.
     if sys.platform != "win32":
@@ -166,12 +221,20 @@ def main() -> None:
         icon.save(BUILD / "Donggu-PC.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(distribution),
                     "--workpath", str(BUILD / "work"), str(ROOT / "tools/desktop.spec")], cwd=ROOT, check=True)
+    if pack is not None:
+        copy_osrm_pack(pack, app)
+    if edit_kit is not None:
+        for relative in edit_files:
+            destination = app / 'osrm-edit-kit' / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(edit_kit / relative, destination)
+        osrm_edit_kit_files(app / 'osrm-edit-kit', app / 'osrm-pack')
     write_release_info(app)
     archive = distribution / "Donggu-PC-windows-x64.zip"
     zip_distribution(app, archive)
     print("실행 앱: " + str(app / "Donggu-PC.exe"))
     print("배포 ZIP: " + str(archive))
-    print("ZIP SHA256: " + hashlib.sha256(archive.read_bytes()).hexdigest())
+    print("ZIP SHA256: " + sha256_file(archive))
 
 
 if __name__ == "__main__":

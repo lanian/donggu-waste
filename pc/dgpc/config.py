@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from dgpc import external as X, backup as _bk, privacy as _pv, area, finance, settings as SR
+from dgpc import external as X, backup as _bk, privacy as _pv, area, finance, osrm, settings as SR
 from dgpc import derive as _derive, fees as _fees, payments as _payments  # noqa: F401 — 설정 묶음에 값을 더하는 모듈(contribute)을 불러 둔다
 from dgpc.settings import CONTACT_PLACEHOLDER, EXTERNAL_KEYS, PAYMENT_GUIDE_DEFAULT  # noqa: F401 — 예전 이름(S.CONTACT_PLACEHOLDER 등)
 from dgpc.core import UserError, audit, get_setting, set_setting, tx
@@ -70,7 +70,7 @@ def save_settings(con, data: dict):
             _save_external(con, data["external"] or {})
         if "osrm_url" in data:
             u = (data["osrm_url"] or "").strip()
-            if u and not re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/?$", u):
+            if u and not osrm.valid_url(u):
                 raise UserError("OSRM 주소는 이 PC 안(http://127.0.0.1:포트)만 쓸 수 있습니다.")
             set_setting(con, "osrm_url", u)
         for k in ("service_min_base", "service_min_per_item"):
@@ -141,13 +141,29 @@ def travel_method(con) -> str:
     m = get_setting(con, "travel_method")
     if m in TRAVEL_METHODS:
         return m
-    return "OSRM" if get_setting(con, "osrm_url") else "ESTIMATE"  # 이전 설정 그대로(OSRM 주소가 있으면 OSRM)
+    pack = osrm.bundled
+    return "OSRM" if get_setting(con, "osrm_url") or (pack and pack.status != 'MISSING') else "ESTIMATE"
+
+
+def local_osrm(con, *, retry=False) -> tuple[str, str]:
+    if travel_method(con) != 'OSRM':
+        return '', 'DISABLED'
+    configured = get_setting(con, 'osrm_url')
+    if configured:
+        return configured, 'CONFIGURED'
+    return osrm.bundled.local_endpoint(retry=retry) if osrm.bundled else ('', 'MISSING')
+
+
+def managed_road_revision(con) -> str | None:
+    if travel_method(con) == 'OSRM' and not get_setting(con, 'osrm_url'):
+        return getattr(osrm.bundled, 'revision', None)
+    return None
 
 
 def external_settings(con) -> dict:
     from dgpc import vworld
     return {"keys": {k: {"set": bool(secret(con, k)), "mask": X.mask(secret(con, k)), "label": lab} for k, lab in EXTERNAL_KEYS.items()},
-            "travel_method": travel_method(con), "vworld": vworld.settings(con)}
+            "travel_method": travel_method(con), "travel_preference": get_setting(con, "travel_method"), "vworld": vworld.settings(con)}
 
 
 def _save_external(con, d: dict):
@@ -176,7 +192,7 @@ def _save_external(con, d: dict):
             set_setting(con, "vworld_enabled", values["enabled"])
     if "travel_method" in d:
         m = d["travel_method"]
-        if m not in TRAVEL_METHODS:
+        if m not in (*TRAVEL_METHODS, None):
             raise UserError("이동시간 계산 방식을 골라 주세요.")
         if m == "KAKAO" and not secret(con, "kakao_rest_key"):
             raise UserError("카카오모빌리티 REST 키를 먼저 저장하세요.")

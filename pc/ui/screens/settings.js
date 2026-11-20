@@ -273,7 +273,7 @@ function capacityCard() {
   return h('div', { class: 'card' }, h('h2', {}, '수거 한도'),
     h('div', { class: 'row' }, '전체 일일 한도', lim, '건 ·', m3, 'm³', h('span', { class: 'muted small' }, '비우면 한도 없음. 넘어도 막지 않고 접수 화면에서 경고합니다. 동별 한도는 [행정동] 탭에서 정합니다.')),
     h('div', { class: 'row' }, '쉬는 요일', closed.el),
-    h('label', { class: 'row' }, pref, '차고지 미지정 동의 기본 담당 팀 우선 (약한 선호)'),
+    h('label', { class: 'row' }, pref, '자동 노선은 동별 담당 팀에만 배정'),
     btn('저장', wrap(async () => { await post('settings', { capacity: { daily_count: lim.value, daily_m3: m3.value, closed_weekdays: closed.get(), prefer_dong_crew: pref.checked } }); toast('저장했습니다'); setBoot(null); render(); }, msg), 'primary'), msg);
 }
 function holidayCard() {
@@ -343,12 +343,13 @@ function unloadCard(d) {
 }
 
 // ------------------------------------------------------------ QR 실측 (가상 자료)
-const SETTING_TABS = [['basic', '기본'], ['crews', '수거팀'], ['devices', '기기'], ['dongs', '행정동'], ['capacity', '한도'], ['holidays', '휴무일'], ['fees', '수수료·감면'], ['addr', '주소·외부 서비스'], ['backup', '백업'], ['privacy', '개인정보']];
+const SETTING_TABS = [['basic', '기본'], ['crews', '수거팀'], ['devices', '기기'], ['dongs', '행정동'], ['capacity', '한도'], ['holidays', '휴무일'], ['fees', '수수료·감면'], ['addr', '주소·외부 서비스'], ['road-rules', '도로 통행 정보'], ['backup', '백업'], ['privacy', '개인정보']];
 async function screenSettings(tab) {
   tab = SETTING_TABS.some(([k]) => k === tab) ? tab : 'basic';
   const tabs = h('nav', { class: 'tabs', 'aria-label': '설정 묶음' }, ...SETTING_TABS.map(([k, t]) => h('a', { href: '#/settings/' + k, class: k === tab ? 'on' : '', 'aria-current': k === tab ? 'page' : null }, t)));
   const body = await ({ basic: settingsBasic, crews: settingsCrews, devices: settingsDevices, dongs: () => [dongCard()], capacity: () => [capacityCard()], holidays: () => [holidayCard()],
-    fees: settingsFees, addr: () => [addrCard(), externalCard()], backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
+    fees: settingsFees, addr: () => [addrCard(), externalCard()], 'road-rules': async () => (await import('./road_rules.js')).roadRulesCard(),
+    backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
   return h('div', {}, pagehead('설정'), tabs, ...[].concat(body));
 }
 const fp9 = (f) => (f.length === 9 ? `${f.slice(0, 3)} ${f.slice(3, 6)} ${f.slice(6)}` : f);
@@ -495,7 +496,7 @@ function settingsBasic() {
   const routeMsg = h('p', { class: 'msg' }), infoMsg = h('p', { class: 'msg' });
   const st = boot.settings;
   const dlat = h('input', { value: st.depot.lat, class: 'w-s', 'aria-label': '차고지 위도' }), dlon = h('input', { value: st.depot.lon, class: 'w-s', 'aria-label': '차고지 경도' }), dlabel = h('input', { value: st.depot.label, 'aria-label': '차고지 이름' });
-  const osrm = h('input', { value: st.osrm_url, placeholder: 'http://127.0.0.1:5000 (이동시간 방식이 로컬 OSRM일 때 사용)', class: 'w-l', 'aria-label': '로컬 OSRM' });
+  const osrm = h('input', { value: st.osrm_url, placeholder: '자동 연결 또는 http://127.0.0.1:5000', class: 'w-l', 'aria-label': '로컬 OSRM' });
   const sb = h('input', { type: 'number', value: st.service_min_base, class: 'w-xs', 'aria-label': '지점당 기본 작업(분)' }), sp = h('input', { type: 'number', value: st.service_min_per_item, class: 'w-xs', 'aria-label': '품목당 작업(분)' });
   const us = st.unload_site || {}, es = st.end_site || {};
   const jur = h('input', { value: st.jurisdiction || '', placeholder: '예: 동구', class: 'w-s', 'aria-label': '관할 구역' });
@@ -506,7 +507,7 @@ function settingsBasic() {
   const lus = h('input', { type: 'time', value: lu.start || '', 'aria-label': '쉬는 시간 창 시작' }), lue = h('input', { type: 'time', value: lu.end || '', 'aria-label': '쉬는 시간 창 끝' });
   const lum = h('input', { type: 'number', value: lu.minutes || 60, min: 10, class: 'w-xs', 'aria-label': '쉬는 시간(분)' });
   const bfirst = h('input', { type: 'checkbox', checked: st.base_first !== false, 'aria-label': '큰 짐 먼저 싣기 선호' });
-  const umin = h('input', { type: 'number', value: st.unload_min, class: 'w-xs', 'aria-label': '하차 시간(분)' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, class: 'w-xs', 'aria-label': '차량당 최대 하차 횟수' });
+  const umin = h('input', { type: 'number', value: st.unload_min, class: 'w-xs', 'aria-label': '하차 시간(분)' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, class: 'w-xs', 'aria-label': '차량당 수거 중 최대 하차 횟수' });
   const ft = (label, ...el) => h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, label), h('div', { class: 'ft-v' }, ...el));
   const contact = h('input', { value: st.contact_info, class: 'fill', 'aria-label': '문의처' });
   const guide = h('textarea', { rows: 2, class: 'fill', 'aria-label': '배출 장소 안내' }, st.disposal_guide);
@@ -514,13 +515,13 @@ function settingsBasic() {
   const payGuide = h('textarea', { rows: 2, class: 'fill', maxlength: 300, 'aria-label': '납부 안내' }, st.payment_guide || '');
   const roundUnit = h('select', { 'aria-label': '감면액 끝수 단위' }, ...(boot.reduction_round_units || [1, 10]).map((u) => h('option', { value: u, selected: +u === +(st.reduction_round_unit || 1) }, u === 1 ? '1원 (원 미만 버림)' : `${u}원 (${u}원 미만 버림)`)));
   return [h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'ftable' },
-      ft('공통 차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel), h('span', { class: 'muted small' }, '행정동에서 개별 차고지를 지정하지 않은 팀에 적용')), ft('로컬 OSRM', osrm), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
-      ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차', umin, '분 · 차량당 최대', umax, '회'),
+      ft('공통 차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel), h('span', { class: 'muted small' }, '행정동에서 개별 차고지를 지정하지 않은 팀에 적용')), ft('로컬 OSRM', osrm, h('span', { class: 'muted small' }, '주소를 비우면 함께 받은 도로 자료를 사용합니다.')), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
+      ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차', umin, '분 · 차량당 수거 중 최대', umax, '회'),
       ft('반입지 받는 시간', uhs, '~', uhe, h('span', { class: 'muted small' }, '비우면 따지지 않음')),
       ft('쉬는 시간', lus, '~', lue, '사이에', lum, '분', h('span', { class: 'muted small' }, '예: 11:30~13:30 사이 60분. 비우면 넣지 않음')),
       ft('적재 순서', h('label', { class: 'row' }, bfirst, '큰 짐(장롱·침대·대형 냉장고 등)은 차가 비어 있을 때 싣는 순서를 선호'), h('span', { class: 'muted small' }, '이동시간이 비슷하면 큰 짐을 먼저')), ft('종료지', elat, elon, elabel, coordTools(elat, elon, '종료지', elabel), h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
       ft('관할 구역', jur, h('span', { class: 'muted small' }, '주소의 구 이름이 다르면 접수할 때 경고 (막지는 않음)'))),
-    h('p', { class: 'small muted' }, '반입지 좌표를 넣으면 적재가 찰 때 반입지에 들러 비우고 이어서 수거하는 순서를 추천합니다. 비우면 차량 1회 적재 안에서만 계산합니다.'),
+    h('p', { class: 'small muted' }, '반입지를 등록하고 종료지를 비우면 마지막 수거 후 반입지에서 하차하고 출발 차고지로 복귀합니다. 반입지 받는 시간과 하차 소요시간이 반영됩니다.'),
     h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
       unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value,
       unload_hours: { start: uhs.value, end: uhe.value }, lunch: { start: lus.value, end: lue.value, minutes: lum.value }, base_first: bfirst.checked }); toast('저장했습니다'); setBoot(null); render(); }, routeMsg), 'primary')), routeMsg),
@@ -669,8 +670,9 @@ function externalCard() {
   const rows = ['juso_search_key', 'juso_coord_key', 'kakao_rest_key', 'vworld_api_key'].map(keyRow);
   const vworldEnabled = h('input', { type: 'checkbox', checked: ex.vworld?.enabled, 'aria-label': 'VWorld 참고 조회 사용' });
   const vworldDomain = h('input', { value: ex.vworld?.domain || '', class: 'fill', 'aria-label': 'VWorld 등록 서비스 URL', placeholder: '키 발급 시 등록한 URL (선택)' });
-  const method = h('select', { 'aria-label': '이동시간 계산 방식' }, ...[['ESTIMATE', '직선거리 추정 (기본, 외부 전송 없음)'], ['OSRM', '로컬 OSRM (기본 설정의 OSRM 주소)'], ['KAKAO', '카카오모빌리티 API (REST 키)']]
-    .map(([v, t]) => h('option', { value: v, selected: v === ex.travel_method }, t)));
+  const preference = Object.hasOwn(ex, 'travel_preference') ? ex.travel_preference || '' : ex.travel_method;
+  const method = h('select', { 'aria-label': '이동시간 계산 방식' }, ...[['', '자동 (로컬 도로 자료가 있으면 사용)'], ['ESTIMATE', '직선거리 추정'], ['OSRM', '로컬 OSRM (동봉 자료 또는 지정 주소)'], ['KAKAO', '카카오모빌리티 API (REST 키)']]
+    .map(([v, t]) => h('option', { value: v, selected: v === preference }, t)));
   const testOut = h('span', { class: 'muted small', role: 'status' });
   const test = (svc) => wrap(async () => { testOut.textContent = '연결 시험 중…'; const r = await post('external/test', { service: svc }); testOut.textContent = (r.ok ? '✓ ' : '✗ ') + r.message; }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '외부 서비스 (주소 검색·도로 이동시간)'),
@@ -686,7 +688,7 @@ function externalCard() {
       h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '이동시간 계산 방식'), h('div', { class: 'ft-v' }, method))),
     h('div', { class: 'row' }, btn('저장', wrap(async () => {
       const keys = {}; rows.forEach((r) => { if (r.inp.value.trim()) keys[r.k] = r.inp.value.trim(); });
-      await post('settings', { external: { keys, travel_method: method.value, vworld: { enabled: vworldEnabled.checked, domain: vworldDomain.value.trim() } } }); rows.forEach((r) => { r.inp.value = ''; });
+      await post('settings', { external: { keys, travel_method: method.value || null, vworld: { enabled: vworldEnabled.checked, domain: vworldDomain.value.trim() } } }); rows.forEach((r) => { r.inp.value = ''; });
       toast('저장했습니다'); setBoot(null); render();
     }, msg), 'primary'), btn('주소 검색 연결 시험', test('juso'), 'small'), btn('카카오모빌리티 연결 시험', test('kakao'), 'small'), btn('VWorld 연결 시험', test('vworld'), 'small'), testOut), msg);
 }

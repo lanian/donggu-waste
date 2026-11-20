@@ -2,18 +2,11 @@
 import * as F from '../field.js';
 import * as L from '../load.js';
 import * as S from '../store.js';
-import { LABEL } from '../fees.js';
-import { deriveStop } from '../fees.js';
-import { matchText } from '../fees.js';
+import { LABEL, deriveStop, isStopDone, matchText, needsResult } from '../fees.js';
 import * as NAV from '../nav.js';
 import { END_OF_DAY_H, ago, ask, btn, cancelAsked, commit, dial, dongOf, flushPhotos, go, h, isSolo, outbox, pcStops, pcWorkDate, pendingPhotos, render, st, toast, todayKST, ui, workerName } from '../core.js';
 import { CHECKS, doInstall, installEvt, navBtn, runningAsApp } from '../widgets.js';
 
-// 수량 입력만 끝난 상태와 방문 결과까지 저장한 완료를 구분한다.
-const isStopDone = (s, d) => !d.resultNeedsConfirmation && (d.outcome ? d.outcome === 'DONE' && d.progress === 'DONE' : s.status === 'DONE');
-// 방문 결과를 기록해야 할 곳: 취소·제외·개인정보 정리 아님, 완료 아님, 결과 없음 또는 재확인 필요.
-// 홈·단독 홈의 '지금 할 일'과 상세 하단 바의 '다음 N번'이 같은 기준을 쓴다.
-const needsResult = (s, d) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation);
 // 방문 순서 목록에서 지금 지점 다음의 기록할 곳. 뒤쪽에 없으면 앞 번호로 돌아가 찾는다(지금 지점은 빼고).
 function nextToVisit(list, current, events) {
   const i = list.indexOf(current);

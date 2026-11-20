@@ -28,12 +28,16 @@ def same(a, b):
     return a['lat'] == b['lat'] and a['lon'] == b['lon']
 
 
-def resolve(requests, crews, dongs, default, end_site=None):
+def resolve(requests, crews, dongs, default, end_site=None, *, keep_dong_crews=True):
     by_name = {d['name']: d for d in dongs}
     names = {r.get('dong') for r in requests}
     required = {}
+    defaults = {}
     for req in requests:
         dong = by_name.get(req.get('dong'))
+        if keep_dong_crews and dong:
+            # 등록된 동의 미연결과 동이 미지정인 접수를 자동 배정에서 구분한다.
+            defaults[req['id']] = dong.get('crew_id') or None
         if dong and dong.get('depot'):
             if not dong.get('crew_id'):
                 raise C.UserError(f"{dong['name']} 차고지의 담당 수거팀을 먼저 지정해 주세요.")
@@ -48,13 +52,13 @@ def resolve(requests, crews, dongs, default, end_site=None):
             depots[crew['id']] = chosen
         else:
             depots[crew['id']] = dict(default)
-    context = {'crew_depots': depots, 'crew_required': required, 'end_site': end_site}
+    context = {'crew_depots': depots, 'crew_required': required, 'crew_defaults': defaults, 'end_site': end_site}
     context['signature'] = hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
     return context
 
 
 def current(con, request_ids, crew_ids):
-    from dgpc.area import list_dongs
+    from dgpc.area import capacity_settings, list_dongs
     reqs = []
     ids = list(dict.fromkeys(request_ids))
     for chunk in C._chunks(ids):
@@ -63,4 +67,5 @@ def current(con, request_ids, crew_ids):
         raise C.StaleError('계산한 접수가 바뀌었습니다. 노선을 다시 계산해 주세요.')
     wanted = set(crew_ids)
     crews = [c for c in C.rows(con, 'SELECT id,name FROM crew WHERE active=1') if c['id'] in wanted]
-    return resolve(reqs, crews, list_dongs(con), C.get_setting(con, 'depot'), C.get_setting(con, 'end_site'))
+    return resolve(reqs, crews, list_dongs(con), C.get_setting(con, 'depot'), C.get_setting(con, 'end_site'),
+                   keep_dong_crews=capacity_settings(con)['prefer_dong_crew'])

@@ -378,6 +378,17 @@ def norm_rel(rel) -> dict | None:
     return out
 
 
+def _final_return(value) -> dict:
+    if not isinstance(value, list) or len(value) != 3:
+        return {}
+    lat, lon, count = value
+    if (type(lat) not in (int, float) or type(lon) not in (int, float)
+            or not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat, lon) == (0, 0)
+            or type(count) is not int or not 1 <= count <= 2**53 - 1):
+        return {}
+    return {"final": True, "depot": {"lat": lat, "lon": lon}, "stop_count": count}
+
+
 def compact_daylist(p: dict, fee_rows: dict) -> dict:
     stops = []
     for s in p["stops"]:
@@ -407,6 +418,11 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
             c["u"] = [u.get("eta", ""), u.get("label", "반입지"), u.get("minutes", 0), u.get("volume_m3", 0)]
             if u.get("lat") is not None and u.get("lon") is not None:  # 반입지 좌표(선택, 5·6번째 값) — 휴대폰 v0.10.1 길안내용
                 c["u"] += [round(float(u["lat"]), 6), round(float(u["lon"]), 6)]
+            depot = u.get("depot")
+            if s is p["stops"][-1] and u.get("final") is True and isinstance(depot, dict):
+                final = [depot.get("lat"), depot.get("lon"), u.get("stop_count")]
+                if _final_return(final):
+                    c["f"] = [round(final[0], 6), round(final[1], 6), final[2]]
         items = []
         for it in s["items"]:
             row = fee_rows.get(it.get("fee_rate_id") or "")
@@ -470,7 +486,8 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
                       "eta": c.get("e", ""), "appt": c.get("t"), "revisit": bool(c.get("rv")), "assign_ver": p["assign_ver"], "items": items,
                       "levy_no": c.get("lv", ""), **({'pc_collection_ver': c['pcv']} if c.get('pcv') else {}), **({"reduction": {"rate": int(c["rd"]), **({"round_unit": 10} if c.get("ru") == 10 else {})}} if c.get("rd") else {}),
                       **({"unload_after": {"eta": c["u"][0], "label": c["u"][1], "minutes": c["u"][2], "volume_m3": c["u"][3],
-                                            "lat": c["u"][4] if len(c["u"]) > 5 else None, "lon": c["u"][5] if len(c["u"]) > 5 else None}} if c.get("u") else {})})
+                                            "lat": c["u"][4] if len(c["u"]) > 5 else None, "lon": c["u"][5] if len(c["u"]) > 5 else None,
+                                            **_final_return(c.get("f"))}} if c.get("u") else {})})
     ft = {"version_id": p["fee"]}
     if p.get("fb"):
         ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))

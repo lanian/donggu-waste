@@ -225,7 +225,7 @@ def kakao_destinations(key: str, origin: tuple[float, float], dests: list[tuple[
         raise ValueError("목적지는 30곳까지")
     body = {"origin": {"x": f"{origin[1]:.5f}", "y": f"{origin[0]:.5f}"},
             "destinations": [{"x": f"{lon:.5f}", "y": f"{lat:.5f}", "key": str(k)} for k, lat, lon in dests],
-            "radius": int(min(radius_m, KAKAO_RADIUS_M)), "priority": "TIME"}
+            "radius": int(min(radius_m, KAKAO_RADIUS_M)), "priority": "TIME", "avoid": ["toll"]}
     j = http_json(f"{kakao_base()}/v1/destinations/directions", data=body, headers=_kakao_headers(key), timeout=timeout)
     out = {}
     for r in (j or {}).get("routes") or []:
@@ -239,7 +239,12 @@ def kakao_destinations(key: str, origin: tuple[float, float], dests: list[tuple[
 
 def kakao_direction(key: str, origin: tuple[float, float], dest: tuple[float, float], timeout: float = TIMEOUT_S) -> int | None:
     """출발지 → 목적지 1곳 자동차 소요 시간(초). 경로가 없으면 None."""
-    p = urllib.parse.urlencode({"origin": f"{origin[1]:.5f},{origin[0]:.5f}", "destination": f"{dest[1]:.5f},{dest[0]:.5f}", "priority": "TIME"})
+    p = urllib.parse.urlencode({
+        "origin": f"{origin[1]:.5f},{origin[0]:.5f}",
+        "destination": f"{dest[1]:.5f},{dest[0]:.5f}",
+        "priority": "TIME",
+        "avoid": "toll",
+    })
     j = http_json(f"{kakao_base()}/v1/directions?{p}", headers=_kakao_headers(key), timeout=timeout)
     for r in (j or {}).get("routes") or []:
         try:

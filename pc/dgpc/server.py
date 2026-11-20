@@ -38,7 +38,7 @@ from typing import Callable
 import contextlib
 import queue
 
-from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, privacy as PV, routing, service as S, store, users as U
+from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, osrm, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
 from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
@@ -621,16 +621,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path.startswith("/bundle/"):
                 return self.bundle_page(path[8:])
             if method == "GET" and path.startswith("/print/batch/"):
-                sess = SESSIONS.get(self.session() or "")
-                if not sess:  # 위에서 확인한 사이에 로그아웃·만료 정리로 사라짐
-                    return self.send_json({"error": "로그인이 필요합니다."}, 401)
-                S.ACTOR.set(sess["username"])
-                with LOCK:
-                    if sess["role"] == "FIELD":
-                        b = S.one(CON, "SELECT crew_id FROM assignment_batch WHERE id LIKE ?", (path[13:] + "%",))
-                        if not b or b["crew_id"] != sess.get("crew_id"):
-                            return self.send_json({"error": "내 팀의 배차표만 볼 수 있습니다."}, 403)
-                    return self.print_page(path[13:])
+                return self.print_page(path[13:], mode=qs.get("mode", "protected"),
+                                       route_mode=qs.get("route"))
             if method == "GET" and path.startswith("/print/requests/"):
                 sess = SESSIONS.get(self.session() or "")
                 if not sess:
@@ -1363,7 +1355,7 @@ class Handler(BaseHTTPRequestHandler):
         "", sum(b.get("count") or len(b.get("stops") or []) for b in out), f"배정 목록 {qs['date']}") if out else None))  # 이름·주소 포함: 건수만
     def ep_batches(self, qs):
         """그날 배정 목록(수거팀은 자기 팀만)."""
-        out = S.list_batches(self.c, qs["date"])
+        out = S.list_batches(self.c, qs["date"], route_map=qs.get('route_map') == '1')
         if self.crew_scope() is not None:
             out = [b for b in out if b["crew_id"] == self.crew_scope()]
         return out
@@ -1558,6 +1550,43 @@ class Handler(BaseHTTPRequestHandler):
     def ep_route(self, qs):
         """노선 계산과 확정 배정 변경 검토(OR-Tools·카카오 길찾기는 잠금 밖)."""
         return self.route_plan(self.json_body())
+
+    @endpoint('POST', 'route-path', ALL, lock='none')
+    def ep_route_path(self, qs):
+        """지도 방문 순서의 로컬 OSRM 형상·거리 조회. 동봉과 지정 주소 모두 루프백만 사용."""
+        body = self.json_body()
+        if not isinstance(body, dict):
+            raise S.UserError('지도 좌표를 확인해 주세요.')
+        points = routing.route_points(body.get('points'))
+        batch_id = body.get('batch_id')
+        if batch_id is not None and (not isinstance(batch_id, str) or not 1 <= len(batch_id) <= 64):
+            raise S.UserError('지도에 표시할 배정을 확인해 주세요.')
+
+        def permitted():
+            if batch_id is None:
+                return self.user['role'] in WORK
+            batch = S.one(CON, "SELECT crew_id FROM assignment_batch WHERE id=? AND status='ACTIVE'", (batch_id,))
+            scope = self.crew_scope()
+            return batch and (scope is None or batch['crew_id'] == scope)
+
+        denied_scope = json_status({'error': '조회할 수 있는 현재 배정이 아닙니다.'}, 403)
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            if not permitted():
+                return denied_scope
+            endpoint, state = S.local_osrm(CON)
+        if not endpoint:
+            return {'source': 'ESTIMATE', 'reason': state}
+        result = routing.road_path(points, endpoint)
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            if not permitted():
+                return denied_scope
+            if (endpoint, state) != S.local_osrm(CON):
+                return {'source': 'ESTIMATE', 'reason': 'SETTINGS_CHANGED'}
+        return result
 
     # 오래 걸리는 관리 작업 → 백그라운드 작업 번호
     @endpoint("POST", "backup", ADMIN, lock="none")
@@ -2008,26 +2037,89 @@ class Handler(BaseHTTPRequestHandler):
         S.save_settings(self.c, self.json_body())
         return S.settings(self.c)
 
+    def road_rules_manager(self, con):
+        manager = osrm.bundled
+        if not callable(getattr(manager, 'summary', None)):
+            raise S.UserError('도로 통행 편집 자료가 포함된 Windows 배포본에서 사용할 수 있습니다.')
+        if S.managed_road_revision(con) is None:
+            raise S.UserError('이동시간 설정에서 동봉 로컬 OSRM을 선택해 주세요.')
+        return manager
+
+    @endpoint('GET', 'road-rules', ADMIN)
+    def ep_road_rules(self, qs):
+        """동봉 도로 정보의 사용 가능 여부, 적용·이전 버전과 미리보기."""
+        try:
+            manager = self.road_rules_manager(self.c)
+        except S.UserError as error:
+            return {'available': False, 'reason': str(error), 'active_id': 'base', 'previous_id': None,
+                    'rules': [], 'busy': False, 'pending': None}
+        return manager.summary()
+
+    @endpoint('GET', 'road-rules/roads', ADMIN)
+    def ep_road_rules_roads(self, qs):
+        """지도 선택 위치 주변의 등록 가능 도로 구간."""
+        try:
+            lat, lon = float(qs['lat']), float(qs['lon'])
+        except (KeyError, TypeError, ValueError):
+            raise S.UserError('지도 위치를 확인해 주세요.') from None
+        if not (33 <= lat <= 39 and 124 <= lon <= 132):
+            raise S.UserError('지도 위치를 확인해 주세요.')
+        manager = self.road_rules_manager(self.c)
+        try:
+            return manager.roads(lat, lon)
+        except ValueError as error:
+            raise S.UserError(str(error)) from None
+
+    def road_rule_job(self, operation):
+        body = self.json_body()
+        if not isinstance(body, dict):
+            raise S.UserError('도로 통행 정보 요청을 확인해 주세요.')
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            manager = self.road_rules_manager(CON)
+            actor = self.user['username']
+
+        @contextlib.contextmanager
+        def guard():
+            with LOCK:
+                if self._write_session_error():
+                    raise S.UserError('도로 통행 정보를 처리하려면 관리자 계정으로 다시 로그인해 주세요.')
+                if self.road_rules_manager(CON) is not manager:
+                    raise S.StaleError('사용하는 도로 자료가 바뀌었습니다. 다시 확인해 주세요.')
+                yield
+
+        def run(job):
+            with guard():
+                pass
+            try:
+                if operation == 'preview':
+                    return manager.preview(body)
+                return getattr(manager, operation)(body, guard)
+            except ValueError as error:
+                raise S.UserError(str(error)) from None
+
+        jid = OPS.JOBS.submit('road_rule_' + operation, run, actor, self.client_address[0] if LAN else 'local')
+        return {'job_id': jid, 'status': 'QUEUED'}
+
+    @endpoint('POST', 'road-rules/preview', ADMIN, lock='none')
+    def ep_road_rules_preview(self, qs):
+        """시험 도로망에서 통행 방향의 적용 전후를 비교하는 작업."""
+        return self.road_rule_job('preview')
+
+    @endpoint('POST', 'road-rules/apply', ADMIN, lock='none')
+    def ep_road_rules_apply(self, qs):
+        """검증한 도로망으로 전환하는 작업."""
+        return self.road_rule_job('apply')
+
+    @endpoint('POST', 'road-rules/rollback', ADMIN, lock='none')
+    def ep_road_rules_rollback(self, qs):
+        """이전에 사용한 도로망으로 복원하는 작업."""
+        return self.road_rule_job('rollback')
+
     def route_inputs(self, con, date, request_ids, crew_ids):
-        versions = {}
-        ids = list(request_ids)
-        for start in range(0, len(ids), 800):
-            chunk = ids[start:start + 800]
-            placeholders = ','.join('?' for _ in chunk)
-            events = {}
-            for event in S.rows(con, f'SELECT * FROM result_event WHERE request_id IN ({placeholders}) ORDER BY event_id', chunk):
-                events.setdefault(event['request_id'], []).append(event)
-            for row in S.rows(con, f'SELECT * FROM request WHERE id IN ({placeholders})', chunk):
-                versions[row['id']] = hashlib.sha256(json.dumps([row, events.get(row['id'], [])], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        profiles = [{k: crew.get(k) for k in ('id', 'name', 'active', 'capacity_m3', 'capacity_kg', 'shift_start', 'shift_end')}
-                    for crew in S.list_crews(con) if crew['id'] in crew_ids]
-        st = S.settings(con)
-        options = {k: st.get(k) for k in ('depot', 'end_site', 'osrm_url', 'service_min_base', 'service_min_per_item',
-            'unload_site', 'unload_min', 'max_unloads', 'unload_hours', 'lunch', 'base_first', 'capacity')}
-        options.update(crews=sorted(profiles, key=lambda c: c['id']), volumes=S.volume_overrides(con), travel_method=S.travel_method(con))
-        signature = hashlib.sha256(json.dumps(options, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        revisions = {r['crew_id']: r['v'] for r in S.rows(con, 'SELECT crew_id,MAX(assign_ver) AS v FROM assignment_batch WHERE work_date=? GROUP BY crew_id', (date,)) if r['crew_id'] in crew_ids}
-        return {'requests': versions, 'profiles': signature, 'revisions': {cid: revisions.get(cid, 0) for cid in crew_ids}}
+        """전체·동별 공용 계산 입력 지문(dong_work.route_inputs)."""
+        return DW.route_inputs(con, date, request_ids, crew_ids)
 
     def check_depot_basis(self, con, value, date, plan=None, *, refresh_inputs=False):
         try:
@@ -2037,7 +2129,12 @@ class Handler(BaseHTTPRequestHandler):
             if plan is not None and (not set(plan).issubset(proof['crew_ids']) or any(s['request_id'] not in proof['request_ids'] for stops in plan.values() for s in stops)):
                 raise ValueError()
             if refresh_inputs:
-                return  # 재계산은 같은 승인 범위에서 최신 자료를 읽고 새 증명을 만든다. 확정은 엄격하게 검사한다.
+                return  # 재계산(순서 유지 포함)은 같은 승인 범위에서 최신 자료·현재 도로망을 읽고 새 증명을 만든다. 확정은 엄격하게 검사한다.
+            road = proof.get('road_revision')
+        except (KeyError, TypeError, ValueError, S.UserError):
+            raise S.StaleError('접수·차고지·수거팀·배정 또는 계산 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
+        DW.check_road_revision(con, road, '적용 도로망이 바뀌었습니다. 새 도로망으로 [순서 유지 재계산]을 하거나 노선을 다시 계산한 뒤 확정하세요.')
+        try:
             current = DP.current(con, proof['request_ids'], proof['crew_ids'])
             if current['signature'] != proof['signature']:
                 raise ValueError()
@@ -2049,6 +2146,7 @@ class Handler(BaseHTTPRequestHandler):
     def check_assignment_review(self, con, review):
         """검토했던 팀의 배정과 관련 접수·계산 조건을 다시 검사한다."""
         date, change = review["date"], review["change"]
+        DW.check_road_revision(con, review.get("road_revision"), "적용 도로망이 바뀌었습니다. 현재 배정을 다시 불러와 새 도로망으로 변경을 다시 검토하세요.")
         if review["inputs"] != self.route_inputs(con, date, review["request_ids"], list(change["assign_ver"])):
             raise S.StaleError("계산 뒤 접수·현장 결과·팀 배정 또는 설정이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.")
         self.check_depot_basis(con, review["depot_basis"], date, review.get("plan"))
@@ -2066,6 +2164,7 @@ class Handler(BaseHTTPRequestHandler):
         ids = set(d.get("request_ids") or []) if change is None else set()
         review = None
         departure = ""
+        retry_osrm = d.get('retry_osrm') is True
         with LOCK:
             denied = self._write_session_error()
             if denied:
@@ -2086,7 +2185,8 @@ class Handler(BaseHTTPRequestHandler):
                 affected = ids | {s["request_id"] for cid in crew_ids for s in draft["current"].get(cid, {}).get("stops", [])}
                 change = {k: change[k] for k in ("op", "request_id", "crew_id", "to_crew_id", "position", "order", "assign_ver", "expected_order") if k in change}
                 review = {"kind": "assignment_edit", "date": date, "user_id": self.user["user_id"], "change": change,
-                          "request_ids": sorted(affected), "inputs": self.route_inputs(c, date, sorted(affected), crew_ids)}
+                          "request_ids": sorted(affected), "inputs": self.route_inputs(c, date, sorted(affected), crew_ids),
+                          "road_revision": S.managed_road_revision(c)}
             else:
                 wanted = set(d.get("crew_ids") or [])
                 crews = [x for x in S.list_crews(c) if x["id"] in wanted and x["active"]]
@@ -2114,16 +2214,22 @@ class Handler(BaseHTTPRequestHandler):
             if review is not None and {r["id"] for r in reqs} != ids:
                 raise S.StaleError("남은 접수나 예정일이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.")
             st = S.settings(c)
-            dongs = {x["name"]: x for x in A.list_dongs(c)}
             method = S.travel_method(c)
+            osrm_url, osrm_status = S.local_osrm(c, retry=retry_osrm)
             kakao_key = S.secret(c, "kakao_rest_key") if method == "KAKAO" else ""
             ov = S.volume_overrides(c)
-            context = DP.resolve(reqs, crews, list(dongs.values()), st['depot'], st['end_site'])
+            context = DP.resolve(reqs, crews, A.list_dongs(c), st['depot'], st['end_site'],
+                                 keep_dong_crews=st['capacity']['prefer_dong_crew'])
             basis = DW._proof({'kind': 'depot', 'date': date, 'request_ids': [r['id'] for r in reqs],
                                'crew_ids': [c['id'] for c in crews], 'signature': context['signature'], 'at': time.time(),
-                               'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews])})
-        pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} \
-            if st["capacity"]["prefer_dong_crew"] else {}
+                               'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews]),
+                               'road_revision': S.managed_road_revision(c)})
+        if retry_osrm and osrm_status == 'STARTING' and osrm.bundled:
+            osrm_url, osrm_status = osrm.bundled.wait_ready(8)
+        pref = context['crew_defaults']
+        required = context['crew_required']
+        if fixed is None:
+            required = {**pref, **required}
         late = {crew["id"] for crew in crews if departure and fixed[crew["id"]]
                 and routing.to_min(departure, 0) >= routing.to_min(crew["shift_end"], 1020)}
         if late:
@@ -2132,13 +2238,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             plan_crews = [{**crew, "shift_start": departure} if departure and fixed[crew["id"]] and departure > crew["shift_start"] else crew
                           for crew in crews]
-            res = routing.plan(reqs, plan_crews, st["depot"], osrm_url=st["osrm_url"], service_base=st["service_min_base"],
+            res = routing.plan(reqs, plan_crews, st["depot"], osrm_url=osrm_url, osrm_status=osrm_status, service_base=st["service_min_base"],
                            travel_method=method, kakao_key=kakao_key,
                            service_per_item=st["service_min_per_item"], time_limit_s=routing.clamp_time_limit(d.get("time_limit") or min(20, max(5, len(reqs) // 10))),
                            volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
-                           max_unloads=st["max_unloads"], end_site=st["end_site"], crew_pref=pref,
+                           max_unloads=st["max_unloads"], end_site=st["end_site"], final_unload_return=True, crew_pref=pref,
                            unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"],
-                           crew_depots=context['crew_depots'], crew_required=context['crew_required'], fixed_plan=fixed if ids or review is None else None)
+                           crew_depots=context['crew_depots'], crew_required=required, fixed_plan=fixed if ids or review is None else None)
         res['fixed_order'] = fixed is not None
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
         with LOCK:
@@ -2207,12 +2313,81 @@ class Handler(BaseHTTPRequestHandler):
         label = f"QR 실측 · 가상 {pr['count']}건 · 주소 {pr['addr']} · 조각 {pr['chunk']}B · 오류복원 {pr['ec']}"
         self.raw_page(display_html(imgs, t["id"][:8], "실측", 0, pr["count"], pr["fps"], label).encode())
 
-    def print_page(self, batch_short: str):
-        b = S.one(CON, "SELECT id FROM assignment_batch WHERE id LIKE ?", (batch_short + "%",))
-        if not b or len(batch_short) < 8:
-            return self.send_json({"error": "없음"}, 404)
-        d = S.dispatch_sheet(CON, b["id"])
+    def _batch_print_access(self, batch):
+        sess = self._refresh_session(self.session(), CON)
+        if not sess:
+            return json_status({"error": "로그인이 필요합니다."}, 401)
+        if sess["role"] not in ALL:
+            return json_status({"error": "이 출력 작업은 권한이 없습니다."}, 403)
+        if sess.get("must_change"):
+            return json_status({"error": "비밀번호를 먼저 바꿔 주세요.", "must_change": True}, 403)
+        if sess["role"] == "FIELD" and (not batch or batch["crew_id"] != sess.get("crew_id")):
+            return json_status({"error": "내 팀의 배차표만 볼 수 있습니다."}, 403)
+        S.ACTOR.set(sess["username"])
+
+    def print_page(self, batch_short: str, *, mode: str, route_mode: str | None):
+        from dgpc.dispatch_print_map import route_figure
+        from pc_tool import qr_png_data_uri
+
+        if mode not in ("protected", "plain") or route_mode not in (None, "positions"):
+            return self.send_json({"error": "인쇄 방식을 확인하세요."}, 400)
+        protected = mode == "protected"
+        positions = not protected or route_mode == "positions"
         e = _h.escape
+        modes = ('<strong aria-current="page">개인정보 보호 인쇄</strong><a href="?mode=plain">일반 인쇄</a>' if protected
+                 else '<a href="?mode=protected">개인정보 보호 인쇄</a><strong aria-current="page">일반 인쇄</strong>')
+        if protected:
+            modes += ('<a href="?mode=protected">방문 위치 숨기기</a>' if positions else
+                      '<a href="?mode=protected&amp;route=positions">노선도에 방문 위치 표시</a>')
+        options = f'<nav class="print-options" aria-label="배차표 인쇄 방식">{modes}</nav>'
+        try:
+            with LOCK:
+                b = S.one(CON, "SELECT id, crew_id FROM assignment_batch WHERE id LIKE ?", (batch_short + "%",))
+                if error := self._batch_print_access(b):
+                    return self.send_out(error)
+                if not b:
+                    return self.send_json({"error": "없음"}, 404)
+                d = S.dispatch_sheet(CON, b["id"], protected=protected, route_positions=positions)
+                stamp = AS.print_sheet_stamp(CON, b["id"])
+                endpoint, road_status = S.local_osrm(CON) if positions and d["stops"] else ("", "")
+        except S.UserError as error:
+            if not protected:
+                raise
+            page = f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>배차표 인쇄</title>
+<link rel="stylesheet" href="/print.css"></head><body><header><h1>대형폐기물 수거 배차표</h1></header>
+{options}<p class="warn" role="alert">{e(str(error))}</p></body></html>'''
+            return self.send_bytes(page.encode(), "text/html; charset=utf-8")
+
+        def visit(label, site):
+            pair = [site.get("lon"), site.get("lat")] if site else []
+            return label, pair if len(pair) == 2 and None not in pair else None
+
+        waypoints = []
+        if d["stops"]:
+            depots = d.get("map_route", {})
+            waypoints.append(visit("출발", depots.get("depot") if depots.get("complete") else None))
+            unload_count = 0
+            final_unload = False
+            for stop in d["stops"]:
+                waypoints.append(visit(str(stop["seq"]), stop if positions else None))
+                if unload := stop.get("unload_after"):
+                    unload_count += 1
+                    last = unload.get("final") is True
+                    final_unload |= last
+                    waypoints.append(visit("최종 하차" if last else f"하차{unload_count}", unload if positions else None))
+            waypoints.append(visit("차고지 복귀" if final_unload else "종료", depots.get("end") if depots.get("complete") else None))
+        line = {}
+        coordinates = [pair for _, pair in waypoints]
+        if endpoint and 2 <= len(coordinates) <= 500 and all(coordinates):
+            try:
+                points = routing.route_points(coordinates)
+            except S.UserError:
+                pass
+            else:
+                line = routing.road_path(points, endpoint)  # 로컬 길찾기 동안에는 업무 DB 잠금을 잡지 않는다.
+        route = route_figure(waypoints, geometry=line.get("geometry"), distance_km=line.get("distance_km"),
+                             toll_excluded=line.get("toll_excluded") is True, geographic=positions,
+                             caption=f"{d['work_date']} · {d['crew']} · 갱신본 {d['assign_ver']}")
         rows_html = []
         for s in d["stops"]:
             done_note = {"DONE": "수거 완료", "PARTIAL": "일부 수거 (남은 품목)", "NOT_COLLECTED": "미수거 (재방문)", "ON_HOLD": "보류"}.get(s.get("status"), "")
@@ -2223,21 +2398,53 @@ class Handler(BaseHTTPRequestHandler):
             amt = sum((i.get("amount") or 0) for i in s["items"])
             pend = any(i.get("price_status") != "CONFIRMED" for i in s["items"])
             appt = f'{s["appt"][0] or ""}~{s["appt"][1] or ""}' if s.get("appt") else ""
-            rows_html.append(f'<tr><td class="n">{s["seq"]}</td><td>{e(s.get("eta") or "")}<br><small>{e(appt)}</small></td>'
-                             f'<td><b>{e(s["name"])}</b><br>{e(s["phone"][:3] + "-" + s["phone"][3:-4] + "-" + s["phone"][-4:] if len(s["phone"]) >= 9 else s["phone"])}</td>'
-                             f'<td>{e(s.get("dong") or "")}</td><td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
-                             f'<td class="r">{amt:,}원{"<br><small>확인 대기 있음</small>" if pend else ""}</td><td class="chk"></td><td class="chk"></td></tr>')
+            lead = f'<tr><td class="n">{s["seq"]}</td><td>{e(s.get("eta") or "")}<br><small>{e(appt)}</small></td>'
+            checks = '<td class="chk"></td><td class="chk"></td></tr>'
+            dong = f'<td>{e(s.get("dong") or "")}</td>'
+            if protected:
+                frames = s["qr_frames"]
+                qrs = []
+                for i, frame in enumerate(frames, 1):
+                    image, _ = qr_png_data_uri(frame, "M")
+                    part = f'<span>{i}/{len(frames)}</span>' if len(frames) > 1 else ''
+                    qrs.append(f'<div class="visit-qr-part"><img class="visit-qr" src="{image}" alt="{s["seq"]}번 수거 건 QR {i}/{len(frames)}">{part}</div>')
+                rows_html.append(f'{lead}{dong}<td>{items}</td><td class="visit-qr-cell">{"".join(qrs)}</td>{checks}')
+            else:
+                phone = s["phone"]
+                if len(phone) >= 9:
+                    phone = f'{phone[:3]}-{phone[3:-4]}-{phone[-4:]}'
+                rows_html.append(f'{lead}<td><b>{e(s["name"])}</b><br>{e(phone)}</td>{dong}'
+                                 f'<td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
+                                 f'<td class="r">{amt:,}원{"<br><small>확인 대기 있음</small>" if pend else ""}</td>{checks}')
             if s.get("unload_after"):
                 u = s["unload_after"]
-                rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="7">{e(u["label"])} 하차 · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
+                action = "최종 하차 후 차고지 복귀" if u.get("final") is True else "하차"
+                rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="{5 if protected else 7}">{e(u["label"])} {action} · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
+        if protected:
+            columns = '<th>행정동</th><th>품목</th><th>건별 수신 QR</th>'
+            note = '상세정보는 등록된 휴대폰에서 확인합니다. [오늘 목록 받기]에서 해당 행의 QR을 읽으세요. QR이 여러 개면 모두 읽어야 한 건을 가져옵니다.'
+            if positions:
+                note += ' 노선도에는 수거 위치가 표시되므로 출력물을 업무용으로만 사용하세요.'
+        else:
+            columns = '<th>신청인</th><th>행정동</th><th>배출 위치</th><th>품목</th><th>금액</th>'
+            note = '개인정보(이름·연락처·주소)가 들어 있습니다. 휴대폰 고장 대비 예비본으로만 쓰고, 업무가 끝나면 파쇄하세요. 결과는 휴대폰 앱에 기록합니다.'
         page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>배차표 {e(d['work_date'])} {e(d['crew'])}</title>
 <link rel="stylesheet" href="/print.css"><script src="/print.js" defer></script></head><body>
 <header><h1>대형폐기물 수거 배차표</h1><p>{e(d['work_date'])} · {e(d['crew'])} · 갱신본 {d['assign_ver']} · 수수료표 {e(d['fee_version'])}</p>
 <button type="button" id="print">인쇄</button></header>
-<p class="warn">개인정보(이름·연락처·주소)가 들어 있습니다. 휴대폰 고장 대비 예비본으로만 쓰고, 업무가 끝나면 파쇄하세요. 결과는 휴대폰 앱에 기록합니다.</p>
-<table><thead><tr><th>순서</th><th>도착·약속</th><th>신청인</th><th>행정동</th><th>배출 위치</th><th>품목</th><th>금액</th><th>연락</th><th>수거</th></tr></thead>
+{options}<p class="warn">{note}</p>
+<table><thead><tr><th>순서</th><th>도착·약속</th>{columns}<th>연락</th><th>수거</th></tr></thead>
 <tbody>{''.join(rows_html)}</tbody></table>
+{route}
 <footer>출력 {e(d['printed_at'])} · 출력 기록은 변경 이력에 남습니다.</footer></body></html>"""
+        with LOCK:
+            batch = S.one(CON, "SELECT crew_id, status FROM assignment_batch WHERE id=?", (b["id"],))
+            if error := self._batch_print_access(batch or b):
+                return self.send_out(error)
+            if not batch or batch["status"] != "ACTIVE" or stamp != AS.print_sheet_stamp(CON, b["id"]):
+                return self.send_json({"error": "배정 또는 접수가 바뀌었습니다. 최신 배차표를 다시 열어 주세요."}, 409)
+            if line.get("geometry") and (endpoint, road_status) != S.local_osrm(CON):
+                return self.send_json({"error": "도로망이 바뀌었습니다. 배차표를 다시 열어 주세요."}, 409)
         return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 
     def print_requests_page(self, d: dict):
@@ -2478,6 +2685,7 @@ def serve(port: int = 8765, lan: dict | None = None, host: str | None = None,
         print("=" * 72)
     else:
         print(f"동구 대형폐기물 PC 업무 화면: http://127.0.0.1:{port}  (이 PC에서만 열립니다. 끝내려면 Ctrl+C)")
+    S.local_osrm(CON)  # EXE에서는 동봉 자료 준비를 업무 화면 시작과 동시에 진행한다.
     LOG.info("서버 시작 port=%s lan=%s log=%s", port, bool(lan), logf.name)
     stop = threading.Event()
     scheduled = None

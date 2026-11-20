@@ -246,6 +246,52 @@ def _crew_versions(con, date: str, crews: list[str]) -> dict:
     return {cid: C.one(con, "SELECT COALESCE(MAX(assign_ver),0) AS v FROM assignment_batch WHERE work_date=? AND crew_id=?", (date, cid))["v"] for cid in crews}
 
 
+# 계산 근거의 적용 도로망(동봉 OSRM 판)만 바뀐 409. 화면은 이 코드로 일반 409와 구별해 새 도로망 재계산을 안내한다.
+ROAD_RULES_CHANGED = "ROAD_RULES_CHANGED"
+
+
+def check_road_revision(con, revision, message: str):
+    """계산할 때의 적용 도로망과 지금이 다르면 409. 둘 다 동봉 도로망이면 ROAD_RULES_CHANGED, 계산 방식·연결 주소가 바뀐 것이면 일반 409."""
+    current = S.managed_road_revision(con)
+    if revision == current:
+        return
+    if revision is not None and current is not None:
+        raise C.StaleError(message, code=ROAD_RULES_CHANGED)
+    raise C.StaleError("이동시간 계산 방식이나 도로 서비스가 바뀌었습니다. 노선을 다시 계산해 주세요.")
+
+
+def route_inputs(con, date: str, request_ids, crew_ids) -> dict:
+    """노선 계산 결과가 기대는 입력의 지문(전체·동별 공용). 확정 전에 다시 만들어 같은지 본다.
+
+    requests: 접수 행·현장 결과 기록·활성 배정 / profiles: 팀 차량·근무시간, 작업·반입·쉬는 시간 설정, 적재량 보정,
+    이동시간 방식·연결 주소·적용 도로망 / revisions: 팀별 그날 최신 갱신본 번호."""
+    crew_ids = list(crew_ids)
+    versions = {}
+    ids = list(request_ids)
+    for start in range(0, len(ids), 800):
+        chunk = ids[start:start + 800]
+        placeholders = ','.join('?' for _ in chunk)
+        events, active = {}, {}
+        for event in C.rows(con, f'SELECT * FROM result_event WHERE request_id IN ({placeholders}) ORDER BY event_id', chunk):
+            events.setdefault(event['request_id'], []).append(event)
+        for row in C.rows(con, f'SELECT request_id, batch_id FROM active_assignment WHERE request_id IN ({placeholders})', chunk):
+            active[row['request_id']] = row['batch_id']
+        for row in C.rows(con, f'SELECT * FROM request WHERE id IN ({placeholders})', chunk):
+            versions[row['id']] = hashlib.sha256(json.dumps([row, events.get(row['id'], []), active.get(row['id'])],
+                                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    profiles = [{k: crew.get(k) for k in ('id', 'name', 'active', 'capacity_m3', 'capacity_kg', 'shift_start', 'shift_end')}
+                for crew in S.list_crews(con) if crew['id'] in crew_ids]
+    st = S.settings(con)
+    options = {k: st.get(k) for k in ('depot', 'end_site', 'osrm_url', 'service_min_base', 'service_min_per_item',
+                                      'unload_site', 'unload_min', 'max_unloads', 'unload_hours', 'lunch', 'base_first', 'capacity')}
+    options.update(crews=sorted(profiles, key=lambda c: c['id']), volumes=S.volume_overrides(con),
+                   travel_method=S.travel_method(con), road_revision=S.managed_road_revision(con))
+    signature = hashlib.sha256(json.dumps(options, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    revisions = {r['crew_id']: r['v'] for r in C.rows(con, 'SELECT crew_id,MAX(assign_ver) AS v FROM assignment_batch WHERE work_date=? GROUP BY crew_id', (date,))
+                 if r['crew_id'] in crew_ids}
+    return {'requests': versions, 'profiles': signature, 'revisions': {cid: revisions.get(cid, 0) for cid in crew_ids}}
+
+
 def _proof(payload: dict) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode() + "." + hmac.new(_PROOF_KEY, raw, hashlib.sha256).hexdigest()
@@ -292,26 +338,31 @@ def prepare_route(con, user: dict, data: dict) -> dict:
     crew_versions = _crew_versions(con, date, sorted(wanted))
     settings = S.settings(con)
     dongs = A.list_dongs(con)
-    context = DP.resolve(reqs, crews, dongs, settings['depot'], settings['end_site'])
+    context = DP.resolve(reqs, crews, dongs, settings['depot'], settings['end_site'],
+                         keep_dong_crews=settings['capacity']['prefer_dong_crew'])
     basis = {"date": date, "dong": selected, "crew_versions": crew_versions, 'depot_signature': context['signature']}
-    signed = {**basis, "scope": fingerprint(u), "requests": versions, "at": time.time()}
+    signed = {**basis, "scope": fingerprint(u), "requests": versions, "at": time.time(),
+              "road_revision": S.managed_road_revision(con), "inputs": route_inputs(con, date, list(versions), sorted(wanted))}
     basis["proof"] = _proof(signed)
     method = S.travel_method(con)
+    osrm_url, osrm_status = S.local_osrm(con)
     return {"user_scope": fingerprint(u), "basis": basis, "requests": reqs, "crews": crews, "settings": settings, 'route_context': context,
-            "dongs": dongs, "method": method, "kakao_key": S.secret(con, "kakao_rest_key") if method == "KAKAO" else "",
+            "osrm_url": osrm_url, "osrm_status": osrm_status,
+            "method": method, "kakao_key": S.secret(con, "kakao_rest_key") if method == "KAKAO" else "",
             "overrides": S.volume_overrides(con)}
 
 
 def calculate(prepared: dict) -> dict:
     reqs, crews, settings, ov = prepared["requests"], prepared["crews"], prepared["settings"], prepared["overrides"]
-    dongs = {d["name"]: d for d in prepared["dongs"]}
-    pref = {r["id"]: dongs[r["dong"]]["crew_id"] for r in reqs if r.get("dong") in dongs and dongs[r["dong"]]["crew_id"]} if settings["capacity"]["prefer_dong_crew"] else {}
-    result = routing.plan(reqs, crews, settings["depot"], osrm_url=settings["osrm_url"], service_base=settings["service_min_base"],
+    context = prepared['route_context']
+    pref = context['crew_defaults']
+    result = routing.plan(reqs, crews, settings["depot"], osrm_url=prepared["osrm_url"], osrm_status=prepared["osrm_status"], service_base=settings["service_min_base"],
                           travel_method=prepared["method"], kakao_key=prepared["kakao_key"], service_per_item=settings["service_min_per_item"],
                           time_limit_s=routing.clamp_time_limit(min(20, max(5, len(reqs) // 10))), volume_overrides=ov,
                           unload_site=settings["unload_site"], unload_min=settings["unload_min"], max_unloads=settings["max_unloads"],
-                          end_site=settings["end_site"], crew_pref=pref, unload_hours=settings["unload_hours"], lunch=settings["lunch"], base_first=settings["base_first"],
-                          crew_depots=prepared['route_context']['crew_depots'], crew_required=prepared['route_context']['crew_required'])
+                          end_site=settings["end_site"], final_unload_return=True, crew_pref=pref, unload_hours=settings["unload_hours"],
+                          lunch=settings["lunch"], base_first=settings["base_first"],
+                          crew_depots=context['crew_depots'], crew_required={**pref, **context['crew_required']})
     result["prefer_dong_crew"] = bool(settings["capacity"]["prefer_dong_crew"])
     result["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"], "lon": r["lon"],
                                      "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]], "status": r["status"], "dong": r["dong"],
@@ -336,12 +387,16 @@ def validate_route_result(con, user: dict, prepared: dict):
 
 
 def _check_depots(con, proof):
+    """도로망 → 차고지·담당팀 → 계산 입력 순서로 검사한다. 응답 직전과 확정 쓰기(트랜잭션 안) 모두 이 검사를 거친다."""
+    check_road_revision(con, proof.get('road_revision'), '적용 도로망이 바뀌었습니다. 새 도로망으로 동별 노선을 다시 계산해 주세요.')
     try:
         signature = DP.current(con, list(proof['requests']), list(proof['crew_versions']))['signature']
     except C.UserError:
         raise C.StaleError('차고지·담당팀 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
     if signature != proof.get('depot_signature'):
         raise C.StaleError('차고지·담당팀 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
+    if proof.get('inputs') != route_inputs(con, proof['date'], list(proof['requests']), list(proof['crew_versions'])):
+        raise C.StaleError('계산 뒤 수거팀 차량·근무시간, 작업·반입 설정, 현장 결과 또는 배정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
 
 
 def assign(con, user: dict, data: dict) -> list[dict]:
@@ -355,7 +410,6 @@ def assign(con, user: dict, data: dict) -> list[dict]:
         raise C.StaleError("계정·담당 범위·기준일이 바뀌었습니다. 다시 계산하세요.")
     if any(basis.get(k) != proof.get(k) for k in ("date", "dong", "crew_versions", 'depot_signature')):
         raise C.StaleError("계산 기준이 달라졌습니다. 다시 계산하세요.")
-    _check_depots(con, proof)
     plan = data.get("plan")
     if not isinstance(plan, dict) or not plan or any(not isinstance(stops, list) for stops in plan.values()):
         raise C.UserError("확정할 팀별 배정 목록을 확인하세요.")
@@ -374,6 +428,9 @@ def assign(con, user: dict, data: dict) -> list[dict]:
         current = _crew_versions(con, date, list(proof["crew_versions"]))
         if current != proof["crew_versions"]:
             raise C.StaleError("그날의 배정 버전이 바뀌었습니다. 다시 계산하세요.")
+        # 쓰기 잠금·트랜잭션 안에서 도로망·차고지·차량·작업 조건·현장 결과·활성 배정을 다시 본다.
+        # 같은 client_req_id 재전송은 idempotent가 저장된 응답을 돌려주므로 여기까지 오지 않는다.
+        _check_depots(con, proof)
         for batch in S.current_assignment(con, date):
             if batch["crew_id"] in plan and any(stop["request_id"] not in allowed for stop in batch["stops"]):
                 raise C.StaleError("다른 동의 접수가 함께 배정된 팀입니다. 전체 업무 담당자에게 배정 조정을 요청하세요.")

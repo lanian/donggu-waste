@@ -21,7 +21,8 @@ from dgpc import area as A, backup as BK, finance as FN, privacy as PV, service 
 
 # ------------------------------------------------------------------ 백그라운드 작업 실행기 (작업자 1개)
 JOB_KINDS = {"backup": "수동 백업", "backup_auto": "자동 백업(지금)", "backup_retention": "백업 보관 정리", "pii_purge": "개인정보 파기",
-             "photo_purge": "사진 보관 기간 정리", "verify_full": "전체 무결성 검사", "refund_sync": "환불 전체 점검"}
+             "photo_purge": "사진 보관 기간 정리", "verify_full": "전체 무결성 검사", "refund_sync": "환불 전체 점검",
+             "road_rule_preview": "도로 방향 미리보기", "road_rule_apply": "도로 통행 정보 적용", "road_rule_rollback": "이전 도로망 복원"}
 
 
 class JobRunner:

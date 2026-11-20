@@ -336,6 +336,17 @@ const e16 = P.expandDaylist(pc16, BUILTIN_FEES);
 ok(pc16.s[0].u.length === 6 && pc16.s[1].u.length === 4 && e16.stops[0].unload_after.lat === 35.13 && e16.stops[0].unload_after.lon === 126.95 && e16.stops[1].unload_after.lat === null,
   'PC 목록 묶음: 반입지 좌표가 있으면 "u" 5·6번째 값으로 싣고 휴대폰이 읽음(없으면 이전 형식)');
 
+const returnFixture = { ...pc16, s: [{ ...pc16.s[1], f: [35.149123, 126.924321, 2] }] };
+const returnVisit = P.expandDaylist(returnFixture, BUILTIN_FEES).stops[0].unload_after;
+ok(returnVisit.final === true && returnVisit.stop_count === 2 &&
+  returnVisit.depot.lat === 35.149123 && returnVisit.depot.lon === 126.924321 && returnVisit.lat === null && !('final' in e16.stops[1].unload_after),
+  '차고지 복귀: 최종 하차 안내만 선택 필드 f에 있으며, 한 건씩 읽어도 팀 전체 방문 수를 보존');
+const badFinal = [undefined, [35, 126], ['35', 126, 1], [35, 181, 1], [0, 0, 1], [35, 126, 0], [35, 126, 1.25], [35, 126, true]];
+ok(badFinal.every(f => {
+  const unload = P.expandDaylist({ ...returnFixture, s: [{ ...returnFixture.s[0], f }] }, BUILTIN_FEES).stops[0].unload_after;
+  return unload.eta === '12:00' && !('final' in unload) && !('depot' in unload);
+}), '구형·잘못된 차고지 정보는 하차 기록을 그대로 읽고 복귀 안내만 생략');
+
 // 17) 감면율 "rd"·부과번호 "lv" (v0.11 선택 키) — PC → 휴대폰 ---------------------------------
 ok(/^\d{4}-/.test(s0.levy_no) && s0.reduction === null, `실제 PC 목록 묶음: 부과번호 "lv" 받음(${s0.levy_no}), 감면 없는 건은 reduction 없음`);
 const pc17 = JSON.parse(pyEval(`import json, dgproto as P

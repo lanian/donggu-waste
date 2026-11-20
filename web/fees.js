@@ -122,6 +122,10 @@ export function deriveStop(stop, events) {
   return { lines, contact, outcome, resultNeedsConfirmation, photos, loc, appt, fee, memos, stickers, notices, notice, arrive, noPhotoReason,
     progress: progressOf(lines, mine.filter((e) => !NON_PROGRESS.includes(e.kind)).length) };
 }
+// 읽은 목록의 상태와 이 휴대폰에 저장된 방문 결과를 함께 본다.
+export const isStopDone = (s, d) => !d.resultNeedsConfirmation && (d.outcome ? d.outcome === 'DONE' && d.progress === 'DONE' : s.status === 'DONE');
+export const needsResult = (s, d) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged && !isStopDone(s, d) && (!d.outcome || d.resultNeedsConfirmation);
+
 // 수거 진행으로 세지 않는 기록 (연락·안내·위치 같은 것)
 export const NON_PROGRESS = ['LOCATION_FIX', 'REVISIT_APPT', 'CONTACT', 'DIAL_INTENT', 'FIELD_MEMO', 'SMS_INTENT', 'NAV_INTENT', 'FIELD_INTAKE', 'CORRECTION', 'CANCEL_REQUEST'];
 

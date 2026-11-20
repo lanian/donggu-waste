@@ -1515,10 +1515,14 @@ def v11_external():
         gets = [c for c in kc if c["path"] == "/v1/directions"]
         ok(all(len(c["body"]["destinations"]) <= 30 and c["body"]["radius"] <= 10000 for c in posts) and len(posts) == 34 * 2 and all(c["method"] == "POST" for c in posts),
            f"다중 목적지 API: 출발지마다 30곳씩 나눠 묻고(반경 10km), 행 단위로 채움 (POST {len(posts)}회)")
-        ok(len(gets) == 34 * 2 and all(set(c["q"]) == {"origin", "destination", "priority"} for c in gets), f"반경 10km 밖 지점은 1:1 길찾기(GET {len(gets)}회)")
+        ok(len(gets) == 34 * 2 and all(set(c["q"]) == {"origin", "destination", "priority", "avoid"} and c["q"]["avoid"] == "toll" for c in gets),
+           f"반경 10km 밖 지점은 유료도로를 제외한 1:1 길찾기(GET {len(gets)}회)")
         body_txt = json.dumps([c["body"] for c in posts], ensure_ascii=False)
-        ok(set(posts[0]["body"]) == {"origin", "destinations", "radius", "priority"} and all(set(d) == {"x", "y", "key"} for c in posts for d in c["body"]["destinations"])
-           and all(c["auth"] == "KakaoAK KAKAOKEY-0000-1111" for c in kc) and not re.search(r"[가-힣]", body_txt), "카카오모빌리티에는 좌표(경도 x·위도 y)와 'KakaoAK 키' 머리글만, 이름·주소 없음")
+        ok(set(posts[0]["body"]) == {"origin", "destinations", "radius", "priority", "avoid"}
+           and all(c["body"]["avoid"] == ["toll"] for c in posts)
+           and all(set(d) == {"x", "y", "key"} for c in posts for d in c["body"]["destinations"])
+           and all(c["auth"] == "KakaoAK KAKAOKEY-0000-1111" for c in kc) and not re.search(r"[가-힣]", body_txt),
+           "다중 목적지 길찾기에도 유료도로 제외를 요청하고, 접수 이름·주소는 보내지 않음")
         ok(info["fallback_pairs"] == 0 and info["road_pairs"] == 35 * 34 and mat[0][1] == math.ceil((int(routing.haversine_km(pts[0], pts[1]) * 100) + 60) / 60) and mat[3][3] == 0,
            f"N×N 행렬(35×35) 모두 도로 시간, 분 단위 올림 (API {info['api_calls']}회)")
         n1 = len(kc)
@@ -1535,8 +1539,9 @@ def v11_external():
         sub = [(35.15, 126.93), pts[2], (35.151, 126.931), (35.152, 126.935)]
         mat3, info3 = routing.kakao_matrix(sub, "KAKAOKEY-0000-1111", min_interval_s=0)
         est = routing._estimate_min(sub[0], sub[1])
-        ok(info3["fallback_pairs"] == 3 and mat3[0][1] == est and routing.matrix_note("KAKAO", info3) == "도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)",
-           "경로를 못 받은 쌍만 직선거리 추정 → '도로 시간: 카카오모빌리티 (일부 직선 추정 3쌍)'")
+        ok(info3["fallback_pairs"] == 3 and mat3[0][1] == est
+           and routing.matrix_note("KAKAO", info3) == "도로 시간: 카카오모빌리티 · 유료도로 제외 (일부 직선 추정 3쌍)",
+           "카카오모빌리티 유료도로 제외 및 경로를 못 받은 쌍의 직선거리 추정 안내")
         # 시간 초과: 더 묻지 않고 전부 추정
         X.urlopen = lambda req, timeout: (_ for _ in ()).throw(urllib.error.URLError(socket.timeout("timed out")))
         far = [(35.16, 126.94), (35.161, 126.941), (35.163, 126.945)]
@@ -2692,6 +2697,9 @@ def v13_refactor():
         ("POST", ("vworld/locate",), ("ADMIN", "INTAKE")),
         ("GET", ("recon-exceptions", "recon-exceptions/{id}"), ("ADMIN", "INTAKE", "LEAD")),
         ("POST", ("recon-exceptions/{id}",), ("ADMIN", "INTAKE")),
+        ("POST", ("route-path",), ("ADMIN", "INTAKE", "FIELD", "LEAD")),
+        ("GET", ("road-rules", "road-rules/roads"), ("ADMIN",)),
+        ("POST", ("road-rules/preview", "road-rules/apply", "road-rules/rollback"), ("ADMIN",)),
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}
@@ -2699,7 +2707,7 @@ def v13_refactor():
         if (entry["method"], entry["path"]) in self_routes:
             entry["roles"] = (*entry["roles"], "DONG")
     cur = {(r.method, r.pattern): r for r in SV.ROUTES}
-    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로 + 보고서·배출표·동별 업무·동 순서·센터 차고지·가져온 현장 확인")
+    ok(set(cur) == {(x["method"], x["path"]) for x in snap}, f"경로 표 {len(cur)}개 = 기존 경로와 명시한 추가 기능 경로")
     diff = [(x["method"], x["path"]) for x in snap if sorted(cur[(x["method"], x["path"])].roles) != sorted(x["roles"])]
     ok(not diff, f"기존 권한과 명시한 동별 업무·자기 정보 권한만 허용 (다른 곳: {diff[:5]})")
     sample = lambda pat: pat.replace("{id}", "a1b2c3d4")
@@ -2712,9 +2720,10 @@ def v13_refactor():
                     "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv", "dong-work/followups", "dong-work/followups/{id}"}
     ok(all(r.lock == ("write" if r.pattern in scoped_reads else "read") for r in SV.ROUTES if r.method == "GET") and
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
-                                                             "external/test", "route", "backup", "backup/auto", "backup/retention", "privacy/purge",
-                                                             "photo-purge", "refunds/sync", "integrity/full", "dong-work/route", "vworld/locate"},
-       "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 POST 17개는 잠금 밖")
+                                                             "external/test", "route", "route-path", "backup", "backup/auto", "backup/retention", "privacy/purge",
+                                                             "photo-purge", "refunds/sync", "integrity/full", "dong-work/route", "vworld/locate",
+                                                             "road-rules/preview", "road-rules/apply", "road-rules/rollback"},
+       "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 작업은 잠금 밖")
     ok(not SV.allowed("FIELD", "GET", "nothing-here") and SV.allowed("ADMIN", "GET", "nothing-here") and SV.allowed("INTAKE", "GET", "requests/a/b/c"),
        "경로 표에 없는 주소: 관리자·같은 첫 마디를 쓸 수 있는 역할은 404, 그 밖은 403")
     # 설정 등록표
@@ -2855,14 +2864,15 @@ def review_fixes():
         def open(self, url, timeout=10):
             import io as _io
             return _io.BytesIO(json.dumps({"code": "Ok", "durations": [[0, None], [600, 0]]}).encode())
-    real_bo = routing.urllib.request.build_opener
-    routing.urllib.request.build_opener = lambda *a, **kw: FakeOsrm()
+    from dgpc import osrm
+    real_bo = osrm.urllib.request.build_opener
+    osrm.urllib.request.build_opener = lambda *a, **kw: FakeOsrm()
     try:
         pts = [(35.14, 126.92), (35.18, 126.96)]
         m, src = routing.matrix(pts, "http://127.0.0.1:5000")
     finally:
-        routing.urllib.request.build_opener = real_bo
-    ok(src == "OSRM" and m[1][0] == 10 and m[0][1] == routing.estimate_matrix(pts)[0][1] > 0, f"OSRM 경로 없음(null) → 직선 추정 {m[0][1]}분 (0분 아님)")
+        osrm.urllib.request.build_opener = real_bo
+    ok(src == "OSRM" and m[1][0] == 10 and m[0][1] is None, "OSRM 경로 없음(null) → 응답한 이동 방향만 계산에서 제외")
 
     # 예약 작업: 작업이 실패하면 결과에 오류로 남김("None" 아님)
     real_job_fn = OPS.job_fn

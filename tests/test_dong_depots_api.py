@@ -54,6 +54,31 @@ class DepotAPITests(SessionHTTPTestCase):
         self.assertEqual([x['request_id'] for x in result['unassigned']], [self.ra])
         self.assertFalse(any(r['stops'] for r in result['routes']))
 
+    def test_auto_route_keeps_the_dong_crew_even_without_a_dong_garage(self):
+        A.save_dong(self.con, {'id': self.da, 'name': '가상A동', 'crew_id': self.a, 'depot': None})
+        self.con.execute('UPDATE request SET must_today=1 WHERE id=?', (self.ra,))
+        for path in ('route', 'dong-work/route'):
+            with self.subTest(path=path):
+                result = self.route(path, request_ids=[self.ra], dong=self.da, crew_ids=[self.b])
+                self.assertEqual([u['request_id'] for u in result['unassigned']], [self.ra])
+                self.assertTrue(result['unassigned'][0]['must_today'])
+                self.assertFalse(any(r['stops'] for r in result['routes']))
+
+    def test_dong_crew_restriction_can_be_turned_off_explicitly_for_common_garage(self):
+        A.save_dong(self.con, {'id': self.da, 'name': '가상A동', 'crew_id': self.a, 'depot': None})
+        A.save_capacity(self.con, {'prefer_dong_crew': False})
+        result = self.route('route', request_ids=[self.ra], crew_ids=[self.b])
+        self.assertEqual([s['request_id'] for s in result['routes'][0]['stops']], [self.ra])
+
+    def test_manual_review_can_keep_an_explicit_change_for_a_dong_without_a_garage(self):
+        A.save_dong(self.con, {'id': self.da, 'name': '가상A동', 'crew_id': self.a, 'depot': None})
+        result = self.route('route', request_ids=[self.ra])
+        self.assertEqual(result['requests'][self.ra]['pref_crew_id'], self.a)
+        self.assertIsNone(result['requests'][self.ra]['required_crew_id'])
+        reviewed = self.route('route', fixed_plan={self.a: [], self.b: [self.ra]}, depot_basis=result['depot_basis'])
+        by_crew = {r['crew_id']: r['stops'] for r in reviewed['routes']}
+        self.assertEqual([s['request_id'] for s in by_crew[self.b]], [self.ra])
+
     def test_changed_depot_invalidates_scoped_assignment(self):
         result = self.route(dong=self.da, crew_ids=[self.a])
         A.save_dong(self.con, {'id': self.da, 'name': '가상A동', 'crew_id': self.a, 'depot': {**self.pa, 'lat': 35.141}})

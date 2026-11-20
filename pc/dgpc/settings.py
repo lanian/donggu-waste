@@ -123,15 +123,15 @@ def contribute(name: str):
 # ================================================================== 등록표
 # ---- 노선·이동시간 (설정 > 노선)
 register("depot", DEPOT_DEFAULT, "공통 차고지 좌표와 이름. 동별 차고지를 지정하지 않은 팀에 적용하며 미설정 기본값은 동구청 부근.", _point, expose=True, group="노선")
-register("osrm_url", "", "이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 쓰지 않음.", _str_max(200), expose=True, group="노선")
-register("travel_method", None, "이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 비어 있으면 OSRM 주소가 있을 때 OSRM.",
+register("osrm_url", "", "이 PC 안의 OSRM 주소(http://127.0.0.1:포트). 비우면 Windows EXE의 동봉 팩을 사용합니다(OSRM 방식).", _str_max(200), expose=True, group="노선")
+register("travel_method", None, "이동시간 계산 방식: ESTIMATE(직선 추정)·OSRM·KAKAO. 자동은 OSRM 주소나 동봉 팩이 있으면 OSRM.",
          _opt(lambda v: v in ("ESTIMATE", "OSRM", "KAKAO")), group="노선")
 register("service_min_base", 5, "한 곳 작업 기본 시간(분).", lambda v: _is_int(v) and v >= 0, expose=True, group="노선")
 register("service_min_per_item", 3, "품목 하나당 더하는 작업 시간(분).", lambda v: _is_int(v) and v >= 0, expose=True, group="노선")
 register("unload_site", None, "반입지(하차 장소) 좌표·이름. 비우면 하차를 노선에 넣지 않음.", _opt(_point), expose=True, group="노선")
-register("end_site", None, "종료지 좌표·이름. 비우면 차고지로 돌아옴.", _opt(_point), expose=True, group="노선")
+register("end_site", None, "종료지 좌표·이름. 비우면 반입지에서 최종 하차한 뒤 출발 차고지로 돌아옴.", _opt(_point), expose=True, group="노선")
 register("unload_min", 20, "하차 한 번에 걸리는 시간(분, 0~180).", _int_in(0, 180), expose=True, group="노선")
-register("max_unloads", 2, "하루 최대 하차 횟수(0~5).", _int_in(0, 5), expose=True, group="노선")
+register("max_unloads", 2, "차량당 수거 중 최대 하차 횟수(0~5).", _int_in(0, 5), expose=True, group="노선")
 register("unload_hours", None, "반입지가 받는 시간 {start, end}(HH:MM). 비우면 따지지 않음.", _opt(_hhmm_window), expose=True, group="노선")
 register("lunch", None, "쉬는(점심) 시간 창 {start, end, minutes}. 비우면 없음.", _opt(_hhmm_window), expose=True, group="노선")
 register("base_first", True, "차고지에서 가까운 곳부터 도는 쪽을 먼저 고려.", lambda v: isinstance(v, bool), expose=True, group="노선")

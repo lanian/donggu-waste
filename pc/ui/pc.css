@@ -361,12 +361,12 @@ ol.tline { list-style: none; display: flex; margin: 8px 0 0; padding: 0 0 4px; o
 ol.tline li { flex: none; width: 46px; display: flex; flex-direction: column; align-items: center; position: relative; }
 ol.tline li::before { content: ""; position: absolute; top: 11px; right: 50%; width: 100%; height: 3px; background: color-mix(in srgb, var(--team) 35%, var(--surface)); }
 ol.tline li:first-child::before { display: none; }
-ol.tline li b { position: relative; z-index: 1; width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--team); background: var(--surface); color: var(--team); display: grid; place-items: center; font-size: 0.7857rem; font-weight: 800; }
+ol.tline li :is(b, .route-map-step) { position: relative; z-index: 1; width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 50%; border: 2px solid var(--team); background: var(--surface); color: var(--team); display: grid; place-items: center; font-size: 0.7857rem; font-weight: 800; }
 ol.tline li small { font-size: 0.7857rem; color: var(--muted); margin-top: 2px; }
-ol.tline li.ok b { background: var(--green); border-color: var(--green); color: #fff; }
-ol.tline li.warn b { background: var(--sticker); border-color: #9c7a00; color: var(--sticker-ink); }
-ol.tline li.info b { background: var(--info-bg); border-color: var(--info); color: var(--info); }
-ol.tline li.neutral b { background: var(--neutral-bg); border-color: #8a96a3; color: var(--muted); }
+ol.tline li.ok :is(b, .route-map-step) { background: var(--green); border-color: var(--green); color: #fff; }
+ol.tline li.warn :is(b, .route-map-step) { background: var(--sticker); border-color: #9c7a00; color: var(--sticker-ink); }
+ol.tline li.info :is(b, .route-map-step) { background: var(--info-bg); border-color: var(--info); color: var(--info); }
+ol.tline li.neutral :is(b, .route-map-step) { background: var(--neutral-bg); border-color: #8a96a3; color: var(--muted); }
 
 /* ------------------------------------------------------------------ 배정·노선: 지도 크게 + 오른쪽 팀 패널 */
 .dispatch .cond { grid-template-columns: 104px 190px 104px minmax(0, 1fr); }
@@ -418,6 +418,45 @@ ol.tline li.neutral b { background: var(--neutral-bg); border-color: #8a96a3; co
 .mapbox { height: 380px; border-radius: var(--r-s); overflow: hidden; background: #e2e6ea; position: relative; border: 1px solid var(--line); }
 .pin { min-width: 30px; height: 30px; padding: 0 6px; border-radius: 15px 15px 15px 3px; border: 2px solid #fff; background: var(--green); color: #fff; font: 700 0.8929rem/26px var(--f); box-shadow: 0 1px 3px rgba(0, 0, 0, .4); cursor: pointer; }
 .pin.c1 { background: #2557a7; } .pin.c2 { background: #a5560d; } .pin.c3 { background: #6c3fb5; } .pin.c4 { background: #0e7490; } .pin.un { background: #6b7280; } .pin.me { background: var(--red); } .pin.done { background: var(--green); }
+.route-map-tools, .route-map-tools label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+.route-map-tools { justify-content: space-between; margin-bottom: 8px; }
+.route-map-tools label { font-weight: 700; }
+.route-map-tools select { max-width: 100%; width: clamp(9rem, 20vw, 14rem); }
+.route-map-dialog {
+  position: fixed; inset: 0; width: calc(100vw - 32px); height: calc(100dvh - 32px); max-width: none; max-height: none;
+  margin: auto; padding: clamp(8px, 1.4vw, 20px); background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--r-m); overflow: hidden;
+}
+.route-map-dialog::backdrop { background: rgb(17 28 43 / 66%); }
+.route-map-dialog .route-map { display: flex; flex-direction: column; height: 100%; overflow: auto; }
+.route-map-dialog .route-map .mapbox { flex: 1 1 auto; height: auto; min-height: min(34dvh, 220px); max-height: none; }
+.route-map-dialog :is(.route-map-distances, .route-map-details) { flex: 0 0 auto; max-height: 15dvh; overflow: auto; }
+@media (max-width: 540px) {
+  .route-map-dialog { width: calc(100vw - 12px); height: calc(100dvh - 12px); }
+}
+.route-map-details { margin-bottom: 8px; padding: 8px 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-s); overflow-wrap: anywhere; }
+.route-map-details strong { margin-right: 8px; }
+.route-map-details p { margin: 0; }
+.route-map-details strong ~ p { margin-top: 3px; }
+.route-map-meta { font-weight: 700; font-size: .9rem; }
+button.small.route-map-link { margin: 3px 0 0 5px; }
+.pin[aria-pressed=true], .route-map-step:is(:hover, [aria-pressed=true]), .route-map-link[aria-pressed=true] { outline: 2px solid var(--focus); outline-offset: 1px; }
+.pin[aria-pressed=true], .route-map .pin:focus-visible { z-index: 2; box-shadow: 0 0 0 2px #fff; }
+.road-rules-workspace { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); gap: 0 16px; }
+.road-rules-workspace > .card { min-width: 0; }
+.road-rules-map { height: clamp(300px, 45vh, 460px); }
+.road-rules-map .maplibregl-canvas { cursor: crosshair; }
+.road-rules-map .road-rules-end { cursor: default; }
+.road-rules-versions, .road-rules .grid td { overflow-wrap: anywhere; }
+.road-rules-candidates { display: grid; gap: 6px; margin: 8px 0; padding: 2px; max-height: 182px; overflow: auto; list-style: none; }
+.road-rules-candidates:empty { display: none; }
+.road-rules-option { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; text-align: left; }
+.road-rules-candidates button, .road-rules-fields :is(select, input, textarea) { width: 100%; }
+.road-rules-fields { min-width: 0; border: 0; margin: 0 0 8px; padding: 0; }
+.road-rules :is(.road-rules-candidates, .road-rules-map-tools) button[aria-pressed=true] { background: var(--navy-tint); color: var(--navy-ink); border-color: var(--focus); }
+.road-rules-map-tools { margin-bottom: 8px; }
+.road-rules-result-actions { justify-content: flex-end; margin-top: 12px; }
+@media (max-width: 950px) { .road-rules-workspace { grid-template-columns: minmax(0, 1fr); } }
 .thumbs { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
 .thumbs img { width: 96px; height: 96px; object-fit: cover; border-radius: var(--r-s); margin: 4px; background: #e2e6ea; border: 1px solid var(--line); }
 .thumbs figure.ph { margin: 0; text-align: center; } .thumbs figure.ph figcaption { font-size: 0.8571rem; color: var(--muted); }

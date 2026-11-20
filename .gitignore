@@ -10,7 +10,10 @@ __pycache__/
 shots/
 *.log
 build/desktop/
+/build/osrm-pack/
+/build/osrm-edit-kit/
 dist/desktop/
+/dist/mobile/
 # 업무 자료가 들어 있는 파일(주민 사진·백업·키) — 작업 폴더에 받아 두었더라도 저장소에 올리지 않는다
 *.dgp
 *.dgbak

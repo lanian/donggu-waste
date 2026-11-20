@@ -13,7 +13,7 @@ PKG = ROOT / "pc" / "dgpc"
 
 # 아래 → 위. 같은 단계끼리는 맨 위 import 로 서로 부르지 않는다.
 LAYERS = [
-    ["settings", "paths", "geo", "dong_defaults", "operation_print"],  # 다른 업무 모듈을 부르지 않는 바닥
+    ["settings", "paths", "geo", "dong_defaults", "operation_print", "dispatch_print_map", "osrm"],  # 다른 업무 모듈을 부르지 않는 바닥
     ["store"],
     ["core"],
     ["fees", "external"],

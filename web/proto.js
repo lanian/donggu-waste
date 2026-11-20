@@ -238,6 +238,15 @@ export function normRel(rel) {
   if (gm.size) out.g = [...gm.entries()];
   return out;
 }
+// 최종 하차 행의 선택 필드 f에는 차고지 좌표와 배차표 전체 방문 수를 넣는다. 옛 목록의 u는 그대로 읽는다.
+function finalReturn(value) {
+  if (!Array.isArray(value) || value.length !== 3) return {};
+  const [lat, lon, count] = value;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 ||
+      (lat === 0 && lon === 0) || !Number.isSafeInteger(count) || count < 1) return {};
+  return { final: true, depot: { lat, lon }, stop_count: count };
+}
+
 export function expandDaylist(p, feeTable) {
   if (!p || p.schema !== 'dg.daylist/2') return p;
   const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
@@ -250,7 +259,7 @@ export function expandDaylist(p, feeTable) {
     // v0.13: 선택 키 "ru" 감면액 끝수 단위(원, 10만 — 1원이면 싣지 않음). 감면이 있을 때만 뜻이 있음. 없으면 1원(이전 목록 그대로).
     levy_no: c.lv || '', reduction: c.rd ? { rate: Number(c.rd), ...(Number(c.ru) === 10 ? { round_unit: 10 } : {}) } : null,
     // v0.10.1: "u"의 선택 5·6번째 값 = 반입지 위도·경도(길안내용). 없으면 null(이전 목록 그대로).
-    unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3], lat: c.u[4] ?? null, lon: c.u[5] ?? null } : null,
+    unload_after: c.u ? { eta: c.u[0], label: c.u[1], minutes: c.u[2], volume_m3: c.u[3], lat: c.u[4] ?? null, lon: c.u[5] ?? null, ...finalReturn(c.f) } : null,
     items: c.it.map(([sid, rid, qty, x = {}]) => {
       const row = rows[rid || ''];
       const status = x.ps === 'C' ? 'CONFIRMED' : x.ps === 'P' ? 'PENDING' : row && row.status === 'CONFIRMED' ? 'CONFIRMED' : 'PENDING';

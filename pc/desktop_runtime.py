@@ -435,10 +435,12 @@ def child_main(state, port, *, connection=None):
                 lan = server.lan_config(profile.cert, profile.key, profile.allow, profile.hostname) if profile.mode == "lan" else None
             except ValueError:
                 raise ChildStartError("profile") from None
-            if lan:
-                server.serve(port, lan=lan, host=profile.host, on_ready=ready)
-            else:
-                server.serve(port, on_ready=ready)
+            from desktop_osrm import bundled_osrm, bundled_pack_dir
+            with bundled_osrm(bundled_pack_dir(), state):
+                if lan:
+                    server.serve(port, lan=lan, host=profile.host, on_ready=ready)
+                else:
+                    server.serve(port, on_ready=ready)
             return 0
         except BaseException as error:
             # 비밀번호·원시 요청·주민 자료·원시 오류 문구는 출력하지 않는다. 분류·오류 종류·OS 오류 번호만 남긴다.

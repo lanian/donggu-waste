@@ -2,12 +2,14 @@
 import * as NAV from '../nav.js';
 import * as S from '../store.js';
 import { deriveStop } from '../fees.js';
+import { finalUnloadState, TOLL_GUIDANCE } from '../final-unload.js';
 import { appLogo, btn, commit, flushSteps, go, h, isSolo, lockNow, mdOf, outbox, pcStops, pcWorkDate, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, toast, todayKST, ui } from '../core.js';
 import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
 import { screenHomeSolo } from './solo.js';
 import { openFinder } from './find.js';
 import { daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, needsResult, nextQuick, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
+import { finalUnloadPending } from './unload.js';
 
 // 화면 순서: 머리글 → 지금 할 일(화면에서 유일한 주 단추) → 경고 띠 → 자주 쓰는 기능(자리 고정) → 진행 요약 → 거르기 → 목록.
 async function screenHome() {
@@ -28,6 +30,8 @@ async function screenHome() {
   const otherDay = !!dl && dl.work_date !== todayKST();
   const rcpt = st.lastReceipt;
   const showReceipt = rcpt && !rcpt.told && dl && rcpt.work_date === dl.work_date;
+  const final = finalUnloadState(st, todayKST(), stops);
+  const finalPending = final && finalUnloadPending(st, final.key);
   // 안내는 현재 기록만 읽는다. 전송·반영·회수·정리는 각각의 기존 화면에서 사람이 확인한다.
   const waitingResult = st.exports.some((x) => !x.confirmed);
   const recovered = new Set(st.recoveredPhotos || []);
@@ -39,10 +43,15 @@ async function screenHome() {
   const reconfirm = unrecorded.find(({ d }) => d.resultNeedsConfirmation);
   const nextStop = unrecorded[0];
   const sendDetail = `보낼 기록 ${ob.toSend}건${ob.waiting ? ` · 확인 대기 ${ob.waiting}건` : ''}`;
-  let next = { key: 'scan', title: '오늘 목록을 받으세요', detail: 'PC 담당자가 준비한 QR을 읽고, 받은 뒤 수신 코드를 알려 주세요.', label: '오늘 목록 받기', run: () => go('#/scan') };
+  let next = { key: 'scan', title: '오늘 목록을 받으세요', detail: 'PC 화면의 팀 목록 QR이나 종이 배차표의 건별 QR을 읽으세요.', label: '오늘 목록 받기', run: () => go('#/scan') };
   if (pendingPhotos.length) next = {
     key: 'photo', title: `사진 ${pendingPhotos.length}장이 아직 저장 대기 중입니다`, detail: '앱을 닫지 말고 아래의 [사진 다시 저장]으로 저장을 마쳐 주세요.', label: '대기 사진 저장 안내',
     run: () => { const el = document.querySelector('.pending-photo'); if (el) { el.scrollIntoView({ block: 'center' }); el.querySelector('button')?.focus({ preventScroll: true }); } },
+  };
+  else if (final?.ready && finalPending) next = {
+    key: 'final-pending', title: '최종 하차 저장을 확인하세요',
+    detail: '하차 화면에서 저장 상태를 확인하세요. 실패한 경우 같은 기록을 다시 저장할 수 있습니다.',
+    label: '최종 하차 저장 확인', run: () => go('#/unload/final'),
   };
   else if (saveFailed || S.hasPendingSecure('state')) next = {
     key: registered ? 'send' : 'backup', title: '저장하지 못한 기록부터 보호하세요',
@@ -64,6 +73,16 @@ async function screenHome() {
     key: 'stop', stop: nextStop.s, title: `${nextStop.s.seq}번 방문 결과를 이어서 기록하세요`, detail: `방문 결과 미기록 ${unrecorded.length}곳 · 휴대폰 방문 순서 기준`,
     label: `${nextStop.s.seq}번 수거 이어가기`, run: () => go(`#/stop/${nextStop.s.request_id}`),
   };
+  else if (final?.missingStops) next = {
+    key: 'scan', title: '남은 배차표 QR을 읽으세요',
+    detail: `최종 하차 전에 아직 읽지 않은 수거 건 ${final.missingStops}곳을 확인하세요.`,
+    label: '오늘 목록 받기', run: () => go('#/scan'),
+  };
+  else if (final?.ready && !final.recorded && final.hasLoad) next = {
+    key: 'final-unload', title: '수거를 마쳤습니다. 반입지에서 하차하세요',
+    detail: `${final.site.label || '반입지'} · 하차 기록을 저장하면 차고지 복귀 길안내를 열 수 있습니다.`,
+    label: '최종 하차 기록', run: () => go('#/unload/final'),
+  };
   else if (ob.toSend) next = {
     key: 'send', title: '기록한 결과를 PC로 보내세요', detail: `${sendDetail}. 결과 파일을 보낸 뒤 PC 담당자가 알려 주는 결과 반영 코드(D-)를 넣으세요. 사진은 따로 보냅니다.`,
     label: '결과 보내기', run: () => go('#/export'),
@@ -77,8 +96,20 @@ async function screenHome() {
     : { key: 'photo-send', title: `사진 ${left.length}장의 회수 코드가 남아 있습니다`, detail: 'PC가 사진을 가져온 뒤 알려 주는 사진 회수 코드(P-)를 넣으세요.', label: '사진 회수 코드 넣기', run: () => go('#/export') };
   else if (dl) next = { key: 'cleanup', title: '반영·회수를 확인한 자료를 정리할 수 있습니다', detail: '정리 화면에서 남은 기록을 확인하세요. [오늘 자료 정리]를 직접 누르기 전에는 목록과 기록을 지우지 않습니다.', label: '정리 단계 확인하기', run: () => go('#/export') };
   const out = [top, workerBar()];
+  if (registered && final?.ready && !nextStop && !showReceipt && !pendingPhotos.length
+      && !finalPending && !saveFailed && !S.hasPendingSecure('state') && (final.recorded || !final.hasLoad)) {
+    out.push(h('section', { class: 'card', 'aria-label': '차고지 복귀' },
+      h('h2', {}, final.recorded ? '최종 하차를 기록했습니다' : '복귀 전에 적재량을 확인하세요'),
+      final.recorded ? null : h('p', { class: 'small' }, '실은 폐기물이 있으면 반입지에서 하차를 먼저 기록하세요.'),
+      final.recorded ? null : btn('최종 하차 기록', () => go('#/unload/final'), 'big'),
+      navBtn('차고지 복귀 길안내', null, final.depot, NAV.navLabel('DEPOT'), 'big'),
+      h('p', { class: 'small' }, TOLL_GUIDANCE)));
+  }
   out.push(h('section', { class: 'card next-action', 'aria-label': '지금 할 일' }, h('h2', {}, '지금 할 일'),
-    h('p', { class: 'next-title' }, next.title), h('p', { class: 'small next-detail' }, next.detail), btn(next.label, next.run, 'primary huge')));
+    h('p', { class: 'next-title' }, next.title), h('p', { class: 'small next-detail' }, next.detail), btn(next.label, next.run, 'primary huge'),
+    next.key === 'final-unload' ? h('div', { class: 'row' },
+      NAV.hasCoord(final.site) ? navBtn('반입지 길안내', null, final.site, NAV.navLabel('UNLOAD'), 'big') : null,
+      NAV.hasCoord(final.site) ? h('span', { class: 'small' }, TOLL_GUIDANCE) : h('span', { class: 'small' }, '반입지 좌표가 없습니다. PC 배차표에서 위치를 확인하세요.')) : null));
   if (next.stop && !otherDay) out.push(nextQuick(next.stop));
   // 경고 띠: 지난(또는 다음) 날짜 목록, 수신 코드, 대기 사진·보낼 기록·배터리 등. 주 단추는 두지 않는다(지금 할 일이 맡음).
   if (otherDay) out.push(h('section', { class: 'card callout warn day-banner' + (past ? ' past' : ''), role: 'alert' },
@@ -115,7 +146,7 @@ async function screenHome() {
     const reordered = !!(st.localOrder && st.localOrder.work_date === wd && st.localOrder.assign_ver === (dl ? dl.assign_ver : 0));
     const fieldN = today.filter((s) => s.field).length;
     out.push(h('p', { class: 'meta' }, (dl ? `${dl.work_date} ${dl.crew}` + (dl.assign_ver > 1 ? ` · 목록 ${dl.assign_ver}차` : '') : `${wd} · PC 목록 없음`) + (changed ? ` · 바뀐 곳 ${changed}` : '')
-      + (fieldN ? ` · 현장 접수 ${fieldN}` : '') + (reordered ? ' · 순서 바꿈(이 휴대폰만)' : '')));
+      + (dl?.printed_since_seq != null ? ' · 배차표에서 가져온 목록' : '') + (fieldN ? ` · 현장 접수 ${fieldN}` : '') + (reordered ? ' · 순서 바꿈(이 휴대폰만)' : '')));
     if (!otherDay) out.push(daySummary(stops.filter((x) => !x.s.removed)));
     const TABS = [['ALL', '전체', stops.length], ['REMAIN', '남음', remain.length], ['HOLD', '재방문·보류', hold.length]];
     out.push(h('div', { class: 'tabs pc-list-filters', role: 'group', 'aria-label': '목록 거르기' },
@@ -148,7 +179,7 @@ async function screenHome() {
     const one = ({ s, d }) => h('li', { class: ui.reorder && canReorder ? 'srow' : null },
       stopCard(s, d, { nowId }),
       ui.reorder && canReorder && !s.removed ? h('span', { class: 'mv' }, btn('▲', () => move(s, -1), 'step', { 'aria-label': '위로' }), btn('▼', () => move(s, 1), 'step', { 'aria-label': '아래로' })) : null,
-      s.unload_after && !ui.stopQ && !(ui.reorder && canReorder) ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
+      s.unload_after && s.unload_after.final !== true && !ui.stopQ && !(ui.reorder && canReorder) ? h('div', { class: 'unload-row' }, h('span', { class: 'seq u' }, '⇩'),
         h('span', { class: 'u-body' }, h('strong', {}, `${s.unload_after.label} 하차`), h('br'), h('span', { class: 'small' }, `도착 ${s.unload_after.eta || '-'} · 약 ${s.unload_after.volume_m3}m³ 비움 · ${s.unload_after.minutes}분`)),
         navBtn('길안내', null, unloadLoc(s.unload_after), NAV.navLabel('UNLOAD'), 'u-nav'),
         btn('하차 기록', () => go('#/unload'), 'u-log', { 'aria-label': `${s.unload_after.label} 하차 기록` })) : null);
