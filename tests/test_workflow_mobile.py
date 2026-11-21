@@ -46,9 +46,22 @@ def open_mobile(browser, url):
     return ctx, page
 
 
+def route(page, hash_):
+    page.evaluate("""async hash => {
+        const C = await import('./core.js');
+        if (location.hash !== hash) {
+            const changed = new Promise(resolve => addEventListener('hashchange', resolve, { once: true }));
+            location.hash = hash;
+            await changed;
+        }
+        // 앱의 hashchange 처리 뒤에 시작해야 여기서 기다리는 렌더가 교체되지 않는다.
+        await C.render();
+    }""", hash_)
+
+
 def seed(page, patch=None, registered=True):
     """PIN으로 열린 실제 저장소에 가상 업무 상태를 저장하고 앱 라우터로 그린다."""
-    return page.evaluate("""async ({ patch, registered }) => {
+    dates = page.evaluate("""async ({ patch, registered }) => {
         const C = await import('./core.js'), S = await import('./store.js'), F = await import('./field.js');
         if (registered) {
             await S.putRaw('device', window.__workflowDevice);
@@ -64,10 +77,10 @@ def seed(page, patch=None, registered=True):
         C.pendingPhotos.length = 0;
         Object.assign(C.ui, { filter: 'ALL', soloView: 'TODAY', stopQ: '', dong: '', reorder: false, receipt: null });
         await C.commit();
-        location.hash = '#/home';
-        await C.render();
         return { today: C.todayKST(), yesterday: C.todayKST(-1), tomorrow: C.todayKST(1) };
     }""", {"patch": patch or {}, "registered": registered})
+    route(page, "#/home")
+    return dates
 
 
 def stop(number, date, **extra):

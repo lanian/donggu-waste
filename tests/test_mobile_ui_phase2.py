@@ -16,7 +16,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from test_review_ui import mobile_server, unlock
-from test_workflow_mobile import daylist, event, open_mobile, seed, stop
+from test_workflow_mobile import daylist, event, open_mobile, route, seed, stop
 
 passed = 0
 SHOTS = Path(os.environ.get("DG_TEST_DIR") or tempfile.mkdtemp(prefix="dg-mobile-ui-phase2-")) / "shots"
@@ -33,10 +33,6 @@ def ok(condition, message):
 
 def today_of(page):
     return page.evaluate("async () => (await import('./core.js')).todayKST()")
-
-
-def route(page, hash_):
-    page.evaluate("async h => { location.hash = h; await (await import('./core.js')).render(); }", hash_)
 
 
 def ago(hours):
