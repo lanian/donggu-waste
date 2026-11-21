@@ -381,7 +381,7 @@ async function screenDispatch() {
     const revised = Object.values(E.resend);
     out.replaceChildren(h('div', { class: 'notice info edit-mode' }, h('strong', {}, `${md(E.date)} 확정 배정 부분 수정 `), '접수를 추가·제외하거나 순서·팀을 바꾸면 변경 팀의 남은 노선을 검토할 수 있습니다. ',
         btn('수정 끝내기', () => { s.edit = null; draw(); }, 'small')),
-      revised.length ? h('p', { class: 'notice' }, h('a', { href: `#/send/${revised.map(encodeURIComponent).join(',')}?date=${E.date}` }, '변경 팀 목록 전송 →')) : null,
+      ...(revised.length ? [h('p', { class: 'notice' }, h('a', { href: `#/send/${revised.map(encodeURIComponent).join(',')}?date=${E.date}` }, '변경 팀 목록 전송 →'))] : []),
       staleBox, h('div', { class: 'row' }, h('label', { class: 'f inline' }, '재계산 시작 시각 (선택)', start), why, editMsg),
       E.cur.length || E.cand.length ? h('div', { class: 'cols edit-cols' }, ...cols) : h('div', { class: 'card empty-state' }, h('p', { class: 'muted' }, `${md(E.date)}에 확정된 배정이 없습니다. [노선 계산]으로 먼저 확정하세요.`)));
   };

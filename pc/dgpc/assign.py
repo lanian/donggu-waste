@@ -413,7 +413,7 @@ def _kept_visit(batch_id, active_batch, status):
     return status != 'CANCELLED' and (active_batch == batch_id or active_batch is None and status in FINAL)
 
 
-def list_batches(con, work_date: str, *, route_map=False, current_road=None) -> list[dict]:
+def list_batches(con, work_date: str, *, route_map=False, current_road=None, for_send=False) -> list[dict]:
     out = rows(con, """SELECT b.*, c.name AS crew_name, c.device_id FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
         WHERE b.work_date=? ORDER BY c.name, b.assign_ver DESC""", (work_date,))
     if route_map:
@@ -422,15 +422,32 @@ def list_batches(con, work_date: str, *, route_map=False, current_road=None) -> 
         depot, end, unload = (get_setting(con, key) for key in ('depot', 'end_site', 'unload_site'))
     for b in out:
         show_route = route_map and b['status'] == 'ACTIVE'
-        map_columns = ', r.dong, a.batch_id AS active_batch' if show_route else ''
-        map_join = 'LEFT JOIN active_assignment a ON a.request_id=s.request_id' if show_route else ''
+        show_send = for_send and not route_map and b['status'] == 'ACTIVE'
+        map_columns = ', a.batch_id AS active_batch' if show_route or show_send else ''
+        if show_route:
+            map_columns += ', r.dong'
+        map_join = 'LEFT JOIN active_assignment a ON a.request_id=s.request_id' if show_route or show_send else ''
         b["stops"] = rows(con, f"""SELECT s.seq, s.eta, r.id AS request_id, r.receipt_no, r.name, r.address, r.status, r.updated_at, r.lat, r.lon{map_columns}
             FROM assignment_stop s JOIN request r ON r.id=s.request_id {map_join} WHERE s.batch_id=? ORDER BY s.seq""", (b["id"],))
-        b["bundles"] = rows(con, "SELECT id, chunk_count, displayed_at, receipt_confirmed_at FROM transfer_bundle WHERE batch_id=? ORDER BY displayed_at DESC", (b["id"],))
+        b["bundles"] = rows(con, "SELECT id, chunk_count, displayed_at, receipt_confirmed_at FROM transfer_bundle WHERE batch_id=? ORDER BY displayed_at DESC, rowid DESC", (b["id"],))
+        if for_send and b["bundles"]:
+            latest = b["bundles"][0]
+            sent = one(con, """SELECT json_extract(detail, '$.stop_versions') AS versions FROM audit_log
+                WHERE entity='bundle' AND entity_id=? AND action='DISPLAY' ORDER BY rowid DESC LIMIT 1""", (latest["id"],))
+            latest["sent_stops"] = bool(json.loads(sent["versions"])) if sent and sent["versions"] is not None else None
         last = b["bundles"][0]["displayed_at"] if b["bundles"] else None
         b["resend_needed"] = bool(last and any(s["updated_at"] > last for s in b["stops"]))
         saved_route = b.pop("route_json", None)
-        if not b['stops']:
+        if show_send:
+            b['stops'] = [s for s in b['stops'] if _kept_visit(b['id'], s['active_batch'], s['status'])]
+            for stop in b['stops']:
+                del stop['active_batch']
+            if not b['stops']:
+                planned, header = _route_record(saved_route)
+                final = _detached_final(header, _last_final_unload(planned))
+                if final:
+                    b['final_unload'] = final
+        elif not b['stops']:
             _, header = _route_record(saved_route)
             if header and header.get('final_unload'):
                 b['final_unload'] = header['final_unload']

@@ -1361,7 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
     def ep_batches(self, qs):
         """그날 배정 목록(수거팀은 자기 팀만)."""
         route_map = qs.get('route_map') == '1'
-        out = S.list_batches(self.c, qs["date"], route_map=route_map,
+        out = S.list_batches(self.c, qs["date"], route_map=route_map, for_send=not route_map and qs.get('for_send') == '1',
                              current_road=DW.road_history_basis(self.c) if route_map else None)
         if self.crew_scope() is not None:
             out = [b for b in out if b["crew_id"] == self.crew_scope()]

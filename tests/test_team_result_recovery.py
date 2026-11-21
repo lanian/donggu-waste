@@ -49,6 +49,32 @@ class TeamRecoveryTest(UsageHTTPCase):
     def team_row(self, crew, day=DAY):
         return next(r for r in self.summary(day)["result_recovery"] if r["crew_id"] == crew)
 
+    def test_send_screen_distinguishes_cancelled_visits_from_confirmed_empty_list(self):
+        crew, phone = self.team("가상 전송팀")
+        request, _ = self.request()
+        batch = self.plan(DAY, crew, request)
+        self.send(DAY, batch, phone)
+        S.cancel_request(self.con, request["id"], code="RESIDENT")
+
+        def batch_view(for_send):
+            code, batches = self.get(f"batches?date={DAY}" + ("&for_send=1" if for_send else ""), self.admin_cookie)
+            self.assertEqual(code, 200)
+            return next(b for b in batches if b["id"] == batch["batch_id"])
+
+        self.assertEqual(len(batch_view(False)["stops"]), 1)
+        current = batch_view(True)
+        self.assertEqual(current["stops"], [])
+        self.assertTrue(current["bundles"][0]["sent_stops"])
+        self.assertTrue(current["bundles"][0]["receipt_confirmed_at"])
+        empty, stops, receipt = self.send(DAY, batch, phone, confirmed=False, at="00:25")
+        self.assertEqual(stops, [])
+        latest = batch_view(True)["bundles"][0]
+        self.assertEqual(latest["id"], empty["bundle_id"])
+        self.assertFalse(latest["sent_stops"])
+        self.assertIsNone(latest["receipt_confirmed_at"])
+        S.confirm_receipt(self.con, empty["bundle_id"], receipt)
+        self.assertTrue(batch_view(True)["bundles"][0]["receipt_confirmed_at"])
+
     def test_no_result_receipt_if_an_event_cannot_be_saved_even_as_conflict(self):
         crew, phone = self.team("가상 저장 장애 팀")
         batch = self.plan(DAY, crew, self.request()[0], self.request()[0])

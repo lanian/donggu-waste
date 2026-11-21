@@ -91,17 +91,18 @@ async function screenPick(id) {
     forbid: () => (stop ? [stop.name, stop.phone] : []),
     onPick: (it, ll) => {
       if (!ll) { say(msg, '이 주소의 좌표를 받지 못했습니다. 지도를 움직여 맞춰 주세요.', true); return; }
-      found = ll; save.disabled = false;
+      found = ll; gps = null; save.disabled = false;
       gpsNote.textContent = `주소 검색: ${it.road} (건물 출입구 좌표). 배출 위치가 다르면 지도를 움직여 맞춘 뒤 저장하세요.`;
       if (liveMap) liveMap.jumpTo({ center: [ll.lon, ll.lat], zoom: 18 });
     } });
   const myLoc = btn('📍 지금 내 위치로 이동', async () => {
     say(msg, '휴대폰 위치를 찾는 중…');
     const fix = await M.myFix({ ask: true, timeout: 15000 });
+    if (!view.isConnected) return;
     if (!fix) { say(msg, '위치를 가져오지 못했습니다. 위치 권한과 GPS를 확인해 주세요.', true); return; }
-    gps = fix; say(msg, '');
+    gps = fix; found = null; say(msg, '');
     gpsNote.textContent = `내 위치: 오차 약 ${fix.acc}m. 서 있는 곳이 배출 위치면 [이 위치로 저장]을 누르세요.`;
-    if (liveMap) { liveMap.jumpTo({ center: [fix.lon, fix.lat], zoom: 18 }); if (ui.pickReady) ui.pickReady(); }
+    if (liveMap) { liveMap.jumpTo({ center: [fix.lon, fix.lat], zoom: 18 }); mapReady = true; }
     save.disabled = false;
   }, 'big', { 'aria-label': '지금 내 위치로 이동' });
   const tilesFailed = () => {
@@ -110,25 +111,54 @@ async function screenPick(id) {
     box.append(h('div', { class: 'map-empty' }, h('p', {}, '지도가 안 보입니다 (인터넷 또는 지도 서버 문제).'),
       h('p', { class: 'small' }, '배출 위치에 서서 아래 [지금 내 위치로 이동]을 누르면 지도 없이도 휴대폰 위치로 저장할 수 있습니다.')));
   };
+  const view = h('main', { class: 'location-picker' },
+    h('header', { class: 'bar' }, btn('← 취소', () => go(back), 'ghost'), h('h1', { class: 'bar-title' }, isUnload ? '반입지 위치 지정' : '배출 위치 지정')),
+    h('div', { class: 'location-picker-content' },
+      h('p', {}, isUnload ? '반입지(하차하는 곳)' : stop.pii_purged ? stop.receipt_no : `${stop.name} · ${stop.address}`),
+      h('p', { class: 'small' }, '지도를 움직여 가운데 표시를 실제 위치에 맞추세요.'),
+      box, gpsNote, msg, search, mapNotice()),
+    h('footer', { class: 'footbar location-picker-actions' }, myLoc, save));
   setTimeout(async () => {
+    if (!view.isConnected) return;
+    // 화면 키보드가 열린 휴대폰에서는 레이아웃 높이와 실제로 보이는 높이가 다를 수 있다.
+    const viewport = window.visualViewport;
+    if (viewport) {
+      const fit = () => {
+        if (viewport.scale === 1) {
+          view.style.setProperty('--picker-height', viewport.height + 'px');
+          view.style.setProperty('--picker-top', viewport.offsetTop + 'px');
+        } else {
+          view.style.removeProperty('--picker-height');
+          view.style.removeProperty('--picker-top');
+        }
+      };
+      fit();
+      viewport.addEventListener('resize', fit);
+      viewport.addEventListener('scroll', fit);
+      const observer = new MutationObserver(() => {
+        if (view.isConnected) return;
+        viewport.removeEventListener('resize', fit);
+        viewport.removeEventListener('scroll', fit);
+        observer.disconnect();
+      });
+      observer.observe(view.parentNode, { childList: true });
+    }
     try {
       const { map, ml } = await M.createMap(box, { center: d.loc ? [d.loc.lon, d.loc.lat] : M.DEFAULT_CENTER, zoom: d.loc ? 18 : 15 });
+      if (!view.isConnected) { map.remove(); return; }
       setLiveMap(map); ui.ml = ml;
       // 지도가 실제로 보일 때만(또는 원래 위치가 있거나 내 위치를 잡았을 때) 지도 가운데로 저장: 빈 화면에서 기본 좌표를 저장하지 않도록
       const ready = () => { mapReady = true; save.disabled = false; const e = box.querySelector('.map-empty'); if (e) e.remove(); myLoc.classList.remove('primary'); };
-      if (d.loc) ready();
+      const selected = found || gps;
+      if (selected) map.jumpTo({ center: [selected.lon, selected.lat], zoom: 18 });
+      if (selected || d.loc) ready();
       map.on('data', (e) => { if (e.dataType === 'source' && e.tile) ready(); });
       map.once('idle', () => { if (map.areTilesLoaded && map.areTilesLoaded() && map.loaded()) ready(); });
       map.on('error', () => setTimeout(tilesFailed, 1500));
       setTimeout(tilesFailed, 8000);
-      ui.pickReady = () => { if (gps) { mapReady = true; save.disabled = false; } };
     } catch { say(msg, '지도를 불러오지 못했습니다.', true); tilesFailed(); }
   }, 0);
-  return h('main', {},
-    h('header', { class: 'bar' }, btn('← 취소', () => go(back), 'ghost'), h('h1', { class: 'bar-title' }, isUnload ? '반입지 위치 지정' : '배출 위치 지정')),
-    isUnload ? h('p', {}, '반입지(하차하는 곳)') : h('p', {}, stop.pii_purged ? stop.receipt_no : `${stop.name} · ${stop.address}`),
-    h('p', { class: 'small' }, '주소로 찾거나, 지도를 움직여 가운데 표시를 실제 위치에 맞추거나, 그 자리에 서서 [지금 내 위치로 이동]을 누르세요.'),
-    search, box, myLoc, gpsNote, save, msg, mapNotice());
+  return view;
 }
 
 // ------------------------------------------------------------ 결과 QR 표시 (역방향: 휴대폰 → PC 웹캠)
