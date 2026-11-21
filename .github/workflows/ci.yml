@@ -87,6 +87,9 @@ jobs:
           python tests/test_pairing_relay.py
           python tests/test_pairing_pc.py
           python tests/test_pairing_api.py
+          python tests/test_device_approval.py
+          python tests/test_device_approval_api.py
+          python tests/test_device_approval_cli.py
       - run: |
           python tests/test_crew_delete.py
           python tests/test_crew_delete_api.py
@@ -215,6 +218,8 @@ jobs:
           - test_crew_delete_ui
           - test_solo_close_ui
           - test_device_pairing_ui
+          - test_device_approval_ui
+          - test_device_registration_file_ui
           - test_phone_pairing_e2e
           - test_recon_exceptions_ui
           - test_osrm_map_ui

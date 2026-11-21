@@ -7,6 +7,8 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 from test_dong_work_e2e import api
 from test_reports_labels_bundle import frozen_server
 from test_review_ui import ROOT, mobile_server, pc_server
@@ -36,7 +38,7 @@ def pair_phone(admin, url, phone):
       return P.deviceCode(d.id, await P.exportRaw(d.kex.publicKey), await P.exportRaw(d.sign.publicKey));
     }""", image)
     device = api(admin, url, 'devices/register', {'code': code, 'label': '가상 반입 휴대폰'})['device_id']
-    api(admin, url, f'devices/{device}/confirm', {})
+    ApprovalApp(admin, url, PASSWORD).approve(device)
     return device
 
 

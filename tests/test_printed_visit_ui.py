@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 from test_dong_work_e2e import api
 from test_osrm_runtime import loopback
 from test_review_ui import ROOT, mobile_server, pc_server
@@ -81,7 +83,7 @@ def main(exe=None):
                 return P.deviceCode(d.id, await P.exportRaw(d.kex.publicKey), await P.exportRaw(d.sign.publicKey));
             }""", registration)
             device = api(pc, pc_url, 'devices/register', {'label': '가상 스캔 휴대폰', 'code': code})['device_id']
-            api(pc, pc_url, 'devices/' + device + '/confirm', {})
+            ApprovalApp(pc, pc_url, 'printed-visit-fixture-123').approve(device)
             api(pc, pc_url, 'crews', {'id': crew, 'name': '가상 인쇄 수거팀', 'device_id': device, 'capacity_m3': 10})
             seed(app)
             sheet.reload()

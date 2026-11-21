@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from playwright.sync_api import expect, sync_playwright
+
+from device_approval_fixture import ApprovalApp
 from test_dong_work_e2e import api
 from test_review_ui import mobile_server, pc_server, PIN
 from test_workflow_mobile import dgproto, open_mobile, seed
@@ -28,13 +30,15 @@ class DevicePairUI(unittest.TestCase):
                 code = "DGD1." + base64.urlsafe_b64encode(raw + hashlib.sha256(raw).digest()[:4]).decode().rstrip("=")
                 return api(ctx, url, "devices/register", {"code": code, "label": label})["device_id"]
             previous = device("기존 업무폰")
-            api(ctx, url, f"devices/{previous}/confirm", {})
+            approver = ApprovalApp(ctx, url, "phone-links-123-test")
+            approver.approve(previous)
             new = device("추가 업무폰")
             occupied = api(ctx, url, "crews", {"name": "000 기존 팀", "device_id": previous})["id"]
             available = api(ctx, url, "crews", {"name": "001 빈 팀"})["id"]
             page = ctx.new_page()
             page.goto(url + "#/settings/devices")
             page.get_by_role("button", name="지문 같음 · 사용 시작").click()
+            approver.approve_dialog(page)
             chooser = page.get_by_role("dialog", name="어느 팀에 연결할까요?")
             pick = chooser.get_by_label("연결할 팀")
             expect(pick).to_have_value(available)
@@ -59,6 +63,7 @@ class DevicePairUI(unittest.TestCase):
             device("대기 업무폰")
             page.reload()
             page.get_by_role("button", name="지문 같음 · 사용 시작").click()
+            approver.approve_dialog(page)
             expect(pick).to_have_value("__new")
             chooser.get_by_role("button", name="나중에", exact=True).click()
             self.assertEqual(linked(), new)

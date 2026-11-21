@@ -169,7 +169,8 @@ def main():
             ok(qr_text == code and code.startswith("DGD1."), "기기 등록: 기기 코드를 QR로 표시 (읽으면 같은 코드, 복사는 웹캠 없을 때 예비)")
             fp_phone = page.locator(".fp").inner_text().replace(" ", "")
             page.screenshot(path=SHOTS / "02_register.png", full_page=True)
-            out = py("register-device", code, "--confirm")
+            out = subprocess.run([sys.executable, str(ROOT / "tests" / "approve_fixture_phone.py"), str(WORK), code],
+                                 env=ENV, capture_output=True, text=True, check=True).stdout
             ok(fp_phone in out, f"카메라로 등록 QR 인식, PC·휴대폰 지문 일치 ({fp_phone})")
             page.get_by_role("button", name="완료").click()
             dev_short = re.search(r"등록 완료: ([0-9a-f]{8})", out).group(1)

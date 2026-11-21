@@ -51,8 +51,8 @@ const fp = await P.fingerprint(reg.pcSignPub, reg.pcKexPub, deviceId, kexRaw, si
 ok(regOut0.includes(fp) && fp.length === 9 && regOut0.includes('--confirm'), `기기 등록: 양쪽 9자리 지문 일치, 확인 전에는 사용 대기 (${fp})`);
 const fakeKex = (await P.generateDeviceKeys()).kex;
 ok((await P.fingerprint(reg.pcSignPub, await P.exportRaw(fakeKex.publicKey), deviceId, kexRaw, signRaw)) !== fp, '등록 QR의 키 합의 키만 바꿔치기해도 지문이 달라짐');
-const regOut = py('register-device', code, '--confirm');
-ok(regOut.includes('사용 시작'), '지문 확인 뒤 사용 시작');
+const regOut = execFileSync('python3', [join(ROOT, 'tests', 'approve_fixture_phone.py'), WORK, code], { env, encoding: 'utf8' });
+ok(regOut.includes('사용 시작'), '지문 대조와 관리자 2단계 승인 뒤 사용 시작');
 const pcSignPub = await P.importEcdsaPub(reg.pcSignPub);
 const pcKexPub = await P.importEcdhPub(reg.pcKexPub);
 

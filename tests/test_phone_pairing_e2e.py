@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 from test_label_usage_api import UsageHTTPCase
 from test_review_ui import PIN, ROOT
 from dgpc import devices
@@ -98,7 +100,57 @@ def show_qr_to_camera(phone, image):
     }""", image)
 
 
+def open_new_phone(phone, mobile):
+    phone.goto(mobile)
+    phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
+    phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
+    phone.get_by_role("button", name="PIN 설정", exact=True).click()
+    phone.get_by_role("button", name="PC와 연결해서 사용", exact=True).click()
+    register = phone.locator(".next-action").get_by_role("button", name="기기 등록", exact=True)
+    expect(register).to_be_visible()
+    return register
+
+
 class PhonePairingE2E(UsageHTTPCase):
+    def test_registration_file_from_offline_phone_then_admin_approval_without_relay(self):
+        pc_url = f"http://127.0.0.1:{self.port}/"
+        with serving(PagesServer(("127.0.0.1", 0), PagesHandler)) as site, sync_playwright() as pw:
+            browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path,
+                proxy={"server": "http://127.0.0.1:1", "bypass": "127.0.0.1,localhost"})
+            try:
+                admin = browser.new_context(service_workers="block")
+                admin.add_cookies([{"name": "dg_s", "value": self.admin_cookie.split("=", 1)[1], "url": pc_url}])
+                approver = ApprovalApp(admin, pc_url, "session-admin-test-123")
+                pc = admin.new_page()
+                pc.goto(pc_url + "#/settings/devices")
+                expect(pc.get_by_role("button", name="6자리 간편 등록 시작")).to_be_disabled()
+                phone_context = browser.new_context(service_workers="block")
+                phone = phone_context.new_page()
+                register = open_new_phone(phone, site + PagesHandler.prefix)
+                qr = pc.get_by_role("img", name="기기 등록 QR", exact=True)
+                expect(qr).to_have_attribute("src", re.compile(r"^data:image/png"))
+                show_qr_to_camera(phone, qr.get_attribute("src"))
+                register.click()
+                save = phone.get_by_role("button", name="등록 파일 저장")
+                expect(save).to_be_visible()
+                phone_context.set_offline(True)
+                with phone.expect_download() as completed:
+                    save.click()
+                file = completed.value
+                pc.get_by_label("수거폰 등록 파일", exact=True).set_input_files({
+                    "name": file.suggested_filename, "mimeType": "application/octet-stream", "buffer": file.path().read_bytes()})
+                pending = pc.get_by_role("button", name="지문 같음 · 사용 시작")
+                expect(pending).to_be_visible()
+                fingerprint = phone.locator(".fp").inner_text().strip()
+                expect(pc.locator("tr", has=pending)).to_contain_text(fingerprint)
+                self.assertIsNone(devices.list_devices(self.con)[0]["confirmed_at"])
+                pending.click()
+                approver.approve_dialog(pc)
+                pc.get_by_role("dialog", name="어느 팀에 연결할까요?").get_by_role("button", name="나중에").click()
+                self.assertTrue(devices.list_devices(self.con)[0]["confirmed_at"])
+            finally:
+                browser.close()
+
     def test_scanning_pc_qr_then_typing_totp_registers_the_phone_for_use(self):
         pc_url = f"http://127.0.0.1:{self.port}/"
         team_id = devices.save_crew(self.con, {"name": "간편 등록 검증팀"})
@@ -122,19 +174,14 @@ class PhonePairingE2E(UsageHTTPCase):
                 for context in (pc_context, phone_context):
                     context.on("request", observe_request)
                 pc_context.add_cookies([{"name": "dg_s", "value": self.admin_cookie.split("=", 1)[1], "url": pc_url}])
+                approver = ApprovalApp(pc_context, pc_url, "session-admin-test-123")
                 pc, phone = pc_context.new_page(), phone_context.new_page()
                 pc.goto(pc_url + "#/settings/devices")
-                phone.goto(mobile)
                 pc.evaluate("""() => {
                     window.cameraCalls = 0;
                     navigator.mediaDevices.getUserMedia = async () => { window.cameraCalls++; throw Error('PC camera unavailable'); };
                 }""")
-                phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
-                phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
-                phone.get_by_role("button", name="PIN 설정", exact=True).click()
-                phone.get_by_role("button", name="PC와 연결해서 사용", exact=True).click()
-                register = phone.locator(".next-action").get_by_role("button", name="기기 등록", exact=True)
-                expect(register).to_be_visible()
+                register = open_new_phone(phone, mobile)
 
                 pc.get_by_text("간편 등록 중계 설정", exact=True).click()
                 pc.get_by_label("간편 등록 중계 주소", exact=True).fill(relay)
@@ -156,7 +203,9 @@ class PhonePairingE2E(UsageHTTPCase):
                 with pc.expect_response(lambda r: "/api/devices/pair/" in r.url and r.url.endswith("/confirm")) as confirm:
                     dialog.get_by_role("button", name="등록번호 확인", exact=True).click()
                 self.assertEqual(confirm.value.status, 200)
-                self.assertIs(confirm.value.json()["confirmed"], True)
+                self.assertIs(confirm.value.json()["approval_required"], True)
+                self.assertFalse(devices.list_devices(self.con)[0]["confirmed_at"])
+                approver.approve_dialog(pc)
                 teams = pc.get_by_role("dialog", name="어느 팀에 연결할까요?")
                 expect(teams).to_be_visible()
                 teams.get_by_label("연결할 팀", exact=True).select_option(team_id)

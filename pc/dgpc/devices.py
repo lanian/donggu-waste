@@ -40,7 +40,7 @@ def device_fingerprint(con, dev_id: str, kex: bytes, sig: bytes) -> str:
 
 
 def register_device(con, code: str, label: str = "", confirm: bool = False) -> dict:
-    """공개키를 등록한다. 기본 경로는 지문 확인을 기다리고, 간편 등록은 서명과 등록번호를 검증한 뒤 confirm=True를 전달한다."""
+    """공개키를 등록한다. 새 기기는 대기 상태로 저장하고 운영 화면과 CLI에서 별도 관리자 승인을 받는다."""
     try:
         dev, kex, sig = P.parse_device_code(code)
     except P.ProtocolError as e:
@@ -65,7 +65,7 @@ def register_device(con, code: str, label: str = "", confirm: bool = False) -> d
 
 
 def confirm_device(con, dev_id: str):
-    """지문 대조 또는 간편 등록 인증을 마친 기기를 사용 가능 상태로 표시한다."""
+    """승인을 마친 기기를 사용 가능 상태로 표시하는 내부 DB 작업."""
     d = one(con, "SELECT status, confirmed_at FROM device WHERE id=?", (dev_id,))
     if not d or d["status"] != "ACTIVE":
         raise UserError("확인할 기기가 없습니다.")

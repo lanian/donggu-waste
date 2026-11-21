@@ -141,7 +141,7 @@ def _post(url, body):
     return reply
 
 
-def _number(key, step):
+def totp_number(key, step):
     mac = hmac.digest(key, step.to_bytes(8, "big"), "sha1")
     offset = mac[-1] & 15
     value = int.from_bytes(mac[offset:offset+4], "big") & 0x7fffffff
@@ -213,7 +213,7 @@ class Pairing:
             raise PairingError("휴대폰 등록 자료를 확인할 수 없습니다. 새 QR을 열고 다시 읽어 주세요.") from None
         step = int(time.time()) // 30
         if not isinstance(otp, str) or not re.fullmatch(r"[0-9]{6}", otp) or not any(
-                hmac.compare_digest(otp, _number(key, slot)) for slot in range(max(0, step - 1), step + 2)):
+                hmac.compare_digest(otp, totp_number(key, slot)) for slot in range(max(0, step - 1), step + 2)):
             self._failed += 1
             if self._failed >= ATTEMPTS:
                 raise PairingError(_LOCKED)

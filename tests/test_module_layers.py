@@ -19,7 +19,7 @@ LAYERS = [
     ["fees", "external"],
     ["derive", "routing"],
     ["collection", "payments", "devices", "users", "auditlog", "addresses"],
-    ["area", "finance", "label_auto", "photos", "dong_centers", "route_depots", "form_files"],
+    ["area", "finance", "label_auto", "photos", "dong_centers", "route_depots", "form_files", "device_approval"],
     ["numbered_labels", "official_forms"],
     ["intake"],
     ["results"],

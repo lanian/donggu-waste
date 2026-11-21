@@ -555,6 +555,16 @@ def _m17_close_approval(con):
     con.execute("ALTER TABLE day_close_log ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 1 CHECK(approval_required IN (0,1))")
 
 
+def _m18_admin_device_factor(con):
+    con.execute("""CREATE TABLE admin_device_factor (
+        user_id TEXT PRIMARY KEY REFERENCES app_user(id) ON DELETE CASCADE,
+        secret BLOB, last_step INTEGER NOT NULL DEFAULT -1,
+        recovery_hashes TEXT NOT NULL DEFAULT '[]',
+        pending_secret BLOB, pending_owner BLOB, pending_proof BLOB, pending_until INTEGER NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0, blocked_until INTEGER NOT NULL DEFAULT 0
+    )""")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
@@ -565,7 +575,8 @@ MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색
               (12, "기본 행정동마다 담당 수거팀 자동 연결", _m12_default_dong_crews),
               (13, "접수별 후속조치", _m13_request_followups), (14, "수납 대사 불일치 후속처리", _m14_recon_exceptions),
               (15, "접수별 추가 현장시간", _m15_extra_work_min), (16, "삭제된 수거팀 이력 보존", _m16_crew_archive),
-              (17, "일일 마감 회차별 팀장 확인 여부", _m17_close_approval)]
+              (17, "일일 마감 회차별 팀장 확인 여부", _m17_close_approval),
+              (18, "새 수거폰 승인을 위한 관리자 2단계 인증", _m18_admin_device_factor)]
 LATEST = MIGRATIONS[-1][0]
 
 

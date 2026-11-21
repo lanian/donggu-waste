@@ -41,6 +41,7 @@ import queue
 
 from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, osrm, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
+from . import device_approval
 from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
 ROOT = resource_root()
@@ -1913,6 +1914,30 @@ class Handler(BaseHTTPRequestHandler):
         d = self.json_body()
         return S.register_device(self.c, d.get("code", ""), d.get("label", ""))
 
+    def device_approval_body(self):
+        body = self.json_body()
+        if not isinstance(body, dict):
+            raise S.UserError("기기 승인 요청 형식을 확인해 주세요.")
+        return body
+
+    @endpoint("GET", "devices/approval/status", ADMIN)
+    def ep_approval_status(self, qs):
+        """현재 관리자의 새 기기 승인용 인증 앱 설정 여부."""
+        return device_approval.status(self.c, self.user["user_id"])
+
+    @endpoint("POST", "devices/approval/setup/start", ADMIN)
+    def ep_approval_setup_start(self, qs):
+        """관리자 비밀번호 확인 후 인증 앱 등록 QR 발급."""
+        from pc_tool import qr_png_data_uri
+        d = self.device_approval_body()
+        setup = device_approval.start_setup(self.c, self.user["user_id"], self.session(), d.get("password"), d.get("recovery_code"))
+        return {"qr_image": qr_png_data_uri(setup["uri"])[0]}
+
+    @endpoint("POST", "devices/approval/setup/finish", ADMIN)
+    def ep_approval_setup_finish(self, qs):
+        """인증 앱 연결을 확인하고 일회용 복구코드를 처음 한 번 표시."""
+        return device_approval.finish_setup(self.c, self.user["user_id"], self.session(), self.device_approval_body().get("otp"))
+
     @endpoint("POST", "devices/pair/start", ADMIN, lock="none")
     def ep_pair_start(self, qs):
         """휴대폰 6자리 등록에 사용할 일회용 QR 만들기."""
@@ -1943,7 +1968,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @endpoint("POST", "devices/pair/{id}/confirm", ADMIN, lock="none")
     def ep_pair_confirm(self, qs, pair_id):
-        """휴대폰의 기기 서명과 일회용 번호를 검증해 등록."""
+        """휴대폰의 기기 서명과 등록번호를 대조하고 새 수거폰은 관리자 승인 대기로 등록."""
         body = self.json_body()
         if not isinstance(body, dict) or not isinstance(body.get("otp"), str) or not re.fullmatch("[0-9]{6}", body["otp"]):
             raise S.UserError("휴대폰에 표시된 숫자 6자리를 입력해 주세요.")
@@ -1964,7 +1989,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise S.UserError("휴대폰에서 등록번호를 받은 다음 입력해 주세요.")
             code = current.device_code(payload, body["otp"])
             with S.tx(CON):
-                result = S.register_device(CON, code, label.strip(), confirm=True)
+                result = S.register_device(CON, code, label.strip())
+                result["approval_required"] = not result["confirmed"]
             PAIRINGS.drop(owner, pair_id)
         # 등록 성공 뒤 중계 회수에 실패해도 재사용할 수 없으며 암호문은 중계에서 만료된다.
         with contextlib.suppress(PAIR.PairingError):
@@ -1987,9 +2013,9 @@ class Handler(BaseHTTPRequestHandler):
 
     @endpoint("POST", "devices/{id}/confirm", ADMIN)
     def ep_device_confirm(self, qs, dev):
-        """휴대폰 지문 확인."""
-        S.confirm_device(self.c, dev)
-        return {"ok": True}
+        """새 수거폰을 관리자 비밀번호와 인증 앱 번호로 승인."""
+        d = self.device_approval_body()
+        return device_approval.approve_device(self.c, self.user["user_id"], dev, d.get("admin_password"), d.get("admin_otp"))
 
     @endpoint("POST", "devices/{id}/status", ADMIN)
     def ep_device_status(self, qs, dev):

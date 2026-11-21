@@ -356,11 +356,13 @@ const fp9 = (f) => (f.length === 9 ? `${f.slice(0, 3)} ${f.slice(3, 6)} ${f.slic
 const regState = { fp: '' };  // 방금 등록한 기기의 지문: 목록을 다시 그려도 보이게 화면 밖에 둔다
 // 지문 확인 뒤 "어느 팀에 연결할까요?": 있는 팀 고르기 또는 새 팀 만들기 (나중에 해도 됨)
 async function crewChooser(dev) {
+  const owner = sessionOwner();
+  const link = (body) => api('crews', { method: 'POST', body, _prefsOwner: owner });
   const crews = boot.crews.filter((c) => c.active);
   const own = crews.find((c) => c.device_id === dev.id);
   const inactive = boot.crews.filter((c) => !c.active && c.device_id === dev.id);
   if (!own && inactive.length) {
-    await modal({ title: '연결된 수거팀', ok: '확인', cancel: null, body: [h('p', {}, `이 휴대폰은 사용 중지된 ${inactive.map((c) => c.name).join(', ')}에 연결되어 있습니다. 설정 → 수거팀에서 기존 팀의 사용을 켜거나 연결 휴대폰을 해제한 뒤 다른 팀에 연결하세요.`)] });
+    await modal({ title: '연결된 수거팀', owner, ok: '확인', cancel: null, body: [h('p', {}, `이 휴대폰은 사용 중지된 ${inactive.map((c) => c.name).join(', ')}에 연결되어 있습니다. 설정 → 수거팀에서 기존 팀의 사용을 켜거나 연결 휴대폰을 해제한 뒤 다른 팀에 연결하세요.`)] });
     return null;
   }
   const pick = h('select', { 'aria-label': '연결할 팀' }, ...crews.map((c) => h('option', { value: c.id }, `${c.name}${c.device_id && c.device_id !== dev.id ? ' (다른 휴대폰 연결됨)' : ''}`)),
@@ -383,21 +385,88 @@ async function crewChooser(dev) {
   };
   const body = [h('p', {}, `${dev.label || dev.id.slice(0, 8)} 휴대폰을 사용하기 시작했습니다. 이 휴대폰으로 목록을 받을 팀을 고르세요.`), h('label', { class: 'f' }, '팀', pick), newName, warning];
   pick.addEventListener('change', sync); sync();
-  return modal({ title: '어느 팀에 연결할까요?', ok: '연결', cancel: '나중에', body,
+  return modal({ title: '어느 팀에 연결할까요?', owner, ok: '연결', cancel: '나중에', body,
     onOk: async () => {
       if (pick.value === '__new') {
         if (!nm.value.trim()) throw new Error('새 팀 이름을 적어 주세요.');
-        await post('crews', { id: null, name: nm.value.trim(), device_id: dev.id, capacity_m3: 8, capacity_kg: 0, shift_start: '09:00', shift_end: '17:00', active: true });
+        await link({ id: null, name: nm.value.trim(), device_id: dev.id, capacity_m3: 8, capacity_kg: 0, shift_start: '09:00', shift_end: '17:00', active: true });
         return nm.value.trim();
       }
       const c = crews.find((x) => x.id === pick.value);
       if (c.device_id && c.device_id !== dev.id && !replace.checked) throw new Error('기존 휴대폰을 교체하려면 팀과 휴대폰을 확인하고 교체 확인에 체크하세요.');
       if (c.device_id === dev.id) return c.name;
-      await post('crews', { id: c.id, name: c.name, device_id: dev.id, expected_device_id: c.device_id || null, capacity_m3: c.capacity_m3, capacity_kg: c.capacity_kg || 0, shift_start: c.shift_start, shift_end: c.shift_end, active: !!c.active });
+      await link({ id: c.id, name: c.name, device_id: dev.id, expected_device_id: c.device_id || null, capacity_m3: c.capacity_m3, capacity_kg: c.capacity_kg || 0, shift_start: c.shift_start, shift_end: c.shift_end, active: !!c.active });
       return c.name;
     } });
 }
-function devicePairingCard() {
+function adminOtpInput() {
+  return h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, autocomplete: 'one-time-code' });
+}
+function deviceApproval() {
+  const owner = sessionOwner();
+  const status = h('p', { class: 'small', role: 'status' }, '관리자 OTP 설정을 확인하는 중입니다.');
+  const msg = h('p', { class: 'msg', role: 'status' });
+  const call = (path, body) => api(path, { _prefsOwner: owner, ...(body === undefined ? {} : { method: 'POST', body }) });
+  let configured;
+  const setupButton = btn('관리자 OTP 설정', wrap(() => setup(configured), msg), 'small', { disabled: true });
+  const card = h('section', { class: 'card' }, h('h2', {}, '새 수거폰 승인'), status, setupButton, msg);
+  const current = () => card.isConnected && sessionOwner() === owner;
+  function showStatus(value) {
+    configured = value;
+    status.textContent = value ? '관리자 OTP가 연결되어 있습니다. 새 수거폰을 승인할 때만 사용합니다.' : '새 수거폰을 승인하려면 관리자 휴대폰의 Google OTP를 먼저 연결하세요.';
+    setupButton.textContent = value ? '관리자 OTP 교체' : '관리자 OTP 설정';
+    setupButton.disabled = false;
+  }
+  call('devices/approval/status').then((r) => showStatus(r.configured)).catch((e) => { status.textContent = e.message; });
+
+  async function setup(replace) {
+    const pw = h('input', { type: 'password', autocomplete: 'current-password' });
+    const recovery = replace ? h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false' }) : null;
+    const started = await modal({ title: replace ? '관리자 OTP 교체' : '관리자 OTP 설정', owner, ok: '설정 QR 받기', body: [
+      h('label', { class: 'f' }, '관리자 비밀번호', pw),
+      recovery && h('label', { class: 'f' }, '기존 OTP 또는 복구코드', recovery)], onOk: async () => {
+      if (!pw.value || (recovery && !recovery.value.trim())) throw new Error('관리자 인증 정보를 입력하세요.');
+      return call('devices/approval/setup/start', { password: pw.value, ...(recovery && { recovery_code: recovery.value.trim() }) });
+    } });
+    pw.value = ''; if (recovery) recovery.value = '';
+    if (!started || !current()) return false;
+    const otp = adminOtpInput();
+    const codes = await modal({ title: '관리자 인증 앱 연결', owner, ok: '연결 확인', body: [
+      h('p', {}, '관리자 휴대폰의 Google OTP에서 계정 추가 → QR 코드 스캔을 선택하세요. 이 QR은 관리자 본인만 읽으세요.'),
+      h('img', { alt: '관리자 OTP 설정 QR', src: started.qr_image, style: 'width:240px;max-width:100%;image-rendering:pixelated' }),
+      h('label', { class: 'f' }, '관리자 OTP 6자리', otp)], onOk: async () => {
+      if (!/^[0-9]{6}$/.test(otp.value)) throw new Error('인증 앱에 보이는 숫자 6자리를 입력하세요.');
+      return call('devices/approval/setup/finish', { otp: otp.value });
+    } });
+    if (!codes || !current()) return false;
+    showStatus(true);
+    await modal({ title: '복구코드 보관', owner, ok: '보관했습니다', cancel: null, body: [
+      h('p', {}, '인증기를 잃어버리면 비밀번호와 복구코드 한 개로 교체할 수 있습니다. 이 창을 닫기 전에 관리자가 안전한 곳에 보관하세요.'),
+      h('ul', {}, ...codes.recovery_codes.map((code) => h('li', {}, code))),
+      h('p', { class: 'small' }, '새 수거폰을 승인할 때는 인증 앱의 숫자가 다음 6자리로 바뀐 뒤 입력하세요.')] });
+    return current();
+  }
+
+  async function approve(dev, matchedByRelay = false) {
+    const latest = await call('devices/approval/status');
+    if (!current()) return false;
+    showStatus(latest.configured);
+    if (!configured && !(await setup(false))) return false;
+    const pw = h('input', { type: 'password', autocomplete: 'current-password' }), otp = adminOtpInput();
+    const accepted = await modal({ title: '새 수거폰 등록 승인', owner, ok: '등록 승인', body: [
+      h('p', {}, `${dev.label || dev.id.slice(0, 8)} 수거폰 · ${matchedByRelay ? '수거폰 등록번호 확인 완료' : '지문 ' + fp9(dev.fingerprint || '')}`),
+      h('label', { class: 'f' }, '관리자 비밀번호', pw),
+      h('label', { class: 'f' }, '관리자 OTP 6자리', otp),
+      h('p', { class: 'small muted' }, '관리자 휴대폰의 Google OTP에 표시된 번호를 입력하세요.')], onOk: async () => {
+      if (!pw.value || !/^[0-9]{6}$/.test(otp.value)) throw new Error('관리자 비밀번호와 인증 앱의 6자리를 입력하세요.');
+      await call('devices/' + encodeURIComponent(dev.id) + '/confirm', { admin_password: pw.value, admin_otp: otp.value });
+    } });
+    pw.value = ''; otp.value = '';
+    return !!accepted && current();
+  }
+  return { card, approve };
+}
+function devicePairingCard(approval) {
   const owner = sessionOwner(), msg = h('p', { class: 'msg', role: 'status' });
   const relay = h('input', { type: 'url', class: 'fill', placeholder: 'https://', value: boot.settings.device_pairing_relay_url || '',
     'aria-label': '간편 등록 중계 주소' });
@@ -419,11 +488,11 @@ function devicePairingCard() {
       const otp = h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, autocomplete: 'one-time-code', placeholder: '000000' });
       const label = h('input', { maxlength: 80, placeholder: '예: 수거 1팀' });
       try {
-        await modal({ title: '휴대폰 간편 등록', ok: '등록번호 확인', body: [
+        await modal({ title: '휴대폰 간편 등록', owner, ok: '등록번호 확인', body: [
           h('p', {}, '휴대폰 앱의 기기 등록에서 이 QR을 읽고 [등록번호 받기]를 누르세요.'),
           h('img', { alt: '간편 등록 QR', src: pair.qr_image, style: 'width:260px;max-width:100%;image-rendering:pixelated' }), time,
           h('label', { class: 'f' }, '휴대폰 등록번호 6자리', otp),
-          h('p', { class: 'small muted' }, '휴대폰에서 30초마다 바뀌는 번호입니다. 확인하면 이 기기를 등록하고 사용할 팀을 선택합니다.'),
+          h('p', { class: 'small muted' }, '수거폰에서 30초마다 바뀌는 번호입니다. 새 수거폰은 이 번호를 확인한 뒤 관리자가 등록을 승인합니다.'),
           h('label', { class: 'f' }, '기기 이름 (선택)', label)],
           onOk: async () => {
             if (Date.now() >= expires) throw new Error('QR이 만료되었습니다. 창을 닫고 새로 시작하세요.');
@@ -437,9 +506,15 @@ function devicePairingCard() {
     if (!confirmed || sessionOwner() !== owner) return;
     setBoot(await api('bootstrap', { _prefsOwner: owner }));
     if (!begin.isConnected) return;
-    toast('기기 등록 완료');
     const device = boot.devices.find((d) => d.id === confirmed.device_id);
-    if (device && !boot.crews.some((c) => c.active && c.device_id === device.id)) {
+    if (!device) { setBoot(null); render(true); return; }
+    if (!confirmed.confirmed && !(await approval.approve(device, true))) {
+      if (sessionOwner() === owner && begin.isConnected) render(true);
+      return;
+    }
+    if (sessionOwner() !== owner || !begin.isConnected) return;
+    toast('기기 등록 완료');
+    if (!boot.crews.some((c) => c.active && c.device_id === device.id)) {
       const name = await crewChooser(device);
       if (name) toast(`${name}에 연결했습니다`);
     }
@@ -459,20 +534,36 @@ function devicePairingCard() {
       h('label', { class: 'f' }, '간편 등록 중계 주소', relay), save), msg);
 }
 function settingsDevices() {
+  const owner = sessionOwner(), approval = deviceApproval();
+  const call = (path, body) => api(path, { _prefsOwner: owner, ...(body === undefined ? {} : { method: 'POST', body }) });
   const devMsg = h('p', { class: 'msg' }), regMsg = h('p', { class: 'msg' });
   const regImg = h('img', { alt: '기기 등록 QR', style: 'width:260px;image-rendering:pixelated' });
   api('registration-qr').then((r) => { regImg.src = r.image; }).catch(() => {});
   const code = h('textarea', { placeholder: '휴대폰 화면의 기기 코드 (DGD1.…) — 웹캠이 없을 때만 붙여 넣기', rows: 3, style: 'width:100%' });
   const label = h('input', { placeholder: '기기 이름 (예: 1팀 업무폰)' });
-  const fp = h('p', { class: 'big' }, regState.fp);
+  const fp = h('p', { class: 'big' }, regState.owner === owner ? regState.fp : '');
   // 등록하면 바로 목록을 새로 그린다(지문은 regState에 남겨 다시 그린 화면에도 보임)
-  const register = wrap(async () => {
-    const r = await post('devices/register', { code: code.value, label: label.value });
-    regState.fp = `지문 ${fp9(r.fingerprint)}`; fp.textContent = regState.fp;
+  async function registerCode(text) {
+    if (sessionOwner() !== owner || !regMsg.isConnected) return;
+    const r = await call('devices/register', { code: text, label: label.value });
+    if (sessionOwner() !== owner || !regMsg.isConnected) return;
+    regState.owner = owner; regState.fp = `지문 ${fp9(r.fingerprint)}`; fp.textContent = regState.fp;
     toast(r.confirmed ? '이미 등록된 기기입니다.' : '등록했습니다. 지문이 휴대폰과 같으면 아래 목록에서 [지문 같음 · 사용 시작]을 누르세요.');
-    setBoot(await api('bootstrap'));
-    if (location.hash.startsWith('#/settings/devices')) render(true);
-  }, regMsg);
+    const refreshed = await call('bootstrap');
+    if (sessionOwner() === owner && regMsg.isConnected) { setBoot(refreshed); render(true); }
+  }
+  const register = wrap(() => registerCode(code.value), regMsg);
+  const file = h('input', { type: 'file', accept: '.dgdevice', 'aria-label': '수거폰 등록 파일' });
+  file.addEventListener('change', wrap(async () => {
+    const selected = file.files[0]; if (!selected) return;
+    try {
+      if (!/\.dgdevice$/i.test(selected.name)) throw new Error('수거폰에서 저장한 .dgdevice 파일을 선택하세요.');
+      if (selected.size > 1024) throw new Error('수거폰 등록 파일은 1KB까지 열 수 있습니다.');
+      const text = (await selected.text()).trim();
+      if (!/^DGD1\.[A-Za-z0-9_-]{200}$/.test(text)) throw new Error('수거폰 등록 파일의 내용을 확인하세요. 휴대폰에서 다시 저장할 수 있습니다.');
+      await registerCode(text);
+    } finally { file.value = ''; }
+  }, regMsg));
   // 휴대폰 화면의 기기 코드 QR을 이 PC 웹캠으로 읽어 바로 등록 (코드를 옮겨 적거나 보낼 필요 없음)
   const camVideo = h('video', { playsinline: true, muted: true, class: 'regcam', hidden: true });
   // 같은 단추가 읽기 시작·멈추기를 함께 한다. 읽는 동안 단추를 끄는 wrap 밖에서 멈추기를 처리해야 두 번째 누름이 닿는다.
@@ -499,20 +590,23 @@ function settingsDevices() {
     pending(d) ? h('span', {}, chip('지문 확인 대기', 'warn'), h('br'), h('b', { class: 'fp-inline' }, fp9(d.fingerprint || ''))) : d.status === 'ACTIVE' ? chip('사용', 'ok') : chip(d.status === 'LOST' ? '분실' : '중지', 'bad'),
     d.registered_at.slice(0, 10), h('span', { class: 'row' },
       pending(d) ? btn('지문 같음 · 사용 시작', wrap(async () => {
-        await post(`devices/${d.id}/confirm`); toast('사용을 시작했습니다'); regState.fp = '';
-        setBoot(await api('bootstrap'));
+        if (!(await approval.approve(d))) return;
+        toast('사용을 시작했습니다'); regState.fp = '';
+        const refreshed = await call('bootstrap'); if (sessionOwner() !== owner || !devMsg.isConnected) return;
+        setBoot(refreshed);
         const crewName = await crewChooser(d);
+        if (sessionOwner() !== owner || !devMsg.isConnected) return;
         if (crewName) toast(`${crewName}에 연결했습니다`);
         setBoot(null); render(true);
       }, devMsg), 'small primary') : null,
       ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
       btn(t, wrap(async () => { if (k !== 'ACTIVE' && !(await confirmDlg(`휴대폰 ${t}`, `${d.id.slice(0, 8)} 기기를 '${t}'합니다. 이 기기로는 목록을 보낼 수 없고 결과도 받지 않습니다. 계속할까요?`, { ok: t, danger: true }))) return; await post(`devices/${d.id}/status`, { status: k }); setBoot(null); render(); }, devMsg), 'small')))]), { empty: '등록된 휴대폰이 없습니다.' });
-  return [devicePairingCard(), h('div', { class: 'grid2' },
+  return [approval.card, devicePairingCard(approval), h('div', { class: 'grid2' },
     h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'),
       h('ol', { class: 'steps-list' }, h('li', {}, '휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음).'),
-        h('li', {}, '휴대폰에 나온 기기 코드 QR을 [휴대폰 QR 웹캠으로 읽기]로 이 PC 웹캠에 비춥니다. 읽으면 바로 등록됩니다.'),
-        h('li', {}, '양쪽 9자리 지문이 같은지 확인하고, 아래 목록에서 [지문 같음 · 사용 시작]을 누릅니다. 그 전에는 이 휴대폰으로 목록을 보낼 수 없습니다.')),
-      regImg, label, h('div', { class: 'row' }, camBtn), camVideo, fp, regMsg,
+        h('li', {}, '휴대폰에서 [등록 파일 저장]을 누르고 파일을 PC로 옮겨서 엽니다. PC에 웹캠이 있으면 휴대폰의 QR도 읽을 수 있습니다.'),
+        h('li', {}, '양쪽 9자리 지문을 대조하고 [지문 같음 · 사용 시작]을 누릅니다. 관리자 비밀번호와 관리자 OTP로 승인한 뒤 수거팀을 선택하세요.')),
+      regImg, label, h('label', { class: 'f' }, '수거폰 등록 파일', file), h('div', { class: 'row' }, camBtn), camVideo, fp, regMsg,
       h('details', { class: 'free' }, h('summary', {}, '웹캠이 없을 때: 기기 코드 붙여 넣기'),
         h('p', { class: 'small muted' }, '휴대폰의 [코드 복사]로 복사한 코드를 업무 메일 등 승인된 경로로 이 PC에 옮겨 붙여 넣습니다(공개키만 들어 있어 비밀은 아니지만, 지문 대조로 바꿔치기를 막습니다).'),
         code, btn('기기 등록', register, 'small'))),

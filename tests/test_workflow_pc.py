@@ -19,6 +19,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 from test_review_ui import pc_server
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -120,7 +122,7 @@ def run_suite(browser):
             raw = uuid.uuid4().bytes + P.pub_raw(P.gen_key()) + P.pub_raw(P.gen_key())
             code = "DGD1." + base64.urlsafe_b64encode(raw + hashlib.sha256(raw).digest()[:4]).decode().rstrip("=")
             dev = post(page, "devices/register", {"code": code, "label": "가상 업무폰"})["device_id"]
-            post(page, "devices/" + dev + "/confirm", {})
+            ApprovalApp(ctx, url, PW).approve(dev)
             crew = post(page, "crews", {"name": "가상 이어하기팀", "device_id": dev})["id"]
             fee = page.evaluate("async () => (await import('/web/fees-data.js')).BUILTIN_FEES.rows.find(r => r.status === 'CONFIRMED' && r.price > 0).id")
             request = post(page, "requests", {"name": "가상 이어하기", "phone": "01000004567", "address": "가상구 시험로 1",

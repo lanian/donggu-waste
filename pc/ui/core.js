@@ -20,6 +20,8 @@ let boot = null;       // 설정·팀·기기
 let prefsSession = {}, prefsIdentity = '', prefsRevision = 0, confirmedPrefs = null;
 const bootstrapPrefsReads = new WeakMap();
 function resetPrefsSession(identity = '') {
+  // 같은 주소에서 로그아웃해도 이전 관리자의 인증 QR·복구코드 대화 상자는 닫는다.
+  [...dlgStack].reverse().forEach((dialog) => { if (dialog._owner === prefsSession) dialog._close(null); });
   prefsSession = {}; prefsIdentity = identity; prefsRevision = 0; confirmedPrefs = null;
 }
 // 라우터보다 먼저 탐색 세대를 올린다. 늦게 읽은 화면의 응답도 같은 탐색 기준으로 검사한다.
@@ -344,7 +346,7 @@ const dlgStack = [];
 // 처리 중인 대화 상자는 닫히지 않는다(응답을 잃지 않게). 다만 이 시간이 지나도 응답이 없으면(PC 서버 멈춤·연결 끊김)
 // [기다리지 않고 닫기]를 보여 화면에 갇히지 않게 한다. 그때 닫으면 결과를 못 받을 수 있으므로 새로 고쳐 확인하라고 알린다.
 const MODAL_STUCK_MS = 30_000;
-function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false, enterSubmit = true } = {}) {
+function modal({ title, body = [], ok = '확인', cancel = '취소', danger = false, wide = false, onOk, extra = [], sticky = false, enterSubmit = true, owner } = {}) {
   return new Promise((resolve) => {
     const id = `dlg${++dlgSeq}`;
     const prev = document.activeElement;
@@ -386,7 +388,7 @@ function modal({ title, body = [], ok = '확인', cancel = '취소', danger = fa
     };
     let closed = false;
     const close = (v) => { if (closed) return; closed = true; clearTimeout(stuckTimer); back.remove(); const i = dlgStack.indexOf(back); if (i >= 0) dlgStack.splice(i, 1); document.removeEventListener('keydown', key, true); if (prev && prev.isConnected && prev.focus) prev.focus(); resolve(v); };
-    back._close = close; back._sticky = sticky; back._busy = () => busy;
+    back._close = close; back._sticky = sticky; back._busy = () => busy; back._owner = owner;
     okB.addEventListener('click', async () => {
       if (busy) return;
       msg.textContent = ''; setBusy(true);

@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from device_approval_fixture import ApprovalApp
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pc"))
 sys.path.insert(0, str(ROOT / "tests"))
@@ -419,7 +421,7 @@ def ui_main():
             raw = os.urandom(16) + P.pub_raw(P.gen_key()) + P.pub_raw(P.gen_key())
             code = "DGD1." + base64.urlsafe_b64encode(raw + hashlib.sha256(raw).digest()[:4]).decode().rstrip("=")
             dev = api(ctx, url, "devices/register", {"code": code, "label": "가상 정렬폰"})["device_id"]
-            api(ctx, url, "devices/" + dev + "/confirm", {})
+            ApprovalApp(ctx, url, PW).approve(dev)
             crew = api(ctx, url, "crews", {"name": "가상 정렬팀", "device_id": dev})["id"]
             for d in ("가상정렬가동", "가상정렬나동"):
                 api(ctx, url, "dongs", {"name": d})

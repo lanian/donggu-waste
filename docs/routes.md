@@ -100,6 +100,7 @@
 | `fee-usage` | ✓ | ✓ | ✓ | ✓ |  | read |  |  | 자주 쓴 품목. |
 | `qrtests` | ✓ | ✓ | ✓ | ✓ |  | read |  |  | QR 실측 목록. |
 | `photo/{id}` | ✓ | ✓ | ✓ | ✓ |  | read |  | PHOTO | 현장 사진(수거팀은 자기 팀 접수만). |
+| `devices/approval/status` | ✓ |  |  |  |  | read |  |  | 현재 관리자의 새 기기 승인용 인증 앱 설정 여부. |
 | `road-rules` | ✓ |  |  |  |  | read |  |  | 동봉 도로 정보의 사용 가능 여부, 적용·이전 버전과 미리보기. |
 | `road-rules/roads` | ✓ |  |  |  |  | read |  |  | 지도 선택 위치 주변의 등록 가능 도로 구간. |
 
@@ -183,10 +184,12 @@
 | `crews` | ✓ |  |  |  |  | write |  |  | 수거팀 저장. |
 | `crews/{id}/delete` | ✓ |  |  |  |  | write |  |  | 수거팀 삭제 및 기존 배차·하차 이력 보존. |
 | `devices/register` | ✓ |  |  |  |  | write |  |  | 휴대폰 등록(지문 확인 대기). |
+| `devices/approval/setup/start` | ✓ |  |  |  |  | write |  |  | 관리자 비밀번호 확인 후 인증 앱 등록 QR 발급. |
+| `devices/approval/setup/finish` | ✓ |  |  |  |  | write |  |  | 인증 앱 연결을 확인하고 일회용 복구코드를 처음 한 번 표시. |
 | `devices/pair/start` | ✓ |  |  |  |  | none |  |  | 휴대폰 6자리 등록에 사용할 일회용 QR 만들기. |
-| `devices/pair/{id}/confirm` | ✓ |  |  |  |  | none |  |  | 휴대폰의 기기 서명과 일회용 번호를 검증해 등록. |
+| `devices/pair/{id}/confirm` | ✓ |  |  |  |  | none |  |  | 휴대폰의 기기 서명과 등록번호를 대조하고 새 수거폰은 관리자 승인 대기로 등록. |
 | `devices/pair/{id}/cancel` | ✓ |  |  |  |  | none |  |  | 간편 등록 QR과 일회용 번호 사용 중단. |
-| `devices/{id}/confirm` | ✓ |  |  |  |  | write |  |  | 휴대폰 지문 확인. |
+| `devices/{id}/confirm` | ✓ |  |  |  |  | write |  |  | 새 수거폰을 관리자 비밀번호와 인증 앱 번호로 승인. |
 | `devices/{id}/status` | ✓ |  |  |  |  | write |  |  | 휴대폰 상태(분실·중지). |
 | `requests/{id}/link` | ✓ | ✓ |  |  |  | write |  |  | 유사 품목 연결. |
 | `links/{id}/void` | ✓ | ✓ |  |  |  | write |  |  | 유사 품목 연결 취소. |
@@ -213,4 +216,4 @@
 | `road-rules/apply` | ✓ |  |  |  |  | none |  |  | 검증한 도로망으로 전환하는 작업. |
 | `road-rules/rollback` | ✓ |  |  |  |  | none |  |  | 이전에 사용한 도로망으로 복원하는 작업. |
 
-경로 184개 (로그인 전 4개 제외).
+경로 187개 (로그인 전 4개 제외).

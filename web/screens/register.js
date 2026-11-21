@@ -20,6 +20,32 @@ function rescan() {
   ui.rescanPc = true;
   render();
 }
+function registrationFileControls(code) {
+  const file = new File([code], '수거폰-등록.dgdevice', { type: 'text/plain' });
+  const msg = msgBox();
+  const save = btn('등록 파일 저장', () => {
+    const url = URL.createObjectURL(file);
+    const link = h('a', { href: url, download: file.name });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    say(msg, '등록 파일 다운로드를 시작했습니다. 파일을 PC 담당자에게 전달하세요.');
+  }, 'big');
+  const share = navigator.share && navigator.canShare?.({ files: [file] }) ? btn('등록 파일 공유', async () => {
+    share.disabled = true;
+    try {
+      await navigator.share({ files: [file], title: '수거폰 등록 파일' });
+      say(msg, 'PC 담당자가 파일을 열면 아래의 지문 숫자를 함께 확인하세요.');
+    } catch (error) {
+      if (error.name === 'AbortError') say(msg, '공유를 취소했습니다.');
+      else say(msg, '파일을 공유할 수 없습니다. [등록 파일 저장]을 이용하세요.', true);
+    } finally { share.disabled = false; }
+  }, 'big') : null;
+  return h('div', {},
+    h('p', {}, '등록 파일을 업무 메일이나 승인된 매체로 PC에 전달하세요. PC의 [설정 → 기기 → 수거폰 등록 파일]에서 엽니다.'),
+    h('div', { class: 'row' }, save, share), msg);
+}
 function pairingCard(session, dev, code) {
   const msg = msgBox(), result = h('div', {});
   const current = () => pairing === session && S.isUnlocked() && Date.now() < session.expires;
@@ -121,14 +147,15 @@ async function screenRegister() {
   return h('main', { class: 'with-dock' }, back, flowSteps(STEPS, 1),
     h('section', { class: 'card' },
       h('h2', {}, h('span', { class: 'stepno' }, '2'), '기기 코드 전달'),
-      h('p', {}, '관리자 PC [설정 → 기기 → 휴대폰 QR 웹캠으로 읽기]를 누른 뒤, 이 QR을 PC 웹캠에 비추세요. 읽으면 PC에 바로 등록됩니다. (공개키만 들어 있습니다)'),
+      registrationFileControls(code),
+      h('p', { class: 'small' }, 'PC에 웹캠이 있으면 [휴대폰 QR 웹캠으로 읽기]를 누르고 아래 QR을 비춰도 됩니다.'),
       h('div', { class: 'qrwrap' }, qr),
-      h('details', { class: 'devcode-alt' }, h('summary', {}, 'PC에 웹캠이 없을 때: 코드 복사'),
+      h('details', { class: 'devcode-alt' }, h('summary', {}, '기기 코드 복사'),
         h('p', { class: 'small' }, '코드를 복사해 업무 메일 등 승인된 경로로 관리자에게 보내면 PC에 붙여 넣어 등록합니다.'),
         ta, btn('코드 복사', async () => { try { await navigator.clipboard.writeText(code); toast('복사했습니다'); } catch { ta.select(); } }, 'big'))),
     h('section', { class: 'card' },
       h('h2', {}, h('span', { class: 'stepno' }, '3'), '지문 숫자 대조'),
-      h('p', {}, 'PC 화면에 나온 지문 9자리가 아래와 같은지 확인하세요. 같으면 PC에서 [지문 같음 · 사용 시작]을 눌러야 이 휴대폰으로 목록을 보낼 수 있습니다.'),
+      h('p', {}, '관리자와 함께 PC 화면의 지문 9자리가 아래와 같은지 확인하세요. 번호가 일치하면 관리자가 PC에서 비밀번호와 Google OTP로 이 휴대폰을 승인합니다.'),
       h('p', { class: 'fp' }, `${fp.slice(0, 3)} ${fp.slice(3, 6)} ${fp.slice(6)}`),
       h('p', { class: 'small' }, '기기 번호 ' + P.uuidStr(dev.id).slice(0, 8))),
     btn('PC 등록 QR 다시 읽기', rescan, 'ghost link'),

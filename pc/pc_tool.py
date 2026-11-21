@@ -112,13 +112,36 @@ def cmd_reg_qr(_):
 
 
 def cmd_register_device(a):
+    import getpass
+    import warnings
+    from dgpc import device_approval
+
+    c = con()
+    actor = S.ACTOR.set("cli")
     try:
-        r = S.register_device(con(), a.code, a.label or "", confirm=bool(getattr(a, "confirm", False)))
+        r = S.register_device(c, a.code, a.label or "")
+        print("지문:", r["fingerprint"], "← 휴대폰 화면의 숫자와 같은지 확인하세요", flush=True)
+        if a.confirm and not r["confirmed"]:
+            username = (a.admin or input("운영 관리자 아이디: ")).strip().lower()
+            user = S.one(c, "SELECT id FROM app_user WHERE username=?", (username,))
+            if not user or not device_approval.status(c, user["id"])["configured"]:
+                raise S.UserError("PC 설정 → 기기에서 운영 관리자 계정의 인증 앱을 먼저 연결하세요.")
+            # 숨김 입력을 지원하지 않는 터미널에서는 비밀번호·OTP를 평문으로 읽지 않는다.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                password = getpass.getpass("관리자 비밀번호: ")
+                otp = getpass.getpass("관리자 Google OTP 6자리: ")
+            device_approval.approve_device(c, user["id"], r["device_id"], password, otp)
+            r["confirmed"] = True
     except S.UserError as e:
         sys.exit(str(e))
+    except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+        sys.exit("승인 입력이 중단되었습니다. 터미널에서 다시 시도하거나 PC 설정 → 기기에서 승인하세요.")
+    finally:
+        S.ACTOR.reset(actor)
+        c.close()
     print("등록 완료:", r["device_id"])
-    print("지문:", r["fingerprint"], "← 휴대폰 화면의 숫자와 같은지 확인하세요")
-    print("사용 시작(지문 확인함)" if r["confirmed"] else "지문이 같으면 --confirm 을 붙여 다시 실행하거나 PC 화면 설정 → 기기에서 [지문 같음 · 사용 시작]")
+    print("사용 시작(관리자 승인 완료)" if r["confirmed"] else "지문이 같으면 --confirm 을 붙여 다시 실행하거나 PC 화면 설정 → 기기에서 승인하세요.")
 
 
 def cmd_make_bundle(a):
@@ -406,7 +429,9 @@ def main(argv=None):
     sv.set_defaults(fn=cmd_serve)
     s.add_parser("reg-qr").set_defaults(fn=cmd_reg_qr)
     r = s.add_parser("register-device"); r.add_argument("code"); r.add_argument("--label")
-    r.add_argument("--confirm", action="store_true", help="두 화면의 지문이 같음을 확인했으면 바로 사용 시작"); r.set_defaults(fn=cmd_register_device)
+    r.add_argument("--confirm", action="store_true", help="지문을 대조한 뒤 관리자 비밀번호와 인증 앱 번호로 사용 승인")
+    r.add_argument("--admin", help="승인할 운영 관리자 아이디 (생략하면 직접 입력)")
+    r.set_defaults(fn=cmd_register_device)
     m = s.add_parser("make-bundle")
     m.add_argument("--device", required=True); m.add_argument("--count", type=int, default=20)
     m.add_argument("--date"); m.add_argument("--chunk", type=int, default=700)

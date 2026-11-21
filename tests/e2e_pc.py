@@ -25,6 +25,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 ROOT = Path(__file__).resolve().parent.parent
 WORK = Path(os.environ.get("DG_TEST_DIR") or tempfile.mkdtemp(prefix="dg-pc-e2e-"))
 SHOTS = WORK / "shots"
@@ -281,7 +283,9 @@ def run():
         # 등록하면 바로 목록이 새로 그려진다(기다리지 않음): 지문 확인 대기 행과 지문은 그대로 보임
         expect(page.locator("tr", has_text="1팀 업무폰")).to_contain_text("지문 확인 대기")
         expect(page.locator(".big")).to_contain_text("지문")
+        approver = ApprovalApp(ctx, URL, PW)
         page.get_by_role("button", name="지문 같음 · 사용 시작").click()
+        approver.approve_dialog(page)
         chooser = page.get_by_role("dialog", name="어느 팀에 연결할까요?")
         expect(chooser).to_be_visible()
         ok(S.list_devices(store.connect())[0]["confirmed_at"], "지문 확인을 눌러야 사용 시작(그 전에는 목록을 보낼 수 없음)")

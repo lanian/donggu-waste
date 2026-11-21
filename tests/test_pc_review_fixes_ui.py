@@ -16,6 +16,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from device_approval_fixture import ApprovalApp
+
 from test_review_ui import pc_server
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -440,7 +442,7 @@ def main():
         raw = os.urandom(16) + P.pub_raw(P.gen_key()) + P.pub_raw(P.gen_key())
         code = "DGD1." + base64.urlsafe_b64encode(raw + hashlib.sha256(raw).digest()[:4]).decode().rstrip("=")
         dev = api(admin, url, "devices/register", {"code": code, "label": "가상 검토폰"})["device_id"]
-        api(admin, url, "devices/" + dev + "/confirm", {})
+        ApprovalApp(admin, url, PW).approve(dev)
         crew = api(admin, url, "crews", {"name": "가상 검토팀", "device_id": dev})["id"]
         api(admin, url, "dongs", {"name": "가상검토동"})
         page = admin.new_page()

@@ -12,6 +12,8 @@ import tempfile
 import uuid
 
 from playwright.sync_api import expect, sync_playwright
+
+from device_approval_fixture import ApprovalApp
 import qrcode
 from test_review_ui import pc_server
 
@@ -85,7 +87,7 @@ def main():
             }""", api("registration-qr")["image"])
             phone = Phone(registration)
             device = api("devices/register", {"code": phone.code(), "label": "가상 현장 폰"})
-            api(f"devices/{device['device_id']}/confirm", {})
+            ApprovalApp(context, url, "field-review-pass-123").approve(device["device_id"])
             crew = api("crews", {"name": "가상 현장 팀", "device_id": device["device_id"], "capacity_m3": 8})
             fee = next(row["id"] for row in json.loads((ROOT / "data/fee_table.json").read_text(encoding="utf-8"))["rows"]
                        if row["status"] == "CONFIRMED" and row.get("price", 0) > 0)
