@@ -450,13 +450,14 @@ class Handler(BaseHTTPRequestHandler):
 HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
 ''', encoding='utf-8')
             launched = []
+            expected_pack = path.resolve()
 
             def spawn(args):
-                self.assertEqual(Path(args[0]), path / 'bin/osrm-routed.exe')
+                self.assertEqual(Path(args[0]), expected_pack / 'bin/osrm-routed.exe')
                 self.assertEqual(args[args.index('--ip') + 1], '127.0.0.1')
                 self.assertEqual(args[args.index('--algorithm') + 1], 'mld')
                 self.assertEqual(args[args.index('--max-table-size') + 1], '200')
-                self.assertEqual(Path(args[-1]), path / 'data/gwangju.osrm')
+                self.assertEqual(Path(args[-1]), expected_pack / 'data/gwangju.osrm')
                 process = subprocess.Popen([sys._base_executable, str(worker), args[args.index('--port') + 1]],
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 launched.append(process)
