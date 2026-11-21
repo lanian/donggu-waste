@@ -1,7 +1,8 @@
 // PC 화면: 접수 목록·일괄 처리·CSV 일괄 등록
 import { won } from '/web/fees.js';
-import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, routeEpoch, searchbox, sortable, statusChip, toast, wrap } from '../core.js';
+import { CONTACT, PAY, STATUS, api, boot, btn, canWork, chip, confirmDlg, dongOpts, download, fmtPhone, go, grid, gridbar, h, modal, pagehead, post, reasonDlg, routeEpoch, searchbox, sortable, toast, wrap } from '../core.js';
 import { presetRange } from '../date_filters.js';
+import { progressCell } from './request_progress.js';
 async function screenRequests() {
   const myRoute = routeEpoch, myHash = location.hash;
   let view, loadSeq = 0, ready = false;
@@ -104,7 +105,7 @@ async function screenRequests() {
       h('td', { class: 'nowrap' }, r.dong || h('span', { class: 'muted' }, '-')), h('td', { class: 'nowrap' }, r.name), h('td', { class: 'code' }, fmtPhone(r.phone)),
       h('td', {}, h('span', { class: 'clamp' }, r.address)),
       h('td', {}, h('span', { class: 'clamp' }, r.items.map((i) => `${i.name} ${i.spec} ${i.qty}${i.unit_label}`).join(', '))),
-      h('td', {}, r.status !== 'RECEIVED' ? statusChip(r.status) : null, r.state.contact !== 'NOT_CONTACTED' ? chip(CONTACT[r.state.contact]) : null, r.must_today ? chip('오늘 필수', 'warn') : null,
+      h('td', {}, progressCell(r), r.state.contact !== 'NOT_CONTACTED' ? chip(CONTACT[r.state.contact]) : null, r.must_today ? chip('오늘 필수', 'warn') : null,
         (r.warnings || []).length ? h('span', { class: 'chip bad', title: r.warnings.join(' ') }, '관할 확인') : null, r.channel && r.channel !== '전화' ? chip(r.channel) : null),
       h('td', {}, r.status === 'CANCELLED' ? null : r.state.fee.final == null ? chip('금액 확인 대기', 'warn') : won(r.state.fee.final)),
       h('td', { class: 'c' }, r.lat == null ? chip('위치 없음', 'warn') : '✓'),

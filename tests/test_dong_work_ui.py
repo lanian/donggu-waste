@@ -64,12 +64,13 @@ FIXTURE = r"""async ({role}) => {
   let out={};
   if(endpoint==='dong-work')out={date,selected_dong:dong,scope:{mode:role==='DONG'?'assigned':'all',dong_ids:['d1','d2']},dongs:window.__dongs,crews:window.__crews,summary:metrics,rows:window.__dongs.map(d=>({...d,...metrics}))};
   else if(endpoint==='dong-work/requests'&&(options.method||'GET')==='GET')out={rows:[{...row,name:'가상 주민 '+dong}],total:1,page:1,pages:1};
-  else if(endpoint==='dong-work/requests/r1'&&(options.method||'GET')==='GET')out=row;
+  else if(endpoint==='dong-work/requests/r1'&&(options.method||'GET')==='GET')out={...row,...window.__detailFields};
   else if(endpoint==='dong-work/requests')out={id:'r1',receipt_no:row.receipt_no,warnings:[]};
   else if(endpoint==='dong-work/duplicates')out=window.__duplicateDongs.includes(dong)?[{id:'duplicate-fixture',receipt_no:'DG-20261108-0002'}]:[];
+  else if(endpoint==='dong-work/dong-detect')out=window.__dongResults?.[u.searchParams.get('address')]||{dong:null,dong_id:null,candidates:[]};
   else if(endpoint==='dong-work/geocode')out={lat:35.145,lon:126.923,label:'가상 위치',exact:true};
   else if(endpoint==='dong-work/assignments')out=[];
-  else if(endpoint==='dong-work/route')out={routes:[{crew_id:'c1',crew_name:'가상 수거팀',stops:[{request_id:'r1',eta:'09:00'}]}],requests:{r1:row},unassigned:[],basis:{date:body.date,dong:body.dong,crew_versions:{c1:0}}};
+  else if(endpoint==='dong-work/route')out={routes:[{crew_id:'c1',crew_name:'가상 수거팀',stops:window.__routeStops||[{request_id:'r1',eta:'09:00'}]}],requests:{r1:{...row,...window.__detailFields}},unassigned:[],basis:{date:body.date,dong:body.dong,crew_versions:{c1:0}}};
   else if(endpoint==='dong-work/assign')out=[{count:1,assign_ver:1}];
   else if(endpoint==='fee-usage')out=[];
   else if(endpoint==='users')out=[{id:'u1',username:'dong-user',display_name:'동 담당',role:'DONG',dong_ids:['d1'],active:true}];
@@ -351,6 +352,149 @@ def duplicate_scope_regressions(browser, url):
         context.close()
 
 
+def address_dong_regressions(browser, url):
+    context, page = mount(browser, url)
+    try:
+        page.evaluate("""window.__dongResults = {
+          '가상로 1': {dong:'가상1동',dong_id:'d1',candidates:['가상1동']},
+          '가상로 2': {dong:'가상2동',dong_id:'d2',candidates:['가상2동']},
+          '가상로 3': {dong:null,dong_id:null,ambiguous:true,candidates:['가상1동','가상2동']},
+          '가상로 4': {dong:null,dong_id:null,outside_scope:true,candidates:[]}
+        }""")
+        def button(label):
+            return page.get_by_role('button', name=label, exact=True)
+
+        def hold_detection():
+            page.evaluate("window.__hold='dong-work/dong-detect'")
+
+        def wait_detection():
+            page.wait_for_function("window.__gates.length===1")
+
+        def release_detection():
+            page.evaluate("window.__gates.shift()()")
+
+        address = page.get_by_label('배출 주소', exact=True)
+        selected = page.get_by_label('접수 행정동', exact=True)
+        button('접수 등록').click()
+        expect(selected).to_have_value('')
+        hold_detection()
+        address.fill('가상로 1')
+        wait_detection()
+        address.fill('가상로 2')
+        expect(selected).to_have_value('d2')
+        release_detection()
+        expect(selected).to_have_value('d2')
+        ok(True, '전체 범위에서 빈 값으로 시작하고 마지막 주소의 유일한 담당 동만 자동 선택한다')
+        address.fill('가상로 3')
+        expect(page.locator('#dw-dong-hint')).to_contain_text('가상1동, 가상2동')
+        expect(selected).to_have_value('')
+        selected.select_option('d1')
+        address.fill('가상로 2')
+        button('목록으로 · 초안 보관').click()
+        button('접수 등록').click()
+        expect(selected).to_have_value('d1')
+        button('주소로 동 다시 선택').click()
+        expect(selected).to_have_value('d2')
+        address.fill('')
+        expect(selected).to_have_value('')
+        ok(True, '모호한 주소는 후보를 안내하고, 수동 선택은 초안 재진입 후에도 직접 재판정할 때까지 유지한다')
+
+        button('목록으로 · 초안 보관').click()
+        page.get_by_label('행정동 범위', exact=True).select_option('d1')
+        button('접수 등록').click()
+        expect(selected).to_have_value('d1')
+        address.fill('가상로 4')
+        expect(page.locator('#dw-dong-hint')).to_contain_text('담당 범위 밖')
+        expect(selected).to_have_value('')
+        address.fill('자료없는길 1')
+        expect(selected).to_have_value('d1')
+        ok(True, '명시한 범위는 판별 근거가 없는 주소의 기본값이고 담당 범위 밖의 주소는 다시 선택해야 한다')
+
+        hold_detection()
+        address.fill('가상로 2')
+        wait_detection()
+        button('목록으로 · 초안 보관').click()
+        button('접수 등록').click()
+        expect(selected).to_have_value('d2')
+        selected.select_option('d1')
+        release_detection()
+        expect(selected).to_have_value('d1')
+        ok(True, '조회 중 보관한 자동 초안은 재진입 시 다시 판별하고 이전 화면의 응답을 무시한다')
+
+        page.get_by_label('이름', exact=True).fill('가상 접수')
+        page.get_by_label('연락처', exact=True).fill('01000000000')
+        page.get_by_label('품목명·규격 검색', exact=True).fill('의자')
+        page.locator('.results button').first.click()
+        button('품목 추가').click()
+        button('주소로 동 다시 선택').click()
+        expect(selected).to_have_value('d2')
+        hold_detection()
+        address.fill('가상로 1')
+        button('접수 저장').click()
+        wait_detection()
+        assert not page.evaluate("window.__calls.some(x=>x.endpoint==='dong-work/requests'&&x.method==='POST')")
+        release_detection()
+        page.wait_for_function("window.__calls.some(x=>x.endpoint==='dong-work/requests'&&x.method==='POST')")
+        saved = page.evaluate("window.__calls.find(x=>x.endpoint==='dong-work/requests'&&x.method==='POST').body")
+        ok(saved['dong_id'] == 'd1' and saved['address'] == '가상로 1', '주소 입력 직후 저장은 보류 중인 최신 결과의 동과 주소를 함께 보낸다')
+        button('DG-20261108-0001').click()
+        address.fill('가상로 2')
+        address.press('Tab')
+        expect(selected).to_have_value('d1')
+        ok(True, '기존 접수를 열어 주소를 편집해도 저장된 동을 유지한다')
+    finally:
+        context.close()
+
+
+def collection_time_regressions(browser, url):
+    context, page = mount(browser, url)
+    try:
+        def button(label):
+            return page.get_by_role('button', name=label, exact=True)
+
+        extra = page.get_by_label('추가 현장시간(분)', exact=True)
+        button('접수 등록').click()
+        expect(extra).to_have_value('0', timeout=2000)
+        extra.fill('45')
+        button('목록으로 · 초안 보관').click()
+        button('접수 등록').click()
+        expect(extra).to_have_value('45')
+        button('목록으로 · 초안 보관').click()
+        page.evaluate("window.__detailFields={extra_work_min:30}")
+        button('DG-20261108-0001').click()
+        expect(extra).to_have_value('30')
+        page.get_by_label('수정 사유', exact=True).fill('가상 이사 반출')
+        for invalid in ['-1', '1.5', '1441']:
+            extra.fill(invalid)
+            button('수정 저장').click()
+            expect(page.locator('.dw-detail-actions [role=alert]')).to_contain_text('1440')
+        assert not page.evaluate("window.__calls.some(x=>x.endpoint==='dong-work/requests/r1'&&x.method==='POST')")
+        extra.fill('1440')
+        button('수정 저장').click()
+        page.wait_for_function("window.__calls.some(x=>x.endpoint==='dong-work/requests/r1'&&x.method==='POST')")
+        body = page.evaluate("window.__calls.find(x=>x.endpoint==='dong-work/requests/r1'&&x.method==='POST').body")
+        ok(body['extra_work_min'] == 1440, '추가 현장시간은 초안과 상세에서 유지되고 0~1440 범위의 정수만 분 단위로 저장한다')
+        page.evaluate("""() => {
+          window.__detailFields.spot_note='가상 101동 분리수거장';
+          window.__routeStops=[
+            {request_id:'r1',eta:'09:00',service_min:42,extra_work_min:30,same_pickup:2},
+            {request_id:'r2',eta:'09:42',service_min:8,same_pickup:2},
+            {request_id:'r3',eta:'10:00',service_min:8,same_place:2}
+          ];
+        }""")
+        button('노선 계산').click()
+        stop = page.locator('.dw-route li').first
+        expect(stop).to_contain_text('현장 42분')
+        expect(stop).to_contain_text('추가 30분 포함')
+        expect(stop).to_contain_text('같은 수거장 2건')
+        expect(stop).to_contain_text('가상 101동 분리수거장')
+        expect(page.locator('.dw-route li').last).not_to_contain_text('같은 수거장')
+        expect(page.locator('.dw-route h3')).to_contain_text('접수 3건')
+        ok(True, '노선 미리보기에 계산된 전체 현장시간과 포함된 추가 시간, 동일 수거장 접수 건수를 표시한다')
+    finally:
+        context.close()
+
+
 def router_regressions(browser, url):
     context, page = mount(browser, url)
     try:
@@ -438,7 +582,7 @@ def main():
         browser = p.chromium.launch(**options)
         try:
             selected = os.environ.get('DG_DONG_UI_CASE')
-            cases = {'cancel': cancel_reason_regressions, 'price': stored_price_regressions, 'duplicate': duplicate_scope_regressions, 'auth': reauthentication_regressions, 'race': pending_save_draft_regression}
+            cases = {'cancel': cancel_reason_regressions, 'price': stored_price_regressions, 'duplicate': duplicate_scope_regressions, 'auth': reauthentication_regressions, 'race': pending_save_draft_regression, 'address': address_dong_regressions, 'collection_time': collection_time_regressions}
             if selected:
                 cases[selected](browser, url)
             else:

@@ -465,6 +465,14 @@ html:has(.tabbar) { --actionbar-space: calc(var(--tabbar-h) + 20px); }
   background: linear-gradient(to bottom, color-mix(in srgb, var(--bg) 0%, transparent), var(--bg) 18px); }
 .cta .btn { margin: 4px 0 0; }
 .cta .msg:empty { display: none; }
+.intake-form .intake-intro { margin: 0 0 10px; padding: 0 14px; }
+.intake-intro > summary { cursor: pointer; min-height: var(--tap); align-content: center; font-weight: 700; }
+.intake-form .intake-intro[open] { padding-bottom: 10px; }
+.intake-required { margin-left: .45em; font-size: var(--t-xs); font-weight: 500; color: var(--muted); }
+.intake-form .intake-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 8px; align-items: stretch; }
+.intake-actions .msg { grid-column: 1 / -1; }
+.intake-actions > div > button { width: 100%; height: calc(100% - 4px); }
+.intake-form [aria-invalid="true"] { border: 2px solid var(--bad); }
 
 /* ---- 첫 화면·사용 방식 선택 ---- */
 .app-icon { display: block; width: 72px; height: 72px; margin: 8px auto 12px; border-radius: var(--r-card); box-shadow: var(--shadow); }

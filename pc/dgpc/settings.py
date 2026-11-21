@@ -131,7 +131,8 @@ register("service_min_per_item", 3, "품목 하나당 더하는 작업 시간(�
 register("unload_site", None, "반입지(하차 장소) 좌표·이름. 비우면 하차를 노선에 넣지 않음.", _opt(_point), expose=True, group="노선")
 register("end_site", None, "종료지 좌표·이름. 비우면 반입지에서 최종 하차한 뒤 출발 차고지로 돌아옴.", _opt(_point), expose=True, group="노선")
 register("unload_min", 20, "하차 한 번에 걸리는 시간(분, 0~180).", _int_in(0, 180), expose=True, group="노선")
-register("max_unloads", 2, "차량당 수거 중 최대 하차 횟수(0~5).", _int_in(0, 5), expose=True, group="노선")
+register("max_unloads", "auto", "수거 중 하차 횟수. auto는 적재량과 운행 가능시간에 따라 결정하고, 0~5는 차량별 지정 한도입니다. 최종 하차는 별도입니다.",
+         lambda v: v == "auto" or (_is_int(v) and 0 <= v <= 5), expose=True, group="노선")
 register("unload_hours", None, "반입지가 받는 시간 {start, end}(HH:MM). 비우면 따지지 않음.", _opt(_hhmm_window), expose=True, group="노선")
 register("lunch", None, "쉬는(점심) 시간 창 {start, end, minutes}. 비우면 없음.", _opt(_hhmm_window), expose=True, group="노선")
 register("base_first", True, "차고지에서 가까운 곳부터 도는 쪽을 먼저 고려.", lambda v: isinstance(v, bool), expose=True, group="노선")

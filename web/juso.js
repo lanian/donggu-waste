@@ -56,7 +56,7 @@ export function cleanKeyword(q) {
   return String(q || '').replace(/[%=<>\[\]'"`;\\{}|^]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
 }
 export function searchUrl(key, keyword, page = 1, per = 10) {
-  const p = new URLSearchParams({ confmKey: key, currentPage: String(page), countPerPage: String(per), keyword: cleanKeyword(keyword), resultType: 'json' });
+  const p = new URLSearchParams({ confmKey: key, currentPage: String(page), countPerPage: String(per), keyword: cleanKeyword(keyword), resultType: 'json', addInfoYn: 'Y' });
   return `${SEARCH_URL}?${p}`;
 }
 export function coordUrl(key, j) {
@@ -114,7 +114,15 @@ const stem = (s) => sq(s).replace(/(\d+)?(동|읍|면|가)$/, '').replace(/\d+$/
  *  돌려주는 값: { dong: '정확히 하나면 그 이름' | '', candidates: [같은 줄기의 동들] } */
 export function suggestDong(item, known = []) {
   const all = [...new Set([...known.map(sq).filter(Boolean), ...DONGGU_DONGS])];
-  for (const name of [item.hemdNm, item.emdNm].map(sq).filter(Boolean)) if (all.includes(name)) return { dong: name, candidates: [name] };
+  // 주소·센터 이름·전화가 함께 올 수 있다. 관할이 확실하고 다른 동이 섞이지 않을 때만 자동으로 고른다.
+  const tokens = String(item.hemdNm || '').replace(/행정복지센터|주민센터/g, ' ').match(/[가-힣A-Za-z0-9]+/g) || [];
+  const names = all.filter((name) => tokens.includes(name));
+  if (names.length) {
+    const recognized = tokens.every((t) => names.includes(t) || /^(광주광역시|광주시|광주|동구|전화번호|대표전화|전화|문의|tel|\d+)$/i.test(t));
+    return { dong: names.length === 1 ? names[0] : '', candidates: names, automatic: names.length === 1 && recognized };
+  }
+  const legal = sq(item.emdNm);
+  if (all.includes(legal)) return { dong: legal, candidates: [legal] };
   const st = stem(item.hemdNm) || stem(item.emdNm);
   if (!st) return { dong: '', candidates: [] };
   const cands = all.filter((d) => stem(d) === st);
@@ -148,6 +156,7 @@ export function checkAddress(addr, { jurisdiction = '동구', city = '광주' } 
   const sido = toks.find((t) => OTHER_SIDO.test(t));
   if (sido) out.warnings.push(`'${sido}' 주소입니다. 관할(${city} ${jurisdiction}) 주소인지 확인하세요.`);
   const units = toks.filter((t) => /^[가-힣]+(구|군)$/.test(t));
+  out.outside = !!sido || !!(units.length && jurisdiction && !units.includes(jurisdiction));
   if (!sido && units.length && jurisdiction && !units.includes(jurisdiction)) out.warnings.push(`주소의 '${units[0]}'이(가) 관할(${jurisdiction})과 다릅니다. 관할 구역을 확인하세요.`);
   return out;
 }
@@ -161,7 +170,7 @@ export function guessDong(addr, history = [], known = []) {
   // 낱말 단위로만 본다('학동로'처럼 도로 이름 속의 동 이름은 행정동이 아님)
   const toks = String(addr || '').replace(/\(.*?\)/g, ' ').split(/[\s,]+/).map(sq).filter(Boolean);
   const exact = all.filter((d) => toks.includes(d));
-  if (exact.length) return { dong: exact[0], reason: '주소에 행정동 이름', candidates: [exact[0]] };
+  if (exact.length) return { dong: exact.length === 1 ? exact[0] : '', reason: '주소에 행정동 이름', candidates: exact, automatic: exact.length === 1 };
   const road = roadOf(addr), jd = jibunDongOf(addr);
   const key = road ? ['road', road] : jd ? ['jibun', jd] : null;
   if (key) {

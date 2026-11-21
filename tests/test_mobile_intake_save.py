@@ -120,6 +120,42 @@ def hold(page):
     page.evaluate(HOLD_WRITE)
 
 
+def extra_time_case(browser, url, shots):
+    for mode in ('PC', 'SOLO'):
+        context, page, label = form(browser, url, mode)
+        try:
+            minutes = page.get_by_label('추가 현장시간(분)', exact=True)
+            minutes.fill('1441')
+            page.get_by_role('button', name=label, exact=True).click()
+            expect(minutes).to_be_focused()
+            assert not snapshot(page)['records']
+            minutes.fill('45')
+            page.get_by_role('button', name='← 취소', exact=True).click()
+            expect(page).to_have_url(url + '#/home')
+            page.goto(url + '#/intake')
+            expect(minutes).to_have_value('45')
+            page.get_by_role('button', name=label, exact=True).click()
+            expect(page).to_have_url(url + '#/home')
+            def record():
+                return page.evaluate("""async()=>{const {st}=await import('./core.js');
+                    const r=(st.mode==='SOLO'?st.requests:st.fieldStops)[0];
+                    return {id:r.request_id, minutes:r.extra_work_min, events:st.events
+                        .filter(e=>e.kind==='FIELD_INTAKE').map(e=>e.body.extra_work_min)};}""")
+            first = record()
+            assert first['minutes'] == 45 and first['events'] == ([45] if mode == 'PC' else []), first
+            page.goto(url + '#/intake/' + first['id'])
+            expect(minutes).to_have_value('45')
+            minutes.fill('')
+            if mode == 'SOLO':
+                page.get_by_label('수정 사유 (필수)', exact=True).fill('가상 이사 일정 변경')
+            page.get_by_role('button', name='고친 내용 저장' if mode == 'PC' else '수정 저장', exact=True).click()
+            expect(page).to_have_url(url + '#/stop/' + first['id'])
+            assert record() == {'id': first['id'], 'minutes': 0, 'events': [0] if mode == 'PC' else []}
+        finally:
+            context.close()
+    print('추가 현장시간: PC 연결·단독 입력 범위, 초안 복원, 저장·수정과 전송값 확인', flush=True)
+
+
 def wait_held(page):
     for _ in range(100):
         if page.evaluate('window.__releaseIntake.length>0'):
@@ -200,7 +236,7 @@ def lock_case(browser, url, shots):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=('all', 'failure', 'quantity', 'repeated', 'navigation', 'lock'), default='all')
+    parser.add_argument('--case', choices=('all', 'failure', 'quantity', 'extra-time', 'repeated', 'navigation', 'lock'), default='all')
     args = parser.parse_args()
     output = Path(os.environ.get('DG_TEST_DIR') or tempfile.mkdtemp(prefix='dg-intake-save-'))
     shots = output / 'shots'
@@ -209,7 +245,7 @@ def main():
     with mobile_server() as url, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get('CHROME') or pw.chromium.executable_path, headless=True)
         try:
-            for name, fn in [('failure', failure_case), ('quantity', quantity_case), ('repeated', repeated_case), ('navigation', navigation_case), ('lock', lock_case)]:
+            for name, fn in [('failure', failure_case), ('quantity', quantity_case), ('extra-time', extra_time_case), ('repeated', repeated_case), ('navigation', navigation_case), ('lock', lock_case)]:
                 if args.case not in ('all', name):
                     continue
                 try:

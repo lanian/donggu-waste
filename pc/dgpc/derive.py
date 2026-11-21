@@ -26,6 +26,8 @@ def prefetch(con, ids, what=("items", "events", "links", "payments", "partial", 
     out = {k: {i: [] for i in ids} for k in ("items", "events", "links", "payments")}
     out["partial"] = {i: 0 for i in ids}
     out["active"] = {i: None for i in ids}
+    if "assigned_to" in what:
+        out["assigned_to"] = {}
     for ch in _chunks(ids):
         q = ",".join("?" * len(ch))
         if "items" in what:
@@ -48,6 +50,11 @@ def prefetch(con, ids, what=("items", "events", "links", "payments", "partial", 
         if "active" in what:
             for r in rows(con, f"SELECT a.request_id, b.crew_id FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id WHERE a.request_id IN ({q})", ch):
                 out["active"][r["request_id"]] = r["crew_id"]
+        if "assigned_to" in what:
+            for r in rows(con, f"""SELECT a.request_id, c.name, b.work_date FROM active_assignment a
+                    JOIN assignment_batch b ON b.id=a.batch_id JOIN crew c ON c.id=b.crew_id
+                    WHERE a.request_id IN ({q})""", ch):
+                out["assigned_to"][r["request_id"]] = {"name": r["name"], "work_date": r["work_date"]}
     return out
 
 

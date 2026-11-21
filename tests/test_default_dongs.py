@@ -87,7 +87,9 @@ class DefaultDongsTest(unittest.TestCase):
         for row in original:
                 self.assertEqual(upgraded.execute("SELECT * FROM dong WHERE id=?", (row[0],)).fetchone()[:len(row)], row)
         for table, rows in before.items():
-            self.assertEqual(self.snapshot(upgraded, table), rows, table)
+            # 기존 행의 열을 모두 비교하고 v15에서 붙인 추가 현장시간의 초기값도 확인한다.
+            expected = [(*row, 0) for row in rows] if table == "request" else rows
+            self.assertEqual(self.snapshot(upgraded, table), expected, table)
         for row in original_crew:
             self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
         self.assertEqual(len(S.list_crews(upgraded)), 13)

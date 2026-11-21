@@ -185,7 +185,37 @@ def main():
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(url)
             unlock(page)
+            expect(page.locator(".next-action").get_by_role("button", name="오늘 목록 받기")).to_be_visible(timeout=20000)
+            page.evaluate("""async () => {
+              const C = await import('./core.js');
+              C.st.lastReceipt = { code: 'OLDPIN00', work_date: C.todayKST(), ver: 0, count: 1, told: false };
+              await C.commit();
+              const put = IDBObjectStore.prototype.put;
+              window.qrSaveFault = 'list';
+              IDBObjectStore.prototype.put = function(value, key) {
+                if (key === 's:state' && C.st?.lastBundleHash) {
+                  if (window.qrSaveFault === 'list') throw new DOMException('시험 목록 저장 실패', 'QuotaExceededError');
+                  if (window.qrSaveFault === 'receipt' && ++window.qrRetryWrites === 2) {
+                    window.qrPrematureReceipt = C.st.lastReceipt?.code || C.ui.receipt?.code || null;
+                    throw new DOMException('시험 수신 코드 저장 실패', 'QuotaExceededError');
+                  }
+                }
+                return put.call(this, value, key);
+              };
+            }""")
             page.locator(".next-action").get_by_role("button", name="오늘 목록 받기").click()
+            save_again = page.get_by_role("button", name="받은 QR 저장 다시 시도")
+            expect(save_again).to_be_visible(timeout=60000)
+            assert page.evaluate("import('./core.js').then(C => !C.st.lastReceipt && !C.ui.receipt)")
+            page.evaluate("window.qrRetryWrites = 0; window.qrSaveFault = 'receipt'")
+            save_again.click()
+            page.wait_for_function("window.qrRetryWrites >= 2")
+            expect(save_again).to_be_enabled()
+            assert page.evaluate("window.qrPrematureReceipt === null")
+            assert page.evaluate("import('./core.js').then(C => !C.st.lastReceipt && !C.ui.receipt)")
+            assert page.evaluate("import('./store.js').then(async S => !(await S.getSecure('state')).lastReceipt)")
+            page.evaluate("window.qrSaveFault = null")
+            save_again.click()
             expect(page.get_by_text("목록을 받았습니다")).to_be_visible(timeout=60000)
             receipt = page.locator(".fp").inner_text().replace(" ", "")
             page.screenshot(path=SHOTS / "03_received.png")
@@ -1179,15 +1209,16 @@ def juso_flow(pw, url):
     ok(all(x in item for x in ("광주광역시 동구 서남로 1", "지번 광주광역시 동구 계림동 1-1", "가상빌딩", "우편번호 61400")), "검색 결과: 도로명·지번·건물명·우편번호")
     q = parse_qs(urlsplit(calls[0]).query)
     ok(urlsplit(calls[0]).netloc == "business.juso.go.kr" and urlsplit(calls[0]).path == "/addrlink/addrLinkApi.do" and len(calls) == 1
-       and sorted(q) == ["confmKey", "countPerPage", "currentPage", "keyword", "resultType"] and q["keyword"] == ["서남로 1"] and q["resultType"] == ["json"],
-       f"검색 요청은 검색어·승인키·쪽수·json만 ({unquote(calls[0].split('?')[1])})")
+       and sorted(q) == ["addInfoYn", "confmKey", "countPerPage", "currentPage", "keyword", "resultType"] and q["addInfoYn"] == ["Y"] and q["keyword"] == ["서남로 1"] and q["resultType"] == ["json"],
+       "행안부 검색 요청의 검색어·승인키·쪽수·json·행정동 추가정보 플래그 확인")
     page.screenshot(path=SHOTS / "20_juso_search.png")
     page.locator(".addr-item").click()
     expect(page.get_by_label("배출 주소")).to_have_value(JUSO_ITEM["roadAddr"], timeout=10000)
     cq = parse_qs(urlsplit(calls[1]).query)
     ok(urlsplit(calls[1]).path == "/addrlink/addrCoordApi.do" and sorted(cq) == ["admCd", "buldMnnm", "buldSlno", "confmKey", "resultType", "rnMgtSn", "udrtYn"]
        and cq["confmKey"] == ["TEST-COORD-KEY"], "좌표 요청은 건물 식별 번호·좌표 승인키만")
-    ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동" and page.locator(".addr-geo").count() == 1,
+    expect(page.locator(".addr-geo")).to_contain_text("주소 검색 좌표(건물 출입구)")
+    ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동",
        "주소 고르기 → 도로명 주소·좌표(건물 출입구)·행정동 '계림2동' 채움")
     pick_items(page, [("고정 의자", 1)])
     ok(page.get_by_label("동 (행정동, 선택)").input_value() == "계림2동", "품목 담기 화면을 다녀와도 입력한 내용 유지")

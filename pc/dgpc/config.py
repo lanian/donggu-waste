@@ -87,9 +87,15 @@ def save_settings(con, data: dict):
                 if not (33 <= lat <= 39 and 124 <= lon <= 132):
                     raise UserError(f"{what} 좌표가 국내 범위를 벗어났습니다.")
                 set_setting(con, key, {"lat": lat, "lon": lon, "label": str(u.get("label") or default_label)[:40]})
-        for k, lo, hi in (("unload_min", 0, 180), ("max_unloads", 0, 5)):
-            if k in data:
-                set_setting(con, k, min(hi, max(lo, int(data[k]))))
+        if "unload_min" in data:
+            set_setting(con, "unload_min", min(180, max(0, int(data["unload_min"]))))
+        if "max_unloads" in data:
+            limit = data["max_unloads"]
+            if limit != "auto":
+                if not re.fullmatch(r"[0-5]", str(limit)):
+                    raise UserError("수거 중 하차는 자동 또는 차량당 0~5회를 선택하세요.")
+                limit = int(limit)
+            set_setting(con, "max_unloads", limit)
         if "base_first" in data:
             set_setting(con, "base_first", bool(data["base_first"]))
         if "unload_hours" in data:  # 반입지가 받는 시간 (비우면 따지지 않음)

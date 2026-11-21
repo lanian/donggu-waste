@@ -16,11 +16,11 @@ def _known_names(con) -> list[str]:
 
 
 def _dong_for_juso(con, it: dict) -> str | None:
-    for n in (it.get("hemdNm"), it.get("emdNm")):
-        if n and area.get_dong(con, n):
-            return n
-    addr = f'{it.get("road_part1") or it.get("road") or ""} {it.get("emdNm") or ""} {it.get("hemdNm") or ""}'
-    return area.detect_dong(con, addr).get("dong")
+    if it.get("hemdNm"):
+        dong = area.get_dong(con, it["hemdNm"])
+        return dong["name"] if dong and dong["active"] else None
+    addr = it.get("road_part1") or it.get("road") or ""
+    return area.detect_dong(con, addr, legal_dong=it.get("emdNm") or "")["dong"]
 
 
 def juso_search(con, q: str, name: str = "") -> dict:
@@ -105,7 +105,7 @@ def addr_search(con, q: str, limit: int = 12) -> list[dict]:
     out = []
     for kind, c in found:
         addr = _addr_std(c)
-        dong = c.get("dong_h") if c.get("dong_h") and area.get_dong(con, c["dong_h"]) else area.detect_dong(con, addr).get("dong")
+        dong = area.detect_dong(con, addr)["dong"]
         out.append({"kind": kind, "address": addr, "label": addr + (f' · 지번 {c["dong_b"] or ""} {c["jibun_main"]}{"-" + str(c["jibun_sub"]) if c["jibun_sub"] else ""}' if kind == "지번" else ""),
                     "lat": c["lat"], "lon": c["lon"], "dong": dong, "bname": c.get("bname") or ""})
     # 도로명 앞부분만 적었을 때(예: '필문', '동계천로'): 맞는 도로를 알려 주고 번호를 이어 적게 한다(고르면 검색어만 채움)

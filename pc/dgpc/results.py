@@ -201,13 +201,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                     if newer and (newer["v"] or 0) > ev["assign_ver"]:
                         reason = f"새 목록(갱신본 {newer['v']})에서 빠진 접수의 옛 목록 결과"
             if not reason and ev['kind'] in ('ITEM_RESULT', 'FIELD_ITEM_ADD', 'ATTEMPT', 'LOCATION_FIX', 'REVISIT_APPT'):
-                barrier = one(con, """SELECT json_extract(body_json,'$.pc_req_ver') AS version FROM result_event
-                    WHERE request_id=? AND device_id='PC-COLLECTION' AND kind='ATTEMPT' AND apply_status='APPLIED'
-                    ORDER BY rowid DESC LIMIT 1""", (ev['request_id'],))
-                version = ev.get('base_req_ver')
-                if barrier and (isinstance(version, bool) or not isinstance(version, int) or version < barrier['version']
-                                or type(ev['body'].get('pc_collection_ver')) is not int or ev['body']['pc_collection_ver'] != barrier['version']):
-                    reason = 'PC 수거 입력 전의 휴대폰 결과 — 수량을 확인한 뒤 반영해 주세요.'
+                reason = _pc_collection_conflict(con, ev, ev['body'])
             if not reason and ev["kind"] == "ITEM_RESULT":
                 reason = _missing_line(con, ev["request_id"], ev["body"].get("line_id"))
             if ev["kind"] in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 충돌함에 들어가는 것도 정리해서 저장(반영할 때 다시 정리)
@@ -296,6 +290,58 @@ def _missing_line(con, rid: str, line_id) -> str | None:
     return "접수에 없는 품목 줄의 수거 결과"
 
 
+def _field_item_key(body):
+    """수수료표 품목은 규격별 ID, 표외 품목은 입력된 이름·규격·부과 단위로 대조한다."""
+    def normalized(k, default=''):
+        return ' '.join(str(body.get(k) or default).split()).casefold()
+    if body.get('fee_rate_id'):
+        return ('catalog', body['fee_rate_id'])
+    name = normalized('name')
+    return ('free', name, normalized('spec'), normalized('unit', 'EA')) if name else None
+
+
+def _duplicate_pc_field_item(con, rid, body, base_version, latest):
+    key = _field_item_key(body)
+    if not key:
+        return False
+    # 휴대폰이 이미 알고 있던 추가 품목까지 막으면 같은 규격을 다시 발견한 실제 방문을 기록할 수 없다.
+    pc_version = body.get('pc_collection_ver')
+    known = pc_version if type(pc_version) is int and type(base_version) is int and 0 < pc_version <= min(base_version, latest) else 0
+    added = con.execute("""SELECT body_json FROM result_event WHERE request_id=? AND device_id='PC-COLLECTION'
+        AND kind='FIELD_ITEM_ADD' AND apply_status='APPLIED' AND base_req_ver>?""", (rid, known))
+    return any(_field_item_key(json.loads(row[0])) == key for row in added)
+
+
+def _pc_collection_conflict(con, event, body, *, review=False):
+    rid, kind = event['request_id'], event['kind']
+    barrier = one(con, """SELECT json_extract(body_json,'$.pc_req_ver') AS version, json_extract(body_json,'$.outcome') AS outcome
+        FROM result_event WHERE request_id=? AND device_id='PC-COLLECTION' AND kind='ATTEMPT' AND apply_status='APPLIED'
+        ORDER BY rowid DESC LIMIT 1""", (rid,))
+    if not barrier:
+        return None
+    if barrier['outcome'] == 'DONE' and kind in ('FIELD_ITEM_ADD', 'ITEM_RESULT', 'ATTEMPT'):
+        return 'PC에서 이미 수거 완료한 접수입니다. 저장된 품목·수량을 대조한 뒤 이 기록은 거부하세요. 완료 뒤 새로 발생한 수거 건은 별도 접수하세요.'
+    version, known = event.get('base_req_ver'), body.get('pc_collection_ver')
+    if type(version) is int and version >= barrier['version'] and type(known) is int and known == barrier['version']:
+        return None
+    warning = 'PC 현장 추가 품목과 중복될 수 있습니다. 기존 수량을 대조하고 실제 추가분은 PC 수거 처리에 입력한 뒤 중복 기록은 거부하세요.'
+    if kind == 'FIELD_ITEM_ADD' and _duplicate_pc_field_item(con, rid, body, version, barrier['version']):
+        return warning
+    if not review:
+        return 'PC 수거 입력 전의 휴대폰 결과 — 수량을 확인한 뒤 반영해 주세요.'
+    if kind == 'ATTEMPT':
+        # 파일을 나눠 가져올 수 있으므로 같은 기기·세대에서 이 방문(이전 ATTEMPT 이후)의 미반영 추가 품목을 찾는다.
+        additions = con.execute("""SELECT a.body_json, a.base_req_ver FROM result_event a
+            WHERE a.request_id=? AND a.device_id=? AND a.gen IS ? AND a.kind='FIELD_ITEM_ADD'
+              AND a.apply_status!='APPLIED' AND a.device_seq < ?
+              AND NOT EXISTS(SELECT 1 FROM result_event prev WHERE prev.request_id=a.request_id AND prev.device_id=a.device_id
+                  AND prev.gen IS a.gen AND prev.kind='ATTEMPT' AND prev.device_seq>a.device_seq AND prev.device_seq<?)""",
+            (rid, event['device_id'], event['gen'], event['device_seq'], event['device_seq']))
+        if any(_duplicate_pc_field_item(con, rid, json.loads(b), v, barrier['version']) for b, v in additions):
+            return warning
+    return None
+
+
 def _sanitize_item_event(con, kind: str, b: dict):
     """휴대폰이 보낸 현장 품목·수량을 그대로 믿지 않는다: 수량은 0~9999 정수, 현장 추가 단가는 PC 수수료표로 다시 정한다."""
     if kind == "ITEM_RESULT":
@@ -313,6 +359,15 @@ def _sanitize_item_event(con, kind: str, b: dict):
                  price_status="CONFIRMED" if ok_ else "PENDING", fee_version_id=fee_state(con)["version_id"])
     else:  # 표에 없는 품목: 휴대폰 단가를 쓰지 않고 금액 확인 대기
         b.update(fee_rate_id=None, unit_price=None, price_status="PENDING")
+
+
+def _scrub_field_item_text(body):
+    """파기된 현장 추가 품목의 직접 쓴 설명만 지우고 배출표·정산에 쓰는 값은 보존한다."""
+    if not body.get('fee_rate_id'):
+        if 'name' in body:
+            body['name'] = '(파기)'
+        if 'spec' in body:
+            body['spec'] = ''
 
 
 def _apply_revisit(con, rid: str, b: dict, *, office=False):
@@ -370,13 +425,15 @@ def resolve_conflict(con, event_id: str, action: str, reason: str):
         body = {}
     if not isinstance(body, dict):
         body = {}
-    if action == "APPLY" and e["kind"] == "ITEM_RESULT" and e["request_id"]:
-        miss = _missing_line(con, e["request_id"], body.get("line_id"))
-        if miss:  # 반영해도 계산에 들어갈 줄이 없다: '반영됨'으로 보이기만 하고 아무 일도 없으므로 막는다
-            raise UserError(f"{miss}라 반영할 수 없습니다. 거부한 뒤, 실제로 수거했으면 접수 품목을 고치세요.")
     with tx(con):
         if action == "APPLY" and one(con, "SELECT 1 AS x FROM request WHERE id=? AND pii_purged_at IS NOT NULL", (e["request_id"],)):
             raise UserError("개인정보가 파기된 접수는 현장 기록을 반영할 수 없습니다. [거부]로 정리하세요.")
+        if action == "APPLY" and e['kind'] in ('FIELD_ITEM_ADD', 'ITEM_RESULT', 'ATTEMPT'):
+            blocked = _pc_collection_conflict(con, e, body, review=True)
+            if blocked:
+                raise UserError(blocked)
+            if e['kind'] == 'ITEM_RESULT' and (missing := _missing_line(con, e['request_id'], body.get('line_id'))):
+                raise UserError(f'{missing}라 반영할 수 없습니다. 실제 수거분은 PC 수거 처리에서 확인한 뒤 이 기록은 거부하세요.')
         con.execute("UPDATE result_event SET apply_status=?, resolved_reason=?, resolved_at=? WHERE event_id=?",
                     ("APPLIED" if action == "APPLY" else "REJECTED", reason.strip(), now(), event_id))
         if action == "APPLY":
@@ -454,19 +511,23 @@ def _field_request(con, rid: str, b: dict, dev_id: str, device_ts: str | None = 
         raise UserError("접수 ID 형식이 올바르지 않습니다.")
     fr = fee_rows(con)
     items = []
-    for it in (b.get("items") or [])[:50]:
+    source_items = b.get("items") or []
+    if not isinstance(source_items, list):
+        raise UserError("현장 접수의 품목 형식이 올바르지 않습니다.")
+    for it in source_items:
         if not isinstance(it, dict):
-            continue
+            raise UserError("현장 접수의 품목 형식이 올바르지 않습니다.")
         x = {"line_id": str(it.get("line_id") or "")[:40] or None, "qty": it.get("qty"), "name": str(it.get("name") or "")[:60],
              "spec": str(it.get("spec") or "")[:60], "unit": str(it.get("unit") or "EA")[:10], "unit_label": str(it.get("unit_label") or "개")[:10]}
         if it.get("fee_rate_id") in fr:
             x["fee_rate_id"] = it["fee_rate_id"]
         elif not x["name"]:
-            continue
+            raise UserError("현장 접수의 품목 이름이 없습니다.")
         items.append(x)
     data = {k: str(b.get(k) or "")[:300] for k in ("name", "phone", "address", "spot_note", "memo", "planned_date")}
     ch = b.get("channel") if b.get("channel") in ("현장", "전화", "방문") else "현장"  # 휴대폰에서 고른 접수 경로
-    data.update(channel=ch, items=items, appt_start=b.get("eta") if re.fullmatch(r"\d\d:\d\d", str(b.get("eta") or "")) else None)
+    data.update(channel=ch, items=items, extra_work_min=b.get("extra_work_min"),
+                appt_start=b.get("eta") if re.fullmatch(r"\d\d:\d\d", str(b.get("eta") or "")) else None)
     if _num(b.get("lat")) is not None and _num(b.get("lon")) is not None:
         data.update(lat=_num(b["lat"]), lon=_num(b["lon"]), geo_source="ADDR")
     dong_s = str(b.get("dong") or "").strip()[:20]
@@ -610,7 +671,8 @@ def _solo_check(con, r) -> tuple[dict | None, str | None]:
     try:
         items = _solo_items(con, r)
         d = validate({**{k: (str(rr.get(k)) if rr.get(k) is not None else None) for k in ("name", "phone", "address", "spot_note", "memo", "planned_date", "appt_start", "appt_end")},
-                      "lat": _num(rr.get("lat")), "lon": _num(rr.get("lon")), "items": items or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
+                      "lat": _num(rr.get("lat")), "lon": _num(rr.get("lon")), "extra_work_min": rr.get("extra_work_min"),
+                      "items": items or [{"name": "(품목 없음)", "qty": 1}]})  # 품목 없는 취소 건도 옮긴다
     except UserError as e:
         return None, str(e)
     if not items:
@@ -674,11 +736,11 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
             dcode = (one(con, "SELECT code FROM dong WHERE name=?", (dong_s,)) or {}).get("code") if dong_s else None
             rv = r.get("req_ver")
             con.execute("""INSERT INTO request (id, receipt_no, req_ver, name, phone, address, spot_note, memo, lat, lon, geo_source,
-                planned_date, appt_start, appt_end, must_today, urgent, priority, status, cancel_reason, received_at, updated_at, dong, levy_no, pii_purged_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?)""",
+                planned_date, appt_start, appt_end, extra_work_min, must_today, urgent, priority, status, cancel_reason, received_at, updated_at, dong, levy_no, pii_purged_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?)""",
                         (r["request_id"], rec, rv if isinstance(rv, int) and rv > 0 else 1, d["name"], d["phone"], d["address"], d["spot_note"], d["memo"],
                          d["lat"], d["lon"], ({"ADDR": "ADDR", "GPS": "FIELD"}.get(r.get("geo_source"), "MANUAL")) if d["lat"] is not None else None,
-                         d["planned_date"] or None, None, None,
+                         d["planned_date"] or None, None, None, d["extra_work_min"],
                          "CANCELLED" if r.get("status") == "CANCELLED" else "RECEIVED", None if purged else (str(r.get("cancel_reason"))[:200] if r.get("cancel_reason") else None),
                          _sane_ts(r.get("received_at")) or now(), _sane_ts(r.get("updated_at")) or now(), dong_s,
                          _store.next_levy_no(con, _store.levy_year(r.get("received_at") if isinstance(r.get("received_at"), str) else None), dcode),
@@ -740,6 +802,8 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
                 if kind in ("FIELD_ITEM_ADD", "ITEM_RESULT"):  # 휴대폰 단가·수량을 그대로 믿지 않음(PC 수수료표, 0~9999)
                     body = dict(body)
                     _sanitize_item_event(con, kind, body)
+                    if kind == "FIELD_ITEM_ADD" and e["request_id"] in purgedids:
+                        _scrub_field_item_text(body)
             con.execute("""INSERT INTO result_event (event_id, import_id, device_id, device_seq, request_id, assign_ver, base_req_ver, kind,
                 body_json, apply_status, conflict_reason, device_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (e["event_id"], imp, solo_dev, seq, e["request_id"], 0, e.get("base_req_ver") if isinstance(e.get("base_req_ver"), int) else None, kind,

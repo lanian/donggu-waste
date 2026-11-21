@@ -543,6 +543,10 @@ def _m14_recon_exceptions(con):
     con.execute("CREATE INDEX ix_recon_exception_request ON recon_exception(request_id)")
 
 
+def _m15_extra_work_min(con):
+    con.execute("ALTER TABLE request ADD COLUMN extra_work_min INTEGER NOT NULL DEFAULT 0 CHECK(extra_work_min BETWEEN 0 AND 1440)")
+
+
 MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색인·재전송 방지", _m2_v13), (3, "감면액 끝수 단위 접수별 저장", _m3_round_unit),
               (4, "휴대폰 기록 세대(복원 구분)", _m4_device_gen), (5, "주소 위치 자료 행안부 식별 번호(도로명코드·법정동코드·지하여부)", _m5_addr_codes),
               (6, "카카오 이동시간 보관 중단(travel_cache 삭제)", _m6_drop_travel_cache),
@@ -551,7 +555,8 @@ MIGRATIONS = [(1, "v0.12 이하 구조", _m1_legacy), (2, "v0.13 요약 열·색
               (10, "행정동별 배출표 재고와 수거 번호 자동 배정", _m10_dong_label_stock),
               (11, "동별 담당 수거팀의 차고지", _m11_dong_depots),
               (12, "기본 행정동마다 담당 수거팀 자동 연결", _m12_default_dong_crews),
-              (13, "접수별 후속조치", _m13_request_followups), (14, "수납 대사 불일치 후속처리", _m14_recon_exceptions)]
+              (13, "접수별 후속조치", _m13_request_followups), (14, "수납 대사 불일치 후속처리", _m14_recon_exceptions),
+              (15, "접수별 추가 현장시간", _m15_extra_work_min)]
 LATEST = MIGRATIONS[-1][0]
 
 

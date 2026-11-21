@@ -137,8 +137,82 @@ def main(exe=None):
             expect(dialog).to_have_count(0)
             assert api('requests/' + retry['id'])['state']['lines'][0]['qty_collected'] == 1
             assert api('label-auto?dong_id=' + dong['id'])['assigned'] == 4
+            page.goto(url + '#/dongs/' + retry['id'])
+            outer.get_by_role('button', name='수거 처리', exact=True).click()
+            confirmed = dialog.get_by_label('1번 현장 확인 수량', exact=True)
+            expect(confirmed).to_have_value('2')
+            confirmed.fill('0')
+            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            expect(dialog.get_by_role('alert').filter(has_text='이전 수거')).to_be_visible()
+            confirmed.fill('3')
+            dialog.get_by_label('1번 이번 수거 개수', exact=True).fill('1')
+            dialog.get_by_label('품목·수량 변경 사유', exact=True).fill('현장에서 수량 세 개 확인')
+            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            expect(dialog).to_have_count(0)
+            updated = api('requests/' + retry['id'])
+            assert (updated['items'][0]['qty'], updated['state']['lines'][0]['qty_confirmed'], updated['state']['lines'][0]['qty_collected']) == (2, 3, 2)
+
+            page.goto(url + '#/request/' + retry['id'])
+            expect(outer).to_have_count(0)
+            opening.click()
+            confirmed.fill('2')
+            dialog.get_by_text('현장 품목 추가', exact=True).click()
+            picker = dialog.get_by_role('region', name='버릴 물건 선택', exact=True)
+            rate = next(x for x in json.loads((Path(__file__).resolve().parent.parent / 'data/fee_table.json').read_text(encoding='utf-8'))['rows']
+                        if x['id'] != fee and x['status'] == 'CONFIRMED' and x.get('price', 0) > 0)
+            picker.get_by_label('품목명·규격 검색', exact=True).fill(rate['name'])
+            picker.locator(f'button[data-fee-id="{rate["id"]}"]').click()
+            picker.get_by_role('button', name='품목 추가', exact=True).click()
+            picker.get_by_text('목록에 없는 품목 넣기 (금액 확인 대기)', exact=True).click()
+            picker.get_by_placeholder('목록에 없는 품목 이름').fill('가상 현장 대체품')
+            picker.get_by_role('button', name='확인 대기로 추가', exact=True).click()
+            third = dialog.get_by_role('row').filter(has_text='가상 현장 대체품')
+            expect(third).to_contain_text('금액 확인 대기')
+            dialog.get_by_role('button', name='남은 수량 전부', exact=True).click()
+            expect(dialog.get_by_label('수거 입력 요약', exact=True)).to_contain_text('수거 완료')
+            expect(dialog.get_by_label('변경 후 예상 수수료', exact=True)).to_contain_text('금액 확인 대기')
+            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            expect(dialog.get_by_text('품목·수량 변경 사유를 입력하세요.', exact=True)).to_be_visible()
+            dialog.get_by_label('품목·수량 변경 사유', exact=True).fill('실제 규격과 추가 물건 확인')
+            payloads = []
+            endpoint = url + 'api/requests/' + retry['id'] + '/collection'
+            page.on('request', lambda req: payloads.append(req.post_data_json) if req.url == endpoint and req.method == 'POST' else None)
+            page.route(endpoint, lose_response, times=1)
+            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            expect(dialog.get_by_role('button', name='저장 여부 다시 확인', exact=True)).to_be_enabled()
+            expect(confirmed).to_be_disabled()
+            expect(picker.get_by_placeholder('목록에 없는 품목 이름')).to_be_disabled()
+            page.get_by_role('button', name='수정 저장', exact=True).click()
+            expect(page.get_by_text('수거 결과 저장 여부를 먼저 확인하세요.', exact=True)).to_be_visible()
+            dialog.get_by_role('button', name='저장 여부 다시 확인', exact=True).click()
+            expect(dialog).to_have_count(0)
+            saved = api('requests/' + retry['id'])
+            assert len(payloads) == 2 and payloads[0] == payloads[1]
+            assert saved['status'] == 'DONE' and saved['items'][0]['qty'] == 2
+            assert [(line['kind'], line['qty_confirmed'], line['qty_collected']) for line in saved['state']['lines']] == [
+                ('RECEIVED', 2, 2), ('FIELD', 1, 1), ('FIELD', 1, 1)]
+            assert saved['state']['fee']['pending_count'] == 1 and saved['state']['fee']['final'] is None and saved['payment']['paid'] == 0
+            absent = api('requests', {'name': '가상 미배출 주민', 'phone': '01000000002', 'address': '가상구 검증길 1',
+                                      'dong': dong['name'], 'planned_date': boot['today'], 'items': [{'fee_rate_id': fee, 'qty': 1}]})
+            page.goto(url + '#/dongs/' + absent['id'])
+            outer.get_by_role('button', name='수거 처리', exact=True).click()
+            confirmed.fill('0')
+            expect(dialog.get_by_label('수거 입력 요약', exact=True)).to_contain_text('미수거')
+            dialog.get_by_label('품목·수량 변경 사유', exact=True).fill('현장에 물건이 없음')
+            dialog.get_by_role('button', name='수거 결과 저장', exact=True).click()
+            expect(dialog).to_have_count(0)
+            assert api('requests/' + absent['id'])['status'] == 'NOT_COLLECTED'
+            outer.get_by_role('button', name='수거 처리', exact=True).click()
+            expect(confirmed).to_have_value('0')
+            dialog.get_by_text('현장 품목 추가', exact=True).click()
+            expect(picker.get_by_label('추가 수량', exact=True)).to_be_disabled()
+            outer.get_by_label('요청 메모', exact=True).fill('가상 연락처 메모 변경')
+            outer.get_by_label('수정 사유', exact=True).fill('가상 메모 확인')
+            with page.expect_response(lambda reply: reply.url.endswith('/api/dong-work/requests/' + absent['id']) and reply.request.method == 'POST') as editing:
+                outer.get_by_role('button', name='수정 저장', exact=True).click()
+            assert editing.value.ok, editing.value.text()
             assert not errors, errors
-            print('PC 직접 수거: 상세 조회 중 품목 편집·취소/초점·수량/사유 검증·초안/수정 저장·동별 재수거·배출표 1+2장·응답 유실 재시도 중복 차감 방지 통과')
+            print('PC 수거 처리: 기존 수량 입력·동별 재수거·현장 수량 증감·품목 대체/추가·미확정 금액·기존 접수 보존·미배출 후 재입력·응답 유실 복구 통과')
         finally:
             context.close()
             browser.close()

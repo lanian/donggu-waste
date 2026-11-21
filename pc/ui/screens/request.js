@@ -8,6 +8,8 @@ import { vworldDialog } from './vworld.js';
 import { screenRefunds } from './refunds.js';
 import { collectionButton, unchangedCollectionItems } from './collection_entry.js';
 import { followupCard } from './followups.js';
+import { progressPanel } from './request_progress.js';
+import { addressDongSelection } from './address_dong.js';
 
 // 새 접수 작성 중 내용(이 화면 메모리에만, 브라우저 저장소에 남기지 않음): 다른 화면에 다녀오거나 다시 로그인해도 이어서 쓴다
 let intakeDraft = null;
@@ -22,7 +24,7 @@ const requestSessionTasks = (owner) => {
   if (!requestSessions.has(owner)) requestSessions.set(owner, { saves: new Map(), reviews: new Map(), uncertain: new Set(), failed: new Map() });
   return requestSessions.get(owner);
 };
-const FORM_LABEL = { name: '이름', phone: '연락처', address: '배출 주소', spot_note: '상세 배출 위치', memo: '요청 메모', planned_date: '수거 예정일', appt_start: '방문 약속 시작', appt_end: '방문 약속 끝', dong: '행정동', channel: '접수 경로' };
+const FORM_LABEL = { name: '이름', phone: '연락처', address: '배출 주소', spot_note: '상세 배출 위치', memo: '요청 메모', planned_date: '수거 예정일', appt_start: '방문 약속 시작', appt_end: '방문 약속 끝', extra_work_min: '추가 현장시간(분)', dong: '행정동', channel: '접수 경로' };
 const digitsOnly = (v) => String(v || '').replace(/\D/g, '');
 async function screenRequest(id) {
   const isNew = id === 'new';
@@ -42,36 +44,38 @@ async function screenRequest(id) {
   const F = { name: inp('name'), phone: inp('phone', { inputmode: 'tel', placeholder: '010-0000-0000', value: fmtPhone(r.phone) }), address: inp('address'), spot_note: inp('spot_note', { placeholder: '예: 101동 분리수거장 옆' }),
     memo: h('textarea', {}, r.memo || ''), planned_date: inp('planned_date', { type: 'date' }), appt_start: inp('appt_start', { type: 'time' }), appt_end: inp('appt_end', { type: 'time' }),
     must_today: h('input', { type: 'checkbox', checked: r.must_today }), urgent: h('input', { type: 'checkbox', checked: r.urgent }),
+    extra_work_min: inp('extra_work_min', { type: 'number', min: 0, max: 1440, step: 1, value: r.extra_work_min ?? 0, 'aria-describedby': 'extra-work-help' }),
     priority: h('select', {}, ...[[0, '보통'], [1, '높음'], [2, '매우 높음']].map(([v, t]) => h('option', { value: v, selected: +r.priority === v }, t))),
     lat: inp('lat', { readonly: true, style: 'width:110px' }), lon: inp('lon', { readonly: true, style: 'width:120px' }),
     channel: h('select', {}, ...boot.channels.map((c) => h('option', { value: c, selected: c === (r.channel || '전화') }, c))),
-    dong: h('select', {}, ...dongOpts(r.dong || '')) };
-  // 행정동: 주소로 자동 추정(고친 뒤에는 그대로 둠), 못 찾으면 경고
-  let dongTouched = !isNew && !!r.dong;
+    dong: h('select', { 'aria-label': '행정동' }, ...dongOpts(r.dong || '')) };
   const dongMsg = h('span', { class: 'muted small', 'aria-live': 'polite' });
-  F.dong.addEventListener('change', () => { dongTouched = true; dongMsg.textContent = ''; loadCal(); });
-  // 배출 주소 확인(형식·관할·전화번호 섞임 — 막지 않고 알림)
   const addrWarn = h('div', { class: 'addr-warn', 'aria-live': 'polite' });
-  const detect = wrap(async () => {
-    if (!can('dongDetect')) return;  // 수거팀은 dong-detect 권한이 없다
-    if (!F.address.value.trim()) { addrWarn.replaceChildren(); return; }
-    const d = await api('dong-detect?address=' + encodeURIComponent(F.address.value));
-    addrWarn.replaceChildren(...(d.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)));
-    if (dongTouched || !boot.dongs.some((x) => x.active)) return;
-    if (d.dong) { F.dong.value = d.dong; dongMsg.textContent = d.source === 'ADDR' ? '주소 자료의 행정동으로 정했습니다.' : '주소 낱말로 추정했습니다. 맞는지 확인하세요.'; dongMsg.className = 'muted small'; }
-    else { F.dong.value = ''; dongMsg.textContent = d.ambiguous ? `여러 동에 해당(${d.candidates.join(', ')}) — 골라 주세요.` : '주소로 동을 찾지 못했습니다. 골라 주세요.'; dongMsg.className = 'err small'; }
-    loadCal();
+  let dongResult = fromDraft?.dongResult || null;
+  const selection = addressDongSelection({
+    input: F.address, select: F.dong, message: dongMsg, defaultValue: '',
+    manual: fromDraft ? fromDraft.dongManual ?? !!r.dong : !isNew && !!r.dong,
+    isCurrent: () => sameReview() && can('dongDetect'),
+    lookup: (address) => api('dong-detect?address=' + encodeURIComponent(address)),
+    valueOf: (d) => d.dong,
+    onUpdate: () => { loadCal(); saveDraft(); },
+    onResult: (d) => {
+      dongResult = d;
+      addrWarn.replaceChildren(...(d?.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)));
+    },
   });
-  F.address.addEventListener('change', detect);
   // 예약 달력: 다음 업무일 14일의 예약/한도 (선택한 동의 수거 요일·한도 반영), 가장 빠른 가능일, 휴무·한도 경고(막지 않음)
   const calBox = h('div', { class: 'cal', role: 'group', 'aria-label': '예약 현황' });
   const calWarn = h('div', { 'aria-live': 'polite' });
-  let earliest = null;
+  let earliest = null, calSeq = 0;
   const showCal = can('calendar');  // 수거팀은 calendar 권한이 없어 달력 영역을 두지 않고 부르지도 않는다
   const loadCal = wrap(async () => {
     if (!showCal) return;
+    const seq = ++calSeq;
+    earliest = null;
     const qs = new URLSearchParams({ start: boot.today, days: 14, dong: F.dong.value, date: F.planned_date.value, exclude: isNew ? '' : id });
     const c = await api('calendar?' + qs);
+    if (seq !== calSeq || !sameReview()) return;
     earliest = c.earliest;
     calBox.replaceChildren(...c.days.map((d) => {
       const lim = d.dong_limit ?? d.limit, n = d.dong_limit != null ? d.dong_booked : d.booked;
@@ -120,7 +124,16 @@ async function screenRequest(id) {
 
   // 위치: 이 PC의 주소 자료로 찾거나 지도를 눌러 지정 (주소를 외부로 보내지 않음)
   const mapBox = h('div', { class: 'mapbox' });
-  let geoSource = r.geo_source || null, setPin = null;
+  let geoSource = r.geo_source || null, setPin = null, coordSeq = 0, coordTask = null;
+  const clearAddressPin = () => {
+    if (geoSource !== 'ADDR') return;
+    F.lat.value = ''; F.lon.value = ''; geoSource = null;
+    if (setPin) setPin(null, null, false);
+  };
+  F.address.addEventListener('input', () => {
+    if (coordTask || geoSource === 'ADDR') geoMsg.textContent = '바뀐 주소의 배출 위치를 확인하세요.';
+    coordSeq++; coordTask = null; clearAddressPin();
+  });
   // 주소 찾기: 도로명·지번·건물명(아파트)·초성 → 고르면 표준 주소·좌표·동을 채움
   const addrQ = h('input', { type: 'search', placeholder: '도로명·지번·건물명·아파트 (초성 가능, 예: ㄱㅅㅇㅍㅌ)', autocomplete: 'off', 'aria-label': '주소 찾기', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': 'addr-sug' });
   const addrSug = h('div', { class: 'results addr-sug', id: 'addr-sug', role: 'listbox', hidden: true });
@@ -130,19 +143,30 @@ async function screenRequest(id) {
   let jusoSeq = 0;
   const pickAddr = wrap(async (x) => {
     const ext = x.kind === '행안부';
+    const seq = ++coordSeq;
+    coordTask = null;
+    if (x.address !== F.address.value) clearAddressPin();
+    F.address.value = x.address;
+    const known = x.dong && boot.dongs.some((d) => d.active && d.name === x.dong);
+    selection.choose(known ? { dong: x.dong, source: ext ? 'JUSO' : 'ADDR' } : null);
+    clearTimeout(addrT); jusoSeq++;
+    addrSug.hidden = true; addrSug.replaceChildren(); addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
+    checkDup(); saveDraft(); F.spot_note.focus();
     let lat = x.lat, lon = x.lon, note = '', via = '';
     if (ext) {
-      const c = await api('juso-coord?' + new URLSearchParams(x.ref));
+      geoMsg.textContent = '선택한 주소의 좌표를 확인하는 중입니다.';
+      const pending = api('juso-coord?' + new URLSearchParams(x.ref)).catch(() => ({ none: true }));
+      coordTask = pending;
+      const c = await pending;
+      if (seq !== coordSeq || F.address.value !== x.address || !sameReview()) return;
+      coordTask = null;
       if (c.none) note = c.reason || '좌표를 받지 못했습니다. 지도에서 위치를 지정하세요.';
       else { lat = c.lat; lon = c.lon; via = c.source === 'LOCAL' ? ' (위치: 이 PC 주소 위치 자료)' : ' (위치: 행안부 좌표)'; }
     }
-    F.address.value = x.address;
     if (lat != null) { F.lat.value = lat; F.lon.value = lon; geoSource = 'ADDR'; }
-    if (x.dong && [...F.dong.options].some((o) => o.value === x.dong)) { F.dong.value = x.dong; dongTouched = true; dongMsg.textContent = ext ? '행안부 주소의 행정동으로 정했습니다.' : '주소 자료의 행정동으로 정했습니다.'; dongMsg.className = 'muted small'; }
     geoMsg.textContent = lat != null ? `${x.kind} 찾기: ${x.address}${via} — 건물 출입구 기준이니 배출 위치를 지도에서 확인하세요.` : `${x.kind} 찾기: ${x.address} — ${note}`;
     if (setPin && lat != null) setPin(lat, lon, true);
-    addrSug.hidden = true; addrSug.replaceChildren(); jusoSeq++; addrQ.setAttribute('aria-expanded', 'false'); addrQ.value = '';
-    checkDup(); loadCal(); saveDraft(); F.spot_note.focus();
+    saveDraft();
   });
   // 도로 이름만 맞은 결과(hint)는 고르면 검색어를 '도로명 '으로 채워 번호를 이어 적게 한다
   const sugBtn = (x) => h('button', { type: 'button', role: 'option', onclick: () => {
@@ -171,17 +195,21 @@ async function screenRequest(id) {
     addrSug.hidden = !addrQ.value.trim(); addrQ.setAttribute('aria-expanded', addrSug.hidden ? 'false' : 'true');
   };
   const jusoOn = () => !!(boot.settings.external && boot.settings.external.keys.juso_search_key.set);
-  addrQ.addEventListener('input', () => { clearTimeout(addrT); addrT = setTimeout(wrap(async () => {
+  addrQ.addEventListener('input', () => {
     const q0 = addrQ.value.trim(), seq = ++jusoSeq;
-    if (q0.length < 2) return drawSug([]);
-    const local = await api('addr-search?q=' + encodeURIComponent(q0));
-    if (seq !== jusoSeq) return;
-    if (!jusoOn()) return drawSug(local);
-    drawSug(local, { loading: true });
-    // 서버가 검색어에 전화번호·신청인 이름이 있으면 보내지 않는다(이름 칸 값을 함께 넘겨 대조)
-    const j = await api('juso-search?' + new URLSearchParams({ q: q0, name: F.name.value.trim() }));
-    if (seq === jusoSeq) drawSug(local, j);
-  }), 300); });
+    clearTimeout(addrT); addrSug.replaceChildren(); addrSug.hidden = true; addrQ.setAttribute('aria-expanded', 'false');
+    if (q0.length < 2) return;
+    addrT = setTimeout(wrap(async () => {
+      if (!sameReview()) return;
+      const local = await api('addr-search?q=' + encodeURIComponent(q0));
+      if (seq !== jusoSeq || !sameReview()) return;
+      if (!jusoOn()) return drawSug(local);
+      drawSug(local, { loading: true });
+      // 서버가 검색어에 전화번호·신청인 이름이 있으면 보내지 않는다(이름 칸 값을 함께 넘겨 대조)
+      const j = await api('juso-search?' + new URLSearchParams({ q: q0, name: F.name.value.trim() }));
+      if (seq === jusoSeq && sameReview()) drawSug(local, j);
+    }), 300);
+  });
   addrQ.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { const b = addrSug.querySelector('button'); if (b) { e.preventDefault(); b.focus(); } } else if (e.key === 'Escape') { addrSug.hidden = true; } else if (e.key === 'Enter') { e.preventDefault(); const b = addrSug.querySelector('button'); if (b) b.click(); } });
   addrSug.addEventListener('keydown', (e) => { const bs = [...addrSug.querySelectorAll('button')], i = bs.indexOf(document.activeElement); if (e.key === 'ArrowDown' && bs[i + 1]) { e.preventDefault(); bs[i + 1].focus(); } else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? bs[i - 1] : addrQ).focus(); } });
   // 수수료 감면(새 접수): 사유·증빙 확인 방법·확인자 (식별번호는 적지 않음)
@@ -190,7 +218,10 @@ async function screenRequest(id) {
   const redWho = h('input', { 'aria-label': '확인자', placeholder: '확인자', value: r.reduction_checker || '' });
   const geoMsg = h('span', { class: 'muted' }, r.geo_source === 'ADDR' ? '주소 자료로 찾은 위치 (건물 출입구 기준)' : '');
   const findAddr = wrap(async () => {
+    const seq = ++coordSeq;
+    coordTask = null;
     const g = await api('geocode?address=' + encodeURIComponent(F.address.value));
+    if (seq !== coordSeq || !sameReview()) return;
     if (!g || g.none) { geoMsg.textContent = boot.addr_count ? '주소 자료에서 찾지 못했습니다. 도로명과 건물번호를 확인하거나 지도를 눌러 지정하세요.' : '이 PC에 주소 위치 자료가 없어 찾을 수 없습니다. 지도를 눌러 위치를 지정하세요.'; return; }
     if (g.ambiguous) { geoMsg.textContent = `같은 도로명·번호가 여러 지역에 있습니다(${g.options.join(', ')}). 주소에 구 이름을 넣어 주세요.`; return; }
     F.lat.value = g.lat; F.lon.value = g.lon; geoSource = 'ADDR';
@@ -200,9 +231,10 @@ async function screenRequest(id) {
   setTimeout(async () => {
     try {
       const { map, ml } = await mapIn(mapBox, { center: r.lat != null ? [r.lon, r.lat] : [boot.settings.depot.lon, boot.settings.depot.lat], zoom: r.lat != null ? 17 : 14 });
-      let marker = r.lat != null ? M.pin(ml, map, { lng: r.lon, lat: r.lat, label: '●', cls: 'me' }) : null;
-      setPin = (lat, lon, fly) => { if (marker) marker.remove(); marker = M.pin(ml, map, { lng: lon, lat, label: '●', cls: 'me' }); if (fly) map.jumpTo({ center: [lon, lat], zoom: 17 }); };
+      let marker = F.lat.value ? M.pin(ml, map, { lng: +F.lon.value, lat: +F.lat.value, label: '●', cls: 'me' }) : null;
+      setPin = (lat, lon, fly) => { if (marker) marker.remove(); marker = lat == null ? null : M.pin(ml, map, { lng: lon, lat, label: '●', cls: 'me' }); if (marker && fly) map.jumpTo({ center: [lon, lat], zoom: 17 }); };
       map.on('click', (e) => {
+        coordSeq++; coordTask = null;
         const lat = Math.round(e.lngLat.lat * 1e6) / 1e6, lon = Math.round(e.lngLat.lng * 1e6) / 1e6;
         F.lat.value = lat; F.lon.value = lon; geoSource = 'MANUAL'; geoMsg.textContent = '지도에서 지정한 위치';
         setPin(lat, lon, false);
@@ -214,7 +246,7 @@ async function screenRequest(id) {
   const msg = h('p', { class: 'msg' });
   const data = () => ({ name: F.name.value, phone: F.phone.value, address: F.address.value, spot_note: F.spot_note.value, memo: F.memo.value,
     planned_date: F.planned_date.value, appt_start: F.appt_start.value, appt_end: F.appt_end.value, must_today: F.must_today.checked, urgent: F.urgent.checked,
-    priority: +F.priority.value, lat: F.lat.value || null, lon: F.lon.value || null, geo_source: geoSource, dong: F.dong.value, channel: F.channel.value,
+    priority: +F.priority.value, extra_work_min: Number(F.extra_work_min.value || 0), lat: F.lat.value || null, lon: F.lon.value || null, geo_source: geoSource, dong: F.dong.value, channel: F.channel.value,
     ...(isNew ? { reduction_code: redSel.value, reduction_proof: redProof.value, reduction_checker: redWho.value || (redSel.value ? boot.me.display_name : '') } : {}),
     items: items.map((i) => ({ line_id: i.line_id, fee_rate_id: i.fee_rate_id || null, name: i.name, spec: i.spec, unit: i.unit, unit_label: i.unit_label, qty: i.qty })) });
   // 중복 경고를 본 연락처·주소는 기억한다(화면 밖 변수): 그사이 화면이 다시 그려져도 [접수 등록]을 또 눌러야 하는 일이 없게
@@ -229,13 +261,26 @@ async function screenRequest(id) {
   };
   const save = wrap(async () => {
     if (savingRequest || requestSaveTasks.has(reviewKey) || fieldReviewTasks.has(reviewKey)) return;
+    if (lower.querySelector('.collection-entry[data-collection-submitted]')) throw new Error('수거 결과 저장 여부를 먼저 확인하세요.');
+    if (!F.extra_work_min.validity.valid) {
+      F.extra_work_min.focus();
+      throw new Error('추가 현장시간은 0~1440분 사이의 정수로 입력하세요.');
+    }
     let finishSave = () => {};
-    const saveSnapshot = isNew ? null : { data: data(), base: JSON.parse(baseSnap), reason: reason.value, ver: baseVer };
+    let saveSnapshot = isNew ? null : { data: data(), base: JSON.parse(baseSnap), reason: reason.value, ver: baseVer };
     let saveOutcome = { ok: true };
     const saveTask = isNew ? null : new Promise((resolve) => { finishSave = resolve; });
     if (saveTask) requestSaveTasks.set(reviewKey, saveTask);
     savingRequest = true; syncFieldReview();
     try {
+      const address = F.address.value, locationVersion = coordSeq;
+      const ready = await selection.settle();
+      if (coordTask) await coordTask;
+      const addressChanged = () => !sameReview() || address !== F.address.value || locationVersion !== coordSeq;
+      if (addressChanged()) { if (sameReview()) msg.textContent = '배출 위치가 바뀌었습니다. 주소와 행정동을 확인한 뒤 다시 저장하세요.'; return; }
+      if (!ready) { msg.textContent = '행정동을 확인하지 못했습니다. 주소로 다시 선택하거나 행정동을 직접 고른 뒤 저장하세요.'; return; }
+      const dong = F.dong.value;
+      if (saveSnapshot) saveSnapshot.data = data();
       if (isNew) {
         if (dupAckKey !== dupKey()) {
           await checkDup();
@@ -252,6 +297,7 @@ async function screenRequest(id) {
           if (!v) return;
           if (v === true && e) { F.planned_date.value = e; saveDraft(); loadCal(); }
         }
+        if (addressChanged() || F.dong.value !== dong) { if (sameReview()) msg.textContent = '배출 위치가 바뀌었습니다. 주소와 행정동을 확인한 뒤 다시 저장하세요.'; return; }
         const res = await postOnce('intake', 'requests', { ...data(), intake_secs: intakeT0 ? Math.round((Date.now() - intakeT0) / 1000) : null });
         intakeDraft = null; dupAckKey = null; intakeT0 = null; justSaved = res.id;
         toast(`${res.receipt_no} 등록했습니다`); (res.warnings || []).forEach((w) => toast(w, true)); go(`#/request/${res.id}`);
@@ -283,7 +329,7 @@ async function screenRequest(id) {
   }, msg);
   const editable = r.status !== 'CANCELLED' && canWork();
   // 작성 중인 새 접수는 메모리에 담아 둔다
-  saveDraft = () => { if (isNew) intakeDraft = { r: { ...data(), must_today: F.must_today.checked ? 1 : 0, urgent: F.urgent.checked ? 1 : 0 }, items: items.map((i) => ({ ...i })) }; syncFieldReview(); };
+  saveDraft = () => { if (isNew) intakeDraft = { r: { ...data(), must_today: F.must_today.checked ? 1 : 0, urgent: F.urgent.checked ? 1 : 0 }, items: items.map((i) => ({ ...i })), dongManual: selection.isManual(), dongResult }; syncFieldReview(); };
 
   // 유사 품목 적용: 표에 없는 품목(확인 대기)을 단가가 확정된 수수료표 행에 연결 (근거·확인자 기록)
   let linkOpen = null;
@@ -313,13 +359,21 @@ async function screenRequest(id) {
       before: () => unchangedCollectionItems(items, r.items),
       after: async (result, authOwner) => {
         if (!form.isConnected) return;
-        const fresh = await api('requests/' + id, { _prefsOwner: authOwner });
-        if (!form.isConnected) return;
+        const pending = progressNotice('수거 결과는 저장됐습니다. 최신 진행 상황을 불러오는 중…');
+        let fresh;
+        try {
+          fresh = await api('requests/' + id, { _prefsOwner: authOwner });
+        } catch (error) {
+          if (sameReview() && pending.isConnected) progressNotice('수거 결과는 저장됐습니다. 현장 결과에서 ‘최신 내용 다시 불러오기’를 누르세요.', true);
+          throw error;
+        }
+        if (!sameReview()) return;
+        if (pending.isConnected) showProgress(fresh);
         if (fresh.req_ver !== result.req_ver) { showStale(); return; }
         baseVer = fresh.req_ver; locked.clear(); fresh.locked_lines.forEach((line) => locked.add(line)); drawItems();
         lower.replaceChildren(...lowerCards(fresh).filter(Boolean));
       } }) : null,
-    h('div', { class: 'row' }, statusChip(r.status), chip('연락: ' + CONTACT[st.contact]), st.outcome ? chip('저장된 결과: ' + (STATUS[st.outcome] || st.outcome)) : null),
+    h('div', { class: 'row' }, h('span', { class: 'field-request-status' }, statusChip(r.status)), chip('연락: ' + CONTACT[st.contact]), st.outcome ? chip('저장된 결과: ' + (STATUS[st.outcome] || st.outcome)) : null),
     fieldExtras(st, r),
     h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['품목', '구분', '처음 접수', '현장 수량', '실은 수량', '못 실은 수량', '사유', '스티커', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, ...st.lines.flatMap((l) => [h('tr', {}, h('td', {}, `${l.name} ${l.spec}`,
@@ -400,6 +454,28 @@ async function screenRequest(id) {
     if (fieldReviewButton) { fieldReviewButton.hidden = !!checkedAt; fieldReviewButton.disabled = !!checkedAt || pending || saving || saveNeedsReview || dirty(); fieldReviewButton.setAttribute('aria-busy', String(pending || saving)); }
   };
   const lower = h('div', { class: 'req-lower' });
+  const progress = isNew ? null : h('div', {}, progressPanel(r));
+  const showProgress = (fresh) => progress?.replaceChildren(progressPanel(fresh));
+  function progressNotice(text, failed = false, retry = null) {
+    const notice = h('p', { class: failed ? 'notice warn' : 'muted', role: failed ? 'alert' : 'status' }, text, retry);
+    progress.replaceChildren(h('section', { class: 'card request-progress', 'aria-label': '접수 진행 상황' },
+      h('h2', {}, '접수 진행 상황'), notice));
+    return notice;
+  }
+  async function refreshRevisitProgress() {
+    if (!sameReview()) return;
+    const loading = progressNotice('재방문 약속을 저장했습니다. 진행 상황을 확인하는 중…');
+    try {
+      const fresh = await api('requests/' + id, { _prefsOwner: reviewSession });
+      if (!sameReview() || !loading.isConnected) return;
+      showProgress(fresh);
+      if (fresh.req_ver !== baseVer) showStale();
+    } catch {
+      if (sameReview() && loading.isConnected) progressNotice(
+        '재방문 약속은 저장됐지만 진행 상황을 불러오지 못했습니다. ',
+        true, btn('진행 상황 다시 조회', refreshRevisitProgress, 'small'));
+    }
+  }
   const versionsCard = (rr) => (rr.versions.length ? h('div', { class: 'card' }, h('h2', {}, '수정 이력'), h('ul', {}, ...rr.versions.map((v) => h('li', {}, `버전 ${v.req_ver} → ${v.req_ver + 1} · ${kst(v.at)} · ${v.reason}`)))) : null);
   const ctx = { ver: () => baseVer, stale: () => showStale(), after: () => afterAction() };
   const lowerCards = (rr) => (isNew ? [] : [
@@ -414,16 +490,26 @@ async function screenRequest(id) {
       baseSnap = JSON.stringify(baseline);
       baseVer = saved.req_ver;
       Object.assign(rr, schedule, { req_ver: saved.req_ver, status: saved.request_status });
+      lower.querySelector('.field-request-status')?.replaceChildren(statusChip(saved.request_status));
       syncFieldReview();
+      return refreshRevisitProgress();
     } }) : null,
     fieldCard(rr), paymentCard(rr, ctx), reductionCard(rr, ctx), contactCard(rr, ctx), versionsCard(rr),
   ]);
   // 아래 카드의 작업(수납·감면·통화·유사 품목·확인 완료)이 끝난 뒤: 수정 중이면 아래 카드만 새로, 아니면 화면 전체를 새로
   const afterAction = async () => {
     if (!dirty()) return render();
-    const r2 = await api('requests/' + id);
-    lower.replaceChildren(...lowerCards(r2).filter(Boolean));
-    toast('수정 중인 내용은 그대로 두고 아래 기록만 새로 불러왔습니다');
+    const pending = progressNotice('기록을 저장했습니다. 최신 진행 상황을 불러오는 중…');
+    try {
+      const r2 = await api('requests/' + id, { _prefsOwner: reviewSession });
+      if (!sameReview() || !pending.isConnected) return;
+      showProgress(r2);
+      lower.replaceChildren(...lowerCards(r2).filter(Boolean));
+      toast('수정 중인 내용은 그대로 두고 아래 기록만 새로 불러왔습니다');
+    } catch {
+      if (sameReview() && pending.isConnected) progressNotice('기록은 저장됐습니다. 최신 진행 상황을 다시 확인해 주세요. ',
+        true, btn('진행 상황 다시 조회', wrap(afterAction), 'small'));
+    }
   };
 
   // 전화 받는 순서대로: 왼쪽 = 신청자 → 버릴 물건, 오른쪽 = 일정 → 위치. 저장 단추는 화면 아래에 늘 보이게.
@@ -443,7 +529,13 @@ async function screenRequest(id) {
     : h('div', { class: 'actionbar' }, isNew ? null : reason,
       btn(isNew ? '접수 등록' : '수정 저장', save, 'primary', { 'data-save': '1' }), h('span', { class: 'muted small' }, h('kbd', {}, 'Ctrl'), '+', h('kbd', {}, 'Enter')),
       barTotal, h('span', { class: 'grow' }), msg, isNew ? null : btn('접수 취소', cancel, 'danger'))) : null;
-  setTimeout(() => { loadCal(); if (isNew && !(fromDraft && r.dong)) detect(); }, 0);
+  setTimeout(() => {
+    if (!sameReview()) return;
+    loadCal();
+    if (!isNew || !F.address.value || selection.isManual() || !can('dongDetect')) return;
+    if (fromDraft?.dongResult?.dong && fromDraft.dongResult.dong === F.dong.value && fromDraft.r.address === F.address.value) selection.choose(fromDraft.dongResult);
+    else selection.settle();
+  }, 0);
   const form = h('div', { class: 'reqform' + (isNew ? ' intake-form' : ''), oninput: () => { intakeSeen = Date.now(); saveDraft(); }, onchange: () => saveDraft() },
     h('div', { class: 'pagehead' }, isNew
       ? h('div', { class: 'intake-heading-copy' }, h('h1', {}, '전화 접수 등록'), h('p', { class: 'muted small' }, '신청자와 배출 정보를 입력하고 품목·일정을 확인하세요.'))
@@ -458,6 +550,7 @@ async function screenRequest(id) {
         }), 'small') : null,
         !isNew && canWork() && r.status !== 'CANCELLED' ? btn('배출 표지 인쇄', wrap(async () => { const t = await post('requests/labels', { ids: [id] }); window.open('/print/doc/' + t.token, 'dg-print'); toast('배출 표지를 열었습니다'); }), 'small') : null,
         btn('← 목록', () => go('#/requests')))),
+    progress,
     fromDraft ? h('div', { class: 'notice info' }, '작성 중이던 접수를 불러왔습니다. ', btn('비우고 새로 쓰기', () => { intakeDraft = null; dupAckKey = null; reqDone('intake'); intakeT0 = Date.now(); render(true); }, 'small')) : null,
     showDone ? h('div', { class: 'notice ok-note', role: 'status' }, h('strong', {}, `${r.receipt_no} 등록을 마쳤습니다. `), r.levy_no ? `부과번호 ${r.levy_no} · ` : '', '주민에게 안내 문구를 보내거나 다음 전화를 받으세요. ',
       btn('+ 다음 접수', () => { intakeDraft = null; dupAckKey = null; go('#/request/new'); }, 'small primary'), ' ', btn('주민 안내 문구 복사', wrap(() => copyNotice(id)), 'small')) : null,
@@ -472,7 +565,8 @@ async function screenRequest(id) {
             isNew ? h('p', { class: 'intake-field-help' }, '검색 결과를 고르면 배출 주소에 채워집니다. 직접 입력도 가능합니다.') : null,
             noAddrSource() ? (isNew ? h('details', { class: 'intake-address-help' }, h('summary', {}, '주소 검색 미설정 · 직접 입력 가능'), addrSetupNote()) : addrSetupNote()) : null) : null,
           lab('배출 주소', F.address), addrWarn,
-          h('div', { class: 'grid2' }, lab('행정동', F.dong), lab('접수 경로', F.channel)), dongMsg && h('p', { class: 'dongmsg' }, dongMsg),
+          h('div', { class: 'grid2' }, lab('행정동', F.dong), lab('접수 경로', F.channel)),
+          h('div', { class: 'row dongmsg' }, dongMsg, editable && can('dongDetect') ? btn('주소로 동 다시 선택', () => selection.reset(), 'small') : null),
           isNew ? h('div', { class: 'grid2 intake-notes' }, lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo))
             : [lab('상세 배출 위치', F.spot_note), lab('요청 메모', F.memo)], dupBox),
         h('div', { class: 'card' + (isNew ? ' intake-items' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '02') : null, '버릴 물건'), noticeBox, itemsBox, total,
@@ -488,6 +582,8 @@ async function screenRequest(id) {
           showCal ? h('div', { class: 'calwrap' }, h('div', { class: 'row' }, h('span', { class: 'small muted' }, '다음 업무일 예약/한도'), h('span', { class: 'grow' }),
             btn('가장 빠른 가능일', () => { if (!earliest) return toast('120일 안에 여유 있는 날이 없습니다.', true); F.planned_date.value = earliest; loadCal(); saveDraft(); }, 'small')), calBox, calWarn) : null,
           h('div', { class: 'grid2' }, lab('방문 약속 시작', F.appt_start), lab('방문 약속 끝', F.appt_end)),
+          lab('추가 현장시간(분)', F.extra_work_min),
+          h('p', { id: 'extra-work-help', class: 'muted small' }, '이사 물량 분류나 반출처럼 품목별 기본 작업시간에 더할 시간을 분 단위로 입력하세요.'),
           h('div', { class: 'row checks' }, h('label', { class: 'row' }, F.must_today, '오늘 반드시 포함'), h('label', { class: 'row' }, F.urgent, '긴급'), lab('품목 우선순위', F.priority)),
           h('p', { class: 'muted' }, '오전에 먼저 가야 하면 방문 약속 시간을 넣으세요. 우선순위는 "포함 여부"에만 영향을 줍니다.')),
         h('div', { class: 'card' + (isNew ? ' intake-location' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '04') : null, '배출 위치'), h('p', { class: 'muted' }, jusoOn() ? '이 PC의 도로명주소 위치 자료나 [주소 찾기]의 행안부 결과로 찾거나 지도를 눌러 지정합니다. 행안부 검색에는 주소 찾기 칸의 검색어만 PC 서버가 보냅니다(이름·연락처는 보내지 않음).' : '이 PC에 넣어 둔 도로명주소 위치 자료로 찾거나 지도를 눌러 지정합니다. 주소는 외부로 보내지 않습니다.'),
@@ -528,6 +624,8 @@ async function screenRequest(id) {
     const geoDiff = String(mine.data.lat) !== String(mine.base.lat) || String(mine.data.lon) !== String(mine.base.lon);
     const refill = () => {
       diffs.forEach((k) => { if (F[k]) F[k].value = k === 'phone' ? fmtPhone(digitsOnly(mine.data[k])) || mine.data[k] : mine.data[k] ?? ''; });
+      if (diffs.includes('dong')) F.dong.dispatchEvent(new Event('change'));
+      if (diffs.includes('address')) F.address.dispatchEvent(new Event('input'));
       if (flagDiff.includes('must_today')) F.must_today.checked = !!mine.data.must_today;
       if (flagDiff.includes('urgent')) F.urgent.checked = !!mine.data.urgent;
       if (flagDiff.includes('priority')) F.priority.value = String(mine.data.priority ?? 0);
@@ -536,7 +634,7 @@ async function screenRequest(id) {
       reason.value = mine.reason || ''; staleMine.delete(id); requestSaveFailures.delete(id); saveNeedsReview = false; mineBox.remove(); loadCal(); saveDraft(); toast('내가 적었던 값을 다시 넣었습니다. 확인하고 [수정 저장]을 누르세요.');
     };
     const mineBox = h('div', { class: 'notice info mine-box' }, h('strong', {}, failedMine ? '수정 저장에 실패했습니다. 적었던 내용을 보관했습니다. ' : '바뀐 내용을 다시 불러왔습니다. '), diffs.length || itemsDiff || flagDiff.length || geoDiff ? '내가 고쳤던 값(아직 저장 안 됨):' : '내가 고친 칸은 없었습니다.',
-      h('ul', {}, ...diffs.map((k) => h('li', {}, `${FORM_LABEL[k]}: `, h('b', {}, mine.data[k] || '(비움)'), h('span', { class: 'muted' }, ` (지금 ${r[k] || '(비움)'})`))),
+      h('ul', {}, ...diffs.map((k) => h('li', {}, `${FORM_LABEL[k]}: `, h('b', {}, String(mine.data[k] ?? '') || '(비움)'), h('span', { class: 'muted' }, ` (지금 ${String(r[k] ?? '') || '(비움)'})`))),
         itemsDiff ? h('li', {}, '품목: ', h('b', {}, itemsTxt(mine.data.items) || '(없음)')) : null),
       h('div', { class: 'row' }, btn('내 값 다시 넣기', refill, 'small primary'), btn('버리기', () => { staleMine.delete(id); requestSaveFailures.delete(id); saveNeedsReview = false; mineBox.remove(); fieldReviewMsg.textContent = ''; syncFieldReview(); }, 'small')));
     form.insertBefore(mineBox, form.children[1] || null);

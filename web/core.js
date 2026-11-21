@@ -163,7 +163,8 @@ const ERR = {
   QR_STALE_VERSION: '이미 받은 것보다 오래된 목록입니다. PC 담당자에게 최신 목록 QR을 다시 띄워 달라고 하세요.',
   QR_OLD_DATE: '지금 목록보다 지난 날짜의 목록입니다. 받지 않았습니다. PC 담당자에게 오늘 목록 QR을 띄워 달라고 하세요.',
   QR_VISIT_REFRESH: '이 방문은 현재 휴대폰 목록과 배정이 다릅니다. PC 담당자에게 최신 팀 목록 QR을 요청하세요.',
-  QR_VISIT_SAVE: '가져온 방문을 저장하지 못했습니다. 저장 공간을 확인한 뒤 QR을 다시 읽어 주세요.',
+  QR_VISIT_SAVE: '가져온 방문을 저장하지 못했습니다. 저장 공간을 확인한 뒤 다시 시도하세요.',
+  QR_LIST_SAVE: '목록 수신을 저장하지 못했습니다. 저장 공간을 확인한 뒤 다시 시도하세요.',
   BAD_VERSION: '앱 업데이트가 필요합니다. 앱을 닫았다 다시 열고 위에 뜨는 [업데이트]를 누르세요.',
   QR_NOT_REGISTRATION: '기기 등록용 QR이 아닙니다.',
   UNSENT_PREVIOUS: '이전 날짜 결과가 아직 PC에 반영되지 않아 새 날짜 목록을 받지 않았습니다. 결과를 보내고 결과 반영 코드(D-)를 넣거나, PC가 결과를 가져온 뒤 만든 목록을 받아 주세요.',
@@ -326,9 +327,23 @@ function saveBanner(msg) {
   b.querySelector('summary').textContent = `${msg.includes('공간') ? '저장 공간 부족' : '기록 저장 실패'} · 앱을 닫지 마세요`;
   b.querySelector('.save-fail-detail').textContent = `${msg} 앱을 닫지 말고 이 창의 기록을 [결과 보내기] 또는 백업으로 먼저 내보내 주세요.`;
 }
-function commit() {
-  const snapshot = JSON.parse(JSON.stringify(st));
-  saving = saving.then(() => S.putSecure('state', snapshot)).then(() => {
+function commit() { return saveState(); }
+function commitListReceipt(receipt) { return saveState(receipt); }
+function saveState(receipt) {
+  const source = st;
+  const snapshot = JSON.parse(JSON.stringify(source));
+  saving = saving.then(async () => {
+    if (receipt) {
+      if (source !== st || source.lastBundleHash !== receipt.bundleHash) return false;
+      // 목록은 이미 저장됐다. 코드가 든 암호문은 쓰기가 실패하면 잠금 해제 복구본으로 쓰지 않는다.
+      snapshot.lastReceipt = receipt;
+      await S.putSecure('state', snapshot, { recoverOnFailure: false });
+      if (source.lastBundleHash === receipt.bundleHash) source.lastReceipt = receipt;
+    } else {
+      // 코드 저장을 기다리던 동안 예약된 일반 저장에도 같은 묶음에서 확정된 코드를 이어 준다.
+      if (!snapshot.lastReceipt && snapshot.lastBundleHash && source.lastReceipt?.bundleHash === snapshot.lastBundleHash) snapshot.lastReceipt = source.lastReceipt;
+      await S.putSecure('state', snapshot);
+    }
     if (saveFailed) { saveFailed = false; saveBanner(''); toast('다시 저장됩니다'); if (reloadWanted) setTimeout(reloadWhenSafe, 0); }
     return true;
   }).catch((e) => {
@@ -770,7 +785,7 @@ export {
   $app, BACKUP_WARN_MS, COLLECT_TTL_MS, END_OF_DAY_H, ERR, HANDOFF_MS, HIDDEN_LOCK_MS, LOCK_CHOICES,
   LOW_SPACE_MB, TEXT_SIZES, WIN_ID, addCrewEvent, addEvent, addrRoute, afterUnlock, ago,
   allStops, appLogo, applyPrefs, applyTextSize, ask, autoLockStatus, backBtn, backName, backTo, btn, camInput, camInputs,
-  camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, dial, digits,
+  camera, cancelAsked, changeReqs, clearLiveMap, clearPhotoUrls, commit, commitListReceipt, dial, digits,
   dongOf, emptyState, errMsg, feeMemo, feeTable, fieldEditable, findStop, flowSteps,
   flushPhotos, flushPhotosNow, flushSteps, fmtPhone, footBar, go, h, handoff,
   handoffUntil, hiddenAt, isDark, isIOS, isQuota, isSolo, lastActive, launchApp,

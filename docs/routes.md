@@ -30,6 +30,7 @@
 | `dong-work/requests` | ✓ | ✓ |  | ✓ | ✓ | write |  | LIST | 현재 범위·기준일·처리 종류로 50건씩 접수 조회. |
 | `dong-work/requests/{id}` | ✓ | ✓ |  | ✓ | ✓ | write |  | VIEW | 다른 동 접수의 원문을 포함하지 않는 상세 권한 검사. |
 | `dong-work/duplicates` | ✓ | ✓ |  | ✓ | ✓ | write |  | SEARCH | 허용 범위 안의 접수만 중복 후보로 제공. |
+| `dong-work/dong-detect` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 주소에서 행정동을 판별하고 담당 범위 안의 후보만 제공. |
 | `dong-work/geocode` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 선택 동을 검사한 뒤 공개 주소 자료의 위치 찾기(외부 호출 없음). |
 | `dong-work/assignments` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 선택 범위의 배정만 표시하고 혼합 배정은 shared로 안내. |
 | `dong-work/summary.csv` | ✓ | ✓ |  | ✓ | ✓ | write |  |  | 주민 정보 없는 동별 현황 CSV. |
@@ -208,4 +209,4 @@
 | `road-rules/apply` | ✓ |  |  |  |  | none |  |  | 검증한 도로망으로 전환하는 작업. |
 | `road-rules/rollback` | ✓ |  |  |  |  | none |  |  | 이전에 사용한 도로망으로 복원하는 작업. |
 
-경로 179개 (로그인 전 4개 제외).
+경로 180개 (로그인 전 4개 제외).

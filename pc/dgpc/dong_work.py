@@ -73,6 +73,25 @@ def safe_dongs(con, u: dict) -> list[dict]:
             if u["role"] != "DONG" or d["id"] in u["dong_ids"]]
 
 
+def detect_dong(con, user: dict, address: str) -> dict:
+    u = actor(con, user)
+    detected = A.detect_dong(con, address)
+    allowed = {d["name"]: d["id"] for d in safe_dongs(con, u) if d["active"]}
+    candidates = [name for name in detected["candidates"] if name in allowed]
+    name = detected["dong"]
+    unknown = {"dong": None, "dong_id": None, "source": None, "candidates": []}
+    if name:
+        if name not in allowed:
+            return {**unknown, "outside_scope": True}
+        return {"dong": name, "dong_id": allowed[name], "source": detected["source"], "candidates": candidates}
+    if detected.get("ambiguous"):
+        result = {**unknown, "ambiguous": True, "candidates": candidates}
+        if detected["candidates"] and not candidates:
+            result["outside_scope"] = True
+        return result
+    return unknown
+
+
 def safe_crews(con) -> list[dict]:
     keys = ("id", "name", "active", "capacity_m3", "capacity_kg", "shift_start", "shift_end")
     return [{k: c[k] for k in keys} for c in S.list_crews(con)]
@@ -372,7 +391,7 @@ def calculate(prepared: dict) -> dict:
                           lunch=settings["lunch"], base_first=settings["base_first"],
                           crew_depots=context['crew_depots'], crew_required={**pref, **context['crew_required']})
     result["prefer_dong_crew"] = bool(settings["capacity"]["prefer_dong_crew"])
-    result["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"], "lon": r["lon"],
+    result["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "spot_note": r["spot_note"], "lat": r["lat"], "lon": r["lon"],
                                      "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]], "status": r["status"], "dong": r["dong"],
                                      "pref_crew_id": pref.get(r["id"]), "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])],
                                      "m3": round(sum(routing.volume_of(i, ov) for i in r.get("items", [])), 2),

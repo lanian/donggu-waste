@@ -346,6 +346,8 @@ def _scrub_event_body(raw: str, kind: str | None = None) -> str:
         b.pop("reason", None)  # 정정 요청의 자유 사유에도 주민 개인정보가 들어갈 수 있다.
         return json.dumps(R._strip_request_pii(kind, b), ensure_ascii=False)
     if isinstance(b, dict):
+        if kind == "FIELD_ITEM_ADD":
+            R._scrub_field_item_text(b)
         for k in _PII_EVENT_KEYS:
             if k in b:
                 b[k] = None if k in ("lat", "lon", "acc") else ""
@@ -492,6 +494,9 @@ def _pii_repair_candidates(con, ids=None) -> list[dict]:
         OR EXISTS (SELECT 1 FROM result_event e WHERE e.request_id=r.id AND COALESCE(e.resolved_reason,'') NOT IN ('',?1,?5))
         OR EXISTS (SELECT 1 FROM result_event e, json_each(CASE WHEN json_valid(e.body_json) THEN e.body_json ELSE '{}' END) j
             WHERE e.request_id=r.id AND ((j.key IN (SELECT value FROM json_each(?4)) AND j.value IS NOT NULL AND j.value<>'')
+                OR (e.kind='FIELD_ITEM_ADD'
+                    AND COALESCE(json_extract(CASE WHEN json_valid(e.body_json) THEN e.body_json ELSE '{}' END,'$.fee_rate_id'),'')=''
+                    AND ((j.key='name' AND COALESCE(j.value,'') NOT IN ('',?1)) OR (j.key='spec' AND COALESCE(j.value,'')<>'')))
                 OR (e.kind IN ('FIELD_INTAKE','CORRECTION') AND (j.key IN ('name','phone','address','spot_note','memo')
                     OR (j.key='reason' AND COALESCE(j.value,'')<>'') OR (j.key='fields' AND j.type='object')
                     OR (j.key='items' AND j.type='array')))))

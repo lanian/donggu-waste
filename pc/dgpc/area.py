@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 
-from dgpc import addresses as AD, core as C, fees as F, settings as SR
+from dgpc import core as C, fees as F, geo, settings as SR
 
 WEEKDAYS = "월화수목금토일"  # date.weekday(): 월=0 … 일=6
 DEFAULT_CLOSED_WEEKDAYS = [5, 6]  # 기본: 토·일 수거 안 함 (설정에서 바꿈)
@@ -252,32 +252,73 @@ def delete_dong(con, did: str):
         C.audit(con, "dong", did, "DELETE", {"name": d["name"]})
 
 
-def detect_dong(con, address: str) -> dict:
+_LOT = re.compile(r"^(?P<prefix>(?:[가-힣]+(?:시|도|군|구|읍|면)\s+)*)"
+                  r"(?P<dong>[가-힣][가-힣0-9]*(?:동|가|리))\s*(?P<san>산\s*)?"
+                  r"(?P<main>\d{1,18})(?:\s*-\s*(?P<sub>\d{1,18}))?(?=$|[\s,(])")
+
+
+def _exact_dong_points(con, address: str) -> list[dict]:
+    """행정동을 판별할 때는 인접 부번이나 다른 건물·시군구의 좌표로 대체하지 않는다."""
+    lot = _LOT.match(address.strip())
+    if lot:  # '충장로1가 30-2'는 '충장로 1'로 해석하지 않는다.
+        if lot["san"]:  # 위치 자료에서 산 여부가 확인되는 지번은 별도로 보존하지 않는다.
+            return []
+        points = C.rows(con, """SELECT DISTINCT sigungu, dong_h, dong_b FROM addr_point
+                                WHERE dong_b=? AND jibun_main=? AND jibun_sub=?""",
+                        (lot["dong"], int(lot["main"]), int(lot["sub"] or 0)))
+        units = lot["prefix"].split()
+        hint = next((u for u in reversed(units) if u.endswith(("시", "군", "구"))), None)
+        return [p for p in points if not hint or hint in p["sigungu"].split()]
+    try:
+        pa = geo.parse_address(address)
+    except ValueError:  # 비정상적으로 긴 숫자는 건물 번호가 아니다.
+        return []
+    if not pa or max(pa["main"], pa["sub"]) > (1 << 63) - 1:
+        return []
+    points = C.rows(con, """SELECT sigungu, dong_h, dong_b FROM addr_point
+                            WHERE road=? AND main=? AND sub=? AND underground=?""",
+                    (pa["road"], pa["main"], pa["sub"], pa["underground"]))
+    hint = pa["sigungu_hint"]
+    return [p for p in points if not hint or hint in p["sigungu"].split()]
+
+
+def detect_dong(con, address: str, *, legal_dong: str = "") -> dict:
     """주소 → 행정동 추정. 주소 위치 자료에 관할 행정동이 있으면 그것을, 아니면 동별 판별 낱말(법정동·도로명 등)로 찾는다.
     여러 동이 같은 정도로 맞으면 고르지 않고 후보만 돌려준다."""
     dongs = list_dongs(con, active_only=True)
+    unknown = {"dong": None, "source": None, "candidates": []}
     if not dongs or not (address or "").strip():
-        return {"dong": None, "source": None, "candidates": []}
+        return unknown
     a = _norm(address)
-    g = None
-    try:
-        g = AD.geocode(con, address)
-    except Exception:  # 주소 자료가 없거나 해석 못 함
-        g = None
-    gh = _norm((g or {}).get("dong_h") or "") if g and not g.get("ambiguous") else ""
-    gb = _norm((g or {}).get("dong_b") or "") if g and not g.get("ambiguous") else ""
+    points = _exact_dong_points(con, address)
+    active = {_norm(d["name"]) for d in dongs}
+    # 표준 도로명주소의 괄호는 법정동·건물명이다. 도로명·건물명 속 글자를 행정동으로 보지 않는다.
+    address_tokens = set(re.findall(r"\w+", re.sub(r"\([^)]*\)", " ", address)))
+    if len(points) > 1:
+        names = {_norm(p["dong_h"]) for p in points}
+        return {**unknown, "ambiguous": True, "candidates": [d["name"] for d in dongs if _norm(d["name"]) in names]}
+    point = points[0] if points else {}
+    gh = _norm(point.get("dong_h"))
+    gb = _norm(point.get("dong_b") or legal_dong)
+    if gh:
+        if gh not in active:
+            return unknown
+        names = {gh} | ((address_tokens & active) - {gb})
+        choices = [d["name"] for d in dongs if _norm(d["name"]) in names]
+        if len(choices) > 1:
+            return {**unknown, "ambiguous": True, "candidates": choices}
+        return {"dong": choices[0], "source": "ADDR", "candidates": choices}
     scored = []
     for d in dongs:
-        score, src = 0, None
-        if gh and gh == _norm(d["name"]):
-            score, src = 1000, "ADDR"
-        for k in [d["name"], *d["keywords"]]:
+        name = _norm(d["name"])
+        score, src = (len(name), "KEYWORD") if name in address_tokens else (0, None)
+        for k in d["keywords"]:
             kk = _norm(k)
             if not kk:
                 continue
-            if kk in a or (gb and kk == gb) or (gh and kk == gh):
+            if kk in a or kk == gb:
                 if len(kk) > score:
-                    score, src = len(kk), ("ADDR" if kk in (gb, gh) and kk not in a else "KEYWORD")
+                    score, src = len(kk), ("ADDR" if kk == gb and kk not in a else "KEYWORD")
         if score:
             scored.append((score, d["name"], src))
     if not scored:

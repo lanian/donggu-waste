@@ -135,7 +135,7 @@ async function screenPcInputHelp(id) {
   const matching = '품목명·규격·단위로 맞추세요. 휴대폰과 PC의 품목 순번은 다를 수 있습니다.';
   const duplicate = 'PC 기존 수거량을 이전 수거와 대조하세요. 이미 목표 누적과 같으면 다시 입력하지 마세요.';
   const note = [`접수번호 ${stop.receipt_no}`, dateText, mixedDays ? `전체 기록일 ${days.join(' · ')}` : '', status, dateNote,
-    ...rows.map((line, i) => `${i + 1}. ${line.name} ${line.spec || ''}${line.kind === 'FIELD' ? ' [현장 추가 · PC 품목 확인]' : ''}: 이전 수거 ${line.previous}${line.unit_label} · ${addedLabel} ${line.added}${line.unit_label} · 목표 누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}${line.reason ? ` · 사유 ${LABEL.reason[line.reason] || line.reason}` : ''}`),
+    ...rows.map((line, i) => `${i + 1}. ${line.name} ${line.spec || ''}${line.kind === 'FIELD' ? ' [현장 추가 · PC 품목 확인]' : ''}: 현장 확인 ${line.qty_confirmed}${line.unit_label} · 이전 수거 ${line.previous}${line.unit_label} · ${addedLabel} ${line.added}${line.unit_label} · 목표 누적 ${line.qty_collected}${line.unit_label} · 남음 ${line.remaining}${line.unit_label}${line.reason ? ` · 사유 ${LABEL.reason[line.reason] || line.reason}` : ''}`),
     matching, duplicate, 'PC에서 실제 수거일과 대조한 수량을 확인한 뒤 저장하세요.'].filter(Boolean).join('\n');
   const fallback = h('textarea', { readonly: true, hidden: true, rows: 6, class: 'search', 'aria-label': 'PC 전달 내용' }, note);
   const message = h('p', { class: 'small', role: 'status' });
@@ -188,7 +188,7 @@ async function screenPcInputHelp(id) {
         h('p', { class: 'small pc-help-spec' }, `규격 ${line.spec || '미지정'} · 단위 ${line.unit_label}`),
         line.kind === 'FIELD' ? h('p', { class: 'badge field pc-help-field' }, '현장 추가 · PC 품목 확인') : null,
         h('strong', { class: 'pc-help-quantity' + (!line.added ? ' zero' : '') }, `${addedLabel} ${line.added}${line.unit_label}`),
-        h('p', { class: 'small pc-help-compare' }, h('span', {}, `이전 수거 ${line.previous}${line.unit_label}`),
+        h('p', { class: 'small pc-help-compare' }, h('span', {}, `현장 확인 ${line.qty_confirmed}${line.unit_label}`), h('span', {}, `이전 수거 ${line.previous}${line.unit_label}`),
           h('span', {}, `목표 누적 ${line.qty_collected}${line.unit_label}`), h('span', {}, `남음 ${line.remaining}${line.unit_label}`)),
         line.reason ? h('p', { class: 'small pc-help-reason' }, `사유 ${LABEL.reason[line.reason] || line.reason}`) : null))));
   if (activeWrite) activeWrite.promise.then(refresh, refresh);

@@ -19,7 +19,7 @@
 | `unload_site` | `null` | 노선 | config | 예 | 반입지(하차 장소) 좌표·이름. 비우면 하차를 노선에 넣지 않음. |
 | `end_site` | `null` | 노선 | config | 예 | 종료지 좌표·이름. 비우면 반입지에서 최종 하차한 뒤 출발 차고지로 돌아옴. |
 | `unload_min` | `20` | 노선 | config | 예 | 하차 한 번에 걸리는 시간(분, 0~180). |
-| `max_unloads` | `2` | 노선 | config | 예 | 차량당 수거 중 최대 하차 횟수(0~5). |
+| `max_unloads` | `"auto"` | 노선 | config | 예 | 수거 중 하차 횟수. auto는 적재량과 운행 가능시간에 따라 결정하고, 0~5는 차량별 지정 한도입니다. 최종 하차는 별도입니다. |
 | `unload_hours` | `null` | 노선 | config | 예 | 반입지가 받는 시간 {start, end}(HH:MM). 비우면 따지지 않음. |
 | `lunch` | `null` | 노선 | config | 예 | 쉬는(점심) 시간 창 {start, end, minutes}. 비우면 없음. |
 | `base_first` | `true` | 노선 | config | 예 | 차고지에서 가까운 곳부터 도는 쪽을 먼저 고려. |

@@ -258,8 +258,8 @@ const fakeFetch = async (url, o) => {
 };
 const sr = await J.searchAddress({ key: 'TESTKEY', keyword: '서남로 1', fetchFn: fakeFetch });
 const q14 = new URL(jusoCalls[0].url);
-ok(q14.origin === 'https://business.juso.go.kr' && q14.pathname === '/addrlink/addrLinkApi.do' && [...q14.searchParams.keys()].sort().join() === 'confmKey,countPerPage,currentPage,keyword,resultType'
-  && q14.searchParams.get('keyword') === '서남로 1' && q14.searchParams.get('resultType') === 'json' && jusoCalls[0].o.credentials === 'omit' && jusoCalls[0].o.referrerPolicy === 'no-referrer', '검색 요청: business.juso.go.kr/addrlink/addrLinkApi.do, 검색어·승인키·쪽수·json만, 쿠키·Referer 없음');
+ok(q14.origin === 'https://business.juso.go.kr' && q14.pathname === '/addrlink/addrLinkApi.do' && [...q14.searchParams.keys()].sort().join() === 'addInfoYn,confmKey,countPerPage,currentPage,keyword,resultType'
+  && q14.searchParams.get('addInfoYn') === 'Y' && q14.searchParams.get('keyword') === '서남로 1' && q14.searchParams.get('resultType') === 'json' && jusoCalls[0].o.credentials === 'omit' && jusoCalls[0].o.referrerPolicy === 'no-referrer', '행안부 검색 요청의 허용 필드·행정동 추가정보 요청·개인정보 보호');
 ok(sr.total === 1 && sr.items[0].zip === '61400' && sr.items[0].bdNm === '가상빌딩', '검색 결과: 도로명·지번·건물명·우편번호');
 const co = await J.coordOf({ key: 'COORDKEY', item: sr.items[0], fetchFn: fakeFetch });
 const q14b = new URL(jusoCalls[1].url);

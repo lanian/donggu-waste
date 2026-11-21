@@ -57,6 +57,75 @@ class PCCollectionTests(unittest.TestCase):
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM result_event').fetchone()[0], count)
         self.assertEqual(len(self.active(r)), 1)
 
+    def test_replace_uncollected_item_preserves_original_fee_and_uses_official_new_price(self):
+        self.stock()
+        r, line = self.request()
+        replacement = next(x for x in S.FEE_ROWS.values() if x['status'] == 'CONFIRMED' and x['id'] != self.fee)
+        reason = '가상 현장 규격 교체'
+        data = self.body(r, 0, items=[{'line_id': line, 'confirmed_qty': 0, 'qty': 0}], reason=reason,
+                         field_items=[{'fee_rate_id': replacement['id'], 'confirmed_qty': 2, 'qty': 2, 'unit_price': 1}])
+        result = self.P.save(self.con, r['id'], data)
+        self.assertEqual((result['status'], result['added'], result['total'], result['labels_assigned']), ('DONE', 2, 2, 2))
+        self.assertEqual(self.P.save(self.con, r['id'], data), result)
+        current = S.get_request(self.con, r['id'])
+        old, new = current['state']['lines']
+        self.assertEqual((old['qty_received'], old['qty_confirmed'], old['qty_collected']), (3, 0, 0))
+        self.assertEqual((new['kind'], new['name'], new['price'], new['qty_collected']),
+                         ('FIELD', replacement['name'], replacement['price'], 2))
+        self.assertEqual(current['collection']['lines'][0]['received'], 3)
+        self.assertEqual(current['collection']['lines'][1]['received'], 0)
+        self.assertEqual((current['state']['fee']['received'], current['state']['fee']['final'], current['payment']['paid']),
+                         (r['items'][0]['amount'], replacement['price'] * 2, 0))
+        self.assertEqual({a['line_id'] for a in self.active(r)}, {new['line_id']})
+        detail = C.one(self.con, "SELECT detail FROM audit_log WHERE action='PC_COLLECTION'")['detail']
+        self.assertNotIn(reason, detail)
+        self.assertEqual(C.one(self.con, 'SELECT note FROM audit_note WHERE request_id=? ORDER BY audit_id DESC', (r['id'],))['note'], reason)
+        with self.assertRaises(C.UserError):
+            self.P.save(self.con, r['id'], self.body(r, 0, field_items=[
+                {'fee_rate_id': replacement['id'], 'confirmed_qty': 1, 'qty': 1}]))
+        self.assertEqual(len(self.active(r)), 2)
+
+    def test_raise_confirmed_total_after_partial_and_add_price_pending_item(self):
+        self.stock()
+        r, line = self.request()
+        self.P.save(self.con, r['id'], self.body(r, 1))
+        data = self.body(r, 0, items=[{'line_id': line, 'confirmed_qty': 5, 'qty': 3}],
+                         field_items=[{'name': '가상 현장 품목', 'unit': 'SET', 'confirmed_qty': 2, 'qty': 1, 'unit_price': 0}])
+        result = self.P.save(self.con, r['id'], data)
+        current = S.get_request(self.con, r['id'])
+        self.assertEqual((result['status'], result['added'], result['total'], len(self.active(r))), ('PARTIAL', 4, 5, 5))
+        self.assertEqual([(x['confirmed'], x['previous'], x['remaining']) for x in current['collection']['lines']],
+                         [(5, 4, 1), (2, 1, 1)])
+        self.assertEqual((current['state']['lines'][1]['unit_label'], current['state']['fee']['pending_count'],
+                          current['state']['fee']['final']), ('세트', 1, None))
+
+    def test_zero_confirmed_keeps_missed_visit_and_allows_later_correction(self):
+        r, line = self.request()
+        zero = self.body(r, 0, items=[{'line_id': line, 'confirmed_qty': 0, 'qty': 0}])
+        self.assertEqual(self.P.save(self.con, r['id'], zero)['status'], 'NOT_COLLECTED')
+        self.assertEqual(S.get_request(self.con, r['id'])['collection']['lines'][0]['confirmed'], 0)
+        revisit = self.body(r, 0, items=[{'line_id': line, 'confirmed_qty': 1, 'qty': 1}])
+        self.assertEqual(self.P.save(self.con, r['id'], revisit)['status'], 'DONE')
+
+    def test_reject_invalid_field_changes_without_changing_prior_collection(self):
+        r, line = self.request()
+        self.P.save(self.con, r['id'], self.body(r, 1))
+        valid = {'name': '가상 품목', 'unit': 'EA', 'confirmed_qty': 2, 'qty': 1}
+        invalid = [
+            {'items': [{'line_id': line, 'confirmed_qty': v, 'qty': 0}]} for v in (0, 10000, True, '3')
+        ] + [
+            {'items': [{'line_id': line, 'confirmed_qty': 2, 'qty': 2}]},
+            {'items': [{'line_id': line, 'confirmed_qty': 2, 'qty': 1}], 'reason': ''},
+            {'field_items': [{**valid, 'qty': 3}]}, {'field_items': [{**valid, 'confirmed_qty': 0}]},
+            {'field_items': [{**valid, 'fee_rate_id': 'no-such-rate'}]}, {'field_items': [{**valid, 'name': ' '}]},
+            {'field_items': [{**valid, 'unit': 'BAD'}]}, {'field_items': [{**valid, 'qty': False}]},
+            {'field_items': 'invalid'}, {'field_items': [valid], 'reason': ''},
+        ]
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(C.UserError):
+                self.P.save(self.con, r['id'], self.body(r, 2, **values))
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM result_import').fetchone()[0], 1)
+
     def test_invalid_input_never_writes_results(self):
         r, line = self.request()
         invalid = [{'items': []}, {'items': [{'line_id': 'wrong', 'qty': 1}]},
@@ -98,13 +167,16 @@ class PCCollectionTests(unittest.TestCase):
     def test_allocator_failure_rolls_back_events_version_and_inventory(self):
         self.stock()
         r, _ = self.request()
-        data = self.body(r, 1)
+        data = self.body(r, 1, field_items=[{'fee_rate_id': self.fee, 'confirmed_qty': 2, 'qty': 1}])
         with patch('dgpc.label_auto.sync', side_effect=RuntimeError('fixture failure')):
             with self.assertRaises(RuntimeError):
                 self.P.save(self.con, r['id'], data)
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM result_import').fetchone()[0], 0)
-        self.assertEqual(S.get_request(self.con, r['id'])['req_ver'], r['req_ver'])
+        current = S.get_request(self.con, r['id'])
+        self.assertEqual((current['req_ver'], len(current['state']['lines'])), (r['req_ver'], 1))
         self.assertEqual(len(self.active(r)), 0)
+        result = self.P.save(self.con, r['id'], data)
+        self.assertEqual((result['added'], result['labels_assigned']), (2, 2))
 
     def test_zero_collection_is_not_collected_and_releases_active_assignment(self):
         r, _ = self.request()

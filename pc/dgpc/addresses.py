@@ -191,7 +191,7 @@ _ROAD_RE = re.compile(r"[가-힣A-Za-z0-9·.]+(?:대로|로|길)\s*\d+(?![\d가]
 _JIBUN_RE = re.compile(r"[가-힣]+[0-9]*(?:동|리|가)\s*(?:산\s*)?\d")
 
 
-def address_warnings(con, address: str) -> list[str]:
+def address_warnings(con, address: str, *, jurisdiction: str | None = None) -> list[str]:
     """배출 주소 확인(막지 않음): 관할 밖 + 건물번호(번지) 없음·도로명/지번 형식 아님·주소칸의 전화번호."""
     a = re.sub(r"\(.*?\)", " ", address or "").strip()
     out = []
@@ -203,11 +203,11 @@ def address_warnings(con, address: str) -> list[str]:
         out.append("건물번호(번지)가 없습니다. 예: 예시로 12, 대인동 34-5")
     elif not (_ROAD_RE.search(a) or _JIBUN_RE.search(a)):
         out.append("도로명(…로·…길 + 건물번호) 또는 지번(…동 + 번지) 형식인지 확인하세요.")
-    return jurisdiction_warnings(con, address) + out
+    return jurisdiction_warnings(con, address, jurisdiction=jurisdiction) + out
 
 
-def jurisdiction_warnings(con, address: str) -> list[str]:
-    area = (get_setting(con, "jurisdiction") or "").strip()
+def jurisdiction_warnings(con, address: str, *, jurisdiction: str | None = None) -> list[str]:
+    area = ((get_setting(con, "jurisdiction") if jurisdiction is None else jurisdiction) or "").strip()
     if not area:
         return []
     a = re.sub(r"\(.*?\)", " ", address or "")

@@ -1977,6 +1977,7 @@ def v13():
     import urllib.request
     import zlib
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from unittest.mock import patch
     from dgpc import finance as FN, ops as OPS, privacy as PV, server as SV
     os.environ["DG_STATE"] = tempfile.mkdtemp(prefix="dg-pc-v13-")
     con = store.connect(create=True)
@@ -2602,8 +2603,11 @@ def v13():
     ok(http("GET", "/api/me", cookie=kim)[0] == 401, "세션 절대 만료(조작이 이어져도 10시간)")
     SV.SESSIONS["dead"] = {"exp": time.time() - 1, "created": time.time(), "user_id": "x", "username": "x", "role": "ADMIN"}
     ok(SV.cleanup_sessions() >= 1 and "dead" not in SV.SESSIONS, "만료 세션 정기 정리")
-    for _ in range(3):
-        http("POST", "/api/login", {"username": "kim13", "password": "wrong-password"})
+    # 세 실패와 요청별 집계가 실제 분 경계를 넘더라도 동일한 시험 분에 묶인다.
+    with patch.object(SV, "time", wraps=time) as server_clock:
+        server_clock.gmtime.return_value = time.gmtime()
+        for _ in range(3):
+            http("POST", "/api/login", {"username": "kim13", "password": "wrong-password"})
     SV.FAILS.clear()
     with SV.LOCK:
         SV.flush_login_fails(con, force=True)
@@ -2688,7 +2692,7 @@ def v13_refactor():
                   "numbered-labels/{id}/void", "numbered-labels/stock-dong", "label-auto/sync", "reports/forms/download", "requests/{id}/collection"), ("ADMIN", "INTAKE")),
         ("POST", ("numbered-labels/{id}/print", "reports/print"), ("ADMIN", "INTAKE", "LEAD")),
         ("GET", ("dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
-                 "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
+                 "dong-work/dong-detect", "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
         ("POST", ("dong-work/requests", "dong-work/requests/{id}", "dong-work/requests/{id}/cancel",
                   "dong-work/requests/{id}/collection", "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
         ("GET", ("dong-work/followups", "dong-work/followups/{id}"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
@@ -2717,7 +2721,7 @@ def v13_refactor():
     ok(all(SV.match(x["method"], sample(x["path"]))[0] is cur[(x["method"], x["path"])] for x in snap),
        "견본 주소가 모두 자기 경로로 맞춰짐(앞 경로에 가려지는 것 없음)")
     scoped_reads = {"bootstrap", "me", "dong-work", "dong-work/requests", "dong-work/requests/{id}", "dong-work/duplicates",
-                    "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv", "dong-work/followups", "dong-work/followups/{id}"}
+                    "dong-work/dong-detect", "dong-work/geocode", "dong-work/assignments", "dong-work/summary.csv", "dong-work/followups", "dong-work/followups/{id}"}
     ok(all(r.lock == ("write" if r.pattern in scoped_reads else "read") for r in SV.ROUTES if r.method == "GET") and
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
                                                              "external/test", "route", "route-path", "backup", "backup/auto", "backup/retention", "privacy/purge",

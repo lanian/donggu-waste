@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import unittest
+import uuid
 
 import test_pc_session_revocation as T
-from dgpc import privacy as PV
+from dgpc import area, official_forms, ops, privacy as PV
 
 
 class PrivacyWriteGuardsTest(T.SessionHTTPTestCase):
@@ -87,6 +88,88 @@ class PrivacyWriteGuardsTest(T.SessionHTTPTestCase):
         body = self.con.execute("SELECT body_json FROM result_event WHERE event_id='privacy-event'").fetchone()[0]
         self.assertNotIn("01000000000", body)
         self.assertNotIn("가상 비공개", body)
+
+    def test_pc_field_item_purge_preserves_quantities_accounting_and_labels(self):
+        with T.SV.LOCK:
+            dong_id = area.save_dong(self.con, {"name": "가상 파기동"})
+            T.S.receive_range(self.con, "0101", "0105", dong_id=dong_id, received_on="2020-01-01")
+            rid = T.S.create_request(self.con, {**self.request_body(), "dong": "가상 파기동"})["id"]
+            detail = T.S.get_request(self.con, rid)
+        catalog = detail["items"][0]
+        status, response, _ = self.post(f"requests/{rid}/collection", {
+            "req_ver": detail["req_ver"], "basis": detail["collection"]["basis"], "client_req_id": "purge-collection",
+            "collected_on": "2020-02-05", "reason": "가상 현장 확인",
+            "items": [{"line_id": catalog["line_id"], "qty": 1}],
+            "field_items": [{"fee_rate_id": catalog["fee_rate_id"], "confirmed_qty": 1, "qty": 1},
+                            {"name": "가상 개인이름 포함 품명", "spec": "가상 연락처 포함 규격", "confirmed_qty": 2, "qty": 2}]
+        }, self.admin_cookie)
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["labels_assigned"], 4)
+
+        def allocations():
+            return T.S.rows(self.con, """SELECT number_key,line_id,unit_index,dong_id FROM numbered_label_allocation
+                WHERE request_id=? ORDER BY number_key""", (rid,))
+
+        before = T.S.get_request(self.con, rid)
+        labels = allocations()
+        totals = official_forms.monthly_data(self.con, dong_id, "2020-02")["totals"]
+        self.assertEqual(totals["qty"], 4)
+        self.assertEqual(len(labels), 4)
+        self.assertIn("가상 개인이름 포함 품명", [line["name"] for line in before["state"]["lines"]])
+        self.assertEqual(self.purge()["count"], 1)
+        after = T.S.get_request(self.con, rid)
+        self.assertEqual(allocations(), labels)
+        self.assertEqual(official_forms.monthly_data(self.con, dong_id, "2020-02")["totals"], totals)
+        self.assertEqual(after["state"]["fee"], before["state"]["fee"])
+        self.assertEqual(after["payment"], before["payment"])
+        self.assertEqual(after["dong"], before["dong"])
+        free, = [line for line in after["state"]["lines"] if not line["fee_rate_id"]]
+        self.assertEqual((free["name"], free["spec"], free["qty_confirmed"], free["qty_collected"]), (PV.PURGED, "", 2, 2))
+        imported = self.con.execute("SELECT import_id FROM result_event WHERE request_id=? LIMIT 1", (rid,)).fetchone()[0]
+        review = ops.import_field_review(self.con, imported)["items"][0]
+        self.assertEqual(review["added_items"][-1]["name"], PV.PURGED)
+        self.assertEqual(review["added_items"][-1]["spec"], "")
+        listed, = [line for line in after["state"]["lines"] if line["kind"] == "FIELD" and line["fee_rate_id"]]
+        self.assertEqual((listed["name"], listed["spec"], listed["fee_rate_id"]), (catalog["name"], catalog["spec"], catalog["fee_rate_id"]))
+        self.assertIsNone(self.purge().get("repaired_requests"))
+
+    def test_repair_old_mobile_field_name_and_spec_only_once(self):
+        rid, _ = self.request(finished=True)
+        self.purge()
+        initial = self.row(rid)
+        with T.SV.LOCK, T.S.tx(self.con):
+            self.con.execute("INSERT INTO result_import (id,channel,device_id,package_sha256,imported_at) VALUES ('field-import','USB','fixture-phone','field-test','2018-01-01T00:00:00Z')")
+            self.con.execute("""INSERT INTO result_event
+                (event_id,import_id,device_id,device_seq,request_id,assign_ver,kind,body_json,apply_status,device_ts)
+                VALUES ('field-event','field-import','fixture-phone',1,?,1,'FIELD_ITEM_ADD',?,'APPLIED','2018-01-01T00:00:00Z')""",
+                (rid, json.dumps({"line_id": "field-line", "name": PV.PURGED, "spec": "가상 잔존 규격", "qty": 2, "pii_purged": True})))
+        self.assertEqual(self.purge().get("repaired_requests"), 1)
+        body = json.loads(self.con.execute("SELECT body_json FROM result_event WHERE event_id='field-event'").fetchone()[0])
+        self.assertEqual((body["name"], body["spec"], body["qty"]), (PV.PURGED, "", 2))
+        self.assertEqual(self.row(rid)["pii_purged_at"], initial["pii_purged_at"])
+        self.assertIsNone(self.purge().get("repaired_requests"))
+
+    def test_already_purged_solo_restore_scrubs_field_item_before_first_read(self):
+        rid, original, field = (str(uuid.uuid4()) for _ in range(3))
+        item = self.request_body()["items"][0]
+        request = {"request_id": rid, "receipt_no": "DG-20200101-0091", "pii_purged": "2020-01-01T00:00:00Z",
+                   "planned_date": "2020-01-01", "items": [{**item, "line_id": original}]}
+        records = [("FIELD_ITEM_ADD", {"line_id": field, "name": "가상 비공개 품명", "spec": "가상 비공개 규격",
+                                      "qty": 2, "unit": "EA", "unit_label": "개"}),
+                   ("ITEM_RESULT", {"line_id": field, "qty_confirmed": 2, "qty_collected": 1}),
+                   ("ATTEMPT", {"outcome": "PARTIAL"})]
+        events = [{"seq": i, "event_id": str(uuid.uuid4()), "request_id": rid, "kind": kind, "body": body}
+                  for i, (kind, body) in enumerate(records, 1)]
+        opened = {"format": "dg.backup/1", "state": {"mode": "SOLO", "requests": [request], "events": events}}
+        with T.SV.LOCK:
+            # 서버가 파일 복호화를 마친 뒤 사용하는 동일한 진입점으로 바로 확인한다.
+            summary = T.S.import_solo(self.con, b"fixture-solo-field", "", opened=opened)
+            state = T.S.get_request(self.con, rid)["state"]
+        self.assertEqual(summary["requests"], 1)
+        restored, = [line for line in state["lines"] if line["kind"] == "FIELD"]
+        self.assertEqual((restored["name"], restored["spec"], restored["qty_confirmed"], restored["qty_collected"]),
+                         (PV.PURGED, "", 2, 1))
+        self.assertEqual(state["fee"]["pending_count"], 1)
 
     def test_existing_purged_conflict_reason_only_is_repaired_once(self):
         rid, _ = self.request(finished=True)

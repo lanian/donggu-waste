@@ -17,18 +17,20 @@ const clearRouteTimes = (routes) => routes.forEach((route) => {
 
 // 품목별 취급 표시(적재 기준표): 사람·장비가 더 필요한 것은 주의, 싣는 방법은 안내
 const LOAD_TAG_CLS = { EQUIP: 'warn', TWO: 'warn', FRAGILE: 'warn', BASE: 'info', UPRIGHT: 'info', DRAIN: 'info' };
+const serviceText = (stop) => stop.service_min == null ? ''
+  : ` · 현장 ${stop.service_min}분${stop.extra_work_min ? ` (추가 ${stop.extra_work_min}분 포함)` : ''}`;
 // 하루 물량 점검: 고른 접수 합(적재·무게·작업 시간) ↔ 고른 팀이 하루에 감당할 양, 취급 표시별 곳 수, 경고
 function daySummaryCard(res) {
   const m = res.summary;
   if (!m) return null;
   const TL = res.tag_labels || {};
   return h('div', { class: 'card day-load' }, h('h2', {}, '하루 물량 점검'),
-    h('p', {}, `${m.requests}건 · 적재 추정 ${m.m3}m³ / 고른 팀 ${m.cap_m3}m³${m.trips_per_crew > 1 ? ` (팀마다 ${m.trips_per_crew}회 싣기, 하차 포함)` : ''}`
+    h('p', {}, `${m.requests}건 · 적재 추정 ${m.m3}m³ / 고른 팀 ${m.auto_unloads ? '1회 적재 ' : ''}${m.cap_m3}m³${m.auto_unloads ? ' (필요할 때 중간 하차)' : m.trips_per_crew > 1 ? ` (팀마다 ${m.trips_per_crew}회 싣기, 하차 포함)` : ''}`
       + ` · 무게 추정 ${m.kg.toLocaleString()}kg${m.cap_kg ? ` / ${m.cap_kg.toLocaleString()}kg` : ''} · 현장 작업 약 ${m.work_min}분 / 근무 ${m.shift_min}분`),
     Object.keys(m.tags || {}).length ? h('p', { class: 'row' }, ...Object.entries(m.tags).map(([t, n]) => chip(`${TL[t] || t} ${n}곳`, LOAD_TAG_CLS[t] || ''))) : null,
     res.must_relaxed ? h('div', { class: 'notice warn small' }, '오늘 필수 건이 모두 들어가지 않아, 넣을 수 있는 만큼 넣고 나머지를 미배정에 "오늘 필수였지만 넣지 못함"으로 표시했습니다. 팀을 더하거나 다른 건을 미루고 다시 계산하세요.') : null,
     ...(m.warnings || []).map((w) => h('div', { class: 'notice warn small' }, w)),
-    h('p', { class: 'muted small' }, '부피·무게·작업 시간은 품목별 적재 기준표의 추정치입니다(설정 → 수거팀·차량 → 적재량 보정에서 실측과 비교).'));
+    h('p', { class: 'muted small' }, '부피와 무게는 품목별 추정치입니다. 현장 작업시간에는 접수할 때 입력한 추가 시간도 포함됩니다.'));
 }
 // 카카오맵 웹 길찾기 링크(지점마다): 좌표와 "N번 수거지"만 담는다. 이름·주소는 넣지 않는다. (휴대폰 web/nav.js와 같은 형식)
 function kakaoLink(q, n) {
@@ -55,7 +57,7 @@ function assignmentReviewBody(res) {
         rt.stops.length ? h('ol', {}, ...rt.stops.map((stop) => {
           const q = res.requests[stop.request_id];
           const u = stop.unload_after;
-          return h('li', {}, `${stop.eta} · ${q.receipt_no} ${q.name} · 누적 적재 ${stop.load_m3}m³${res.uses_weight ? ` / ${stop.load_kg}kg` : ''}`,
+          return h('li', {}, `${stop.eta} · ${q.receipt_no} ${q.name}${q.spot_note ? ' · ' + q.spot_note : ''}${serviceText(stop)} · 누적 적재 ${stop.load_m3}m³${res.uses_weight ? ` / ${stop.load_kg}kg` : ''}`,
             u ? h('div', { class: 'small muted' }, `${u.eta} ${u.label} · ${u.final ? '최종 하차' : res.final_unload_return ? '중간 하차' : '하차'} ${u.volume_m3}m³ · ${u.minutes}분${u.final ? ' · 이후 차고지 복귀' : ''}`) : null);
         })) : h('p', {}, `${rt.final_unload.eta} ${rt.final_unload.label} · 최종 하차 ${rt.final_unload.volume_m3}m³ · ${rt.final_unload.minutes}분 · 이후 차고지 복귀`),
       ] : h('p', { class: 'muted' }, '변경 후 남은 방문 없음'))),
@@ -452,11 +454,12 @@ async function screenDispatch() {
         : '순서를 바꿔 반입지 경유 위치가 지워졌습니다. 적재가 넘치지 않는지 확인하거나 [노선 계산]을 다시 하세요.') : null,
       rt.overAt != null ? h('div', { class: 'notice warn small over-note' }, `${rt.overAt + 1}번부터 누적 적재(추정)가 차량 용량(${rt.capacity_m3 || 8}m³${rt.capacity_kg ? ` · ${rt.capacity_kg.toLocaleString()}kg` : ''})을 넘습니다. 반입지에 들러야 하면 [노선 계산]을 다시 하거나 몇 곳을 다른 팀·다른 날로 옮기세요.`) : null,
       ...rt.stops.flatMap((x, i) => [h('div', { class: 'stopline', 'data-request-id': x.request_id }, h('span', { class: 's' }, i + 1),
-        h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${loadTxt(x)}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
+        h('span', { class: 't' }, `${R[x.request_id].name} · ${R[x.request_id].address}${R[x.request_id].spot_note ? ' · ' + R[x.request_id].spot_note : ''}`, h('br'), h('span', { class: 'muted' }, `${x.eta ? '도착 ' + x.eta : '시간 재계산 필요'}${serviceText(x)}${loadTxt(x)}${R[x.request_id].appt[0] ? ` · 약속 ${R[x.request_id].appt[0]}~${R[x.request_id].appt[1] || ''}` : ''}`),
           h('small', { class: 'block muted' }, R[x.request_id].receipt_no),
           (R[x.request_id].items || []).length ? h('span', { class: 'stop-items small' }, h('br'), R[x.request_id].items.join(', ')) : null, h('br'),
           ...tagChips(x), x.over ? chip('적재 초과', 'bad') : null,
-          R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null, x.same_place > 1 ? chip(`같은 장소 ${x.same_place}건`) : null,
+          R[x.request_id].must_today ? chip('오늘 필수', 'warn') : null,
+          !p.needsReview && x.same_pickup > 1 ? chip(`같은 수거장 ${x.same_pickup}건`) : !p.needsReview && x.same_place > 1 ? chip(`인접 접수 ${x.same_place}건`) : null,
           R[x.request_id].dong ? chip(R[x.request_id].dong) : null,
           R[x.request_id].pref_crew_id && R[x.request_id].pref_crew_id !== rt.crew_id ? chip('동 담당 팀 아님', 'info') : null,
           kakaoLink(R[x.request_id], i + 1), map.visitButton(x.request_id, '지도에서 보기', 'small route-map-link')),
@@ -529,7 +532,7 @@ async function screenDispatch() {
         : '순서·팀이 바뀌어 시간 재계산이 필요합니다. 조정안은 보관됩니다. 순서 유지 재계산 후 확정하세요.') : null,
       ...roadBlockers.map((issue) => h('p', { class: 'notice bad', role: 'alert' }, `${issue.crew_name} · ${issue.message} 배정 확정이 보류되었습니다.`)),
       h('div', { class: 'notice matrix-note' }, note,
-        p.res.unload_site && (!finalReturn || p.res.summary?.trips_per_crew > 1) ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : null,
+        p.res.unload_site && (!finalReturn || p.res.summary?.auto_unloads || p.res.summary?.trips_per_crew > 1) ? ` · 적재가 차면 ${p.res.unload_site.label || '반입지'}에 들러 비움` : null,
         !p.res.unload_site ? ' · 반입지 좌표가 없어 차량 1회 적재 안에서만 계산 (설정에서 지정)' : null,
         finalReturn ? ' · 최종 하차 후 차고지 복귀' : p.res.end_site ? ` · 마지막에 ${p.res.end_site.label || '종료지'}로` : null,
         p.res.infeasible ? h('strong', {}, ' · 해를 찾지 못했습니다. 차량·근무시간·필수 포함 조건을 조정하세요.') : null,

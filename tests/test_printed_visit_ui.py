@@ -27,14 +27,23 @@ def main(exe=None):
             api(pc, pc_url, 'setup', {'username': 'printed_visit', 'display_name': '가상 배차 담당자', 'password': 'printed-visit-fixture-123'})
             day = api(pc, pc_url, 'bootstrap')['today']
             crew = api(pc, pc_url, 'crews', {'name': '가상 인쇄 수거팀', 'capacity_m3': 10})['id']
-            fee = next(row['id'] for row in json.loads((ROOT / 'data/fee_table.json').read_text(encoding='utf-8'))['rows']
+            fee = next(row for row in json.loads((ROOT / 'data/fee_table.json').read_text(encoding='utf-8'))['rows']
                        if row['status'] == 'CONFIRMED' and row['price'] > 0)
+            unlisted = {'name': '가상 현장 직접입력품', 'spec': '가상 비공개 규격 메모', 'qty': 1}
             long_memo = ''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(20))
             requests = [api(pc, pc_url, 'requests', {'name': f'인쇄검증 주민 {i}', 'address': f'가상구 시험용 상세주소 {i}',
                         'phone': '01000006261', 'memo': f'가상 비공개 메모 {i}' + (long_memo if i else ''), 'spot_note': f'가상 현장 위치 메모 {i}', 'planned_date': day,
                         'lat': 35.146 + i * 0.002, 'lon': 126.922 + i * 0.001,
-                        'items': [{'fee_rate_id': fee, 'qty': 1}]}) for i in range(2)]
+                        'items': [{'fee_rate_id': fee['id'], 'qty': 4}] if not i else
+                                 [{'fee_rate_id': fee['id'], 'qty': 1}, unlisted]}) for i in range(2)]
             requests = [api(pc, pc_url, 'requests/' + r['id']) for r in requests]
+            first = requests[0]
+            prior = api(pc, pc_url, 'requests/' + first['id'] + '/collection', {
+                'req_ver': first['req_ver'], 'basis': first['collection']['basis'], 'client_req_id': 'printed-partial',
+                'collected_on': day, 'items': [{'line_id': first['items'][0]['line_id'], 'confirmed_qty': 3, 'qty': 1}],
+                'field_items': [{'fee_rate_id': fee['id'], 'confirmed_qty': 2, 'qty': 1}],
+                'reason': '가상 현장 확인 수량 변경과 추가 수거'})
+            assert prior['status'] == 'PARTIAL'
             garage = {'lat': 35.147, 'lon': 126.920, 'label': '가상 차고지'}
             unload = {'lat': 35.152, 'lon': 126.926, 'label': '가상 반입지'}
             api(pc, pc_url, 'settings', {'depot': garage, 'unload_site': unload, 'external': {'travel_method': 'ESTIMATE'}})
@@ -66,6 +75,11 @@ def main(exe=None):
             sheet.reload()
             expect(sheet.locator('.visit-qr-cell')).to_have_count(2)
             protected_html = sheet.content()
+            expected_item = f'{fee["name"]} {fee["spec"]} 2{fee["unit_label"]} (재방문 남은 수량)'
+            expect(sheet.locator('tbody tr').first).to_contain_text(expected_item)
+            expect(sheet.locator('tbody tr').first).to_contain_text(f'1{fee["unit_label"]} (재방문 남은 수량) · 현장 추가')
+            assert unlisted['name'] not in protected_html and unlisted['spec'] not in protected_html
+            expect(sheet.locator('tbody tr').nth(1)).to_contain_text('직접 입력 품목')
             for request in requests:
                 assert request['name'] not in protected_html and request['address'] not in protected_html
             assert '010-0000-6261' not in protected_html and '01000006261' not in protected_html
@@ -104,6 +118,13 @@ def main(exe=None):
             expect(route).to_contain_text('직선')
             expect(sheet.locator('tbody')).to_contain_text(requests[0]['name'])
             expect(sheet.locator('tbody')).to_contain_text(requests[0]['address'])
+            expect(sheet.get_by_role('columnheader', name='이번 방문 수수료 (감면 전)')).to_be_visible()
+            expect(sheet.locator('tbody tr').first).to_contain_text(expected_item)
+            expect(sheet.locator('tbody tr').first.locator('td.r')).to_have_text(f'{fee["price"] * 3:,}원')
+            mixed = sheet.locator('tbody tr').nth(1)
+            expect(mixed).to_contain_text(unlisted['name'])
+            expect(mixed.locator('td.r')).to_contain_text(f'확정 소계 {fee["price"]:,}원')
+            expect(mixed.locator('td.r')).to_contain_text('단가 확인 대기')
             expect(sheet.locator('img.visit-qr')).to_have_count(0)
             assert not api(pc, pc_url, 'batches?date=' + day)[0]['bundles'], '배차표 출력은 팀 목록 전체 수신 확인을 만들지 않는다'
 
@@ -149,6 +170,13 @@ def main(exe=None):
             }""")
             scan(1)
             scan(0)
+            phone_items = app.evaluate("import('./core.js').then(({ st }) => st.daylist.stops.map(s => s.items))")
+            received = phone_items[0][0]
+            assert (received['qty'], received['prior_collected'], received['qty_received']) == (3, 1, 4)
+            added = next(line for line in phone_items[0] if line['line_kind'] == 'FIELD')
+            assert (added['qty'], added['prior_collected'], added['qty_received']) == (2, 1, 0)
+            pending = next(line for line in phone_items[1] if not line['fee_rate_id'])
+            assert (pending['name'], pending['spec'], pending['price_status']) == (unlisted['name'], unlisted['spec'], 'PENDING')
             got = app.evaluate("""async () => {
                 const { getSecure } = await import('./store.js');
                 const st = await getSecure('state');
@@ -184,12 +212,12 @@ def main(exe=None):
 
             # 이미 실은 물량만 반입해야 하는 갱신본에는 수거 행을 만들지 않는다.
             api(pc, pc_url, 'assign', {'date': day, 'plan': {crew: [{'request_id': requests[1]['id']}]}})
-            review = api(pc, pc_url, 'route', {'date': day, 'time_limit': 1, 'assignment_change': {
+            review = api(pc, pc_url, 'route', {'date': day, 'assignment_change': {
                 'op': 'remove', 'request_id': requests[1]['id'], 'start_after': '10:00',
                 'assign_ver': {crew: 3}, 'expected_order': {crew: [requests[1]['id']]},
                 'live_state': {crew: {'lat': 35.149, 'lon': 126.924, 'volume_m3': 0.5, 'weight_kg': 0}},
             }})
-            assert review['routes'][0]['stops'] == [] and review.get('review_basis'), review
+            assert review['routes'] and review['routes'][0]['stops'] == [] and review.get('review_basis'), review
             detached = api(pc, pc_url, 'assign/edit', {'date': day, 'review_basis': review['review_basis']})['batches'][0]
             assert detached['count'] == 0
             sheet.goto(pc_url + 'print/batch/' + detached['batch_id'][:8])

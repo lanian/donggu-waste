@@ -15,7 +15,7 @@ from dgpc.core import (
     ACTOR, KST, UserError, _after_close, _date_ok, _secs, audit, check_req_ver, close_info, get_setting, is_chosung, norm_addr, norm_phone, now, one,
     require_request_pii_writable, rows, safe_csv_writer, today_kst, tx,
 )
-from dgpc.derive import derive, payment_status, prefetch
+from dgpc.derive import FINAL, derive, payment_status, prefetch
 from dgpc.fees import FEE_ROWS, FEE_TABLE, fee_rows, fee_state
 
 CHANNELS = ("전화", "방문", "온라인", "단체(공동주택)", "현장", "기타")  # 접수 경로 (현장 = 수거 중 휴대폰으로 받은 접수)
@@ -76,6 +76,12 @@ def validate(data: dict) -> dict:
     for k in ("must_today", "urgent"):
         d[k] = 1 if data.get(k) else 0
     d["priority"] = int(data.get("priority") or 0)
+    extra = data.get("extra_work_min")
+    if extra is None or extra == "":
+        extra = 0
+    if not re.fullmatch(r"[0-9]{1,4}", str(extra)) or int(extra) > 1440:
+        raise UserError("추가 현장시간은 0~1440분 사이의 정수로 입력하세요.")
+    d["extra_work_min"] = int(extra)
     for k in ("lat", "lon"):
         v = data.get(k)
         d[k] = float(v) if v not in (None, "") else None
@@ -131,6 +137,8 @@ def _insert_request(con, d: dict, items: list[dict], data: dict, dong: str | Non
                  d["appt_end"] or None, d["must_today"], d["urgent"], d["priority"], ts, ts, dong, d["channel"], levy,
                  red.get("reduction_code"), red.get("reduction_rate"), red.get("reduction_label"), red.get("reduction_proof"), red.get("reduction_checker"), red.get("reduction_at"),
                  red.get("reduction_round_unit")))
+    if d["extra_work_min"]:
+        con.execute("UPDATE request SET extra_work_min=? WHERE id=?", (d["extra_work_min"], rid))
     for it in items:
         _insert_item(con, rid, it)
     return rid, receipt
@@ -205,11 +213,12 @@ def update_request(con, rid: str, data: dict, reason: str) -> dict:
                     (rid, cur["req_ver"], json.dumps(_snapshot(con, rid), ensure_ascii=False), reason.strip(), now()))
         con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note=?, memo=?, lat=?, lon=?,
             geo_source=COALESCE(?, geo_source), planned_date=?, appt_start=?, appt_end=?, must_today=?, urgent=?, priority=?, updated_at=?,
-            dong=?, channel=? WHERE id=?""",
+            dong=?, channel=?, extra_work_min=? WHERE id=?""",
                     (d["name"], d["phone"], d["address"], d["spot_note"], d["memo"], d["lat"], d["lon"],
                      (data.get("geo_source") if data.get("geo_source") in ("MANUAL", "ADDR") else "MANUAL") if d["lat"] is not None and (d["lat"], d["lon"]) != (cur["lat"], cur["lon"]) else None,
                      d["planned_date"] or None, d["appt_start"] or None, d["appt_end"] or None, d["must_today"], d["urgent"],
-                     d["priority"], now(), dong, d["channel"], rid))
+                     d["priority"], now(), dong, d["channel"],
+                     d["extra_work_min"] if "extra_work_min" in data else cur["extra_work_min"], rid))
         for lid in old_items:
             if lid not in new_ids:
                 con.execute("UPDATE request_item SET removed=1 WHERE line_id=?", (lid,))
@@ -340,13 +349,64 @@ def _quick_sql(key: str) -> tuple[str, list]:
     }.get(key, ("1=1", []))
 
 
-def _enrich(con, r: dict, pre: dict | None = None) -> dict:
-    r["items"] = (pre["items"].get(r["id"]) if pre else None) or rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (r["id"],))
-    r["state"] = derive(con, r, pre)
-    r["warnings"] = address_warnings(con, r["address"])
-    r["assigned_to"] = (one(con, """SELECT c.name, b.work_date FROM active_assignment a JOIN assignment_batch b ON b.id=a.batch_id
-        JOIN crew c ON c.id=b.crew_id WHERE a.request_id=?""", (r["id"],)) or None)
-    return r
+def revisit_appointments(con, requests):
+    """현재 일정과 마지막 일정 변경 기록이 같은 재방문 약속만 확정으로 표시한다."""
+    appointments = {r["id"]: {"date": r["planned_date"], "start": r["appt_start"], "end": r["appt_end"],
+                              "confirmed": False} for r in requests}
+    dated = [rid for rid, appointment in appointments.items() if appointment["date"]]
+    if not dated:
+        return appointments
+    logged = rows(con, """SELECT entity_id,detail FROM audit_log WHERE action='REVISIT_APPT' AND id IN (
+        SELECT MAX(id) FROM audit_log WHERE entity='request' AND entity_id IN (SELECT value FROM json_each(?))
+            AND action IN ('REVISIT_APPT','CARRY','RESCHEDULE') GROUP BY entity_id)""", (json.dumps(dated),))
+    for record in logged:
+        appointment = appointments[record["entity_id"]]
+        try:
+            data = json.loads(record["detail"])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict):
+            appointment["confirmed"] = all(data.get(k) == appointment[k] for k in ("date", "start", "end"))
+    return appointments
+
+
+def _request_progress(r, assignment, revisit_confirmed):
+    state = r["state"]
+
+    def totals(field):
+        by_unit = {}
+        for line in state["lines"]:
+            if line[field] > 0:
+                unit = line.get("unit_label") or line.get("unit") or "단위 미상"
+                by_unit[unit] = by_unit.get(unit, 0) + line[field]
+        return [{"qty": qty, "unit_label": unit} for unit, qty in by_unit.items()]
+
+    collected = totals("qty_collected")
+    evidence = state["field"]
+    outcome = state["outcome"] if isinstance(state["outcome"], str) else None
+    return {"status": r["status"], "last_outcome": outcome,
+            "assigned_to": assignment["name"] if assignment else None, "pay_status": r["pay_status"],
+            "remaining": totals("remaining"), "collected": collected, "planned_date": r["planned_date"],
+            "revisit_confirmed": revisit_confirmed,
+            "has_visit": bool(evidence["arrive"] or evidence["stickers"] or collected or outcome in FINAL),
+            "has_location": r["lat"] is not None and r["lon"] is not None}
+
+
+def _enrich(con, requests, *, list_view=False):
+    if not requests:
+        return
+    pre = prefetch(con, [r["id"] for r in requests], ("items", "events", "links", "assigned_to"))
+    appointments = revisit_appointments(con, requests)
+    jurisdiction = (get_setting(con, "jurisdiction") or "") if list_view else None
+    for r in requests:
+        rid = r["id"]
+        r["items"] = pre["items"][rid]
+        r["state"] = derive(con, r, pre)
+        assignment = pre["assigned_to"].get(rid)
+        r["progress"] = _request_progress(r, assignment, appointments[rid]["confirmed"])
+        if list_view:
+            r["assigned_to"] = assignment
+            r["warnings"] = address_warnings(con, r["address"], jurisdiction=jurisdiction)
 
 
 def _request_sql(f: dict, scope_ids=None) -> tuple[str, list]:
@@ -434,8 +494,7 @@ def search_requests(con, f: dict | None = None, scope_ids: set[str] | None = Non
     pages = max(1, -(-total // size))
     page = max(1, min(pages, page_))
     part = rows(con, "SELECT * FROM request" + where + order + " LIMIT ? OFFSET ?", args + [size, (page - 1) * size])
-    pre = prefetch(con, [r["id"] for r in part], ("items", "events", "links"))
-    part = [_enrich(con, r, pre) for r in part]
+    _enrich(con, part, list_view=True)
     return {"rows": part, "total": total, "page": page, "size": size, "pages": pages, "counts": counts}
 
 
@@ -448,10 +507,9 @@ def get_request(con, rid: str) -> dict:
     r = one(con, "SELECT * FROM request WHERE id=?", (rid,))
     if not r:
         raise UserError("접수를 찾을 수 없습니다.")
-    r["items"] = rows(con, "SELECT * FROM request_item WHERE request_id=? AND removed=0", (rid,))
+    _enrich(con, [r])
     r["versions"] = rows(con, "SELECT req_ver, reason, at FROM request_version WHERE request_id=? ORDER BY req_ver DESC", (rid,))
     r["locked_lines"] = sorted(locked_lines(con, rid))
-    r["state"] = derive(con, r)
     from dgpc.pc_collection import preview as collection_preview
     r['collection'] = collection_preview(con, r)
     r["events"] = rows(con, """SELECT event_id, kind, body_json, apply_status, conflict_reason, device_ts FROM result_event

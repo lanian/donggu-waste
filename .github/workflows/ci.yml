@@ -87,6 +87,11 @@ jobs:
       - run: python tests/test_pc_unread_body.py   # 본문을 읽기 전 거절해도 응답이 끊기지 않음(Windows RST)
       - run: python tests/test_dong_work.py
       - run: python tests/test_request_followups.py
+      - run: python tests/test_request_progress.py
+      - run: python tests/test_dong_auto.py
+      - run: python tests/test_pickup_routing.py
+      - run: python tests/test_auto_unloads.py
+      - run: python tests/test_mobile_field_import.py
       - run: python tests/test_team_result_recovery.py
       - run: python tests/test_recon_exceptions.py
       - run: python tests/test_osrm_runtime.py
@@ -151,6 +156,7 @@ jobs:
           - test_pc_menu_dismiss
           - test_fee_calculator_ui
           - test_pc_collection_ui
+          - test_completed_pickup_qr
           - test_pc_field_import_ui
           - test_pc_field_review_ui
           - test_collection_quick_ui
@@ -172,6 +178,8 @@ jobs:
           - test_mobile_final_unload_home
           - test_mobile_layout
           - test_mobile_intake_save
+          - test_mobile_intake_flow
+          - test_mobile_intake_location
           - test_mobile_intake_picker
           - test_mobile_result_confirmation
           - test_mobile_field_layout
@@ -186,6 +194,11 @@ jobs:
           - test_vworld_ui
           - test_dong_work_e2e
           - test_request_followups_ui
+          - test_request_progress_ui
+          - test_pc_address_dong_ui
+          - test_pickup_dispatch_ui
+          - test_unload_settings_ui
+          - test_auto_unload_dispatch
           - test_team_result_recovery_ui
           - test_recon_exceptions_ui
           - test_osrm_map_ui

@@ -493,13 +493,16 @@ def _detached_final(history, final=None):
     return {**site, 'depot': history['end'], 'stop_count': 0}
 
 
-def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
+def _read_daylist(con, batch_id: str):
+    from dgpc.pc_collection import SOURCE as pc_collection_source
+
     b = one(con, "SELECT b.*, c.name AS crew_name, c.device_id FROM assignment_batch b JOIN crew c ON c.id=b.crew_id WHERE b.id=?", (batch_id,))
     if not b:
         raise UserError("배정을 찾을 수 없습니다.")
     if b["status"] != "ACTIVE":
         raise UserError("새 배정 버전이 있습니다. 최신 배정으로 전송하세요.")
     stops = []
+    pc_completed = set()
     # 배정 확정 때 저장한 반입지 경유(하차) 위치: 그 지점을 마친 뒤 반입지에 들른다
     planned, history = _route_record(b["route_json"])
     if history and history.get('path', {}).get('reason') == 'NoRoute':
@@ -539,8 +542,12 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
         # "levy_no": 부과번호 → "lv". 감면액 끝수 단위(접수에 저장된 값, 10원일 때만) → "ru"
         red_ = {"reduction": {"rate": int(r["reduction_rate"] or 0), "label": r["reduction_label"] or "",
                               **({"round_unit": 10} if request_round_unit(r) == 10 else {})}} if r.get("reduction_code") else {}
-        from dgpc.pc_collection import revision as pc_collection_revision
-        pc_ver = pc_collection_revision(con, r['id'])
+        pc = one(con, """SELECT json_extract(body_json,'$.pc_req_ver') AS version, json_extract(body_json,'$.outcome') AS outcome
+            FROM result_event WHERE request_id=? AND device_id=? AND kind='ATTEMPT' AND apply_status='APPLIED'
+            ORDER BY rowid DESC LIMIT 1""", (r['id'], pc_collection_source))
+        pc_ver = pc['version'] if pc else 0
+        if r['status'] == 'DONE' and pc and pc['outcome'] == 'DONE':
+            pc_completed.add(r['id'])
         stops.append({**extra_u, **red_, **({'pc_collection_ver': pc_ver} if pc_ver else {}), "seq": s["seq"], "request_id": r["id"], "receipt_no": r["receipt_no"], "req_ver": r["req_ver"], "dong": r["dong"] or "", "levy_no": r.get("levy_no") or "",
                       "name": r["name"], "phone": r["phone"], "address": r["address"], "spot_note": r["spot_note"], "memo": r["memo"],
                       "lat": r["lat"], "lon": r["lon"], "eta": s["eta"] or (r["appt_start"] or ""),
@@ -561,7 +568,31 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
         payload['carry_load'] = carry
     if b.get("device_id"):  # 휴대폰이 지워도 되는 것: PC가 이미 받은 기록 순번·회수한 사진 (dgproto가 서명해 싣는다)
         payload["rel"] = release_info(con, b["device_id"])
-    return payload, b
+    return payload, b, pc_completed, history
+
+
+def _phone_daylist(payload, pc_completed, history):
+    """이전 휴대폰도 PC 완료 건을 다시 열지 않도록 전송 목록에서만 제외한다."""
+    if not pc_completed:
+        return payload
+    stops = []
+    for stop in payload['stops']:
+        if stop['request_id'] in pc_completed:
+            if stops and stop.get('unload_after'):
+                stops[-1]['unload_after'] = stop['unload_after']
+        else:
+            stops.append(stop.copy())
+    phone = {**payload, 'stops': stops}
+    if (final := _last_final_unload(stops)) and final.get('depot'):
+        stops[-1]['unload_after'] = {**final, 'stop_count': len(stops)}
+    if not stops and (detached := _detached_final(history, _last_final_unload(payload['stops']))):
+        phone['final_unload'] = detached
+    return phone
+
+
+def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
+    payload, batch, pc_completed, history = _read_daylist(con, batch_id)
+    return _phone_daylist(payload, pc_completed, history), batch
 
 
 REL_GENS = 4  # rel.g 에 싣는 최근 세대 수
@@ -722,23 +753,33 @@ def print_sheet_stamp(con, batch_id: str) -> list[dict]:
 
 def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positions: bool = False, current_road=None) -> dict:
     """인쇄용 배차표. 보호 인쇄는 이 팀 휴대폰용 암호화 QR을 방문별로 만든다."""
-    payload, b = build_daylist(con, batch_id)
+    payload, b, pc_completed, history = _read_daylist(con, batch_id)
     stops = payload["stops"]
+    detached = payload.get('final_unload')
     unload_frames = None
     if protected:
         if not b["device_id"]:
             raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정 → 수거팀에서 등록된 휴대폰을 연결하세요.")
         dev = _transfer_device(con, b["device_id"])
         sign = pc_key(con, "sign")
-        compact = P.compact_daylist({**payload, "rel": None}, FEE_ROWS)
-        for stop, row in zip(stops, compact["s"], strict=True):
+        phone = _phone_daylist(payload, pc_completed, history)
+        compact = P.compact_daylist({**phone, "rel": None}, FEE_ROWS)
+        print_stops = {stop['request_id']: stop for stop in stops}
+        for stop in stops:
+            stop['qr_frames'] = []
+        for stop, row in zip(phone['stops'], compact["s"], strict=True):
             visit_schema = 'dg.visit/2' if compact['schema'] == 'dg.daylist/3' else 'dg.visit/1'
             visit = {**compact, "schema": visit_schema, "s": [row]}
             bundle_id, envelope, _ = _seal_daylist(visit, dev, sign)
-            stop["qr_frames"] = P.split_frames(envelope, bundle_id)
-        if payload.get('final_unload'):
+            print_stops[stop['request_id']]["qr_frames"] = P.split_frames(envelope, bundle_id)
+        if phone_final := phone.get('final_unload'):
             bundle_id, envelope, _ = _seal_daylist({**compact, 'schema': 'dg.unload/1'}, dev, sign)
             unload_frames = P.split_frames(envelope, bundle_id)
+            if not detached:
+                # 수거 QR 없이 최종 하차 QR만 필요한 경우 인쇄에서도 하차를 한 번만 표시한다.
+                if _last_final_unload(stops):
+                    del stops[-1]['unload_after']
+                detached = phone_final
     with tx(con):
         detail = {"stops": len(stops), "protected": protected}
         if protected and route_positions:
@@ -749,7 +790,7 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
         st["status"] = one(con, "SELECT status FROM request WHERE id=?", (st["request_id"],))["status"]
     sheet = {"work_date": payload["work_date"], "crew": payload["crew"], "assign_ver": payload["assign_ver"], "fee_version": payload["fee_table"]["version_id"],
              "stops": stops, "printed_at": dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M")}
-    if detached := payload.get('final_unload'):
+    if detached:
         sheet['final_unload'] = detached
         if unload_frames:
             sheet['unload_qr_frames'] = unload_frames
@@ -761,7 +802,6 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
         end = None if final else get_setting(con, 'end_site')
         sheet['map_route'] = _map_depots(requests, crew, list_dongs(con), get_setting(con, 'depot'), end,
                                          saved_depot=final.get('depot') if final else None)
-        _, history = _route_record(b["route_json"])
         if history:
             m = sheet['map_route']
             m.update(depot=history.get('depot'), end=history.get('end'))

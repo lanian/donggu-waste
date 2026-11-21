@@ -50,6 +50,7 @@ def main():
             full = page.get_by_role('button', name='전달 내용 복사', exact=True)
             receipt = page.get_by_role('button', name='접수번호 복사', exact=True)
             expect(full).to_be_enabled()
+            expect(body.locator('.pc-help-item').first).to_contain_text('현장 확인 5쪽')
             expect(body).to_contain_text('목표 누적 3쪽')
             expect(body).to_contain_text('이전 수거 1쪽')
             expect(body).to_contain_text('이번 수거 2쪽')
@@ -66,7 +67,7 @@ def main():
             full.click()
             page.wait_for_function('window.__copies?.length===2')
             note = page.evaluate('window.__copies[1]')
-            for required in ('목표 누적 3쪽', '이번 수거 2쪽', '현장 추가', '스티커·필증 없음·불일치', '다시 입력하지'):
+            for required in ('현장 확인 5쪽', '목표 누적 3쪽', '이번 수거 2쪽', '현장 추가', '스티커·필증 없음·불일치', '다시 입력하지'):
                 assert required in note, note
             for private in ('가상 주민', '01000000000', '가상시 가상동', 'FIELD_MEMO_PRIVATE_SENTINEL'):
                 assert private not in note, note

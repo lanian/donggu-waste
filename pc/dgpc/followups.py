@@ -6,6 +6,7 @@ import re
 
 from . import area, core as C, dong_work as DW
 from .derive import derive
+from .intake import revisit_appointments
 from .results import _apply_revisit
 
 _STATES = ("OPEN", "IN_PROGRESS", "DONE")
@@ -93,11 +94,7 @@ def _signal(case):
 
 
 def _appointment(con, request):
-    value = {"date": request["planned_date"], "start": request["appt_start"], "end": request["appt_end"]}
-    logged = C.one(con, """SELECT action,detail FROM audit_log WHERE entity='request' AND entity_id=?
-        AND action IN ('REVISIT_APPT','CARRY','RESCHEDULE') ORDER BY id DESC LIMIT 1""", (request["id"],))
-    data = json.loads(logged["detail"]) if logged and logged["action"] == "REVISIT_APPT" else {}
-    return {**value, "confirmed": bool(value["date"] and all(data.get(k) == v for k, v in value.items()))}
+    return revisit_appointments(con, [request])[request["id"]]
 
 
 def detail(con, user, rid):

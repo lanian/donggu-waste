@@ -900,6 +900,11 @@ class Handler(BaseHTTPRequestHandler):
         """허용 범위 안의 접수만 중복 후보로 제공."""
         return DW.duplicates(self.c, self.user, qs)
 
+    @endpoint("GET", "dong-work/dong-detect", DW.READ_ROLES, lock="write")
+    def ep_dong_work_detect(self, qs):
+        """주소에서 행정동을 판별하고 담당 범위 안의 후보만 제공."""
+        return DW.detect_dong(self.c, self.user, qs.get("address", ""))
+
     @endpoint("GET", "dong-work/geocode", DW.READ_ROLES, lock="write")
     def ep_dong_work_geocode(self, qs):
         """선택 동을 검사한 뒤 공개 주소 자료의 위치 찾기(외부 호출 없음)."""
@@ -2333,7 +2338,7 @@ class Handler(BaseHTTPRequestHandler):
             mi = res.get("matrix_info") or {}
             with LOCK, S.tx(CON):
                 S.audit(CON, "settings", "kakao", "ROUTE_MATRIX", {"calls": mi.get("api_calls", 0), "estimated": mi.get("fallback_pairs", 0)})
-        res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "lat": r["lat"],
+        res["requests"] = {r["id"]: {"receipt_no": r["receipt_no"], "name": r["name"], "address": r["address"], "spot_note": r["spot_note"], "lat": r["lat"],
                                      "lon": r["lon"], "must_today": r["must_today"], "appt": [r["appt_start"], r["appt_end"]],
                                      "status": r["status"], "dong": r["dong"], "pref_crew_id": pref.get(r["id"]), 'required_crew_id': context['crew_required'].get(r['id']),
                                      "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])],
@@ -2477,12 +2482,27 @@ class Handler(BaseHTTPRequestHandler):
         rows_html = []
         for s in d["stops"]:
             done_note = {"DONE": "수거 완료", "PARTIAL": "일부 수거 (남은 품목)", "NOT_COLLECTED": "미수거 (재방문)", "ON_HOLD": "보류"}.get(s.get("status"), "")
-            items = (f"<b>{e(done_note)}</b><br>" if done_note else "") + "<br>".join(e(f'{i["name"]} {i["spec"]} {i["qty"]}{i["unit_label"]}' + (" (재방문 남은 수량)" if s.get("revisit") else "")) for i in s["items"])
+            item_texts = []
+            subtotal = pending = 0
+            for item in s["items"]:
+                qty = item["qty"] - item["prior_collected"]
+                if protected and item["fee_rate_id"] not in S.FEE_ROWS:
+                    text = f"직접 입력 품목 · 수량 {qty}"
+                else:
+                    text = f'{item["name"]} {item["spec"]} {qty}{item["unit_label"]}'
+                if s["revisit"]:
+                    text += " (재방문 남은 수량)"
+                if item["line_kind"] == "FIELD":
+                    text += " · 현장 추가"
+                item_texts.append(e(text))
+                if item["price_status"] == "CONFIRMED":
+                    subtotal += item["unit_price"] * qty
+                else:
+                    pending += 1
+            items = (f"<b>{e(done_note)}</b><br>" if done_note else "") + "<br>".join(item_texts)
             tg = routing.tags_of(s["items"])
             if tg:
                 items += f'<br><small class="tags">취급: {e(" · ".join(routing.TAG_LABEL[t] for t in tg))}</small>'
-            amt = sum((i.get("amount") or 0) for i in s["items"])
-            pend = any(i.get("price_status") != "CONFIRMED" for i in s["items"])
             appt = f'{s["appt"][0] or ""}~{s["appt"][1] or ""}' if s.get("appt") else ""
             lead = f'<tr><td class="n">{s["seq"]}</td><td>{e(s.get("eta") or "")}<br><small>{e(appt)}</small></td>'
             checks = '<td class="chk"></td><td class="chk"></td></tr>'
@@ -2496,12 +2516,15 @@ class Handler(BaseHTTPRequestHandler):
                     qrs.append(f'<div class="visit-qr-part"><img class="visit-qr" src="{image}" alt="{s["seq"]}번 수거 건 QR {i}/{len(frames)}">{part}</div>')
                 rows_html.append(f'{lead}{dong}<td>{items}</td><td class="visit-qr-cell">{"".join(qrs)}</td>{checks}')
             else:
+                amount = f"{subtotal:,}원" if item_texts else "—"
+                if pending:
+                    amount = (f"확정 소계 {subtotal:,}원<br>" if len(item_texts) > pending else "") + "단가 확인 대기"
                 phone = s["phone"]
                 if len(phone) >= 9:
                     phone = f'{phone[:3]}-{phone[3:-4]}-{phone[-4:]}'
                 rows_html.append(f'{lead}<td><b>{e(s["name"])}</b><br>{e(phone)}</td>{dong}'
                                  f'<td>{e(s["address"])}<br><small>{e(s.get("spot_note") or "")}</small></td><td>{items}</td>'
-                                 f'<td class="r">{amt:,}원{"<br><small>확인 대기 있음</small>" if pend else ""}</td>{checks}')
+                                 f'<td class="r">{amount}</td>{checks}')
             if s.get("unload_after"):
                 u = s["unload_after"]
                 action = "최종 하차 후 차고지 복귀" if u.get("final") is True else "하차"
@@ -2521,7 +2544,7 @@ class Handler(BaseHTTPRequestHandler):
             if positions:
                 note += ' 노선도에는 수거 위치가 표시되므로 출력물을 업무용으로만 사용하세요.'
         else:
-            columns = '<th>신청인</th><th>행정동</th><th>배출 위치</th><th>품목</th><th>금액</th>'
+            columns = '<th>신청인</th><th>행정동</th><th>배출 위치</th><th>품목</th><th>이번 방문 수수료 (감면 전)</th>'
             note = '개인정보(이름·연락처·주소)가 들어 있습니다. 휴대폰 고장 대비 예비본으로만 쓰고, 업무가 끝나면 파쇄하세요. 결과는 휴대폰 앱에 기록합니다.'
         page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>배차표 {e(d['work_date'])} {e(d['crew'])}</title>
 <link rel="stylesheet" href="/print.css"><script src="/print.js" defer></script></head><body>

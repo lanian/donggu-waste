@@ -49,6 +49,20 @@ export const putRaw = (k, v) => tx('readwrite', (s) => s.put(v, k));
 export const delRaw = (k) => tx('readwrite', (s) => s.delete(k));
 export const keysRaw = () => tx('readonly', (s) => s.getAllKeys());
 
+// QR 화면이 바뀌거나 두 창이 번갈아 읽어도 다른 묶음의 조각은 보존한다.
+export function saveCollectedBundle(key, bundle, cutoff) {
+  return tx('readwrite', (store) => {
+    const read = store.get('collect');
+    read.onsuccess = () => {
+      const bundles = read.result || {};
+      for (const [id, entry] of Object.entries(bundles)) if (entry.firstSeen < cutoff) delete bundles[id];
+      if (bundle) bundles[key] = { ...bundle, parts: { ...bundles[key]?.parts, ...bundle.parts } };
+      else delete bundles[key];
+      store.put(bundles, 'collect');
+    };
+  }, storageEpoch);
+}
+
 // 자동 잠금은 이 기기의 비밀이 아닌 설정이다. 업무 상태나 PIN/데이터 키는 바꾸지 않는다.
 export const readAutoLock = async () => (await getRaw('auto-lock'))?.enabled !== false;
 export async function saveAutoLock(enabled) {
@@ -180,7 +194,7 @@ async function writeSecureRecord(k, record, recovery, observed, epoch) {
     };
   });
 }
-export async function putSecure(k, obj) {
+export async function putSecure(k, obj, { recoverOnFailure = true } = {}) {
   const epoch = storageEpoch, seq = ++secureWriteSeq;
   const recovery = pendingSecure.get(k), observed = { known: false, base: undefined, expected: null };
   secureWrites.set(k, seq);
@@ -193,7 +207,7 @@ export async function putSecure(k, obj) {
   } catch (e) {
     // 다시 저장할 때도 같은 기준으로 대조한다(충돌했으면 계속 충돌로 남아 다른 창의 기록을 덮지 않음).
     const ref = recovery || observed.expected || observed;
-    if (epoch === storageEpoch && secureWrites.get(k) === seq)
+    if (recoverOnFailure && epoch === storageEpoch && secureWrites.get(k) === seq)
       pendingSecure.set(k, { record, base: ref.base, known: ref.known });
     throw e;  // 화면의 저장 실패 안내는 실제 디스크 저장 성공 때까지 유지한다.
   }

@@ -507,7 +507,19 @@ function settingsBasic() {
   const lus = h('input', { type: 'time', value: lu.start || '', 'aria-label': '쉬는 시간 창 시작' }), lue = h('input', { type: 'time', value: lu.end || '', 'aria-label': '쉬는 시간 창 끝' });
   const lum = h('input', { type: 'number', value: lu.minutes || 60, min: 10, class: 'w-xs', 'aria-label': '쉬는 시간(분)' });
   const bfirst = h('input', { type: 'checkbox', checked: st.base_first !== false, 'aria-label': '큰 짐 먼저 싣기 선호' });
-  const umin = h('input', { type: 'number', value: st.unload_min, class: 'w-xs', 'aria-label': '하차 시간(분)' }), umax = h('input', { type: 'number', value: st.max_unloads, min: 0, max: 5, class: 'w-xs', 'aria-label': '차량당 수거 중 최대 하차 횟수' });
+  const umin = h('input', { type: 'number', value: st.unload_min, class: 'w-xs', 'aria-label': '하차 시간(분)' });
+  const autoUnload = st.max_unloads == null || st.max_unloads === 'auto';
+  const unloadMode = h('select', { 'aria-label': '수거 중 하차 방식' },
+    h('option', { value: 'auto', selected: autoUnload }, '필요할 때 자동 하차'),
+    h('option', { value: 'manual', selected: !autoUnload }, '차량당 횟수 지정'));
+  const unloadLimit = h('input', { type: 'number', value: autoUnload ? 2 : st.max_unloads, min: 0, max: 5, step: 1, required: true,
+    class: 'w-xs', 'aria-label': '차량당 수거 중 최대 하차 횟수' });
+  const limitFields = h('span', { class: 'row', hidden: autoUnload }, '차량당 최대', unloadLimit, '회', h('small', { class: 'muted' }, '0회는 수거 중 하차를 생략합니다.'));
+  const unloadHint = h('span', { class: 'muted small', hidden: !autoUnload }, '차량 적재량과 남은 수거 일정에 따라 반입지를 여러 번 경유할 수 있습니다.');
+  unloadMode.addEventListener('change', () => {
+    limitFields.hidden = unloadMode.value === 'auto';
+    unloadHint.hidden = !limitFields.hidden;
+  });
   const ft = (label, ...el) => h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, label), h('div', { class: 'ft-v' }, ...el));
   const contact = h('input', { value: st.contact_info, class: 'fill', 'aria-label': '문의처' });
   const guide = h('textarea', { rows: 2, class: 'fill', 'aria-label': '배출 장소 안내' }, st.disposal_guide);
@@ -516,14 +528,20 @@ function settingsBasic() {
   const roundUnit = h('select', { 'aria-label': '감면액 끝수 단위' }, ...(boot.reduction_round_units || [1, 10]).map((u) => h('option', { value: u, selected: +u === +(st.reduction_round_unit || 1) }, u === 1 ? '1원 (원 미만 버림)' : `${u}원 (${u}원 미만 버림)`)));
   return [h('div', { class: 'card' }, h('h2', {}, '노선 계산'), h('div', { class: 'ftable' },
       ft('공통 차고지', dlat, dlon, dlabel, coordTools(dlat, dlon, '차고지', dlabel), h('span', { class: 'muted small' }, '행정동에서 개별 차고지를 지정하지 않은 팀에 적용')), ft('로컬 OSRM', osrm, h('span', { class: 'muted small' }, '주소를 비우면 함께 받은 도로 자료를 사용합니다.')), ft('작업 시간', '지점당 기본', sb, '분 + 품목당', sp, '분 (추정치)'),
-      ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차', umin, '분 · 차량당 수거 중 최대', umax, '회'),
+      ft('반입지', ulat, ulon, ulabel, coordTools(ulat, ulon, '반입지', ulabel), '하차 1회', umin, '분'),
+      ft('수거 중 하차', unloadMode, limitFields, unloadHint),
       ft('반입지 받는 시간', uhs, '~', uhe, h('span', { class: 'muted small' }, '비우면 따지지 않음')),
       ft('쉬는 시간', lus, '~', lue, '사이에', lum, '분', h('span', { class: 'muted small' }, '예: 11:30~13:30 사이 60분. 비우면 넣지 않음')),
       ft('적재 순서', h('label', { class: 'row' }, bfirst, '큰 짐(장롱·침대·대형 냉장고 등)은 차가 비어 있을 때 싣는 순서를 선호'), h('span', { class: 'muted small' }, '이동시간이 비슷하면 큰 짐을 먼저')), ft('종료지', elat, elon, elabel, coordTools(elat, elon, '종료지', elabel), h('span', { class: 'muted small' }, '비우면 차고지로 돌아옴')),
       ft('관할 구역', jur, h('span', { class: 'muted small' }, '주소의 구 이름이 다르면 접수할 때 경고 (막지는 않음)'))),
-    h('p', { class: 'small muted' }, '반입지를 등록하고 종료지를 비우면 마지막 수거 후 반입지에서 하차하고 출발 차고지로 복귀합니다. 반입지 받는 시간과 하차 소요시간이 반영됩니다.'),
-    h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
-      unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: umax.value,
+    h('p', { class: 'small muted' }, '반입지를 등록하고 종료지를 비우면 마지막 수거 후 반입지에서 하차하고 출발 차고지로 복귀합니다. 최종 하차는 중간 하차 한도와 별도로 계산합니다. 반입지 받는 시간과 하차 소요시간이 반영됩니다.'),
+    h('div', { class: 'row' }, btn('저장', wrap(async () => {
+      if (unloadMode.value === 'manual' && !unloadLimit.validity.valid) {
+        unloadLimit.focus();
+        throw new Error('중간 하차 한도는 0~5 사이의 정수로 입력하세요.');
+      }
+      await post('settings', { depot: { lat: dlat.value, lon: dlon.value, label: dlabel.value }, osrm_url: osrm.value, service_min_base: sb.value, service_min_per_item: sp.value,
+      unload_site: { lat: ulat.value, lon: ulon.value, label: ulabel.value }, end_site: { lat: elat.value, lon: elon.value, label: elabel.value }, jurisdiction: jur.value, unload_min: umin.value, max_unloads: unloadMode.value === 'auto' ? 'auto' : unloadLimit.valueAsNumber,
       unload_hours: { start: uhs.value, end: uhe.value }, lunch: { start: lus.value, end: lue.value, minutes: lum.value }, base_first: bfirst.checked }); toast('저장했습니다'); setBoot(null); render(); }, routeMsg), 'primary')), routeMsg),
     h('div', { class: 'card' }, h('h2', {}, '접수증·안내 문구·월보'), isPlaceholderContact() ? h('div', { class: 'notice warn small' }, '문의처가 아직 기본 문구입니다. 접수증·주민 안내 문구에 그대로 나가니 전화번호를 넣으세요.') : null,
       h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('납부 안내', payGuide, h('span', { class: 'muted small' }, '납부 방법·기한 (300자, 접수증·안내 문구)')), ft('감면액 끝수', roundUnit, h('span', { class: 'muted small' }, '새로 감면하는 접수부터 적용 (이미 감면한 접수는 그때 단위 그대로)')), ft('월보 제목', title)),

@@ -4,7 +4,7 @@ import * as F from '../field.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
 import { BUILTIN_FEES } from '../fees-data.js';
-import { backBtn, btn, COLLECT_TTL_MS, commit, errMsg, flowSteps, footBar, go, h, mdOf, msgBox, render, say, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
+import { backBtn, btn, COLLECT_TTL_MS, commit, commitListReceipt, errMsg, flowSteps, footBar, go, h, mdOf, msgBox, render, say, st, startCamera, stopCamera, toast, todayKST, ui, unsent } from '../core.js';
 import { purgeReleased } from './export.js';
 
 async function loadCollector() {
@@ -91,9 +91,10 @@ async function screenScan() {
   const count = h('p', { class: 'count' }, '목록 QR을 비추세요');
   const miss = h('p', { class: 'small' });
   const msg = msgBox();
-  const retry = btn('QR 다시 읽기', () => render(), 'big', { hidden: true });
+  let readyToSave = !!current && col.complete(current);
+  const retry = btn(readyToSave ? '받은 QR 저장 다시 시도' : 'QR 다시 읽기', () => readyToSave ? finish() : render(), 'big', { hidden: !readyToSave });
   const owner = st, scanRoute = location.hash;
-  const stillScanning = () => st === owner && S.isUnlocked() && location.hash === scanRoute;
+  const stillScanning = () => msg.isConnected && st === owner && S.isUnlocked() && location.hash === scanRoute;
   const show = () => {
     if (!current) return;
     const b = col.bundles[current], got = Object.keys(b.parts).length;
@@ -105,18 +106,30 @@ async function screenScan() {
   };
   show();
   let finishing = false, reads = 0;
+  const clearFrames = async (mustRemove = false) => {
+    if (!stillScanning()) return false;
+    // 조각은 암호화된 임시 사본이다. 이 정리가 실패해도 이미 저장된 목록과 수신 코드는 유효하다.
+    try { await S.saveCollectedBundle(current, null, Date.now() - COLLECT_TTL_MS); }
+    catch {
+      if (mustRemove) { say(msg, '받던 조각을 지우지 못했습니다. 다시 시도하세요.', true); return false; }
+    }
+    col.drop(current);
+    return true;
+  };
   const finish = async () => {
-    finishing = true; stopCamera(); say(msg, '확인 중…');
+    if (finishing || !stillScanning()) return;
+    finishing = true; retry.disabled = true; stopCamera(); say(msg, '확인 중…');
     try {
       const envBytes = col.assemble(current);
       const opened = await P.openEnvelope(envBytes, await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
+      if (!stillScanning()) return;
       if (opened.payload.schema === 'dg.qrtest/1') {
         // 실측 모드: 가상 목록이므로 저장하지 않고 시간·장수·인식 횟수와 복원 확인 코드만 보여 준다
         const b = col.bundles[current];
         const exp = P.expandDaylist({ ...opened.payload, schema: 'dg.daylist/2' }, BUILTIN_FEES);
         ui.qrtest = { secs: ((Date.now() - b.firstSeen) / 1000).toFixed(1), frames: b.total, reads: reads, count: exp.stops.length, code: opened.receipt.slice(0, 4), params: opened.payload.params };
-        col.drop(current); await S.putRaw('collect', col.bundles);
-        go('#/qrtest-result');
+        await clearFrames();
+        if (stillScanning()) go('#/qrtest-result');
         return;
       }
       const printed = ['dg.visit/1', 'dg.visit/2'].includes(opened.payload.schema);
@@ -132,11 +145,12 @@ async function screenScan() {
         if (opened.header.btype !== P.TYPE_DAYLIST || opened.header.assignVer !== pl.assign_ver) throw Object.assign(new Error(''), { code: 'BAD_VERSION' });
         const id = mergePrintedVisit(pl);
         if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
-        col.drop(current); await S.putRaw('collect', col.bundles);
+        await clearFrames();
         if (stillScanning()) { toast('수거 건을 가져왔습니다'); go('#/stop/' + id); }
         return;
       }
       const hash = P.toHex(await P.sha256(envBytes));
+      if (!stillScanning()) return;
       const old = st.daylist;
       if (printedUnload && (pl.work_date < todayKST() || (old?.work_date === pl.work_date && old.crew !== pl.crew))) {
         throw Object.assign(new Error(''), { code: pl.work_date < todayKST() ? 'QR_OLD_DATE' : 'QR_VISIT_REFRESH' });
@@ -148,7 +162,8 @@ async function screenScan() {
       const relDone = rel ? F.applyRelease(st, rel) : null;
       if (relDone) {
         const purged = purgeReleased();
-        await commit();
+        if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_LIST_SAVE' });
+        if (!stillScanning()) return;
         ui.relDone = { ...relDone, purged };
       } else ui.relDone = null;
       if (hash === st.lastBundleHash) { say(msg, '이미 받은 목록입니다. 바뀐 내용이 없습니다.'); }
@@ -186,44 +201,53 @@ async function screenScan() {
           pl.carry_since_seq = samePlan && Number.isSafeInteger(old.carry_since_seq) ? old.carry_since_seq : st.seq;
         }
         st.daylist = pl; st.lastBundleHash = hash;
+        if (!printedUnload || st.lastReceipt?.work_date !== pl.work_date || st.lastReceipt?.ver !== pl.assign_ver) {
+          st.lastReceipt = null; ui.receipt = null;
+        }
         // 현장 접수: PC 목록에 들어왔으면(같은 접수 ID) PC 것을 쓰고, PC 반영이 확인된 다른 날 건은 이 휴대폰에서 내린다
         reconcileFieldStops(pl);
         // 이 휴대폰에서 바꾼 방문 순서는 새 목록(새 날짜·갱신본)에는 쓰지 않는다
         if (st.localOrder && (st.localOrder.work_date !== pl.work_date || st.localOrder.assign_ver !== pl.assign_ver)) st.localOrder = null;
         ui.diffSummary = diff && diff.summary ? diff.summary : '';
-        if (!printedUnload && !(await commit()) && carry) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
         if (ui.diffSummary) toast(ui.diffSummary);
       }
       if (printedUnload) {
         if (st.lastReceipt?.work_date !== pl.work_date || st.lastReceipt?.ver !== pl.assign_ver) st.lastReceipt = null;
         if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
-        col.drop(current); await S.putRaw('collect', col.bundles);
+        await clearFrames();
         if (stillScanning()) { ui.receipt = null; toast('최종 하차 일정을 가져왔습니다'); go('#/home'); }
         return;
       }
-      col.drop(current); await S.putRaw('collect', col.bundles);
+      // 재시도에서는 메모리의 묶음 해시가 이미 같을 수 있다. 수신 코드는 목록을 디스크에 쓴 뒤에만 공개한다.
+      if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_LIST_SAVE' });
+      if (!stillScanning()) return;
       const rc = opened.receipt;
-      ui.receipt = { code: rc.slice(0, 4) + ' ' + rc.slice(4), count: pl.stops.filter((s) => !s.removed).length, ver: pl.assign_ver, diff: ui.diffSummary || '', rel: ui.relDone };
-      ui.diffSummary = ''; ui.relDone = null;
+      const received = { code: rc.slice(0, 4) + ' ' + rc.slice(4), count: pl.stops.filter((s) => !s.removed).length, ver: pl.assign_ver, diff: ui.diffSummary || '', rel: ui.relDone };
       // 수신 코드는 PC 담당자가 받아 적을 때까지 첫 화면에 남긴다(다시 보기 단추). [PC에 알렸음]을 누르거나 다음 목록을 받으면 내린다.
-      st.lastReceipt = { code: rc, at: new Date().toISOString(), work_date: pl.work_date, ver: pl.assign_ver, count: ui.receipt.count, diff: ui.receipt.diff, told: false };
-      if (!(await commit()) && carry) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
-      go('#/received');
+      const receipt = { code: rc, at: new Date().toISOString(), work_date: pl.work_date, ver: pl.assign_ver, count: received.count, diff: received.diff, told: false, bundleHash: hash };
+      if (!await commitListReceipt(receipt)) throw Object.assign(new Error(''), { code: 'QR_LIST_SAVE' });
+      await clearFrames();
+      if (stillScanning()) {
+        ui.receipt = received; ui.diffSummary = ''; ui.relDone = null;
+        go('#/received');
+      }
     } catch (e) {
+      if (!stillScanning()) return;
+      readyToSave = e.code === 'QR_LIST_SAVE' || e.code === 'QR_VISIT_SAVE';
+      if (!readyToSave) { await clearFrames(); current = null; }
       say(msg, errMsg(e), true);
-      retry.hidden = false;
-      col.drop(current); await S.putRaw('collect', col.bundles);
-      current = null;
+      retry.textContent = readyToSave ? '받은 QR 저장 다시 시도' : 'QR 다시 읽기';
+      finishing = false; retry.disabled = false; retry.hidden = false;
     }
   };
-  setTimeout(() => startCamera(video, async (text) => {
-    if (finishing) return;
+  if (!readyToSave) setTimeout(() => stillScanning() && startCamera(video, async (text) => {
+    if (finishing || !stillScanning()) return;
     let r;
     try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') say(msg, errMsg(e), true); return; }
     if (!current) current = r.key;
     if (r.key !== current) { say(msg, '다른 목록의 QR이 섞였습니다. 지금 받던 목록을 계속 비춰 주세요.', true); return; }
     reads += 1;
-    if (!r.dup) { say(msg, ''); S.putRaw('collect', col.bundles); if (navigator.vibrate) navigator.vibrate(20); }
+    if (!r.dup) { say(msg, ''); S.saveCollectedBundle(current, col.bundles[current], Date.now() - COLLECT_TTL_MS).catch(() => { if (!finishing && stillScanning()) say(msg, '조각을 임시 저장하지 못했습니다. 이 화면에서 QR을 계속 읽어 주세요.'); }); if (navigator.vibrate) navigator.vibrate(20); }
     show();
     if (col.complete(current)) finish();
   }).catch((e) => { say(msg, errMsg(e), true); }), 0);
@@ -232,7 +256,7 @@ async function screenScan() {
     flowSteps(['QR 비추기', '조각 모으기', '수신 코드'], current ? 1 : 0),
     h('section', { class: 'card cam-card' }, video, bar, count, miss, msg, retry,
       h('p', { class: 'small' }, '팀 목록은 수신 코드를 표시하고, 종이 배차표 QR은 해당 수거 건을 엽니다. 중간에 멈춰도 24시간 안에 이어서 받을 수 있습니다.')),
-    current ? btn('받던 조각 버리고 처음부터', async () => { col.drop(current); await S.putRaw('collect', col.bundles); render(); }, 'ghost link') : null);
+    current ? btn('받던 조각 버리고 처음부터', async () => { if (!finishing && await clearFrames(true) && stillScanning()) render(); }, 'ghost link') : null);
 }
 
 // 수신 코드 표시: 앞 글자 R(휴대폰 → PC)은 따로 보여 주고, 코드(.fp)는 PC에 그대로 넣는 8자만

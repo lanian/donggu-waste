@@ -41,6 +41,8 @@ function pendingIntakeScreen(state, operation) {
 }
 // 같은 양식을 다시 그려도 저장 예약은 하나다. 잠금 전 기존 flush 경계에서 초안을 저장한다.
 const draftSaves = new WeakMap();
+// 품목 담기는 같은 폼을 새 DOM으로 그린다. 주소 선택의 세대와 현재 표시만 폼 수명 동안 공유한다.
+const addressLookups = new WeakMap();
 function draftFor(form, state) {
   const previous = draftSaves.get(form);
   if (previous?.state === state) return previous;
@@ -55,7 +57,7 @@ function draftFor(form, state) {
     if (!pending) return;
     cancel();
     if (st !== state || ui.form !== form || !isUnlocked() || intakeOperations.has(state)) return;
-    const { pick, dupAck, addrAck, reason, id: _i, lat, lon, dongCands, picking, ...data } = form;
+    const { pick, dupAck, addrAck, reason, id: _i, lat, lon, picking, ...data } = form;
     state.intakeDraft = { ...data, addrLat: lat, addrLon: lon };
     return commit();
   };
@@ -83,9 +85,11 @@ function screenIntake(id) {
   if (!ui.form || ui.form.id !== (id || null)) {
     const src = editing || st.intakeDraft || {};
     ui.form = { id: id || null, name: src.name || '', phone: src.phone || '', address: src.address || '', dong: src.dong || '', spot_note: src.spot_note || '', memo: src.memo || '',
-      lat: src.addrLat ?? null, lon: src.addrLon ?? null, zip: src.zip || '', dongCands: [],
+      lat: (editing ? src.lat : src.addrLat) ?? null, lon: (editing ? src.lon : src.addrLon) ?? null,
+      geoSource: editing ? src.geo_source : src.geoSource ?? (src.addrLat != null ? 'ADDR' : null),
+      zip: editing ? '' : src.zip || '', dongCands: !editing && Array.isArray(src.dongCands) ? src.dongCands : [], dongAuto: src.dongAuto ?? (src.dong ? false : null),
       planned_date: src.planned_date || (onField ? pcWorkDate() : todayKST(1)), eta: src.eta || '', channel: src.channel || '현장', items: JSON.parse(JSON.stringify(src.items || [])), reason: '', dupAck: false,
-      pick: { q: '', sel: null, qty: 1 } };
+      extra_work_min: src.extra_work_min ?? '', pick: { q: '', sel: null, qty: 1 } };
   }
   const f = ui.form;
   const ownerState = st;
@@ -97,16 +101,54 @@ function screenIntake(id) {
   const saveDraft = () => draft?.schedule();
   if (f.picking) return pickScreen({ items: f.items, state: f.pick, table, locked, onChange: saveDraft,
     onDone: () => { f.picking = false; render(); setTimeout(() => { const el = document.getElementById('intake-items'); if (el) el.scrollIntoView({ block: 'start' }); }, 0); } });
+  const controls = {};
+  let invalidControl = null;
+  if (!addressLookups.has(f)) addressLookups.set(f, { version: 0, pending: false });
+  const addressLookup = addressLookups.get(f);
+  function changeAddress(value) {
+    addressLookup.version++;
+    addressLookup.pending = false;
+    f.address = value;
+    f.lat = f.lon = f.geoSource = null; f.zip = ''; f.dongCands = [];
+    f.dupAck = f.addrAck = false;
+    if (f.dongAuto === true) f.dong = '';
+  }
   const field = (key, label, attrs = {}) => {
-    const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search', value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
+    const required = ['name', 'phone', 'address', 'planned_date', 'reason'].includes(key);
+    const input = h(attrs.multiline ? 'textarea' : 'input', { ...attrs, multiline: null, class: 'search',
+      'aria-required': required ? 'true' : null, 'aria-label': required ? label : null,
+      value: attrs.multiline ? null : f[key], rows: attrs.multiline ? 2 : null });
+    controls[key] = input;
+    input.addEventListener('input', () => { if (invalidControl === input) clearInvalid(); });
     if (attrs.multiline) input.value = f[key];
-    input.addEventListener('input', () => { if (!currentView() || intakeOperations.has(ownerState)) return; f[key] = input.value; f.dupAck = false; if (key === 'dong') f.dongAuto = false; if (key === 'address' || key === 'dong') { f.addrAck = false; addrCheck(); } saveDraft(); });
+    input.addEventListener('input', () => {
+      if (!currentView() || intakeOperations.has(ownerState)) return;
+      if (key === 'address' && f.address !== input.value) changeAddress(input.value);
+      else f[key] = input.value;
+      f.dupAck = false;
+      if (key === 'dong') f.dongAuto = false;
+      if (key === 'address' || key === 'dong') { f.addrAck = false; addrCheck(); }
+      saveDraft();
+    });
     if (key === 'address') input.addEventListener('blur', () => addrCheck(true));
-    return h('label', { class: 'fld' }, h('span', {}, label), input);
+    return h('label', { class: 'fld' }, h('span', {}, label, required && key !== 'reason' ? requiredMark() : null), input);
   };
+  const requiredMark = () => h('small', { class: 'intake-required', 'aria-hidden': 'true' }, '필수');
   // 배출 주소 확인·행정동 추천(휴대폰 안 자료로만): 형식·관할·전화번호 섞임, 같은 도로의 이전 접수로 동 추천, 동 이름 오타
   const addrBox = h('div', { class: 'addr-check', 'aria-live': 'polite' });
   const dongBox = h('div', { class: 'dong-check', 'aria-live': 'polite' });
+  const geoNote = h('p', { class: 'small addr-geo' });
+  function showLocation() {
+    if (addressLookup.pending) {
+      geoNote.hidden = false;
+      geoNote.textContent = '주소의 위치를 확인하는 중입니다. 지금 접수를 저장하면 좌표 없이 저장됩니다.';
+      return;
+    }
+    geoNote.hidden = f.lat == null || f.lon == null;
+    geoNote.textContent = geoNote.hidden ? '' : (f.geoSource === 'ADDR' ? `위치: 주소 검색 좌표(건물 출입구)${f.zip ? ` · 우편번호 ${f.zip}` : ''}` : '위치: 저장된 배출 위치') + '. 접수 뒤 [위치 고치기]에서 조정할 수 있습니다.';
+  }
+  addressLookup.refresh = showLocation;
+  showLocation();
   const history = () => allStops().filter((x) => x.dong && x.address && !x.pii_purged).map((x) => ({ address: x.address, dong: x.dong }));
   const addrIssues = () => {
     const c = J.checkAddress(f.address);
@@ -115,26 +157,35 @@ function screenIntake(id) {
     return out;
   };
   const addrCheck = (final = false) => {
+    showLocation();
+    const dongIn = controls.dong;
+    if (dongIn && dongIn.value !== f.dong) dongIn.value = f.dong;
     if (!f.address.trim()) { addrBox.replaceChildren(); dongBox.replaceChildren(); return; }
     const c = J.checkAddress(f.address);
     addrBox.replaceChildren(...((final || c.warnings.length && f.address.length > 6) ? c.warnings.map((w) => h('p', { class: 'small warnp' }, '⚠ ' + w)) : []));
-    const g = J.guessDong(f.address, history(), knownDongs());
-    const dongIn = document.querySelector('#intake-dong');
-    if (g.dong && (!f.dong || f.dongAuto) && f.dong !== g.dong) {
+    const g = f.dongCands.length ? { candidates: f.dongCands, reason: '주소 검색 결과' } : J.guessDong(f.address, history(), knownDongs());
+    if (!c.outside && g.automatic && !f.dong && f.dongAuto !== false) {
       f.dong = g.dong; f.dongAuto = true; if (dongIn) dongIn.value = g.dong; saveDraft();
     }
     const kids = [];
     if (g.dong && f.dong === g.dong) kids.push(h('p', { class: 'small ok-note' }, `✓ 동: ${g.dong} (${g.reason})`));
-    else if (g.candidates.length > 1 || (g.dong && f.dong !== g.dong)) {
+    else if (g.candidates.length) {
       kids.push(h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 추천' }, h('span', { class: 'small' }, `동 후보${g.reason ? ` (${g.reason})` : ''}: `),
-        ...(g.candidates.length ? g.candidates : [g.dong]).map((x) => btn(x, () => { f.dong = x; f.dongAuto = false; f.addrAck = false; if (dongIn) dongIn.value = x; saveDraft(); addrCheck(); }, 'opt chipbtn' + (f.dong === x ? ' on' : '')))));
+        ...g.candidates.map((x) => btn(x, () => { f.dong = x; f.dongAuto = false; f.addrAck = false; if (dongIn) dongIn.value = x; saveDraft(); addrCheck(); }, 'opt chipbtn' + (f.dong === x ? ' on' : '')))));
     } else if (!f.dong && final) kids.push(h('p', { class: 'small muted' }, onField ? '동을 고르지 않으면 PC가 주소로 정합니다.' : '동을 모르면 비워 두어도 됩니다.'));
     if (f.dong && !J.isKnownDong(f.dong, knownDongs())) kids.push(h('p', { class: 'small warnp' }, `⚠ '${f.dong}'은(는) 동구 행정동 목록에 없습니다. 오타인지 확인하세요.`));
     dongBox.replaceChildren(...kids);
   };
   const itemsBox = h('div', {});
   const totalBox = h('p', { class: 'small' });
+  const pickButton = btn('', async () => {
+    if (!currentView() || intakeOperations.has(ownerState)) return;
+    f.picking = true;
+    await render();
+    if (currentForm() && f.picking && location.hash === targetHash) scrollTo(0, 0);
+  }, 'big');
   const drawItems = () => {
+    pickButton.textContent = f.items.length ? '+ 품목 더 담기' : '+ 품목 담기';
     itemsBox.replaceChildren(...(f.items.length ? f.items.map((it, i) => h('div', { class: 'line orig' },
       h('div', { class: 'lhead' }, h('div', { class: 'lname' }, h('strong', {}, `${it.name} ${it.spec}`)),
         it.price_status === 'CONFIRMED' ? h('span', { class: 'amt' }, won(it.unit_price * it.qty)) : h('span', { class: 'amt pending' }, '확인 대기')),
@@ -149,7 +200,23 @@ function screenIntake(id) {
     totalBox.textContent = `접수 금액: ${won(sum)}${pend ? ` + 확인 대기 ${pend}건 (최종 금액 미확정)` : ''}`;
   };
   drawItems();
-  const msg = h('p', { class: 'msg', role: 'status', 'aria-live': 'polite' });
+  const msg = h('p', { id: 'intake-message', class: 'msg', role: 'status', 'aria-live': 'polite' });
+  function clearInvalid() {
+    if (!invalidControl) return;
+    invalidControl.removeAttribute('aria-invalid');
+    invalidControl.removeAttribute('aria-errormessage');
+    invalidControl = null;
+    say(msg, '');
+  }
+  function focusInvalid(control, message) {
+    clearInvalid();
+    invalidControl = control;
+    control.setAttribute('aria-invalid', 'true');
+    control.setAttribute('aria-errormessage', msg.id);
+    say(msg, message, true);
+    control.focus({ preventScroll: true });
+    if (control !== pickButton) control.scrollIntoView({ block: 'center' });
+  }
   const dupBox = h('div', {});
   const saveLabel = fieldEdit ? '고친 내용 저장' : editing ? '수정 저장' : onField ? '접수 저장' : '접수 등록';
   const syncSave = () => {
@@ -169,15 +236,22 @@ function screenIntake(id) {
     const now = new Date().toISOString();
     const dong = (f.dong || '').trim().slice(0, 20);
     if (dong) st.recentDongs = [dong, ...(st.recentDongs || []).filter((x) => x !== dong)].slice(0, 12);
-    const data = { name: f.name.trim(), phone, address: f.address.trim(), dong, spot_note: f.spot_note.trim(), memo: f.memo.trim(), planned_date: f.planned_date, eta: f.eta, items: JSON.parse(JSON.stringify(f.items)),
-      ...(f.lat != null && f.lon != null ? { lat: f.lat, lon: f.lon, geo_source: 'ADDR' } : {}) };
+    const data = { name: f.name.trim(), phone, address: f.address.trim(), dong, spot_note: f.spot_note.trim(), memo: f.memo.trim(), planned_date: f.planned_date, eta: f.eta, extra_work_min: Number(f.extra_work_min || 0), items: JSON.parse(JSON.stringify(f.items)),
+      ...(f.lat != null && f.lon != null ? { lat: f.lat, lon: f.lon, ...(f.geoSource ? { geo_source: f.geoSource } : {}) } : {}) };
+    const localPlace = { dongAuto: f.dongAuto };
+    const addressChanged = editing && (editing.address || '').trim() !== data.address;
     if (fieldEdit) {
       // 보내기 전의 휴대폰 접수 고치기: PC는 아직 모르므로 보낼 기록(FIELD_INTAKE)과 목록을 함께 바꾼다
       const ch = FIELD_CHANNELS.includes(f.channel) ? f.channel : (editing.channel || '현장');
-      const moved = editing.address !== data.address && data.lat == null;  // 주소를 바꿨는데 새 좌표가 없으면 옛 위치를 버린다
-      Object.assign(editing, data, { channel: ch, appt: data.eta ? [data.eta, null] : null, updated_at: now });
       const body0 = { ...fieldEdit.ev.body };
-      if (moved) { for (const k of ['lat', 'lon', 'geo_source']) { delete editing[k]; delete body0[k]; } }
+      if (addressChanged && data.lat == null) { for (const k of ['lat', 'lon', 'geo_source']) { delete editing[k]; delete body0[k]; } }
+      for (const e of operation.oldFixes) {
+        // 기존 PC도 이해하는 현장 메모로 남겨, 순번을 보존하고 예전 위치가 재적용되는 것을 막는다.
+        const { lat, lon, source, acc, ...meta } = e.body;
+        e.kind = 'FIELD_MEMO';
+        e.body = { ...meta, text: '배출 주소가 변경되어 이전 주소의 위치 보정을 해제했습니다.' };
+      }
+      Object.assign(editing, data, localPlace, { channel: ch, appt: data.eta ? [data.eta, null] : null, updated_at: now });
       fieldEdit.ev.body = { ...body0, ...withWorker({}), channel: ch, ...data,
         items: data.items.map(({ line_id, fee_rate_id, name, spec, unit, unit_label, qty }) => ({ line_id, fee_rate_id, name, spec, unit, unit_label, qty })) };
       operation.message = '접수를 고쳤습니다(보내기 전)'; operation.destination = `#/stop/${id}`;
@@ -190,7 +264,7 @@ function screenIntake(id) {
       const ch = FIELD_CHANNELS.includes(f.channel) ? f.channel : '현장';
       const temp = `${ch}-${rd.slice(5).replace('-', '')}-${n}`;
       const seq = allStops().reduce((m, x) => Math.max(m, Number(x.seq) || 0), 0) + 1;
-      const fstop = { request_id: crypto.randomUUID(), receipt_no: temp, field: true, channel: ch, req_ver: 1, assign_ver: 0, seq, ...data,
+      const fstop = { request_id: crypto.randomUUID(), receipt_no: temp, field: true, channel: ch, req_ver: 1, assign_ver: 0, seq, ...data, ...localPlace,
         appt: data.eta ? [data.eta, null] : null, status: 'ACTIVE', received_at: now };
       st.fieldStops = [...(st.fieldStops || []), fstop]; st.intakeDraft = null;
       operation.message = `${temp} ${ch} 접수를 저장했습니다. 결과 보내기 때 PC로 갑니다`;
@@ -203,7 +277,10 @@ function screenIntake(id) {
       const { versions = [], ...prev } = editing;
       versions.push({ req_ver: editing.req_ver, at: now, reason: f.reason.trim(), snapshot: prev });
       const moved = editing.planned_date !== data.planned_date;
-      Object.assign(editing, data, { req_ver: editing.req_ver + 1, versions, updated_at: now });
+      if (addressChanged && data.lat == null) {
+        for (const k of ['lat', 'lon', 'geo_source']) delete editing[k];
+      }
+      Object.assign(editing, data, localPlace, { req_ver: editing.req_ver + 1, versions, updated_at: now });
       if (moved) editing.seq = nextSeq(data.planned_date, editing.request_id);
       operation.message = '수정했습니다'; operation.destination = `#/stop/${id}`;
       operation.prepared = true; return commit();
@@ -211,7 +288,7 @@ function screenIntake(id) {
       const rd = todayKST();
       const n = (st.receiptCounter[rd] || 0) + 1; st.receiptCounter[rd] = n;
       const req = { request_id: crypto.randomUUID(), receipt_no: `DG-${rd.replace(/-/g, '')}-${String(n).padStart(4, '0')}`, req_ver: 1, assign_ver: 1,
-        ...data, seq: nextSeq(data.planned_date), status: 'ACTIVE', received_at: now, updated_at: now, versions: [] };
+        ...data, ...localPlace, seq: nextSeq(data.planned_date), status: 'ACTIVE', received_at: now, updated_at: now, versions: [] };
       st.requests.push(req); st.intakeDraft = null;
       operation.message = `${req.receipt_no} 등록했습니다`; operation.destination = '#/home';
       operation.prepared = true; return commit();
@@ -241,12 +318,15 @@ function screenIntake(id) {
       await persist(existing); return;
     }
     const phone = digits(f.phone);
-    if (!f.name.trim()) return say(msg, '이름을 적어 주세요.', true);
-    if (!/^0\d{8,10}$/.test(phone)) return say(msg, '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)', true);
-    if (!f.address.trim()) return say(msg, '배출 주소를 적어 주세요.', true);
-    if (!f.planned_date) return say(msg, '수거 예정일을 골라 주세요.', true);
-    if (!f.items.length) return say(msg, '버릴 물건을 하나 이상 추가해 주세요.', true);
-    if (f.items.some((item) => !Number.isInteger(item.qty) || item.qty < 1 || item.qty > 9999)) return say(msg, '품목 수량은 1~9999 사이의 정수로 입력해 주세요.', true);
+    if (!f.name.trim()) return focusInvalid(controls.name, '이름을 적어 주세요.');
+    if (!/^0\d{8,10}$/.test(phone)) return focusInvalid(controls.phone, '연락처를 확인해 주세요. (0으로 시작하는 9~11자리)');
+    if (!f.address.trim()) return focusInvalid(controls.address, '배출 주소를 적어 주세요.');
+    if (!f.planned_date) return focusInvalid(controls.planned_date, '수거 예정일을 골라 주세요.');
+    if (!f.items.length) return focusInvalid(pickButton, '버릴 물건을 하나 이상 추가해 주세요.');
+    const invalidItem = f.items.findIndex((item) => !Number.isInteger(item.qty) || item.qty < 1 || item.qty > 9999);
+    if (invalidItem !== -1) return focusInvalid(itemsBox.children[invalidItem]?.querySelector('.qty-value') || pickButton, '품목 수량은 1~9999 사이의 정수로 입력해 주세요.');
+    clearInvalid();
+    if (!controls.extra_work_min.validity.valid) return focusInvalid(controls.extra_work_min, '추가 현장시간은 0~1440분 사이의 정수로 입력하세요.');
     // 주소 확인: 걱정되는 점이 있으면 한 번 보여 주고, 맞으면 한 번 더 눌러 저장(막지 않음)
     const issues = addrIssues();
     if (issues.length && !f.addrAck) {
@@ -255,7 +335,7 @@ function screenIntake(id) {
       document.querySelector('label.fld input[placeholder^="예: 광주 동구"]')?.scrollIntoView({ block: 'center' });
       return;
     }
-    if (editing && !fieldEdit && !f.reason.trim()) return say(msg, '수정 사유를 적어 주세요.', true);
+    if (editing && !fieldEdit && !f.reason.trim()) return focusInvalid(controls.reason, '수정 사유를 적어 주세요.');
     if (!editing && !f.dupAck) {
       const dups = allStops().filter((r) => r.status !== 'CANCELLED' && !r.pii_purged && deriveStop(r, st.events).progress !== 'DONE' && (digits(r.phone) === phone || normAddr(r.address) === normAddr(f.address)));
       if (dups.length) {
@@ -268,8 +348,15 @@ function screenIntake(id) {
         return;
       }
     }
+    const oldFixes = fieldEdit && (editing.address || '').trim() !== f.address.trim()
+      ? st.events.filter((e) => e.request_id === id && e.kind === 'LOCATION_FIX') : [];
+    if (fieldEdit && (!fieldEditable(id) || oldFixes.some((e) => e.seq <= st.releasedSeq || (st.exports || []).some((x) => x.from <= e.seq && e.seq <= x.to)))) {
+      say(msg, '이미 결과 파일에 포함된 기록입니다. 지점 상세에서 정정 요청으로 변경할 주소를 알려 주세요.', true);
+      dupBox.replaceChildren(btn('지점 상세로', () => go(`#/stop/${id}`), 'ghost'));
+      return;
+    }
     draft?.cancel();
-    const operation = { form: f, id: id || null, hash: targetHash, phone, status: 'ready', prepared: false, notify: null };
+    const operation = { form: f, id: id || null, hash: targetHash, phone, oldFixes, status: 'ready', prepared: false, notify: null };
     intakeOperations.set(ownerState, operation);
     await persist(operation, phone);
   }, 'primary huge');
@@ -279,13 +366,13 @@ function screenIntake(id) {
     if (!currentView()) return;
     ui.form = null; go(editing ? `#/stop/${id}` : '#/home');
   }, 'ghost');
-  view = h('main', {},
+  view = h('main', { class: 'intake-form' },
     h('header', { class: 'bar' }, cancel, h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
     onField && !registeredNow ? h('section', { class: 'card callout warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
       btn('기기 등록', () => go('#/register'), 'ghost')) : null,
-    // 첫머리 설명은 경고가 아니라 안내(.callout.info)
-    onField ? h('section', { class: 'callout info intake-intro' }, h('p', {}, '수거 중 주민이 새로 요청했거나 전화로 받은 건을 접수합니다. 결과 보내기 때 PC로 가서 PC 원본 접수가 되고, 사무실이 주소·품목·금액을 확인합니다.'),
-      h('p', { class: 'small' }, '금액은 PC 수수료표로 다시 계산됩니다. 표에 없는 품목은 "확인 대기"로 갑니다. 이미 목록에 있는 집의 품목이 늘었으면 새로 받지 말고 그 지점에서 [+ 현장 품목 추가]를 하세요.')) : null,
+    onField ? h('details', { class: 'callout info intake-intro' }, h('summary', {}, '휴대폰 저장 후 PC에 보내는 방법'),
+      h('p', { class: 'small' }, '수거 중 주민이 새로 요청했거나 전화로 받은 건은 [결과 보내기]로 PC에 전달하세요. 사무실에서 주소와 품목을 확인하고 수수료를 다시 계산합니다. 표에 없는 품목은 확인 대기로 보냅니다.'),
+      h('p', { class: 'small' }, '이미 받은 접수에 물건이 늘었으면 해당 지점에서 [+ 현장 품목 추가]를 누르세요.')) : null,
     !editing && st.intakeDraft ? h('p', { class: 'small' }, '작성 중이던 내용을 불러왔습니다. ',
       btn('지우고 새로 쓰기', async () => { draft?.cancel(); if (!currentForm()) return; ownerState.intakeDraft = null; await commit(); if (!currentForm()) return; ui.form = null; render(); }, 'ghost')) : null,
     h('section', { class: 'card' },
@@ -296,28 +383,39 @@ function screenIntake(id) {
       field('phone', '연락처', { type: 'tel', inputmode: 'tel', autocomplete: 'off', placeholder: '010-0000-0000' }),
       addrSearch({
         forbid: () => [f.name, f.phone],
-        onPick: (it, ll) => {
+        onSelect: (it) => {
           if (!currentView() || intakeOperations.has(ownerState)) return;
-          f.address = it.road; f.zip = it.zip; f.lat = ll ? ll.lat : null; f.lon = ll ? ll.lon : null; f.dupAck = false;
+          changeAddress(it.road);
+          const version = addressLookup.version;
+          addressLookup.pending = !!st.jusoCoordKey;
+          f.zip = it.zip; controls.address.value = it.road;
           const sg = J.suggestDong(it, knownDongs());
-          if (sg.dong) f.dong = sg.dong;
-          f.dongCands = sg.dong ? [] : sg.candidates;
-          saveDraft(); render();
-          toast(ll ? '주소와 위치(건물 출입구)를 채웠습니다' : '주소를 채웠습니다. 위치는 접수 뒤 지도에서 지정하세요');
+          if (sg.automatic && !J.checkAddress(it.road).outside && f.dongAuto !== false) { f.dong = sg.dong; f.dongAuto = true; }
+          f.dongCands = sg.automatic && f.dong === sg.dong ? [] : sg.candidates;
+          if (invalidControl === controls.address) clearInvalid();
+          addrCheck(true); saveDraft();
+          return (ll) => {
+            if (version !== addressLookup.version) return;
+            addressLookup.pending = false;
+            if (!currentForm() || location.hash !== targetHash || intakeOperations.has(ownerState)) return;
+            if (ll) { f.lat = ll.lat; f.lon = ll.lon; f.geoSource = 'ADDR'; }
+            addressLookup.refresh(); saveDraft();
+            if (!f.picking) toast(ll ? '주소와 위치(건물 출입구)를 채웠습니다' : '주소를 채웠습니다. 위치는 접수 뒤 지도에서 지정하세요');
+          };
         } }),
       field('address', '배출 주소', { autocomplete: 'off', placeholder: '예: 광주 동구 예시로 12 / 대인동 34-5' }), addrBox,
-      f.lat != null ? h('p', { class: 'small addr-geo' }, `위치: 주소 검색 좌표(건물 출입구)${f.zip ? ` · 우편번호 ${f.zip}` : ''}. 배출 위치가 다르면 접수 뒤 [위치 고치기]로 맞추세요.`) : null,
+      field('planned_date', '수거 예정일', { type: 'date' }),
+      geoNote,
       field('dong', '동 (행정동, 선택)', { autocomplete: 'off', list: 'dong-list', placeholder: '예: 충장동', id: 'intake-dong' }), dongBox,
-      f.dongCands.length ? h('div', { class: 'dong-cands', role: 'group', 'aria-label': '동 제안' }, h('span', { class: 'small' }, '주소 검색 결과의 동 후보: '),
-        ...f.dongCands.map((x) => btn(x, () => { f.dong = x; f.dongCands = []; saveDraft(); render(); }, 'opt chipbtn'))) : null,
-      h('datalist', { id: 'dong-list' }, ...knownDongs().map((x) => h('option', { value: x }))),
+      h('datalist', { id: 'dong-list' }, ...knownDongs().map((x) => h('option', { value: x })))),
+    h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건', requiredMark()), itemsBox, totalBox),
+    h('section', { class: 'card intake-extra' }, h('h2', {}, '상세 사항 (선택)'),
       field('spot_note', '상세 배출 위치', { autocomplete: 'off', placeholder: '예: 101동 분리수거장 옆' }),
       field('memo', '요청 메모', { multiline: true }),
-      h('div', { class: 'grid2' }, field('planned_date', '수거 예정일', { type: 'date' }), field('eta', '방문 시각(선택)', { type: 'time' }))),
-    h('section', { class: 'card', id: 'intake-items' }, h('h2', {}, '버릴 물건'), itemsBox, totalBox,
-      btn(f.items.length ? '+ 품목 더 담기' : '+ 품목 담기', async () => { f.picking = true; await render(); if (currentForm() && f.picking && location.hash === targetHash) scrollTo(0, 0); }, 'big')),  // 주 단추는 아래 [접수 저장] 하나
+      field('extra_work_min', '추가 현장시간(분)', { type: 'number', inputmode: 'numeric', min: 0, max: 1440, step: 1, placeholder: '예: 이사 수거 30분' }),
+      field('eta', '방문 시각(선택)', { type: 'time' })),
     editing && !fieldEdit ? h('section', { class: 'card' }, field('reason', '수정 사유 (필수)', { autocomplete: 'off' })) : null,
-    dupBox, h('div', { class: 'cta' }, msg, save));
+    dupBox, h('div', { class: 'cta intake-actions' }, msg, h('div', {}, pickButton), save));
   const operation = intakeOperations.get(ownerState);
   if (operation?.form === f) { operation.notify = () => { if (currentView()) syncSave(); }; syncSave(); }
   if (f.address) setTimeout(() => { if (currentView() && !intakeOperations.has(ownerState)) addrCheck(true); }, 0);
@@ -327,7 +425,7 @@ const knownDongs = () => [...new Set([...(st.recentDongs || []), ...allStops().m
 
 // ------------------------------------------------------------ 주소 검색 (행정안전부 도로명주소 API, juso.js)
 // manual: 검색을 쓸 수 없을 때 대신 할 일(접수 화면은 주소 직접 적기, 위치 지정 화면은 지도·내 위치)
-function addrSearch({ onPick, forbid = () => [], manual = '주소를 직접 적어 주세요.', officeNote = true }) {
+function addrSearch({ onSelect, onPick, forbid = () => [], manual = '주소를 직접 적어 주세요.', officeNote = true }) {
   const box = h('div', { class: 'addr-search' }, h('div', { class: 'section-label' }, '주소 검색'));
   if (addrRoute() === 'pc') {
     // 현장 화면에는 PC·관리자 설명을 두지 않는다(검색 경로·승인키 안내는 설정의 주소 검색 칸에만)
@@ -352,16 +450,23 @@ function addrSearch({ onPick, forbid = () => [], manual = '주소를 직접 적�
     status.textContent = '찾는 중…';
     try {
       const r = await J.searchAddress({ key: st.jusoKey, keyword: q });
-      if (my !== seq) return;
+      if (my !== seq || !box.isConnected) return;
       status.textContent = r.items.length ? `${r.total}건${r.total > r.items.length ? ` 중 ${r.items.length}건` : ''} — 고르면 주소와 위치를 채웁니다` : '찾은 주소가 없습니다. 도로명과 건물번호로 다시 찾아 보세요.';
       list.replaceChildren(...r.items.map((it) => h('li', {}, h('button', { type: 'button', class: 'btn addr-item', onclick: async () => {
+        if (my !== seq || !box.isConnected) return;
+        const selected = ++seq;
+        const complete = onSelect ? onSelect(it) : (ll) => onPick(it, ll);
+        if (!complete) return;
+        list.replaceChildren(); input.value = '';
         status.textContent = '위치를 받는 중…';
         let ll = null;
         if (st.jusoCoordKey) {
-          try { ll = await J.coordOf({ key: st.jusoCoordKey, item: it }); } catch (e) { toast(e.message || '위치를 받지 못했습니다', 'bad'); }
+          try { ll = await J.coordOf({ key: st.jusoCoordKey, item: it }); }
+          catch (e) { if (selected === seq && box.isConnected) toast(e.message || '위치를 받지 못했습니다', 'bad'); }
         }
-        list.replaceChildren(); input.value = ''; status.textContent = st.jusoCoordKey ? '' : '주소만 채웠습니다. 위치는 지도에서 정해 주세요.';
-        onPick(it, ll);
+        if (selected !== seq || !box.isConnected) { if (onSelect) complete(ll); return; }
+        status.textContent = st.jusoCoordKey ? '' : '주소만 채웠습니다. 위치는 지도에서 정해 주세요.';
+        complete(ll);
       } },
       h('span', { class: 'ai' }, h('strong', {}, it.road), it.jibun ? h('span', {}, '지번 ' + it.jibun) : null,
         (it.bdNm || it.zip) ? h('span', { class: 'ai-meta' }, [it.bdNm, it.zip ? '우편번호 ' + it.zip : ''].filter(Boolean).join(' · ')) : null)))));
@@ -371,9 +476,9 @@ function addrSearch({ onPick, forbid = () => [], manual = '주소를 직접 적�
     }
   };
   input.addEventListener('input', () => {
-    clearTimeout(timer);
+    clearTimeout(timer); seq++; list.replaceChildren();
     const q = input.value.trim();
-    if (q.length < 2) { seq++; list.replaceChildren(); status.textContent = q ? '두 글자 이상 적어 주세요.' : ''; return; }
+    if (q.length < 2) { status.textContent = q ? '두 글자 이상 적어 주세요.' : ''; return; }
     timer = setTimeout(run, 300);
   });
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); } });
