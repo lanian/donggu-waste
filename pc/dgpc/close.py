@@ -8,7 +8,7 @@ import uuid
 
 from dgpc import backup as _bk, privacy as _pv, area
 from dgpc.assign import list_unloads
-from dgpc.core import ACTOR, KST, LABELS, UserError, _date_ok, _secs, audit, close_info, now, one, rows, today_kst, tx
+from dgpc.core import ACTOR, KST, LABELS, UserError, _date_ok, _secs, audit, close_info, get_setting, idempotent, now, one, rows, today_kst, tx
 from dgpc.derive import derive, payment_core, payment_status, prefetch
 from dgpc.devices import crew_request_ids
 from dgpc.intake import _snapshot
@@ -237,9 +237,11 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
         live = [r for r in lst if r["status"] != "CANCELLED"]
         dongs.append({"dong": name or None, "total": len(live), "done": sum(r["status"] == "DONE" for r in live), "open": sum(r["status"] != "DONE" for r in live),
                       "limit": None, "limit_m3": None, "m3": None, "crew": None, "working": True})
-    closes = rows(con, "SELECT id, seq, closed_at, closed_by, note, carried_json, status, approved_by, approved_at, approve_note FROM day_close_log WHERE work_date=? ORDER BY seq", (work_date,))
+    closes = rows(con, """SELECT id, seq, closed_at, closed_by, note, carried_json, status, approved_by, approved_at, approve_note, approval_required
+        FROM day_close_log WHERE work_date=? ORDER BY seq""", (work_date,))
     for c in closes:
         c["carried"] = len(json.loads(c.pop("carried_json") or "[]"))
+        c["approval_required"] = bool(c["approval_required"])
     cap = area.capacity_settings(con)
     crews_nr = _missing_teams(result_recovery)
     return {"work_date": work_date, "total": len(reqs), "by_status": by_status, "no_result": no_result, "pending_fee": pending_fee,
@@ -253,12 +255,34 @@ def day_summary(con, work_date: str, crew_id: str | None = None) -> dict:
             "capacity": {"limit": cap["daily_count"], "booked": sum(1 for r in reqs if r["status"] != "CANCELLED")},
             "working": area.working_reason(con, work_date),
             "post_close_edits": [] if scoped else _post_close_edits(con, work_date),
-            "closes": closes, "closed": closes[-1] if closes else None}
+            "closes": closes, "closed": closes[-1] if closes else None, "close_approval_required": get_setting(con, "close_approval_required")}
 
 
-def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
-    """마감 기록(담당자). 끝나지 않은 건은 다음 업무일로 예정일을 옮기고(마감 이월), 기록은 회차로 쌓는다(덮어쓰지 않음).
-    팀장(검토자)이 approve_close 로 확인한다."""
+def close_day(con, work_date: str, note: str = "", close_secs=None, *, client_req_id=None) -> dict:
+    """미처리 건 이월과 마감 회차를 한 번 기록한 뒤, 1인 마감이면 커밋된 DB를 백업한다."""
+    with tx(con):
+        result = idempotent(con, ACTOR.get(), "close", client_req_id, lambda: _record_day(con, work_date, note, close_secs))
+    if result.get("approval_required", True):
+        return result
+    # 요청 키를 재사용한 경우 지금 열려 있는 날짜·회차와 무관하게 원래 회차의 결과를 반환한다.
+    round_key = (result["work_date"], result["seq"])
+    # 파일을 내보내기 시작하는 것과 실제 완료는 구분한다. 강제 종료 후 재전송해도 같은 백업을 두 번 만들지 않는다.
+    with tx(con):
+        saved = one(con, """SELECT json_extract(summary_json, '$.completion') AS completion
+            FROM day_close_log WHERE work_date=? AND seq=?""", round_key)
+        if saved["completion"]:
+            return {**result, **json.loads(saved["completion"])}
+        _set_completion(con, round_key, {"pii_purge": None, "backup": {"ok": False,
+            "error": "마감은 기록되었습니다. 자동 백업 완료 여부는 설정 → 백업의 실행 결과와 보관 목록에서 확인해 주세요."}})
+    return {**result, **_finish_close(con, "CLOSE_SOLO", round_key)}
+
+
+def _set_completion(con, round_key, completion):
+    con.execute("""UPDATE day_close_log SET summary_json=json_set(summary_json, '$.completion', json(?))
+        WHERE work_date=? AND seq=?""", (json.dumps(completion, ensure_ascii=False), *round_key))
+
+
+def _record_day(con, work_date, note, close_secs):
     if not _date_ok(work_date or ""):
         raise UserError("마감할 날짜를 골라 주세요.")
     if work_date > today_kst():  # 미래 날짜를 마감하면 배정이 풀리고 예정일이 옮겨진다
@@ -273,34 +297,48 @@ def close_day(con, work_date: str, note: str = "", close_secs=None) -> dict:
         for c in carry:
             _carry(con, c, work_date)
         seq = (one(con, "SELECT MAX(seq) AS n FROM day_close_log WHERE work_date=?", (work_date,))["n"] or 0) + 1
-        con.execute("""INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note, carried_json, status)
-            VALUES (?,?,?,?,?,?,?,?,'RECORDED')""", (str(uuid.uuid4()), work_date, seq, now(), ACTOR.get(), json.dumps(s, ensure_ascii=False), (note or "")[:300],
-                                                   json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
+        con.execute("""INSERT INTO day_close_log (id, work_date, seq, closed_at, closed_by, summary_json, note, status, approval_required, carried_json)
+            VALUES (?,?,?,?,?,?,?,'RECORDED',?,?)""", (str(uuid.uuid4()), work_date, seq, now(), ACTOR.get(), json.dumps(s, ensure_ascii=False), (note or "")[:300],
+                s["close_approval_required"], json.dumps([{"id": c["id"], "receipt_no": c["receipt_no"], "to": c["to"], "kind": c["kind"]} for c in carry], ensure_ascii=False)))
         audit(con, "day", work_date, "CLOSE", {"seq": seq, "open_items": len(s["no_result"]) + len(s["revisit"]) + s["conflicts"] + s["photos_missing"],
-                                               "carried": len(carry), **_secs("close_secs", close_secs)})
+                                               "carried": len(carry), "approval_required": s["close_approval_required"], **_secs("close_secs", close_secs)})
     warns = [f"{c['crew']}: 갱신본 {c['assign_ver']}에 반영되지 않은 결과가 {c['missing']}건 있습니다." for c in s["crews_no_result"]]
-    return {**s, "seq": seq, "carried": carry, "warnings": warns}
+    return {**s, "seq": seq, "carried": carry, "warnings": warns, "approval_required": s["close_approval_required"]}
 
 
 def approve_close(con, work_date: str, note: str = "") -> dict:
     """팀장 확인(두 번째 단계). 마감을 기록한 사람은 확인할 수 없다. 다시 마감하면 새 회차를 다시 확인해야 한다."""
-    c = close_info(con, work_date)
-    if not c:
-        raise UserError("아직 마감 기록이 없습니다. 담당자가 먼저 마감을 기록해야 합니다.")
-    if c["status"] == "APPROVED":
-        raise UserError("이미 확인한 마감입니다.")
-    if c["closed_by"] and c["closed_by"] == ACTOR.get():
-        raise UserError("마감을 기록한 사람은 확인할 수 없습니다. 팀장(검토자)이 확인해 주세요.")
     with tx(con):
+        c = close_info(con, work_date)
+        if not c:
+            raise UserError("아직 마감 기록이 없습니다. 담당자가 먼저 마감을 기록해야 합니다.")
+        if c["status"] == "APPROVED":
+            raise UserError("이미 확인한 마감입니다.")
+        if not c["approval_required"]:
+            raise UserError("이 회차는 담당자 1인 마감으로 완료되었습니다.")
+        if not get_setting(con, "close_approval_required"):
+            raise UserError("현재 일일 마감에서 팀장 확인을 사용하지 않습니다.")
+        if c["closed_by"] and c["closed_by"] == ACTOR.get():
+            raise UserError("마감을 기록한 사람은 확인할 수 없습니다. 팀장(검토자)이 확인해 주세요.")
         con.execute("UPDATE day_close_log SET status='APPROVED', approved_by=?, approved_at=?, approve_note=? WHERE id=?",
                     (ACTOR.get(), now(), (note or "")[:300], c["id"]))
         audit(con, "day", work_date, "APPROVE", {"seq": c["seq"]})
-    out = dict(close_info(con, work_date))
-    # 마감 확인 뒤: 보유기간 지난 개인정보 파기, 오래된 접속기록 정리, 자동 백업 (실패해도 확인은 그대로)
+        out = close_info(con, work_date)
+    return {**out, **_finish_close(con, "CLOSE_APPROVE")}
+
+
+def _finish_close(con, reason, round_key=None):
+    # 마감 완료 후 보유기간 지난 개인정보·접속 기록 정리와 백업. 실패해도 마감 기록은 남긴다.
+    out = {}
     try:
-        out["pii_purge"] = _pv.purge_pii(con, trigger="CLOSE_APPROVE")["count"]
+        out["pii_purge"] = _pv.purge_pii(con, trigger=reason)["count"]
         _pv.purge_old_access(con)
     except Exception:  # noqa: BLE001
         out["pii_purge"] = None
-    out["backup"] = {k: v for k, v in _bk.make_auto(con, "CLOSE_APPROVE").items() if k in ("ok", "file", "error")}
+    def record_result(result):
+        out["backup"] = {k: v for k, v in result.items() if k in ("ok", "file", "error")}
+        if round_key:
+            _set_completion(con, round_key, out)
+
+    _bk.make_auto(con, reason, on_record=record_result)
     return out

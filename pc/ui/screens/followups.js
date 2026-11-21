@@ -6,6 +6,10 @@ const HISTORY = { CREATE: '등록', UPDATE: '수정', REOPEN: '다시 열기', C
 const option = (value, label, selected = false) => h('option', { value, selected }, label);
 const field = (label, input) => h('label', { class: 'f' }, label, input);
 
+function replaceChildren(target, ...children) {
+  target.replaceChildren(...children.filter((child) => child != null));
+}
+
 export function followupQueue({ scoped = false } = {}) {
   const epoch = routeEpoch, owner = sessionOwner();
   const results = h('div', { 'aria-live': 'polite' });
@@ -28,12 +32,12 @@ export function followupQueue({ scoped = false } = {}) {
     try {
       const data = await api(`dong-work/followups?${filters}`, { _prefsOwner: owner, timeoutMs: 10_000 });
       if (!current() || mine !== seq) return;
-      dong.replaceChildren(option('all', '전체 행정동', filters.get('dong') === 'all'),
+      replaceChildren(dong, option('all', '전체 행정동', filters.get('dong') === 'all'),
         ...data.dongs.map((d) => option(d.id, d.name, d.id === filters.get('dong'))),
         scoped && boot.me.role === 'DONG' ? null : option('-', '동 미지정', filters.get('dong') === '-'));
       assignee.replaceChildren(option('', '전체 담당자'), option('-', '담당 미지정', filters.get('assignee') === '-'),
         ...data.assignees.map((a) => option(a.id, a.name, a.id === filters.get('assignee'))));
-      results.replaceChildren(data.rows.length ? h('ul', { class: 'todo' }, ...data.rows.map((r) => {
+      replaceChildren(results, data.rows.length ? h('ul', { class: 'todo' }, ...data.rows.map((r) => {
         const late = r.status !== 'DONE' && r.due_date && r.due_date < data.today;
         return h('li', {},
           h('a', { href: `#/${scoped ? 'dongs' : 'request'}/${encodeURIComponent(r.id)}?focus=followup` }, r.receipt_no),
@@ -127,7 +131,7 @@ export function followupCard(id, { afterRevisit } = {}) {
     const editButton = set ? btn('후속조치 수정', () => edit(d), 'small primary') : null;
     const contactLine = (c) => `${c.kind} · ${kst(c.at)} · ${c.content}`;
     const metaText = (m) => [m.assignee, m.due_date, STATES[m.status]].filter(Boolean).join(' · ');
-    body.replaceChildren(
+    replaceChildren(body,
       h('div', { class: 'row' }, chip(STATES[d.status], d.status === 'DONE' ? 'ok' : 'warn'),
         d.assignee || '담당 미지정', d.due_date ? `처리기한 ${d.due_date}` : null,
         editButton),

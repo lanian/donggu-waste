@@ -2697,7 +2697,8 @@ def v13_refactor():
                   "dong-work/requests/{id}/collection", "dong-work/route", "dong-work/assign"), ("ADMIN", "INTAKE", "DONG")),
         ("GET", ("dong-work/followups", "dong-work/followups/{id}"), ("ADMIN", "INTAKE", "LEAD", "DONG")),
         ("POST", ("dong-work/followups/{id}", "dong-work/followups/{id}/revisit"), ("ADMIN", "INTAKE", "DONG")),
-        ("POST", ("users/{id}/dongs", "dongs/order", "dongs/centers"), ("ADMIN",)),
+        ("POST", ("users/{id}/dongs", "dongs/order", "dongs/centers", "crews/{id}/delete",
+                  "devices/pair/start", "devices/pair/{id}/confirm", "devices/pair/{id}/cancel"), ("ADMIN",)),
         ("POST", ("vworld/locate",), ("ADMIN", "INTAKE")),
         ("GET", ("recon-exceptions", "recon-exceptions/{id}"), ("ADMIN", "INTAKE", "LEAD")),
         ("POST", ("recon-exceptions/{id}",), ("ADMIN", "INTAKE")),
@@ -2726,7 +2727,8 @@ def v13_refactor():
        {r.pattern for r in SV.ROUTES if r.lock == "none"} == {"import/result", "import/photos", "import/solo", "requests/import", "recon", "addr-import",
                                                              "external/test", "route", "route-path", "backup", "backup/auto", "backup/retention", "privacy/purge",
                                                              "photo-purge", "refunds/sync", "integrity/full", "dong-work/route", "vworld/locate",
-                                                             "road-rules/preview", "road-rules/apply", "road-rules/rollback"},
+                                                             "road-rules/preview", "road-rules/apply", "road-rules/rollback",
+                                                             "devices/pair/start", "devices/pair/{id}/confirm", "devices/pair/{id}/cancel"},
        "잠금 정책: 범위 조회는 짧은 잠금, 나머지 GET은 조회 연결, 계산·검증 작업은 잠금 밖")
     ok(not SV.allowed("FIELD", "GET", "nothing-here") and SV.allowed("ADMIN", "GET", "nothing-here") and SV.allowed("INTAKE", "GET", "requests/a/b/c"),
        "경로 표에 없는 주소: 관리자·같은 첫 마디를 쓸 수 있는 역할은 404, 그 밖은 403")

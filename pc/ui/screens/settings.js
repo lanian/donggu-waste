@@ -321,7 +321,7 @@ function volumeCard() {
       sortable(h('table', {}, h('thead', {}, h('tr', {}, ...['날짜', '하차', '추정 m³', '기록 m³', '추정 kg', '기록 kg'].map((t) => h('th', {}, t)))),
         h('tbody', {}, ...r.days.map((d) => h('tr', {}, ...[d.date, `${d.unloads}회`, d.est_m3, d.rec_m3 ?? '—', d.est_kg.toLocaleString(), d.rec_kg == null ? '—' : d.rec_kg.toLocaleString()].map((v) => h('td', {}, String(v))))))), { key: 'load-check', cols: ['date', 'num', 'num', 'num', 'num', 'num'] }));
   }).catch(() => {});
-  return h('div', { class: 'card' }, h('h2', {}, '적재량 보정'), h('p', { class: 'muted' }, '자주 쓰는 품목의 1단위 부피·무게와 취급 표시(품목별 적재 기준표의 추정치)입니다. 추정치는 그대로 두고, 실측한 부피가 있으면 보정값에 적으세요(비우면 추정치 사용).'),
+  return h('div', { class: 'card' }, h('h2', {}, '품목별 적재량 보정'), h('p', { class: 'muted' }, '실측한 품목 한 단위의 부피를 입력하면 모든 팀의 노선 계산에 적용됩니다. 보정값을 비우면 기준표의 추정 부피를 사용합니다.'),
     h('table', {}, h('thead', {}, h('tr', {}, ...['품목', '부피 추정', '무게 추정', '취급', '부피 보정값', ''].map((t) => h('th', {}, t)))), tbody), msg, chk);
 }
 
@@ -347,7 +347,7 @@ const SETTING_TABS = [['basic', '기본'], ['crews', '수거팀'], ['devices', '
 async function screenSettings(tab) {
   tab = SETTING_TABS.some(([k]) => k === tab) ? tab : 'basic';
   const tabs = h('nav', { class: 'tabs', 'aria-label': '설정 묶음' }, ...SETTING_TABS.map(([k, t]) => h('a', { href: '#/settings/' + k, class: k === tab ? 'on' : '', 'aria-current': k === tab ? 'page' : null }, t)));
-  const body = await ({ basic: settingsBasic, crews: settingsCrews, devices: settingsDevices, dongs: () => [dongCard()], capacity: () => [capacityCard()], holidays: () => [holidayCard()],
+  const body = await ({ basic: settingsBasic, crews: settingsCrews, devices: settingsDevices, dongs: () => [dongCard()], capacity: () => [capacityCard(), volumeCard()], holidays: () => [holidayCard()],
     fees: settingsFees, addr: () => [addrCard(), externalCard()], 'road-rules': async () => (await import('./road_rules.js')).roadRulesCard(),
     backup: () => [autoBackupCard(), backupCard()], privacy: privacyCard }[tab])();
   return h('div', {}, pagehead('설정'), tabs, ...[].concat(body));
@@ -357,12 +357,32 @@ const regState = { fp: '' };  // 방금 등록한 기기의 지문: 목록을 �
 // 지문 확인 뒤 "어느 팀에 연결할까요?": 있는 팀 고르기 또는 새 팀 만들기 (나중에 해도 됨)
 async function crewChooser(dev) {
   const crews = boot.crews.filter((c) => c.active);
-  const pick = h('select', { 'aria-label': '연결할 팀' }, ...crews.map((c) => h('option', { value: c.id }, `${c.name}${c.device_id && c.device_id !== dev.id ? ' (다른 휴대폰 연결됨 → 바꿈)' : ''}`)),
-    h('option', { value: '__new', selected: !crews.length }, '+ 새 팀 만들기'));
+  const own = crews.find((c) => c.device_id === dev.id);
+  const inactive = boot.crews.filter((c) => !c.active && c.device_id === dev.id);
+  if (!own && inactive.length) {
+    await modal({ title: '연결된 수거팀', ok: '확인', cancel: null, body: [h('p', {}, `이 휴대폰은 사용 중지된 ${inactive.map((c) => c.name).join(', ')}에 연결되어 있습니다. 설정 → 수거팀에서 기존 팀의 사용을 켜거나 연결 휴대폰을 해제한 뒤 다른 팀에 연결하세요.`)] });
+    return null;
+  }
+  const pick = h('select', { 'aria-label': '연결할 팀' }, ...crews.map((c) => h('option', { value: c.id }, `${c.name}${c.device_id && c.device_id !== dev.id ? ' (다른 휴대폰 연결됨)' : ''}`)),
+    h('option', { value: '__new' }, '+ 새 팀 만들기'));
+  pick.value = (own || crews.find((c) => !c.device_id))?.id || '__new';
   const nm = h('input', { placeholder: '새 팀 이름 (예: 1팀)', 'aria-label': '새 팀 이름' });
-  const sync = () => { nm.closest('label').hidden = pick.value !== '__new'; };
-  const body = [h('p', {}, `${dev.label || dev.id.slice(0, 8)} 휴대폰을 사용하기 시작했습니다. 이 휴대폰으로 목록을 받을 팀을 고르세요.`), h('label', { class: 'f' }, '팀', pick), h('label', { class: 'f' }, '새 팀 이름', nm)];
-  pick.addEventListener('change', sync); setTimeout(sync, 0);
+  const newName = h('label', { class: 'f' }, '새 팀 이름', nm);
+  const replace = h('input', { type: 'checkbox', 'aria-label': '기존 휴대폰 교체 확인' });
+  const label = h('span', {});
+  const warning = h('label', { class: 'row notice warn' }, replace, label);
+  const sync = () => {
+    const c = crews.find((x) => x.id === pick.value);
+    newName.hidden = pick.value !== '__new';
+    warning.hidden = !c?.device_id || c.device_id === dev.id;
+    replace.checked = false;
+    if (!warning.hidden) {
+      const previous = boot.devices.find((d) => d.id === c.device_id);
+      label.textContent = `${c.name}의 기존 휴대폰(${previous?.label || c.device_id.slice(0, 8)})을 이 휴대폰으로 교체합니다.`;
+    }
+  };
+  const body = [h('p', {}, `${dev.label || dev.id.slice(0, 8)} 휴대폰을 사용하기 시작했습니다. 이 휴대폰으로 목록을 받을 팀을 고르세요.`), h('label', { class: 'f' }, '팀', pick), newName, warning];
+  pick.addEventListener('change', sync); sync();
   return modal({ title: '어느 팀에 연결할까요?', ok: '연결', cancel: '나중에', body,
     onOk: async () => {
       if (pick.value === '__new') {
@@ -371,9 +391,72 @@ async function crewChooser(dev) {
         return nm.value.trim();
       }
       const c = crews.find((x) => x.id === pick.value);
-      await post('crews', { id: c.id, name: c.name, device_id: dev.id, capacity_m3: c.capacity_m3, capacity_kg: c.capacity_kg || 0, shift_start: c.shift_start, shift_end: c.shift_end, active: !!c.active });
+      if (c.device_id && c.device_id !== dev.id && !replace.checked) throw new Error('기존 휴대폰을 교체하려면 팀과 휴대폰을 확인하고 교체 확인에 체크하세요.');
+      if (c.device_id === dev.id) return c.name;
+      await post('crews', { id: c.id, name: c.name, device_id: dev.id, expected_device_id: c.device_id || null, capacity_m3: c.capacity_m3, capacity_kg: c.capacity_kg || 0, shift_start: c.shift_start, shift_end: c.shift_end, active: !!c.active });
       return c.name;
     } });
+}
+function devicePairingCard() {
+  const owner = sessionOwner(), msg = h('p', { class: 'msg', role: 'status' });
+  const relay = h('input', { type: 'url', class: 'fill', placeholder: 'https://', value: boot.settings.device_pairing_relay_url || '',
+    'aria-label': '간편 등록 중계 주소' });
+  const call = (path, body) => api(path, { method: 'POST', body, _prefsOwner: owner });
+  const begin = btn('6자리 간편 등록 시작', wrap(async () => {
+    const pair = await call('devices/pair/start', {});
+    const path = `devices/pair/${encodeURIComponent(pair.id)}`;
+    let confirmed;
+    try {
+      if (!begin.isConnected || sessionOwner() !== owner) return;
+      const expires = Date.now() + pair.expires_in * 1000;
+      const time = h('p', { class: 'small muted' });
+      function updateTime() {
+        const seconds = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+        time.textContent = seconds ? `QR 남은 시간 ${Math.floor(seconds / 60)}분 ${seconds % 60}초` : 'QR이 만료되었습니다. 창을 닫고 새로 시작하세요.';
+      }
+      updateTime();
+      const timer = setInterval(updateTime, 1000);
+      const otp = h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, autocomplete: 'one-time-code', placeholder: '000000' });
+      const label = h('input', { maxlength: 80, placeholder: '예: 수거 1팀' });
+      try {
+        await modal({ title: '휴대폰 간편 등록', ok: '등록번호 확인', body: [
+          h('p', {}, '휴대폰 앱의 기기 등록에서 이 QR을 읽고 [등록번호 받기]를 누르세요.'),
+          h('img', { alt: '간편 등록 QR', src: pair.qr_image, style: 'width:260px;max-width:100%;image-rendering:pixelated' }), time,
+          h('label', { class: 'f' }, '휴대폰 등록번호 6자리', otp),
+          h('p', { class: 'small muted' }, '휴대폰에서 30초마다 바뀌는 번호입니다. 확인하면 이 기기를 등록하고 사용할 팀을 선택합니다.'),
+          h('label', { class: 'f' }, '기기 이름 (선택)', label)],
+          onOk: async () => {
+            if (Date.now() >= expires) throw new Error('QR이 만료되었습니다. 창을 닫고 새로 시작하세요.');
+            if (!/^[0-9]{6}$/.test(otp.value)) { otp.focus(); throw new Error('휴대폰에 보이는 숫자 6자리를 입력하세요.'); }
+            confirmed = await call(path + '/confirm', { otp: otp.value, label: label.value.trim() });
+          } });
+      } finally { clearInterval(timer); }
+    } finally {
+      if (!confirmed && sessionOwner() === owner) await call(path + '/cancel', {}).catch(() => {});
+    }
+    if (!confirmed || sessionOwner() !== owner) return;
+    setBoot(await api('bootstrap', { _prefsOwner: owner }));
+    if (!begin.isConnected) return;
+    toast('기기 등록 완료');
+    const device = boot.devices.find((d) => d.id === confirmed.device_id);
+    if (device && !boot.crews.some((c) => c.active && c.device_id === device.id)) {
+      const name = await crewChooser(device);
+      if (name) toast(`${name}에 연결했습니다`);
+    }
+    if (sessionOwner() === owner) { setBoot(null); render(true); }
+  }, msg), 'primary', { disabled: !relay.value });
+  const save = btn('중계 주소 저장', wrap(async () => {
+    const settings = await call('settings', { device_pairing_relay_url: relay.value.trim() });
+    if (sessionOwner() !== owner || !boot) return;
+    const saved = settings.device_pairing_relay_url || '';
+    setBoot({ ...boot, settings: { ...boot.settings, device_pairing_relay_url: saved } });
+    relay.value = saved; begin.disabled = !saved; msg.textContent = saved ? '중계 주소를 저장했습니다.' : '간편 등록 중계 연결을 해제했습니다.';
+  }, msg), 'small');
+  return h('section', { class: 'card' }, h('h2', {}, '6자리 간편 등록'),
+    h('p', {}, 'PC의 QR을 휴대폰으로 읽으면 휴대폰에 표시되는 6자리 번호로 기기를 등록할 수 있습니다.'),
+    begin, h('details', { class: 'free' }, h('summary', {}, '간편 등록 중계 설정'),
+      h('p', { class: 'small muted' }, '기관에서 사용하는 HTTPS 중계 주소를 저장하세요. 주소가 없으면 아래 기본 QR 등록을 이용하세요.'),
+      h('label', { class: 'f' }, '간편 등록 중계 주소', relay), save), msg);
 }
 function settingsDevices() {
   const devMsg = h('p', { class: 'msg' }), regMsg = h('p', { class: 'msg' });
@@ -424,7 +507,7 @@ function settingsDevices() {
       }, devMsg), 'small primary') : null,
       ...[['ACTIVE', '사용'], ['LOST', '분실 처리'], ['RETIRED', '사용 중지']].filter(([k]) => k !== d.status).map(([k, t]) =>
       btn(t, wrap(async () => { if (k !== 'ACTIVE' && !(await confirmDlg(`휴대폰 ${t}`, `${d.id.slice(0, 8)} 기기를 '${t}'합니다. 이 기기로는 목록을 보낼 수 없고 결과도 받지 않습니다. 계속할까요?`, { ok: t, danger: true }))) return; await post(`devices/${d.id}/status`, { status: k }); setBoot(null); render(); }, devMsg), 'small')))]), { empty: '등록된 휴대폰이 없습니다.' });
-  return [h('div', { class: 'grid2' },
+  return [devicePairingCard(), h('div', { class: 'grid2' },
     h('div', { class: 'card' }, h('h2', {}, '휴대폰 등록'),
       h('ol', { class: 'steps-list' }, h('li', {}, '휴대폰 앱 [기기 등록]으로 아래 QR을 비춥니다 (공개키만 들어 있음).'),
         h('li', {}, '휴대폰에 나온 기기 코드 QR을 [휴대폰 QR 웹캠으로 읽기]로 이 PC 웹캠에 비춥니다. 읽으면 바로 등록됩니다.'),
@@ -437,18 +520,40 @@ function settingsDevices() {
 }
 function settingsCrews() {
   const crewMsg = h('p', { class: 'msg' });
+  const owner = sessionOwner();
   const crewRows = [...boot.crews, { id: '', name: '', device_id: '', capacity_m3: 8, capacity_kg: 0, shift_start: '09:00', shift_end: '17:00', active: 1 }].map((c) => {
     const f = { name: h('input', { value: c.name, placeholder: '새 팀 이름', 'aria-label': c.name ? `${c.name} 이름` : '새 팀 이름' }), device_id: h('select', { 'aria-label': '연결 휴대폰' }, h('option', { value: '' }, '(없음)'), ...boot.devices.filter((d) => d.status === 'ACTIVE').map((d) => h('option', { value: d.id, selected: d.id === c.device_id }, `${d.id.slice(0, 8)} ${d.label || ''}`))),
       capacity_m3: h('input', { type: 'number', step: '0.5', value: c.capacity_m3, class: 'w-xs', 'aria-label': '적재(m³)' }),
       capacity_kg: h('input', { type: 'number', step: '50', min: 0, value: c.capacity_kg || '', placeholder: '0', class: 'w-xs', 'aria-label': '최대 적재 중량(kg)', title: '비우거나 0이면 무게는 따지지 않음' }), shift_start: h('input', { type: 'time', value: c.shift_start, 'aria-label': '근무 시작' }), shift_end: h('input', { type: 'time', value: c.shift_end, 'aria-label': '근무 끝' }), active: h('input', { type: 'checkbox', checked: c.active, 'aria-label': '사용' }) };
-    return h('tr', {}, ...Object.values(f).map((x) => h('td', {}, x)), h('td', {}, btn(c.id ? '저장' : '추가', wrap(async () => {
+    const save = btn(c.id ? '저장' : '추가', wrap(async () => {
       await post('crews', { id: c.id || null, name: f.name.value, device_id: f.device_id.value, capacity_m3: f.capacity_m3.value, capacity_kg: f.capacity_kg.value || 0, shift_start: f.shift_start.value, shift_end: f.shift_end.value, active: f.active.checked });
       toast('저장했습니다'); setBoot(null); render();
-    }, crewMsg), 'small primary')));
+    }, crewMsg), 'small primary');
+    const remove = c.id ? btn('삭제', async () => {
+      let nextInput;
+      const deleted = await modal({ title: '수거팀 삭제', ok: '삭제', danger: true,
+        body: [h('p', {}, `‘${c.name}’ 팀을 삭제할까요? 배차·하차 이력이 있으면 기록을 보존하고 팀 목록에서 숨깁니다.`),
+          h('p', { class: 'small muted' }, '진행 중인 배차는 먼저 처리하거나 다른 팀에 재배정하세요.')],
+        onOk: async () => {
+          if (!row.isConnected || sessionOwner() !== owner) throw new Error('화면이 바뀌었습니다. 팀 목록에서 다시 선택하세요.');
+          const result = await api(`crews/${encodeURIComponent(c.id)}/delete`, { method: 'POST', _prefsOwner: owner });
+          if (sessionOwner() !== owner || !boot?.me) return;
+          setBoot({ ...boot, crews: boot.crews.filter((crew) => crew.id !== c.id) });
+          if (row.isConnected) {
+            nextInput = row.nextElementSibling?.querySelector('input');
+            row.remove();
+            toast(result.archived ? '팀을 목록에서 숨겼습니다. 기존 기록은 보존했습니다.' : '수거팀을 삭제했습니다.');
+          }
+        } });
+      if (deleted && nextInput?.isConnected && sessionOwner() === owner) nextInput.focus();
+    }, 'small danger', { 'aria-label': `${c.name} 삭제` }) : null;
+    const row = h('tr', {}, ...Object.values(f).map((x) => h('td', {}, x)), h('td', { class: 'nowrap' }, save, remove));
+    return row;
   });
-  return [h('div', { class: 'card' }, h('h2', {}, '수거팀·차량'), h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['팀', '연결 휴대폰', '적재(m³)', '최대 중량(kg)', '근무 시작', '근무 끝', '사용', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...crewRows))),
-      h('p', { class: 'small muted' }, '최대 중량은 차량 등록증의 최대 적재량입니다(1톤 차량이면 1000). 비우면 무게는 따지지 않고 부피만 봅니다.'), crewMsg),
-    volumeCard()];
+  return [h('div', { class: 'card' }, h('h2', {}, '수거팀·차량'),
+      h('p', { class: 'small muted' }, '팀 이름을 고치려면 이름 칸을 수정한 뒤 저장하세요. 잘못 등록했거나 운영이 끝난 팀은 삭제할 수 있습니다.'),
+      h('div', { class: 'tablewrap' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['팀', '연결 휴대폰', '적재(m³)', '최대 중량(kg)', '근무 시작', '근무 끝', '사용', ''].map((t) => h('th', {}, t)))), h('tbody', {}, ...crewRows))),
+      h('p', { class: 'small muted' }, '최대 중량은 차량 등록증의 최대 적재량입니다(1톤 차량이면 1000). 비우면 무게는 따지지 않고 부피만 봅니다.'), crewMsg)];
 }
 // 좌표 칸 도우미: [지도에서 고르기](지도를 눌러 핀) · [주소로 찾기](이 PC의 주소 자료). 위도·경도 칸을 채운다.
 async function mapPickDlg(title, lat, lon) {
@@ -495,6 +600,9 @@ function coordTools(latEl, lonEl, what, labelEl) {
 function settingsBasic() {
   const routeMsg = h('p', { class: 'msg' }), infoMsg = h('p', { class: 'msg' });
   const st = boot.settings;
+  const owner = sessionOwner();
+  const approval = h('input', { type: 'checkbox', checked: st.close_approval_required !== false });
+  const approvalMsg = h('p', { class: 'msg', role: 'status' });
   const dlat = h('input', { value: st.depot.lat, class: 'w-s', 'aria-label': '차고지 위도' }), dlon = h('input', { value: st.depot.lon, class: 'w-s', 'aria-label': '차고지 경도' }), dlabel = h('input', { value: st.depot.label, 'aria-label': '차고지 이름' });
   const osrm = h('input', { value: st.osrm_url, placeholder: '자동 연결 또는 http://127.0.0.1:5000', class: 'w-l', 'aria-label': '로컬 OSRM' });
   const sb = h('input', { type: 'number', value: st.service_min_base, class: 'w-xs', 'aria-label': '지점당 기본 작업(분)' }), sp = h('input', { type: 'number', value: st.service_min_per_item, class: 'w-xs', 'aria-label': '품목당 작업(분)' });
@@ -547,6 +655,16 @@ function settingsBasic() {
       h('div', { class: 'ftable' }, ft('문의처', contact), ft('배출 장소 안내', guide), ft('납부 안내', payGuide, h('span', { class: 'muted small' }, '납부 방법·기한 (300자, 접수증·안내 문구)')), ft('감면액 끝수', roundUnit, h('span', { class: 'muted small' }, '새로 감면하는 접수부터 적용 (이미 감면한 접수는 그때 단위 그대로)')), ft('월보 제목', title)),
       h('p', { class: 'small muted' }, '문의처·배출 장소 안내·납부 안내는 접수증(신청인 보관용)과 [안내 문구 복사]에, 월보 제목은 통계 → [월보 출력]에 쓰입니다.'),
       h('div', { class: 'row' }, btn('저장', wrap(async () => { await post('settings', { contact_info: contact.value, disposal_guide: guide.value, payment_guide: payGuide.value, ...(+roundUnit.value !== +(st.reduction_round_unit || 1) ? { reduction_round_unit: +roundUnit.value } : {}), monthly_report_title: title.value }); toast('저장했습니다'); setBoot(null); render(); }, infoMsg), 'primary')), infoMsg),
+    h('section', { class: 'card' }, h('h2', {}, '일일 마감 방식'), h('label', { class: 'row' }, approval, '일일 마감 시 팀장 확인 필요'),
+      h('p', { class: 'muted small' }, '혼자 처리할 때는 체크를 해제하세요. 이후 회차는 담당자가 기록하면 마감이 완료됩니다.'),
+      btn('마감 설정 저장', wrap(async () => {
+        const saved = await api('settings', { method: 'POST', body: { close_approval_required: approval.checked }, _prefsOwner: owner });
+        if (sessionOwner() !== owner || !boot?.me) return;
+        setBoot({ ...boot, settings: { ...boot.settings, close_approval_required: saved.close_approval_required } });
+        if (approval.isConnected) approvalMsg.textContent = saved.close_approval_required ? '팀장 확인 방식으로 저장했습니다.' : '단독 마감 방식으로 저장했습니다.';
+        const { refreshBadges } = await import('./home.js');
+        await refreshBadges(true);
+      }, approvalMsg), 'primary'), approvalMsg),
     noticeCard()];
 }
 function settingsFees() {
@@ -602,7 +720,7 @@ function autoBackupCard() {
     h('div', { class: 'row' }, btn('백업 키 만들기', keygen, 'small'), btn('지금 자동 백업', wrap(async () => { const r = await runJob('backup/auto', {}, '자동 백업'); toast(r.ok ? `자동 백업: ${r.file}` : (r.error || '자동 백업 실패'), !r.ok); load(); }, msg), 'small'),
       btn('보관 기간 지난 백업 정리', wrap(async () => { const r = await runJob('backup/retention', {}, '백업 보관 정리'); toast(`${(r.deleted || []).length}개 지웠습니다`); }, msg), 'small')),
     h('div', { class: 'ftable' },
-      h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '자동 백업'), h('div', { class: 'ft-v' }, h('label', { class: 'row' }, auto, '서버가 켜져 있는 동안 매일'), time, h('span', { class: 'muted small' }, '(늦게 켜면 켜자마자) · 마감 확인 때도 백업'))),
+      h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '자동 백업'), h('div', { class: 'ft-v' }, h('label', { class: 'row' }, auto, '서버가 켜져 있는 동안 매일'), time, h('span', { class: 'muted small' }, '(늦게 켜면 켜자마자) · 일일 마감 완료 때도 백업'))),
       h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '두 번째 보관 위치'), h('div', { class: 'ft-v' }, dest2, h('span', { class: 'muted small' }, '복사 뒤 해시로 확인'))),
       h('div', { class: 'ft-row' }, h('span', { class: 'ft-l' }, '보관'), h('div', { class: 'ft-v' }, '자동 백업 최근', kd, '일(하루 1개) + 최근', km, '개월(달마다 1개) · 모든 백업', rd, '일 지나면 삭제'))),
     h('div', { class: 'row' }, btn('자동 백업 설정 저장', wrap(async () => { await post('settings', { backup_auto: auto.checked, backup_time: time.value, backup_dest2: dest2.value, backup_keep_daily: kd.value, backup_keep_monthly: km.value, backup_retention_days: rd.value }); toast('저장했습니다'); setBoot(null); render(); }, msg), 'primary')),
@@ -628,7 +746,7 @@ async function privacyCard() {
         if (!p.count) throw new Error('파기할 대상이 없습니다.');
         if (!(await confirmDlg('개인정보 파기', `${p.count}건의 이름·연락처·주소 등을 가명 처리합니다. 되돌릴 수 없습니다. 파기 대장에 일시·건수·작업자·기준이 남습니다. 계속할까요?`, { ok: '파기', danger: true }))) return;
         const r = await runJob('privacy/purge', {}, '개인정보 파기'); toast(`${r.count}건 파기했습니다`); render();
-      }, msg), 'danger', { disabled: !p.count }), h('span', { class: 'muted small' }, '마감 확인(팀장) 때와 명령 ', h('code', {}, 'python pc/pc_tool.py purge-pii'), '로도 실행됩니다.')),
+      }, msg), 'danger', { disabled: !p.count }), h('span', { class: 'muted small' }, '일일 마감이 완료될 때와 명령 ', h('code', {}, 'python pc/pc_tool.py purge-pii'), '로도 실행됩니다.')),
       h('div', { class: 'notice warn' }, '이전 백업 파일에는 파기 전 개인정보가 남아 있습니다. 백업은 [백업] 탭의 보관 일수에 따라 지워지며, 외부 매체로 옮긴 사본은 담당자가 같은 기간에 지워야 합니다.'), msg),
     h('div', { class: 'card' }, h('h2', {}, '파기 대장'), purgeLogTable(d.log), h('p', { class: 'small muted' }, '사용자·이력 화면에서도 볼 수 있습니다.'))];
 }

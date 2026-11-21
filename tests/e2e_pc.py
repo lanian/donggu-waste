@@ -701,6 +701,10 @@ def run():
 
         # 적재량 보정
         page.goto(URL + "#/settings/crews")
+        expect(page.get_by_role("heading", name="수거팀·차량")).to_be_visible()
+        expect(page.get_by_placeholder("보정값")).to_have_count(0)
+        page.get_by_role("link", name="한도", exact=True).click()
+        expect(page.get_by_role("heading", name="품목별 적재량 보정")).to_be_visible()
         vrow = page.locator("tr", has=page.get_by_placeholder("보정값")).first
         expect(vrow).to_be_visible()
         vrow.get_by_placeholder("보정값").fill("1.8")

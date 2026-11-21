@@ -239,7 +239,7 @@ def mark_backup(con, ok: bool = True):
         C.set_setting(con, "last_backup_at", C.now())
 
 
-def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
+def make_auto(con, reason: str = "SCHEDULE", lock=None, *, on_record=None) -> dict:
     """공개키로 자동 백업. 실패해도 예외를 밖으로 내지 않고 상태에 남긴다(마감 확인을 막지 않게).
 
     lock: 서버의 DB 잠금. 주면 DB를 읽는 동안(설정 읽기·암호화 내보내기·결과 기록)만 잡고, 시간이 오래 걸리는
@@ -317,6 +317,8 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
             C.set_setting(con, "auto_backup_day", C.today_kst())
         C.audit(con, "backup", res.get("file") or "-", "AUTO_BACKUP", {"ok": res["ok"], "reason": reason, **({"file": res["file"], "bytes": res["bytes"], "sha256": res["sha256"][:16]} if res["ok"] else {"error": res.get("error", "")[:120]}),
                                                                        **({"dest2_ok": res["dest2"]["ok"]} if res.get("dest2") else {}), **({"deleted": len(res["deleted"])} if res.get("deleted") else {})})
+        if on_record is not None:
+            on_record(res)
     return res
 
 

@@ -25,6 +25,7 @@ def main():
     rows = [batch('visit', '가상 방문팀', stops=[visit]),
             batch('unload', '가상 하차팀', final_unload={'eta': '13:20', 'label': '가상 반입지'}),
             cancelled, batch('idle', '가상 대기팀'),
+            batch('retired', '가상 교체팀', stops=[visit], crew_archived=True, device_id=None, resend_needed=True),
             batch('pending', '가상 미확인팀', bundles=[{**empty_qr, 'id': 'pending-qr'}]),
             batch('legacy', '가상 구버전팀', bundles=[{**previous_qr, 'id': 'legacy-qr', 'sent_stops': None}]),
             batch('revision', '가상 갱신팀', assign_ver=2),
@@ -71,10 +72,17 @@ def main():
             expect(heading('가상 대기팀')).to_be_hidden()
             expect(heading('가상 이력팀')).to_be_hidden()
             expect(heading('가상 이전갱신팀')).to_be_hidden()
+            expect(heading('가상 교체팀')).to_be_hidden()
             expect(toggle).not_to_be_checked()
             toggle.check()
             expect(heading('가상 대기팀')).to_be_visible()
             expect(heading('가상 이력팀')).to_be_visible()
+            archived = page.locator('.card').filter(has=heading('가상 교체팀'))
+            expect(archived.get_by_text('보관된 팀', exact=True)).to_be_visible()
+            expect(archived.get_by_role('button', name='배차표 인쇄')).to_be_visible()
+            expect(archived.get_by_role('button', name='QR 표시')).to_have_count(0)
+            expect(archived.get_by_role('link', name=re.compile('설정에서 연결'))).to_have_count(0)
+            expect(archived.get_by_text(re.compile('QR을 다시 표시'))).to_have_count(0)
             toggle.uncheck()
             changed = page.locator('.card').filter(has=heading('가상 취소팀'))
             changed.get_by_role('button', name='QR 표시').click()

@@ -169,6 +169,14 @@ def one(con, sql, args=()):
     return r[0] if r else None
 
 
+def require_current_crew(con, cid):
+    """새 업무에 연결할 팀을 확인한다. 지난 배차·하차 조회에는 사용하지 않는다."""
+    crew = one(con, "SELECT * FROM crew WHERE id=?", (cid,))
+    if not crew or crew.get("archived_at"):
+        raise UserError("삭제되었거나 없는 수거팀입니다. 다른 팀을 선택해 주세요.")
+    return crew
+
+
 ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("actor", default="system")
 
 
@@ -241,7 +249,10 @@ def close_info(con, work_date: str | None) -> dict | None:
     """그날의 가장 최근 마감 회차(없으면 None)."""
     if not work_date:
         return None
-    return one(con, "SELECT * FROM day_close_log WHERE work_date=? ORDER BY seq DESC LIMIT 1", (work_date,))
+    close = one(con, "SELECT * FROM day_close_log WHERE work_date=? ORDER BY seq DESC LIMIT 1", (work_date,))
+    if close:
+        close["approval_required"] = bool(close.get("approval_required", True))
+    return close
 
 
 def _after_close(con, rid: str) -> dict:

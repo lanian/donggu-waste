@@ -8,7 +8,7 @@ import uuid
 from cryptography.hazmat.primitives import serialization
 
 import dgproto as P
-from dgpc.core import UserError, audit, now, one, rows, today_kst, tx
+from dgpc.core import UserError, audit, get_setting, now, one, rows, today_kst, tx
 from dgpc.fees import FEE_ROWS
 
 # ------------------------------------------------------------------ PC 키 (암호화 DB 안에 보관)
@@ -40,7 +40,7 @@ def device_fingerprint(con, dev_id: str, kex: bytes, sig: bytes) -> str:
 
 
 def register_device(con, code: str, label: str = "", confirm: bool = False) -> dict:
-    """기기 등록: 공개키를 넣되 '지문 확인 대기'. 담당자가 두 화면의 9자리 지문이 같음을 확인(confirm_device)해야 목록을 보낼 수 있다."""
+    """공개키를 등록한다. 기본 경로는 지문 확인을 기다리고, 간편 등록은 서명과 등록번호를 검증한 뒤 confirm=True를 전달한다."""
     try:
         dev, kex, sig = P.parse_device_code(code)
     except P.ProtocolError as e:
@@ -65,7 +65,7 @@ def register_device(con, code: str, label: str = "", confirm: bool = False) -> d
 
 
 def confirm_device(con, dev_id: str):
-    """두 화면의 지문이 같다고 담당자가 확인 → 사용 시작."""
+    """지문 대조 또는 간편 등록 인증을 마친 기기를 사용 가능 상태로 표시한다."""
     d = one(con, "SELECT status, confirmed_at FROM device WHERE id=?", (dev_id,))
     if not d or d["status"] != "ACTIVE":
         raise UserError("확인할 기기가 없습니다.")
@@ -97,6 +97,10 @@ def list_devices(con):
     return out
 
 
+def _was_deleted(con, cid):
+    return one(con, "SELECT 1 FROM audit_log WHERE entity='crew' AND entity_id=? AND action='DELETE' LIMIT 1", (cid,))
+
+
 def save_crew(con, data: dict) -> str:
     cid = data.get("id") or str(uuid.uuid4())
     name = (data.get("name") or "").strip()
@@ -121,6 +125,25 @@ def save_crew(con, data: dict) -> str:
     if not 0 <= kg <= 30000:
         raise UserError("최대 적재 중량은 0~30000kg 사이로 적어 주세요 (0 = 따지지 않음).")
     with tx(con):
+        current = one(con, "SELECT * FROM crew WHERE id=?", (cid,)) if data.get("id") else None
+        if (current and current.get("archived_at")) or (data.get("id") and not current and _was_deleted(con, cid)):
+            raise UserError("이미 삭제된 수거팀입니다. 화면을 다시 열어 주세요.")
+        previous_device = current["device_id"] if current else None
+        expected = data.get("expected_device_id", previous_device)
+        if expected == "":
+            expected = None
+        if expected != previous_device:
+            raise UserError("이 팀의 연결 휴대폰이 바뀌었습니다. 화면을 다시 열어 확인해 주세요.")
+        if dev and dev != previous_device:
+            owners = rows(con, "SELECT name FROM crew WHERE device_id=? AND id<>? ORDER BY name", (dev, cid))
+            if owners:
+                names = ", ".join(c["name"] for c in owners)
+                raise UserError(f"이 휴대폰은 {names}에 연결되어 있습니다. 설정 → 수거팀에서 기존 연결을 해제하고 저장해 주세요.")
+        same_name = one(con, "SELECT * FROM crew WHERE name=? AND id<>?", (name, cid))
+        if same_name:
+            if same_name.get("archived_at"):
+                raise UserError("과거 배차·하차 이력에 보존된 팀 이름입니다. 다른 이름을 사용해 주세요.")
+            raise UserError("같은 이름의 수거팀이 이미 있습니다.")
         con.execute("""INSERT INTO crew (id, name, device_id, capacity_m3, capacity_kg, shift_start, shift_end, active) VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_id=excluded.device_id, capacity_m3=excluded.capacity_m3,
             capacity_kg=excluded.capacity_kg, shift_start=excluded.shift_start, shift_end=excluded.shift_end, active=excluded.active""",
@@ -131,7 +154,66 @@ def save_crew(con, data: dict) -> str:
 
 
 def list_crews(con):
-    return rows(con, "SELECT * FROM crew ORDER BY name")
+    return rows(con, "SELECT * FROM crew WHERE archived_at IS NULL ORDER BY name")
+
+
+def _pending_return_day(con, cid):
+    """수거 0건으로 재계산해도 이미 실은 짐의 최종 하차는 그날의 업무다."""
+    return one(con, """SELECT b.work_date FROM assignment_batch b
+        JOIN audit_log plan ON plan.entity='batch' AND plan.entity_id=b.id AND plan.action IN ('CONFIRM','EDIT')
+        WHERE b.crew_id=? AND b.status='ACTIVE' AND b.work_date>=?
+        AND json_type(b.route_json,'$.route_history.final_unload')='object'
+        AND (json_extract(b.route_json,'$.route_history.initial_load.volume_m3')>0
+          OR json_extract(b.route_json,'$.route_history.initial_load.weight_kg')>0)
+        AND NOT EXISTS (SELECT 1 FROM audit_log d WHERE d.entity='day' AND d.entity_id=b.work_date
+                         AND d.action='CLOSE' AND d.id>plan.id)
+        AND NOT EXISTS (SELECT 1 FROM unload_log u LEFT JOIN result_event e ON e.event_id=u.id
+                          WHERE u.crew_id=b.crew_id AND u.work_date=b.work_date AND u.void_reason IS NULL
+                          AND (e.assign_ver=b.assign_ver OR EXISTS
+                            (SELECT 1 FROM audit_log a WHERE a.entity='unload' AND a.entity_id=u.id
+                              AND a.action='ADD' AND a.id>plan.id)))
+        ORDER BY b.work_date LIMIT 1""", (cid, today_kst()))
+
+
+def delete_crew(con, cid: str) -> dict:
+    """진행 중 업무와 설정 연결을 확인하고, 과거 업무가 있는 팀은 이름과 ID를 보관한다."""
+    with tx(con):
+        crew = one(con, "SELECT * FROM crew WHERE id=?", (cid,))
+        if not crew:
+            if _was_deleted(con, cid):
+                return {"ok": True, "archived": False}
+            raise UserError("수거팀을 찾을 수 없습니다.")
+        if crew["archived_at"]:
+            return {"ok": True, "archived": True}
+        pending = one(con, """SELECT COUNT(*) AS n, MIN(b.work_date) AS first_day FROM active_assignment a
+            JOIN assignment_batch b ON b.id=a.batch_id JOIN request r ON r.id=a.request_id
+            WHERE b.crew_id=? AND r.status NOT IN ('DONE','CANCELLED','PARTIAL','NOT_COLLECTED','ON_HOLD')""", (cid,))
+        if pending["n"]:
+            raise UserError(f"미처리 배차 {pending['n']}건이 있습니다(첫 배차일 {pending['first_day']}). "
+                            "현장 결과를 반영하거나 배정·노선에서 다른 팀으로 옮겨 주세요.")
+        returning = _pending_return_day(con, cid)
+        if returning:
+            raise UserError(f"{returning['work_date']} 배차에 최종 하차가 남아 있습니다. "
+                            "하차 기록을 반영하거나 해당 일자의 업무를 마감해 주세요.")
+        dongs = rows(con, "SELECT name FROM dong WHERE crew_id=? ORDER BY sort, name", (cid,))
+        if dongs:
+            names = ", ".join(d["name"] for d in dongs)
+            raise UserError(f"설정 → 행정동에서 {names}의 기본 담당 팀을 먼저 변경하거나 해제해 주세요.")
+        if one(con, "SELECT 1 FROM app_user WHERE crew_id=? LIMIT 1", (cid,)):
+            raise UserError("사용자 관리에서 연결된 계정의 수거팀을 먼저 변경하거나 해제해 주세요.")
+        if (get_setting(con, "pilot") or {}).get("crew_id") == cid:
+            raise UserError("시범 운영에서 대상 팀을 변경하거나 전체 팀으로 저장해 주세요.")
+        if crew["device_id"]:
+            raise UserError("휴대폰의 현장 결과를 회수한 뒤 수거팀 설정에서 연결 휴대폰을 해제하고 저장해 주세요.")
+        history = one(con, """SELECT EXISTS(SELECT 1 FROM assignment_batch WHERE crew_id=?)
+            OR EXISTS(SELECT 1 FROM unload_log WHERE crew_id=?) AS found""", (cid, cid))
+        archived = bool(history["found"])
+        if archived:
+            con.execute("UPDATE crew SET archived_at=?, active=0 WHERE id=?", (now(), cid))
+        else:
+            con.execute("DELETE FROM crew WHERE id=?", (cid,))
+        audit(con, "crew", cid, "ARCHIVE" if archived else "DELETE", {"name": crew["name"]})
+        return {"ok": True, "archived": archived}
 
 
 # ------------------------------------------------------------------ 결과 가져오기·충돌

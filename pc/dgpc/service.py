@@ -37,7 +37,7 @@ from dgpc.payments import (
 )
 from dgpc.devices import (
     ensure_pc_keys, pc_key, registration_text, device_fingerprint, register_device, confirm_device, device_ready, set_device_status,
-    list_devices, save_crew, list_crews, _open_from_device, make_qr_test, record_qr_test, list_qr_tests, crew_request_ids, request_in_crew,
+    list_devices, save_crew, delete_crew, list_crews, _open_from_device, make_qr_test, record_qr_test, list_qr_tests, crew_request_ids, request_in_crew,
     device_crew,
 )
 from dgpc.users import (

@@ -6,6 +6,7 @@ import unittest
 
 from playwright.sync_api import expect, sync_playwright
 import test_label_usage_api as fixture
+from dgpc import area
 
 
 class UsageUITests(fixture.UsageHTTPCase):
@@ -37,6 +38,55 @@ class UsageUITests(fixture.UsageHTTPCase):
         panel = self.page.get_by_role("region", name="사용 장수 자동 집계", exact=True)
         expect(panel).to_be_visible(timeout=3000)
         return panel
+
+    def test_stock_summary_omits_empty_warning(self):
+        stock = self.page.get_by_role("region", name="동별 번호 자동 배정")
+        expect(stock.get_by_label("미배정 장수", exact=True)).to_have_text("3장")
+        self.assertNotIn("null", stock.inner_text())
+
+    def test_actual_stock_dong_links_to_filtered_ledger(self):
+        dong = area.get_dong(self.con, "동명동")
+        for label, owner in (("0071", {}), ("0072", {"dong_id": dong["id"]})):
+            status, data, _ = self.post("numbered-labels/receive", {"start": label, "end": label, **owner}, self.admin_cookie)
+            self.assertEqual(status, 200, data)
+        ledger_filter = self.page.get_by_label("원장 재고 행정동", exact=True)
+        ledger_filter.select_option("unscoped")
+        loose = self.page.get_by_role("button", name="0071", exact=True)
+        scoped = self.page.get_by_role("button", name="0072", exact=True)
+        expect(loose).to_be_visible()
+        expect(scoped).to_have_count(0)
+        self.page.get_by_role("button", name="동명동 번호 원장 보기", exact=True).click()
+        expect(ledger_filter).to_have_value(dong["id"])
+        expect(loose).to_have_count(0)
+        expect(scoped).to_be_visible()
+        scoped.click()
+        expect(self.page.get_by_role("dialog")).to_contain_text("재고 행정동 동명동")
+
+    def test_retry_updates_current_ledger_page_and_filters(self):
+        stock = self.page.get_by_role("region", name="동별 번호 자동 배정")
+        expect(stock.get_by_label("미배정 장수", exact=True)).to_have_text("3장")
+        dong = area.get_dong(self.con, "동명동")
+        status, response, _ = self.post("numbered-labels/receive", {
+            "start": "0001", "end": "0052", "dong_id": dong["id"], "received_on": "2020-01-01"
+        }, self.admin_cookie)
+        self.assertEqual(status, 200, response)
+        # 번호 재배정 전의 기존 수거 결과를 합성한다. 다음 수동 재배정에서 0001이 사용된다.
+        with fixture.SV.LOCK:
+            request, line = self.request(dong="동명동")
+            self.result(request, line, 1, "PARTIAL")
+        status_filter = self.page.get_by_label("번호 상태", exact=True)
+        status_filter.select_option("DISTRIBUTED")
+        self.page.get_by_role("button", name="다음 ›", exact=True).click()
+        first = self.page.get_by_role("button", name="0051", exact=True)
+        last = self.page.get_by_role("button", name="0052", exact=True)
+        expect(first).to_be_visible()
+        expect(last).to_be_visible()
+        stock.get_by_role("button", name="미배정 다시 배정", exact=True).click()
+        expect(stock.get_by_label("배정 장수", exact=True)).to_have_text("1장")
+        expect(status_filter).to_have_value("DISTRIBUTED")
+        expect(first).to_have_count(0)
+        expect(last).to_be_visible()
+        self.assertEqual(self.errors, [])
 
     def test_real_quantity_auto_count_filters_navigation_and_ledger_independence(self):
         p = self.panel()

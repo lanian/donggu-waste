@@ -66,6 +66,21 @@ class NumberedLabelsTest(unittest.TestCase):
         self.assertEqual(self.total(), 3)
         self.assertEqual(self.total("numbered_label_event"), 3)
 
+    def test_ledger_filters_actual_stock_dong_and_unassigned_stock(self):
+        dong_id = self.con.execute("SELECT id FROM dong WHERE name='충장동'").fetchone()[0]
+        self.L.receive_range(self.con, "0041", "0041", dong_id=dong_id)
+        self.L.receive_range(self.con, "0042", "0043")
+        self.L.distribute_range(self.con, "0042", "0042", "가상 충장동 보관소")
+        cases = (({"stock_dong": dong_id}, ["0041"]), ({"stock_dong": "unscoped"}, ["0042", "0043"]),
+                 ({"stock_dong": "unscoped", "status": "DISTRIBUTED"}, ["0042"]))
+        for filters, numbers in cases:
+            with self.subTest(filters=filters):
+                result = self.L.label_page(self.con, filters)
+                self.assertEqual([row["number"] for row in result["rows"]], numbers)
+                self.assertEqual(result["counts"]["ALL"], 3)
+        with self.assertRaises(C.UserError):
+            self.L.label_page(self.con, {"stock_dong": "missing-dong"})
+
     def test_number_requires_ascii_json_string(self):
         invalid = (0, 1, 1.0, True, None, "", " 1", "1 ", "+1", "-1", "1.0", "1e3", "１２", "١", "1\n", "a", "0" * 31)
         for number in invalid:

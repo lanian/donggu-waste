@@ -181,7 +181,11 @@
 | `holidays` | ✓ |  |  |  |  | write |  |  | 휴무일 추가. |
 | `holidays/{id}/delete` | ✓ |  |  |  |  | write |  |  | 휴무일 지우기. |
 | `crews` | ✓ |  |  |  |  | write |  |  | 수거팀 저장. |
+| `crews/{id}/delete` | ✓ |  |  |  |  | write |  |  | 수거팀 삭제 및 기존 배차·하차 이력 보존. |
 | `devices/register` | ✓ |  |  |  |  | write |  |  | 휴대폰 등록(지문 확인 대기). |
+| `devices/pair/start` | ✓ |  |  |  |  | none |  |  | 휴대폰 6자리 등록에 사용할 일회용 QR 만들기. |
+| `devices/pair/{id}/confirm` | ✓ |  |  |  |  | none |  |  | 휴대폰의 기기 서명과 일회용 번호를 검증해 등록. |
+| `devices/pair/{id}/cancel` | ✓ |  |  |  |  | none |  |  | 간편 등록 QR과 일회용 번호 사용 중단. |
 | `devices/{id}/confirm` | ✓ |  |  |  |  | write |  |  | 휴대폰 지문 확인. |
 | `devices/{id}/status` | ✓ |  |  |  |  | write |  |  | 휴대폰 상태(분실·중지). |
 | `requests/{id}/link` | ✓ | ✓ |  |  |  | write |  |  | 유사 품목 연결. |
@@ -209,4 +213,4 @@
 | `road-rules/apply` | ✓ |  |  |  |  | none |  |  | 검증한 도로망으로 전환하는 작업. |
 | `road-rules/rollback` | ✓ |  |  |  |  | none |  |  | 이전에 사용한 도로망으로 복원하는 작업. |
 
-경로 180개 (로그인 전 4개 제외).
+경로 184개 (로그인 전 4개 제외).

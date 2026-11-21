@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import dgproto as P
 from dgpc import privacy as _pv, route_depots as DP
-from dgpc.core import KST, StaleError, UserError, _chunks, _date_ok, _int_clamp, _num, audit, get_setting, now, one, rows, today_kst, tx
+from dgpc.core import KST, StaleError, UserError, _chunks, _date_ok, _int_clamp, _num, audit, get_setting, now, one, require_current_crew, rows, today_kst, tx
 from dgpc.derive import FINAL, derive, request_round_unit
 from dgpc.devices import list_crews, pc_key
 from dgpc.fees import FEE_ROWS, fee_table_for_phone, volume_overrides
@@ -46,7 +46,7 @@ def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason
     out = []
     with tx(con):
         for cid, stops in plan.items():
-            out.append(_write_batch(con, cid, work_date, stops, crews[cid]["name"],
+            out.append(_write_batch(con, cid, work_date, stops,
                                     {"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else None,
                                     history=(histories or {}).get(cid)))
         _release_dropped(con, replaced)
@@ -183,8 +183,9 @@ def history_for_view(history, stops, waypoints, current_road):
     return {**result, 'state': state, 'path': history.get('path', {})}
 
 
-def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: str, extra: dict | None = None, action: str = "CONFIRM", *, history=None) -> dict:
+def _write_batch(con, cid: str, work_date: str, stops: list[dict], extra: dict | None = None, action: str = "CONFIRM", *, history=None) -> dict:
     """팀의 그날 배정 새 버전(assign_ver = 지난 최대 + 1)을 만들고 이전 버전은 SUPERSEDED. 트랜잭션은 호출하는 쪽."""
+    crew_name = require_current_crew(con, cid)["name"]
     _check_fixed_crew(con, cid, stops)
     prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
     con.execute("UPDATE assignment_batch SET status='SUPERSEDED' WHERE crew_id=? AND work_date=? AND status='ACTIVE'", (cid, work_date))
@@ -353,7 +354,7 @@ def prepare_edit(con, work_date: str, op: str, data: dict, *, review=False) -> d
         changes[src] = [x for x in stops_of(src) if x["request_id"] != rid]
     else:  # reorder
         cid = data.get("crew_id")
-        if cid not in cur:
+        if cid not in cur or cid not in crews:
             raise UserError("순서를 바꿀 팀의 배정이 없습니다.")
         order = [x for x in (data.get("order") or []) if isinstance(x, str)]
         old = stops_of(cid)
@@ -370,7 +371,7 @@ def prepare_edit(con, work_date: str, op: str, data: dict, *, review=False) -> d
 
 def apply_edit(con, work_date, op, data, prepared, plan, *, reviewed=None):
     """검토 또는 기존 부분 수정의 변경 팀만 새 갱신본으로 기록한다."""
-    cur, crews = prepared["current"], prepared["crews"]
+    cur = prepared["current"]
     reason = str(data.get("reason") or "").strip()[:200]
     rid = data.get("request_id")
     old_ids = [cur[cid]["batch_id"] for cid in plan if cid in cur]
@@ -379,7 +380,7 @@ def apply_edit(con, work_date, op, data, prepared, plan, *, reviewed=None):
         detail.update(reviewed=True, matrix_source=reviewed["matrix_source"])
     with tx(con):
         histories = matching_histories(plan, reviewed.get("histories")) if reviewed else {}
-        out = [_write_batch(con, cid, work_date, stops, crews[cid]["name"], detail, action="EDIT", history=histories.get(cid))
+        out = [_write_batch(con, cid, work_date, stops, detail, action="EDIT", history=histories.get(cid))
                for cid, stops in plan.items()]
         _release_dropped(con, old_ids)
     return {"batches": out, "resend_needed": [b["crew_id"] for b in out]}
@@ -414,7 +415,8 @@ def _kept_visit(batch_id, active_batch, status):
 
 
 def list_batches(con, work_date: str, *, route_map=False, current_road=None, for_send=False) -> list[dict]:
-    out = rows(con, """SELECT b.*, c.name AS crew_name, c.device_id FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
+    archive_flag = ", c.archived_at IS NOT NULL AS crew_archived" if for_send else ""
+    out = rows(con, f"""SELECT b.*, c.name AS crew_name, c.device_id{archive_flag} FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
         WHERE b.work_date=? ORDER BY c.name, b.assign_ver DESC""", (work_date,))
     if route_map:
         from dgpc.area import list_dongs
@@ -707,7 +709,7 @@ def confirm_receipt(con, bundle: str, code: str) -> str:
 
 # ------------------------------------------------------------------ 하차 기록·적재량 보정
 def add_unload(con, data: dict) -> str:
-    if not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (data.get("crew_id"),)):
+    if not data.get("crew_id"):
         raise UserError("팀을 골라 주세요.")
     place = (data.get("place") or "").strip()
     if not place:
@@ -718,6 +720,7 @@ def add_unload(con, data: dict) -> str:
         raise UserError("부피나 중량 중 하나는 적어 주세요.")
     uid = str(uuid.uuid4())
     with tx(con):
+        require_current_crew(con, data["crew_id"])
         con.execute("INSERT INTO unload_log (id, crew_id, work_date, at_time, place, volume_m3, weight_kg, note, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
                     (uid, data["crew_id"], data.get("work_date") or today_kst(), data.get("at_time") or None, place, vol, kg,
                      (data.get("note") or "").strip(), now()))

@@ -328,6 +328,12 @@ def label_page(con, f: dict | None = None) -> dict:
         if value:
             where.append(condition)
             args.append(value)
+    stock_dong = f.get("stock_dong")
+    if stock_dong == "unscoped":
+        where.append("stock_dong_id IS NULL")
+    elif stock_dong:
+        where.append("stock_dong_id=?")
+        args.append(_stock_dong(con, stock_dong)["id"])
     sql = " WHERE " + " AND ".join(where) if where else ""
     total = con.execute("SELECT COUNT(*) FROM numbered_label" + sql, args).fetchone()[0]
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)

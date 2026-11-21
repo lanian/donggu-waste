@@ -37,6 +37,8 @@
 | `payment_guide` | `"부과 금액은 수거 전까지 가상계좌 또는 현장 카드로 내 주세요. 납부 방법·기한은 담당 부서에 확인하세요."` | 안내 | config | 예 | 납부 방법·기한 안내 문구. |
 | `monthly_report_title` | `"대형폐기물 수거 월보"` | 안내 | config | 예 | 월보 제목. |
 | `capacity` | `{}` | 수거 한도 | area |  | 수거 한도(하루 건수·부피, 동별 우선 팀). 화면 값은 area.capacity_settings 가 기본값을 채워 만든다. |
+| `close_approval_required` | `true` | 마감 | config | 예 | 일일 마감에 팀장 확인을 사용합니다. 끄면 담당자가 마감을 기록할 때 해당 회차를 완료합니다. |
+| `device_pairing_relay_url` | `""` | 기기 | config | 예 | 휴대폰 6자리 간편 등록에 사용하는 HTTPS 중계 주소. 비우면 기존 QR 등록을 사용합니다. |
 | `reduction_round_unit` | `1` | 수수료 | config |  | 감면액 끝수 처리 단위(원): 1 = 원 미만 버림, 10 = 10원 미만 버림. 감면을 적용·바꿀 때 접수에 저장(이미 감면한 접수는 바꿔도 그대로). |
 | `reductions` | `null` | 수수료 | finance |  | 감면 사유 목록 [{code, label, rate, note, active}]. 비어 있으면 기본 목록(조례 확인 필요 표시). |
 | `photo_retention_days` | `90` | 보관 | config | 예 | 현장 사진 보관 기간(일, 7~3650). 지나면 사진 바이트를 지운다. |

@@ -1,10 +1,17 @@
 """행정동별 실물 배출표를 확정 수거 단위에 한 번만 배정한다."""
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import Counter, defaultdict
 import heapq
+from itertools import accumulate
+import re
 
 from dgpc import core as C
 from dgpc.collection import read_traces
+
+
+_ISSUE_PAGE_SIZE = 50
 
 
 def _requests(con, request_ids=None, dong_id=None):
@@ -73,17 +80,23 @@ def _retired(allocation, trace):
                for r in trace["retirements"])
 
 
-def _counts(segments, active, by_line):
+def _counts(segments, active, by_line, *, by_segment=None):
     required = sum(s["qty"] for s in segments)
     assigned = manual_excess = conflicts = 0
     for (rid, line, unit), allocation in active.items():
         segment = _slot(by_line, rid, line, unit)
-        if segment and _matches(allocation, segment):
+        if segment is None:
+            if not allocation["automatic"] and allocation["status"] == "USED":
+                manual_excess += 1
+            continue
+        if _matches(allocation, segment):
             assigned += 1
-        elif segment:
+            category = "assigned"
+        else:
             conflicts += 1
-        elif not allocation["automatic"] and allocation["status"] == "USED":
-            manual_excess += 1
+            category = "conflicts"
+        if by_segment is not None:
+            by_segment[(rid, line, segment["start"])][category] += 1
     return {"required": required, "assigned": assigned, "pending": required - assigned,
             "manual_excess": manual_excess, "conflicts": conflicts}
 
@@ -197,9 +210,85 @@ def sync(con, request_ids=None, *, dong_id=None):
         return {**changes, **counts}
 
 
-def summary(con, dong_id=None):
+def _stock_timeline(con, dong_id):
+    """배정 가능한 실물 번호를 동과 실제 수령·배부일별 누계로 읽는다."""
+    by_dong = defaultdict(Counter)
+    for stock in C.rows(con, """SELECT stock_dong_id,received_at,distributed_at,COUNT(*) AS qty
+            FROM numbered_label WHERE status='DISTRIBUTED' AND stock_dong_id IS NOT NULL
+            AND (? IS NULL OR stock_dong_id=?) GROUP BY stock_dong_id,received_at,distributed_at""", (dong_id, dong_id)):
+        by_dong[stock["stock_dong_id"]][_in_day(stock)] += stock["qty"]
+    timeline = {}
+    for dong, dated in by_dong.items():
+        days = sorted(dated)
+        timeline[dong] = days, [0, *accumulate(dated[day] for day in days)]
+    return timeline
+
+
+def _issue_page(con, segments, coverage, page, dong_id):
+    timeline = _stock_timeline(con, dong_id)
+    grouped, claimed, shortages = {}, Counter(), Counter()
+    # sync와 같은 수거순으로 남은 재고만 대조한다. 조회는 번호를 예약하거나 소모하지 않는다.
+    for s in segments:
+        counts = coverage.get((s["request_id"], s["line_id"], s["start"]), {})
+        pending = s["qty"] - counts.get("assigned", 0)
+        if not pending:
+            continue
+        day, dong = s["date"], s["dong_id"]
+        key = (s["request_id"], day)
+        if key not in grouped:
+            grouped[key] = {"request_id": s["request_id"], "receipt_no": s["receipt_no"], "dong_name": s["dong_name"],
+                            "date": day, "pending": 0, "reasons": set()}
+        row = grouped[key]
+        row["pending"] += pending
+        reasons = row["reasons"]
+        conflicts = counts.get("conflicts", 0)
+        if conflicts:
+            reasons.add("CONFLICT")
+        if not dong:
+            reasons.add("MISSING_DONG")
+        if not day:
+            reasons.add("MISSING_DATE")
+        unlinked = pending - conflicts
+        if not day or not dong or not unlinked:
+            continue
+        days, cumulative = timeline.get(dong, ([], [0]))
+        eligible = cumulative[bisect_right(days, day)]
+        available = min(unlinked, eligible - claimed[dong])
+        if available:
+            reasons.add("READY")
+            claimed[dong] += available
+        shortage = unlinked - available
+        if shortage:
+            shortages[key] += shortage
+            later = cumulative[-1] - eligible
+            if later:
+                reasons.add("LATE_STOCK")
+            if shortages[key] > later:
+                reasons.add("NO_STOCK")
+    rows = sorted(grouped.values(), key=lambda r: (r["date"] or "9999", r["receipt_no"], r["request_id"]))
+    pages = max(1, (len(rows) + _ISSUE_PAGE_SIZE - 1) // _ISSUE_PAGE_SIZE)
+    page = min(page, pages)
+    selected = rows[(page - 1) * _ISSUE_PAGE_SIZE:page * _ISSUE_PAGE_SIZE]
+    for row in selected:
+        row["reasons"] = sorted(row["reasons"])
+    return {"rows": selected, "total": len(rows), "page": page, "pages": pages}
+
+
+def summary(con, dong_id=None, *, issues_page=None):
     """번호를 바꾸지 않고 확정 수량·배정·부족과 현재 동별 재고를 조회한다."""
-    reqs, traces, segments, by_line = _source(con, dong_id=dong_id)
+    if issues_page is not None and not re.fullmatch(r"[1-9][0-9]{0,8}", str(issues_page)):
+        raise C.UserError("미배정 목록의 쪽 번호를 확인해 주세요.")
+    # 읽기 저장점은 입고·재배정의 중간 결과가 집계와 상세에 섞이지 않게 한다.
+    # 이미 열린 호출자 트랜잭션은 이 저장점을 닫은 뒤에도 그대로 유지한다.
+    con.execute("SAVEPOINT label_summary")
+    try:
+        return _summary(con, dong_id, issues_page)
+    finally:
+        con.execute("RELEASE label_summary")
+
+
+def _summary(con, dong_id, issues_page):
+    reqs, _, segments, by_line = _source(con, dong_id=dong_id)
     active = {(a["request_id"], a["line_id"], a["unit_index"]): a for a in allocation_rows(con, [r["id"] for r in reqs]) if not a["voided_at"]}
     stocks = C.rows(con, """SELECT d.id,d.name,d.sort,
         SUM(CASE WHEN l.status='DISTRIBUTED' THEN 1 ELSE 0 END) AS available,
@@ -207,6 +296,10 @@ def summary(con, dong_id=None):
         SUM(CASE WHEN l.status='VOID' THEN 1 ELSE 0 END) AS voided
         FROM dong d LEFT JOIN numbered_label l ON l.stock_dong_id=d.id
         WHERE (? IS NULL OR d.id=?) GROUP BY d.id ORDER BY d.sort,d.name""", (dong_id, dong_id))
-    counts = _counts(segments, active, by_line)
+    coverage = defaultdict(Counter) if issues_page is not None else None
+    counts = _counts(segments, active, by_line, by_segment=coverage)
     counts["manual_excess"] += _unmatched_manual(con, reqs)
+    if coverage is not None:
+        counts["issues"] = (_issue_page(con, segments, coverage, int(issues_page), dong_id) if counts["pending"]
+                            else {"rows": [], "total": 0, "page": 1, "pages": 1})
     return {**counts, "dongs": stocks}

@@ -45,6 +45,7 @@ def asset_files() -> list[Path]:
     files += [ROOT / "web" / name for name in sorted(allowed_web_files())]
     files += [ROOT / "web/icons" / name for name in PUBLIC_ICONS]
     files += [ROOT / "data" / name for name in DATA_JSON]
+    files += [ROOT / "data" / name for name in ("print_streets.json.gz", "print_streets.SOURCES.md")]
     files += [ROOT / "data/report_templates" / name for name in ("monthly.xlsx", "ledger.odt")]
     for path in files:
         if not path.resolve().is_relative_to(ROOT) or not path.is_file():

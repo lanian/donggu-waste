@@ -211,6 +211,109 @@ class LabelAutoTests(unittest.TestCase):
         next_result = self.A.sync(self.con, dong_id=self.dongs['동명동'])
         self.assertEqual((next_result['new_assigned'], next_result['pending'], next_result['conflicts']), (2, 1, 1))
 
+    def test_pending_rows_match_counts_and_preserve_two_collection_dates(self):
+        self.stock("0001", "0001")
+        self.stock("0002", "0002", day="2026-06-20")
+        r, line = self.request(qty=5)
+        self.collect(r, line, 3)
+        self.collect(r, line, 4, day="2026-06-10")
+        self.collect(r, line, 5, day="2026-06-10")
+        legacy = self.A.summary(self.con)
+        writes = self.con.total_changes
+        result = self.A.summary(self.con, issues_page=1)
+        issue = result.pop("issues")
+        self.assertEqual(result, legacy)
+        self.assertEqual(self.con.total_changes, writes)
+        self.assertEqual((issue["total"], issue["page"], issue["pages"]), (2, 1, 1))
+        self.assertEqual(sum(row["pending"] for row in issue["rows"]), result["pending"])
+        for row, day in zip(issue["rows"], ("2026-06-01", "2026-06-10"), strict=True):
+            self.assertEqual(set(row), {"request_id", "receipt_no", "dong_name", "date", "pending", "reasons"})
+            self.assertEqual((row["request_id"], row["receipt_no"], row["dong_name"], row["date"], row["pending"]),
+                             (r["id"], r["receipt_no"], "충장동", day, 2))
+            self.assertCountEqual(row["reasons"], ["LATE_STOCK", "NO_STOCK"])
+
+    def test_pending_rows_identify_missing_metadata_and_dong_scope(self):
+        unscoped, line = self.request(dong="")
+        self.collect(unscoped, line, 1)
+        self.con.execute("UPDATE result_import SET imported_at='unknown' WHERE id=?", (f"usage-import-{self.import_seq}",))
+        scoped, line = self.request(dong="동명동")
+        self.collect(scoped, line, 2)
+        all_rows = self.A.summary(self.con, issues_page=1)["issues"]["rows"]
+        self.assertEqual(len(all_rows), 2)
+        missing = next(row for row in all_rows if row["request_id"] == unscoped["id"])
+        self.assertFalse(missing["date"])
+        self.assertCountEqual(missing["reasons"], ["MISSING_DATE", "MISSING_DONG"])
+        one = self.A.summary(self.con, self.dongs["동명동"], issues_page=1)
+        self.assertEqual(one["pending"], 2)
+        self.assertEqual([(row["request_id"], row["reasons"]) for row in one["issues"]["rows"]], [(scoped["id"], ["NO_STOCK"])])
+
+    def test_conflicts_and_available_stock_include_only_unassigned_units(self):
+        r, line = self.request(qty=4)
+        NL.receive_range(self.con, "0901", "0901", received_on="2026-06-01")
+        NL.use_number(self.con, "0901", r["id"], line)
+        self.collect(r, line, 4)
+        # 이전 버전에서 배정 재실행 전으로 남은 상태로 만든다.
+        with patch.object(NL, "_sync_stock"):
+            self.stock("0001", "0001")
+            self.stock("0002", "0002", day="2026-06-20")
+        again, lid = self.request(qty=1)
+        self.events(again, [("ITEM_RESULT", {"line_id": lid, "qty_confirmed": 1, "qty_collected": 1}),
+                            ("ATTEMPT", {"outcome": "DONE"})])
+        self.con.execute("UPDATE result_event SET device_ts='2026-06-02T01:00:00Z' WHERE import_id=?", (f"usage-import-{self.import_seq}",))
+        result = self.A.summary(self.con, issues_page=1)
+        first, second = result["issues"]["rows"]
+        self.assertEqual((result["conflicts"], first["pending"], second["pending"]), (1, 4, 1))
+        self.assertCountEqual(first["reasons"], ["CONFLICT", "READY", "LATE_STOCK", "NO_STOCK"])
+        self.assertEqual(second["reasons"], ["LATE_STOCK"])
+        self.A.sync(self.con)
+        first, second = self.A.summary(self.con, issues_page=1)["issues"]["rows"]
+        self.assertEqual((first["pending"], second["pending"]), (3, 1))
+        self.assertNotIn("READY", first["reasons"])
+
+    def test_pending_pages_are_stable_and_exclude_nonpending_requests(self):
+        for _ in range(52):
+            r, line = self.request(qty=1)
+            self.collect(r, line, 1)
+        other, line = self.request(qty=1, dong="동명동")
+        self.stock("1000", "1001", dong="동명동")
+        self.collect(other, line, 1)
+        NL.use_number(self.con, "1001", other["id"], line)
+        first = self.A.summary(self.con, issues_page="1")["issues"]
+        last = self.A.summary(self.con, issues_page=999)["issues"]
+        self.assertEqual((first["page"], last["page"], last["pages"], last["total"]), (1, 2, 2, 52))
+        self.assertEqual((len(first["rows"]), len(last["rows"])), (50, 2))
+        receipts = [row["receipt_no"] for row in first["rows"] + last["rows"]]
+        self.assertEqual(receipts, sorted(set(receipts)))
+        self.assertNotIn(other["receipt_no"], receipts)
+        self.assertEqual(last, self.A.summary(self.con, issues_page=2)["issues"])
+        for invalid in ("", "all", -1, True):
+            with self.subTest(invalid=invalid), self.assertRaises(C.UserError):
+                self.A.summary(self.con, issues_page=invalid)
+
+    def test_readonly_summary_keeps_one_snapshot_during_stock_receipt(self):
+        r, line = self.request(qty=1)
+        self.collect(r, line, 1)
+        reader = store.connect(readonly=True)
+        source = self.A._source
+        def stock_after_trace(*args, **kwargs):
+            rows = source(*args, **kwargs)
+            if args[0] is reader:
+                self.stock("0001", "0001")
+            return rows
+        try:
+            with patch.object(self.A, "_source", stock_after_trace):
+                before = self.A.summary(reader, issues_page=1)
+            self.assertEqual(before["pending"], 1)
+            self.assertEqual(before["issues"]["rows"][0]["reasons"], ["NO_STOCK"])
+            self.assertFalse(reader.in_transaction)
+            reader.execute("BEGIN")
+            after = self.A.summary(reader, issues_page=1)
+            self.assertEqual((after["pending"], after["issues"]["rows"]), (0, []))
+            self.assertTrue(reader.in_transaction)
+            reader.rollback()
+        finally:
+            reader.close()
+
 
 if __name__ == "__main__":
     unittest.main()

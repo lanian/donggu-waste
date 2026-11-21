@@ -70,12 +70,15 @@ function workflowCard(sum, batches, unassigned, pd, date) {
   const unreceived = active.filter((b) => receipt(b) === 'UNCONFIRMED' && !b.resend_needed).length;
   const disconnected = active.filter((b) => !b.device_id || !(boot.devices || []).some((d) => d.id === b.device_id && d.status === 'ACTIVE' && d.confirmed_at)).length;
   const ended = afterWork(date), future = date > boot.today, closed = sum.closed;
+  const approvalRequired = (sum.close_approval_required ?? boot.settings.close_approval_required) !== false;
+  const awaitsReview = approvalRequired && closed?.approval_required !== false && closed?.status === 'RECORDED';
   const noResult = (sum.no_result || []).length, photos = sum.photos_missing || 0;
   const closeHref = `#/close?date=${date}`, dispatchHref = `#/dispatch?date=${date}`, sendHref = `#/send?date=${date}`;
   const sendCounts = [resend && `재전송 ${resend}팀`, unsent && `미전송 ${unsent}팀`, unreceived && `수신 미확인 ${unreceived}팀`].filter(Boolean);
   const resultStatus = sum.conflicts ? `충돌 ${sum.conflicts}건 확인` : photos ? `사진 ${photos}장 미회수`
     : noResult ? (ended ? `결과 ${noResult}건 미회수` : '수거 진행 중') : (sum.by_status.DONE ? `수거 완료 ${sum.by_status.DONE}건 반영` : '수거 후 결과 확인');
-  const closeStatus = closed ? (closed.status === 'APPROVED' ? '팀장 확인 완료' : '팀장 확인 대기') : future ? '예정일 도래 후 마감' : '마감 전';
+  const closeStatus = !closed ? (future ? '예정일 도래 후 마감' : '마감 전') : closed.status === 'APPROVED' ? '팀장 확인 완료'
+    : closed.approval_required === false ? '단독 마감 완료' : awaitsReview ? '팀장 확인 대기' : '담당자 기록';
   const steps = [
     { key: 'intake', title: '접수', status: sum.total ? `접수 ${sum.total}건` : '접수 없음', detail: '전화·현장 접수를 확인합니다.', href: office ? '#/request/new' : '#/requests', link: office ? '접수 등록' : '접수 보기' },
     { key: 'dispatch', title: '배정', status: office && unassigned === null ? '미배정 확인 필요' : office && unassigned ? `미배정 ${unassigned}건` : active.length ? `${active.length}팀 배정` : '확정 배정 없음', detail: office ? '미배정 사유·방문 순서를 확인합니다.' : '접수 담당자가 배정합니다.', href: office ? dispatchHref : null, link: '배정·노선 보기' },
@@ -87,12 +90,13 @@ function workflowCard(sum, batches, unassigned, pd, date) {
   if (field) {
     next = { key: 'results', label: '결과 가져오기', href: '#/results', why: '이 휴대폰의 결과·사진을 PC에 가져온 뒤 D/P 확인 코드를 휴대폰에 전달하세요.' };
   } else if (role === 'LEAD') {
-    const approval = (pd && pd.items || []).find((x) => x.key === 'close_approve' && x.count && x.oldest);
+    const approval = approvalRequired && (pd && pd.items || []).find((x) => x.key === 'close_approve' && x.count && x.oldest);
     const refund = (pd && pd.items || []).find((x) => x.key === 'refund_approve' && x.count);
-    next = closed ? { key: 'close', label: closed.status === 'APPROVED' ? '마감 내역 보기' : '마감 확인하기', href: closeHref, why: `${date} ${closeStatus}. 기록을 검토한 뒤 확인하세요.` }
+    next = closed ? { key: 'close', label: awaitsReview ? '마감 확인하기' : '마감 내역 보기', href: closeHref,
+      why: awaitsReview ? `${date} ${closeStatus}. 기록을 검토한 뒤 확인하세요.` : `${date} ${closeStatus}. 기록된 회차와 마감 후 변경 내역을 볼 수 있습니다.` }
       : approval ? { key: 'close', label: '대기 중인 마감 검토', href: `#/close?date=${approval.oldest}`, why: `전체 기간 중 마감 확인 대기 ${approval.count}일 · 가장 오래된 ${approval.oldest}부터 확인하세요.` }
         : refund ? { key: 'close', label: '환불 결재 검토', href: '#/refunds?status=REQUESTED', why: `전체 기간의 환불 결재 대기 ${refund.count}건을 검토하세요.` }
-          : { key: 'close', label: '일일 마감 현황 보기', href: closeHref, why: '접수·배정·목록 전달은 담당자가 처리하고, 팀장은 마감 기록을 검토합니다.' };
+          : { key: 'close', label: '일일 마감 현황 보기', href: closeHref, why: approvalRequired ? '접수·배정·목록 전달은 담당자가 처리하고, 팀장은 마감 기록을 검토합니다.' : '선택한 날짜의 처리 내역과 마감 기록을 볼 수 있습니다.' };
   } else if (closed) {
     next = { key: 'close', label: '마감 내역 보기', href: closeHref, why: `${closeStatus}. 마감 뒤 수정이 있었다면 변경 내역도 확인하세요.` };
   } else if (sum.conflicts) {

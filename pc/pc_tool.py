@@ -50,7 +50,7 @@ KST = dt.timezone(dt.timedelta(hours=9))
 def qr_png_data_uri(text: str, ec: str = "M") -> tuple[str, int]:
     level = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q}[ec]
     q = qrcode.QRCode(error_correction=level, box_size=8, border=4)
-    q.add_data(qrcode.util.QRData(text, mode=qrcode.util.MODE_ALPHA_NUM))
+    q.add_data(text, optimize=0)  # 기존 등록·전송 문자열은 영숫자, 간편 등록 QR은 바이트 방식
     q.make(fit=True)
     buf = io.BytesIO()
     q.make_image().save(buf, format="PNG")

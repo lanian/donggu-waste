@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import device_pairing
 
 from dgpc import external as X, backup as _bk, privacy as _pv, area, finance, osrm, settings as SR
 from dgpc import derive as _derive, fees as _fees, payments as _payments  # noqa: F401 — 설정 묶음에 값을 더하는 모듈(contribute)을 불러 둔다
@@ -28,6 +29,16 @@ def _external_part(con) -> dict:
 
 def save_settings(con, data: dict):
     with tx(con):
+        if "device_pairing_relay_url" in data:
+            try:
+                relay = device_pairing.relay_url(data["device_pairing_relay_url"])
+            except device_pairing.PairingError as e:
+                raise UserError(str(e)) from e
+            set_setting(con, "device_pairing_relay_url", relay)
+        if "close_approval_required" in data:
+            if not isinstance(data["close_approval_required"], bool):
+                raise UserError("일일 마감의 팀장 확인 사용 여부를 선택해 주세요.")
+            set_setting(con, "close_approval_required", data["close_approval_required"])
         if "capacity" in data:
             area.save_capacity(con, data["capacity"] or {})
         if "intake_notices" in data:

@@ -35,6 +35,7 @@ from pathlib import Path
 from socketserver import TCPServer
 from typing import Callable
 
+import device_pairing as PAIR
 import contextlib
 import queue
 
@@ -71,6 +72,7 @@ SLOW_MS = 1000  # 이보다 오래 걸린 요청은 WARNING 으로 남긴다(경
 LOCK = threading.Lock()
 CON = None
 SESSIONS: dict[str, dict] = {}
+PAIRINGS = PAIR.Sessions()
 FAILS: dict[str, dict] = {}  # 아이디별 로그인 실패 {"n": 횟수, "until": 잠금 끝 시각, "at": 마지막 실패}
 PRINTS: dict[str, dict] = {}  # 고른 접수 인쇄: 잠깐 쓰는 표(주소에 접수 ID를 길게 싣지 않게)
 PORT = 8765
@@ -646,7 +648,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(e), "stale": True, **e.info}, 409)
         except DW.ScopeError as e:
             return self.send_json({"error": str(e)}, 403)
-        except S.UserError as e:
+        except (S.UserError, PAIR.PairingError) as e:
             return self.send_json({"error": str(e)}, 400)
         except CLIENT_GONE:  # 브라우저가 응답 전에 연결을 끊음(다른 화면으로 이동·요청 취소): 서버 오류가 아니고 보낼 곳도 없다
             self.close_connection = True
@@ -1077,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
         dong_id = qs.get("dong_id") or None
         if dong_id:
             NL._stock_dong(self.c, dong_id)
-        return LA.summary(self.c, dong_id)
+        return LA.summary(self.c, dong_id, issues_page=qs.get("issues_page"))
 
     @endpoint("POST", "label-auto/sync", WORK)
     def ep_label_auto_sync(self, qs):
@@ -1851,7 +1853,7 @@ class Handler(BaseHTTPRequestHandler):
     def ep_close_day(self, qs):
         """마감 기록(담당자)."""
         d = self.json_body()
-        return self.idem("close", lambda: S.close_day(self.c, d.get("date", ""), d.get("note", ""), d.get("close_secs")))
+        return S.close_day(self.c, d.get("date", ""), d.get("note", ""), d.get("close_secs"), client_req_id=d.get("client_req_id"))
 
     @endpoint("POST", "close/approve", REVIEW)
     def ep_close_approve(self, qs):
@@ -1900,11 +1902,88 @@ class Handler(BaseHTTPRequestHandler):
         """수거팀 저장."""
         return {"id": S.save_crew(self.c, self.json_body())}
 
+    @endpoint("POST", "crews/{id}/delete", ADMIN)
+    def ep_crew_delete(self, qs, cid):
+        """수거팀 삭제 및 기존 배차·하차 이력 보존."""
+        return S.delete_crew(self.c, cid)
+
     @endpoint("POST", "devices/register", ADMIN)
     def ep_device_register(self, qs):
         """휴대폰 등록(지문 확인 대기)."""
         d = self.json_body()
         return S.register_device(self.c, d.get("code", ""), d.get("label", ""))
+
+    @endpoint("POST", "devices/pair/start", ADMIN, lock="none")
+    def ep_pair_start(self, qs):
+        """휴대폰 6자리 등록에 사용할 일회용 QR 만들기."""
+        from pc_tool import qr_png_data_uri
+        self.body()
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            owner = self.session()
+            relay = S.get_setting(CON, "device_pairing_relay_url")
+            if not relay:
+                raise S.UserError("설정 → 기기에서 간편 등록 중계 주소를 먼저 저장해 주세요.")
+            room = PAIRINGS.start(owner, relay)
+            registration = S.registration_text(CON)
+        try:
+            room.create_remote()
+            image, _ = qr_png_data_uri(room.qr_text(registration))
+            with LOCK:
+                if error := self._write_session_error():
+                    PAIRINGS.drop(owner, room.id)
+                    return error
+                PAIRINGS.get(owner, room.id, S.get_setting(CON, "device_pairing_relay_url"))
+                return {"id": room.id, "qr_image": image, "expires_in": max(0, int(room.deadline - time.monotonic()))}
+        except Exception:
+            with LOCK:
+                PAIRINGS.drop(owner, room.id)
+            raise
+
+    @endpoint("POST", "devices/pair/{id}/confirm", ADMIN, lock="none")
+    def ep_pair_confirm(self, qs, pair_id):
+        """휴대폰의 기기 서명과 일회용 번호를 검증해 등록."""
+        body = self.json_body()
+        if not isinstance(body, dict) or not isinstance(body.get("otp"), str) or not re.fullmatch("[0-9]{6}", body["otp"]):
+            raise S.UserError("휴대폰에 표시된 숫자 6자리를 입력해 주세요.")
+        label = body.get("label", "")
+        if not isinstance(label, str) or len(label) > 100:
+            raise S.UserError("기기 이름을 100자 이내로 입력해 주세요.")
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            owner = self.session()
+            room = PAIRINGS.get(owner, pair_id, S.get_setting(CON, "device_pairing_relay_url"))
+        payload = room.read_payload()
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            current = PAIRINGS.get(owner, pair_id, S.get_setting(CON, "device_pairing_relay_url"))
+            if not payload:
+                raise S.UserError("휴대폰에서 등록번호를 받은 다음 입력해 주세요.")
+            code = current.device_code(payload, body["otp"])
+            with S.tx(CON):
+                result = S.register_device(CON, code, label.strip(), confirm=True)
+            PAIRINGS.drop(owner, pair_id)
+        # 등록 성공 뒤 중계 회수에 실패해도 재사용할 수 없으며 암호문은 중계에서 만료된다.
+        with contextlib.suppress(PAIR.PairingError):
+            room.close_remote()
+        return result
+
+    @endpoint("POST", "devices/pair/{id}/cancel", ADMIN, lock="none")
+    def ep_pair_cancel(self, qs, pair_id):
+        """간편 등록 QR과 일회용 번호 사용 중단."""
+        self.body()
+        with LOCK:
+            if error := self._write_session_error():
+                return error
+            owner = self.session()
+            room = PAIRINGS.get(owner, pair_id, S.get_setting(CON, "device_pairing_relay_url"))
+            PAIRINGS.drop(owner, pair_id)
+        with contextlib.suppress(PAIR.PairingError):
+            room.close_remote()
+        return {"ok": True}
 
     @endpoint("POST", "devices/{id}/confirm", ADMIN)
     def ep_device_confirm(self, qs, dev):
@@ -2398,8 +2477,9 @@ class Handler(BaseHTTPRequestHandler):
         S.ACTOR.set(sess["username"])
 
     def print_page(self, batch_short: str, *, mode: str, route_mode: str | None):
-        from dgpc.dispatch_print_map import route_figure
+        from dgpc.dispatch_print_map import pickup_runs, route_figure
         from pc_tool import qr_png_data_uri
+        from print_streets import roads_in_bounds
 
         if mode not in ("protected", "plain") or route_mode not in (None, "positions"):
             return self.send_json({"error": "인쇄 방식을 확인하세요."}, 400)
@@ -2423,7 +2503,11 @@ class Handler(BaseHTTPRequestHandler):
                 d = S.dispatch_sheet(CON, b["id"], protected=protected, route_positions=positions, current_road=current_road)
                 stamp = AS.print_sheet_stamp(CON, b["id"])
                 history = d.get('map_route', {}).get('history')
-                endpoint, road_status = S.local_osrm(CON) if positions and d["stops"] and not history else ("", "")
+                runs = pickup_runs(d["stops"], positions=positions)
+                queries = [(i, [list(point) for _, point in run]) for i, run in enumerate(runs)
+                           if 2 <= len(run) <= 500 and any(p != run[0][1] for _, p in run[1:])]
+                can_route = queries and (not history or history['state'] == 'CURRENT')
+                endpoint, road_status = S.local_osrm(CON) if can_route else ("", "")
         except S.UserError as error:
             if not protected:
                 raise
@@ -2432,36 +2516,16 @@ class Handler(BaseHTTPRequestHandler):
 {options}<p class="warn" role="alert">{e(str(error))}</p></body></html>'''
             return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 
-        def visit(label, site):
-            pair = [site.get("lon"), site.get("lat")] if site else []
-            return label, pair if len(pair) == 2 and None not in pair else None
-
-        waypoints = []
         detached = d.get('final_unload')
-        if d["stops"] or detached:
-            depots = d.get("map_route", {})
-            waypoints.append(visit("출발", depots.get("depot") if depots.get("complete") else None))
-            unload_count = 0
-            final_unload = bool(detached)
-            for stop in d["stops"]:
-                waypoints.append(visit(str(stop["seq"]), stop if positions else None))
-                if unload := stop.get("unload_after"):
-                    unload_count += 1
-                    last = unload.get("final") is True
-                    final_unload |= last
-                    waypoints.append(visit("최종 하차" if last else f"하차{unload_count}", unload if positions else None))
-            if detached:
-                waypoints.append(visit('최종 하차', detached if positions else None))
-            waypoints.append(visit("차고지 복귀" if final_unload else "종료", depots.get("end") if depots.get("complete") else None))
-        line = history.get('path', {}) if history else {}
-        coordinates = [pair for _, pair in waypoints]
-        if endpoint and 2 <= len(coordinates) <= 500 and all(coordinates):
-            try:
-                points = routing.route_points(coordinates)
-            except S.UserError:
-                pass
-            else:
-                line = routing.road_path(points, endpoint)  # 로컬 길찾기 동안에는 업무 DB 잠금을 잡지 않는다.
+        roads = [{} for _ in runs]
+        if endpoint:
+            # 저장된 도형 하나에는 하차·복귀까지 들어 있어 수거 구간별로만 조회한다.
+            # 여러 번 하차하는 날에도 응답 없는 길찾기가 인쇄를 반복해서 지연시키지 않는다.
+            deadline = time.monotonic() + 4
+            for i, coords in queries:
+                if time.monotonic() >= deadline:
+                    break
+                roads[i] = routing.road_path(routing.route_points(coords), endpoint)
         history_note = ""
         if history:
             history_note = {
@@ -2469,16 +2533,18 @@ class Handler(BaseHTTPRequestHandler):
                 'UNVERIFIED': '확정 당시 노선 · 현재 도로망 버전을 확인할 수 없어 운행에 사용하지 마세요.',
                 'VISITS_CHANGED': '확정 뒤 방문 위치나 순서가 바뀌어 현재 방문 순서를 표시합니다. 도착 시각은 확정 당시 기준입니다.',
             }[history['state']]
+            trip_path = history.get('path', {})
+            distance = trip_path.get('distance_km')
+            if type(distance) in (float, int) and 0 <= distance < float('inf'):
+                distance_label = '전체 운행 거리' if trip_path.get('source') == 'OSRM' else '전체 운행 추정 거리'
+                history_note += f' · {distance_label} {distance:.2f} km'
             if history.get('matrix_note'):
                 history_note += ' · 계산 기준 ' + history['matrix_note']
             if history.get('estimated_legs'):
                 history_note += ' · 이동시간 직선 추정 구간 ' + ', '.join(history['estimated_legs'])
-        elif line.get('geometry'):
-            history_note = '이전 배정 · 현재 도로망으로 표시한 경로'
-        route = route_figure(waypoints, geometry=line.get("geometry"), distance_km=line.get("distance_km"),
-                             toll_excluded=line.get("toll_excluded") is True, geographic=positions,
-                             note=history_note, historical=bool(history and history['state'] != 'CURRENT'),
+        route = route_figure(runs, roads=roads, geographic=positions, street_lookup=roads_in_bounds,
                              caption=f"{d['work_date']} · {d['crew']} · 갱신본 {d['assign_ver']}")
+        trip_summary = f'<p class="print-route-note">전체 배차 기준 · {e(history_note)}</p>' if history_note else ''
         rows_html = []
         for s in d["stops"]:
             done_note = {"DONE": "수거 완료", "PARTIAL": "일부 수거 (남은 품목)", "NOT_COLLECTED": "미수거 (재방문)", "ON_HOLD": "보류"}.get(s.get("status"), "")
@@ -2553,6 +2619,7 @@ class Handler(BaseHTTPRequestHandler):
 {options}<p class="warn">{note}</p>
 <table><thead><tr><th>순서</th><th>도착·약속</th>{columns}<th>연락</th><th>수거</th></tr></thead>
 <tbody>{''.join(rows_html)}</tbody></table>
+{trip_summary}
 {route}
 <footer>출력 {e(d['printed_at'])} · 출력 기록은 변경 이력에 남습니다.</footer></body></html>"""
         with LOCK:
@@ -2562,7 +2629,7 @@ class Handler(BaseHTTPRequestHandler):
             if not batch or batch["status"] != "ACTIVE" or stamp != AS.print_sheet_stamp(CON, b["id"]):
                 return self.send_json({"error": "배정 또는 접수가 바뀌었습니다. 최신 배차표를 다시 열어 주세요."}, 409)
             if ((history and current_road != DW.road_history_basis(CON))
-                    or (not history and line.get("geometry") and (endpoint, road_status) != S.local_osrm(CON))):
+                    or (any(r.get('geometry') for r in roads) and (endpoint, road_status) != S.local_osrm(CON))):
                 return self.send_json({"error": "도로망이 바뀌었습니다. 배차표를 다시 열어 주세요."}, 409)
         return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 

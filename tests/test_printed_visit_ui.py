@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -52,6 +53,17 @@ def main(exe=None):
             batch = api(pc, pc_url, 'assign', {'date': day, 'plan': {crew: stops}})[0]['batch_id']
             address = pc_url + 'print/batch/' + batch[:8]
             sheet = pc.new_page()
+            external_print_requests = []
+
+            def local_print_request(request):
+                target = urlsplit(request.request.url)
+                if target.scheme in ('http', 'https') and target.netloc != urlsplit(pc_url).netloc:
+                    external_print_requests.append(request.request.url)
+                    request.abort()
+                else:
+                    request.continue_()
+
+            sheet.route('**/*', local_print_request)
             sheet.goto(address)
             expect(sheet.get_by_text('개인정보 보호 인쇄', exact=True)).to_be_visible()
             expect(sheet.locator('#print')).to_have_count(0)
@@ -85,7 +97,10 @@ def main(exe=None):
             assert '010-0000-6261' not in protected_html and '01000006261' not in protected_html
             assert '가상 비공개 메모' not in protected_html and '가상 현장 위치 메모' not in protected_html
             route = sheet.locator('.print-route')
-            expect(route.get_by_role('heading', name='방문 순서도')).to_be_visible()
+            expect(route.locator('ol li')).to_have_text(['1', '2'])
+            expect(route.get_by_role('heading', name='수거 방문 순서')).to_be_visible()
+            expect(route.locator('svg')).to_have_count(0)
+            expect(sheet.locator('tbody tr.u')).to_contain_text('최종 하차 후 차고지 복귀')
             assert not any(raw in route.inner_html() for raw in ('126.922', '126.923', '35.146'))
             images = [[img.get_attribute('src') for img in cell.locator('img.visit-qr').all()]
                       for cell in sheet.locator('.visit-qr-cell').all()]
@@ -96,28 +111,60 @@ def main(exe=None):
             expect(sheet.locator('img.visit-qr').first).to_be_visible()
             expect(route.locator('.print-route-order')).to_be_visible()
             sheet.emulate_media(media='screen')
-            geometry = {'type': 'LineString', 'coordinates': [[126.920, 35.147], [126.922, 35.146], [126.923, 35.148],
-                                                               [126.926, 35.152], [126.920, 35.147]]}
+            geometry = {'type': 'LineString', 'coordinates': [[126.922, 35.146], [126.9228, 35.1464], [126.923, 35.148]]}
+            pickup_path = '/route/v1/driving/126.922000,35.146000;126.923000,35.148000'
             road_reply = {'code': 'Ok', 'routes': [{'distance': 2750, 'geometry': geometry}]}
             with loopback(lambda _: (200, {}, road_reply)) as (url, calls):
                 api(pc, pc_url, 'settings', {'osrm_url': url, 'external': {'travel_method': 'OSRM'}})
                 sheet.reload()
                 assert not calls, '위치를 제외한 보호 인쇄는 좌표를 조회하지 않는다'
                 sheet.get_by_role('link', name='노선도에 방문 위치 표시', exact=True).click()
-                expect(route.get_by_role('heading', name='배차 노선도')).to_be_visible()
+                expect(route.get_by_role('heading', name='수거지 노선도')).to_be_visible()
+                expect(route.locator('svg text.print-route-stop')).to_have_text(['1', '2'])
                 expect(route).to_contain_text('2.75')
                 expect(sheet.locator('.visit-qr-cell')).to_have_count(2)
-                assert calls and all(r['address'] not in sheet.content() for r in requests)
+                assert [urlsplit(call).path for call in calls] == [pickup_path], calls
+                assert all(r['address'] not in sheet.content() for r in requests)
                 assert not any(raw in route.inner_html() for raw in ('126.922', '126.923', '35.146'))
+                sheet.emulate_media(media='print')
+                expect(route.locator('svg')).to_be_visible()
+                expect(route.locator('.print-map-base .print-map-street-name').first).to_be_visible()
+                base = route.locator('.print-map-base')
+                assert base.locator('.print-map-street').count() > 0
+                # 실제 인쇄 색상에서 도로 배경이 방문 번호보다 옅게 보이며 번호 아래에 그려진다.
+                assert route.evaluate(r"""section => {
+                    const street = section.querySelector('.print-map-street');
+                    const number = section.querySelector('.print-route-stop');
+                    function lightness(node, paint) {
+                        const style = getComputedStyle(node);
+                        const rgb = style[paint].match(/[\d.]+/g).map(Number);
+                        let opacity = Number(style[paint + 'Opacity']);
+                        for (let p = node; p && p !== section; p = p.parentElement)
+                            opacity *= Number(getComputedStyle(p).opacity);
+                        const gray = (rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722) / 255;
+                        return 1 - opacity * (1 - gray);
+                    }
+                    return Boolean(street.compareDocumentPosition(number) & Node.DOCUMENT_POSITION_FOLLOWING)
+                        && lightness(street, 'stroke') > lightness(number, 'fill');
+                }""")
+                expect(sheet.locator('tbody tr.u')).to_be_visible()
+                sheet.emulate_media(media='screen')
+                calls.clear()
                 sheet.get_by_role('link', name='방문 위치 숨기기', exact=True).click()
-                expect(route.get_by_role('heading', name='방문 순서도')).to_be_visible()
+                expect(route.get_by_role('heading', name='수거 방문 순서')).to_be_visible()
+                assert not calls
                 sheet.get_by_role('link', name='일반 인쇄', exact=True).click()
                 expect(route).to_contain_text('2.75')
+                expect(route.locator('svg text.print-route-stop')).to_have_text(['1', '2'])
+                assert [urlsplit(call).path for call in calls] == [pickup_path], calls
             api(pc, pc_url, 'settings', {'external': {'travel_method': 'ESTIMATE'}})
             sheet.reload()
             expect(route).to_contain_text('직선')
+            expect(route.locator('.print-map-base .print-map-street-name').first).to_be_visible()
+            expect(route.locator('.print-route-credit')).to_contain_text('OpenStreetMap contributors')
             expect(sheet.locator('tbody')).to_contain_text(requests[0]['name'])
             expect(sheet.locator('tbody')).to_contain_text(requests[0]['address'])
+            expect(sheet.locator('tbody tr.u')).to_contain_text('최종 하차 후 차고지 복귀')
             expect(sheet.get_by_role('columnheader', name='이번 방문 수수료 (감면 전)')).to_be_visible()
             expect(sheet.locator('tbody tr').first).to_contain_text(expected_item)
             expect(sheet.locator('tbody tr').first.locator('td.r')).to_have_text(f'{fee["price"] * 3:,}원')
@@ -126,6 +173,7 @@ def main(exe=None):
             expect(mixed.locator('td.r')).to_contain_text(f'확정 소계 {fee["price"]:,}원')
             expect(mixed.locator('td.r')).to_contain_text('단가 확인 대기')
             expect(sheet.locator('img.visit-qr')).to_have_count(0)
+            assert not external_print_requests, external_print_requests
             assert not api(pc, pc_url, 'batches?date=' + day)[0]['bundles'], '배차표 출력은 팀 목록 전체 수신 확인을 만들지 않는다'
 
             app.evaluate("""() => {
@@ -222,8 +270,12 @@ def main(exe=None):
             assert detached['count'] == 0
             sheet.goto(pc_url + 'print/batch/' + detached['batch_id'][:8])
             expect(sheet.locator('tbody')).to_contain_text('최종 하차 후 차고지 복귀')
+            expect(sheet.locator('.print-route')).to_have_count(0)
             unload_images = [img.get_attribute('src') for img in sheet.get_by_role('img', name='최종 하차 QR', exact=False).all()]
             assert unload_images and not sheet.locator('.visit-qr-cell').count()
+            sheet.get_by_role('link', name='일반 인쇄', exact=True).click()
+            expect(sheet.locator('.print-route')).to_have_count(0)
+            expect(sheet.locator('tbody tr.u')).to_contain_text('최종 하차 후 차고지 복귀')
             app.evaluate('(frames) => window.printedQr(frames)', unload_images)
             app.get_by_role('button', name='QR 다시 읽기', exact=True).click()
             action = app.get_by_role('region', name='지금 할 일')

@@ -91,7 +91,7 @@ class DefaultDongsTest(unittest.TestCase):
             expected = [(*row, 0) for row in rows] if table == "request" else rows
             self.assertEqual(self.snapshot(upgraded, table), expected, table)
         for row in original_crew:
-            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), (*row, None))
         self.assertEqual(len(S.list_crews(upgraded)), 13)
         self.assertEqual(upgraded.execute("PRAGMA foreign_key_check").fetchall(), [])
 
@@ -123,7 +123,7 @@ class DefaultDongsTest(unittest.TestCase):
                 if column not in ("crew_id", "updated_at"):
                     self.assertEqual(row[index], before[row[0]][index], column)
         for row in original_crew:
-            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), (*row, None))
         self.assertEqual(upgraded.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_existing_crew_names_are_preserved_instead_of_adopted(self):
@@ -137,7 +137,7 @@ class DefaultDongsTest(unittest.TestCase):
         self.assertNotIn(dong["crew_id"], (first, second))
         self.assertEqual(dong["crew_name"], "충장동 수거팀 (3)")
         for row in before:
-            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), row)
+            self.assertEqual(upgraded.execute("SELECT * FROM crew WHERE id=?", (row[0],)).fetchone(), (*row, None))
 
     def test_cleared_default_crew_stays_unassigned_after_restart(self):
         con = self.connect(create=True)

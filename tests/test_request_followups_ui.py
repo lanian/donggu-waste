@@ -16,7 +16,14 @@ def open_queue(page, selector):
     return queue
 
 
+def null_text_nodes(container):
+    return container.evaluate(
+        "(el) => [...el.childNodes].filter(n => n.nodeType === Node.TEXT_NODE && n.data === 'null').length"
+    )
+
+
 def main():
+    null_nodes = {}
     with pc_server() as url, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path, headless=True)
         admin = browser.new_context(service_workers="block")
@@ -42,11 +49,17 @@ def main():
             page = admin.new_page()
             page.goto(url + "#/home", wait_until="domcontentloaded")
             queue = open_queue(page, ".dash-backlog details")
-            queue.get_by_role("link", name=created["receipt_no"], exact=True).click()
+            receipt = queue.get_by_role("link", name=created["receipt_no"], exact=True)
+            expect(receipt).to_be_visible()
+            expect(queue.get_by_label("후속조치 행정동").locator('option[value="-"]')).to_have_count(1)
+            expect(queue.get_by_role("button", name="다음", exact=True)).to_have_count(0)
+            null_nodes["오늘 현황 1쪽"] = null_text_nodes(queue.locator('[aria-live="polite"]'))
+            receipt.click()
             card = page.get_by_role("region", name="접수 후속조치")
             expect(card.get_by_text("가상 재방문 독촉", exact=False)).to_be_visible()
-            expect(card.get_by_text("가상 수거 사유", exact=False)).to_be_visible()
+            expect(card.get_by_text("PC 수거 입력: 가상 수거 사유", exact=True)).to_be_visible()
             expect(card.get_by_role("list", name="남은 품목과 사유")).to_contain_text("남은 2")
+            null_nodes["접수 상세"] = null_text_nodes(card.locator(":scope > div"))
             card.get_by_role("button", name="후속조치 수정").click()
             form = page.get_by_role("dialog", name="후속조치 저장")
             form.get_by_label("담당자").select_option(uid)
@@ -71,7 +84,22 @@ def main():
             page = scoped.new_page()
             page.goto(url + "#/dongs", wait_until="domcontentloaded")
             queue = open_queue(page, ".dong-workspace details")
-            queue.get_by_label("후속조치 행정동").select_option(dong)
+            receipt = queue.get_by_role("link", name=created["receipt_no"], exact=True)
+            expect(receipt).to_be_visible()
+            results = queue.locator('[aria-live="polite"]')
+            dong_filter = queue.get_by_label("후속조치 행정동")
+            assert dong_filter.locator("option").evaluate_all("xs => xs.map(x => x.value)") == ["all", dong]
+            null_nodes["동별 관리 1쪽"] = null_text_nodes(results)
+            null_nodes["동 담당자 행정동 필터"] = null_text_nodes(dong_filter)
+
+            status_filter = queue.get_by_label("후속조치 상태")
+            status_filter.select_option("done")
+            expect(results.get_by_text("조건에 맞는 후속조치가 없습니다.", exact=True)).to_be_visible()
+            expect(results.get_by_role("button", name="다음", exact=True)).to_have_count(0)
+            null_nodes["동별 관리 빈 큐"] = null_text_nodes(results)
+            status_filter.select_option("open")
+            expect(receipt).to_be_visible()
+            dong_filter.select_option(dong)
             queue.get_by_label("후속조치 담당자").select_option(uid)
             queue.get_by_label("기한 초과만").check()
             expect(queue.get_by_text("기한 초과", exact=True)).to_be_visible()
@@ -86,7 +114,8 @@ def main():
             card.get_by_text("후속조치 이력", exact=True).click()
             expect(card.get_by_text("followup_dong · 완료", exact=False)).to_be_visible()
             expect(card.get_by_text("수거 상태 · 일부 수거")).to_be_visible()
-            print("실HTTP UI 통과: 오늘 현황, 미수거 사유·잔량, 재방문 확정, 수정 초안 보존, 동·담당자·기한 초과 필터, 완료와 이력")
+            assert not any(null_nodes.values()), f"선택 항목이 만든 null 텍스트 노드: {null_nodes}"
+            print("실HTTP UI 통과: 목록·빈 큐·동 필터·상세의 null 제거, 수거 메모·잔량, 재방문·초안 보존, 권한·필터·완료 이력")
         finally:
             scoped.close()
             admin.close()

@@ -270,7 +270,8 @@ def pending(con, today: str | None = None) -> dict:
     t = today or S.today_kst()
     out = []
     r = S.one(con, """SELECT COUNT(*) AS n, MIN(work_date) AS oldest FROM day_close_log d WHERE status='RECORDED'
-        AND seq=(SELECT MAX(seq) FROM day_close_log x WHERE x.work_date=d.work_date)""")
+        AND approval_required=1 AND ? AND seq=(SELECT MAX(seq) FROM day_close_log x WHERE x.work_date=d.work_date)""",
+              (S.get_setting(con, "close_approval_required"),))
     out.append({"key": "close_approve", "label": "마감 확인 대기", "count": r["n"], "oldest": r["oldest"], "link": "close"})
     r = S.one(con, "SELECT COUNT(*) AS n, MIN(requested_at) AS oldest FROM refund_case WHERE status='REQUESTED'")
     out.append({"key": "refund_approve", "label": "환불 결재 대기", "count": r["n"], "oldest": S._kst_date(r["oldest"]), "link": "refunds"})

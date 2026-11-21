@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import dgproto as P
 from dgpc import store as _store, area, label_auto
-from dgpc.core import ACTOR, UserError, _after_close, _date_ok, _int_clamp, _num, _sane_ts, audit, norm_phone, now, one, rows, today_kst, tx
+from dgpc.core import ACTOR, UserError, _after_close, _date_ok, _int_clamp, _num, _sane_ts, audit, norm_phone, now, one, require_current_crew, rows, today_kst, tx
 from dgpc.derive import FINAL, derive
 from dgpc.devices import _open_from_device, _require_active_device
 from dgpc.fees import fee_rows, fee_state
@@ -714,11 +714,7 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
             "photos": len(photos), "unloads": sum(1 for e in events if e.get("kind") == "UNLOAD"), "created_at": obj.get("created_at")}
     if preview:
         return info
-    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
-        raise UserError("없는 수거팀입니다.")
     sha = hashlib.sha256(raw).hexdigest()
-    if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):
-        return {**info, "duplicate_file": True}
     imp = str(uuid.uuid4())
     newids = {c["r"]["request_id"] for c in new}
     purgedids = {c["r"]["request_id"] for c in new if c["purged"]}
@@ -726,6 +722,10 @@ def import_solo(con, raw: bytes, password: str, crew_id: str | None = None, prev
     line_map: dict[tuple[str, str], str] = {}
     counts = {"requests": 0, "events": 0, "photos_recovered": 0, "unloads_applied": 0, "skipped": 0, "renamed": 0}
     with tx(con):
+        if crew_id:
+            require_current_crew(con, crew_id)
+        if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):
+            return {**info, "duplicate_file": True}
         con.execute("INSERT INTO result_import (id, channel, device_id, package_sha256, imported_at, summary_json, release_code) VALUES (?,?,?,?,?,NULL,NULL)",
                     (imp, "USB", "SOLO", sha, now()))
         for c in new:

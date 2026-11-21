@@ -983,7 +983,7 @@ table.conflicts tr.grp .row { gap: 6px; align-items: center; }
   .shell.rail nav.side a .ic { width: 32px; height: 28px; background: transparent; }
   .shell.rail nav.side a.on .ic { background: transparent; color: var(--sidebar-accent); }
   .shell.rail .navgrp + .navgrp { border-color: #294358; }
-  .shell > main { padding: 22px 28px 44px; max-width: 1760px; }
+  .shell > main { padding: 22px 28px 44px; max-width: none; }
   .crumb { font-size: .79rem; color: var(--muted); margin-bottom: 13px; }
   h1 { font-size: 1.7rem; letter-spacing: -.035em; line-height: 1.3; }
   .pagehead { align-items: center; gap: 16px; border-bottom: 0; margin-bottom: 22px; padding-bottom: 0; }

@@ -556,7 +556,7 @@ async function screenRequest(id) {
       btn('+ 다음 접수', () => { intakeDraft = null; dupAckKey = null; go('#/request/new'); }, 'small primary'), ' ', btn('주민 안내 문구 복사', wrap(() => copyNotice(id)), 'small')) : null,
     !isNew && r.origin_device ? h('div', { class: 'notice ' + (r.field_checked_at ? 'info' : 'warn'), 'aria-label': '현장 접수 사무실 확인' }, h('strong', {}, '휴대폰 현장 접수 '), fieldReviewText, ' ', fieldReviewButton, fieldReviewHint, fieldReviewMsg) : null,
     r.status === 'CANCELLED' ? h('div', { class: 'notice' }, '취소된 접수입니다. 사유: ' + (r.cancel_label || r.cancel_reason || '-')) : null,
-    r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
+    r.closed && r.status !== 'CANCELLED' ? h('div', { class: 'notice warn' }, `이 접수의 예정일(${r.closed.work_date})은 마감되었습니다(${r.closed.seq}회차 · ${r.closed.status === 'APPROVED' ? '팀장 확인' : r.closed.approval_required === false ? '단독 마감 완료' : '담당자 기록'}). 고치면 사유와 함께 "마감 후 수정"으로 기록됩니다.`) : null,
     h('div', { class: 'grid2' + (isNew ? ' intake-grid' : '') },
       h('div', isNew ? { class: 'intake-column' } : {},
         h('div', { class: 'card formtable' + (isNew ? ' intake-applicant' : '') }, h('h2', {}, isNew ? h('span', { class: 'intake-section-number', 'aria-hidden': 'true' }, '01') : null, '신청자'),

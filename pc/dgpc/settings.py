@@ -151,6 +151,10 @@ register("payment_guide", PAYMENT_GUIDE_DEFAULT, "납부 방법·기한 안내 �
 register("monthly_report_title", "대형폐기물 수거 월보", "월보 제목.", lambda v: isinstance(v, str) and 0 < len(v) <= 60, expose=True, group="안내")
 register("capacity", {}, "수거 한도(하루 건수·부피, 동별 우선 팀). 화면 값은 area.capacity_settings 가 기본값을 채워 만든다.", _is_dict,
          group="수거 한도", owner="area")
+register("close_approval_required", True, "일일 마감에 팀장 확인을 사용합니다. 끄면 담당자가 마감을 기록할 때 해당 회차를 완료합니다.",
+         lambda v: isinstance(v, bool), expose=True, group="마감")
+register("device_pairing_relay_url", "", "휴대폰 6자리 간편 등록에 사용하는 HTTPS 중계 주소. 비우면 기존 QR 등록을 사용합니다.",
+         _str_max(300), expose=True, group="기기")
 
 # ---- 수수료·감면
 register("reduction_round_unit", 1, "감면액 끝수 처리 단위(원): 1 = 원 미만 버림, 10 = 10원 미만 버림. 감면을 적용·바꿀 때 접수에 저장(이미 감면한 접수는 바꿔도 그대로).", lambda v: v in (1, 10), group="수수료",

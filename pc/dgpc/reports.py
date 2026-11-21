@@ -10,7 +10,7 @@ import re
 
 from dgpc import privacy as _pv, finance
 from dgpc.core import (
-    LABELS, KST, UserError, _chunks, _date_ok, _kst_date, _kst_range, audit, get_setting, one, rows, safe_csv_writer, set_setting, today_kst, tx,
+    LABELS, KST, UserError, _chunks, _date_ok, _kst_date, _kst_range, audit, get_setting, one, require_current_crew, rows, safe_csv_writer, set_setting, today_kst, tx,
 )
 from dgpc.derive import FINAL, derive, payment_core, prefetch
 from dgpc.fees import FEE_ROWS
@@ -397,8 +397,6 @@ def save_pilot(con, data: dict) -> dict:
     if out["start"] and out["start"] > out["end"]:
         raise UserError("시작일이 끝일보다 늦습니다.")
     cid = (data.get("crew_id") or "").strip()
-    if cid and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (cid,)):
-        raise UserError("없는 수거팀입니다.")
     out["crew_id"] = cid
     base = {}
     for k in PILOT_BASE:
@@ -416,6 +414,8 @@ def save_pilot(con, data: dict) -> dict:
     out["base_period"] = (data.get("base_period") or "").strip()[:60]
     out["note"] = (data.get("note") or "").strip()[:300]
     with tx(con):
+        if cid:
+            require_current_crew(con, cid)
         set_setting(con, "pilot", out)
         audit(con, "settings", "pilot", "SAVE", {"start": out["start"], "end": out["end"], "crew": bool(cid), "base_keys": sorted(base)})
     return out

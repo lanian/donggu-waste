@@ -172,8 +172,6 @@ def save_dong(con, data: dict) -> str:
     if not name or len(name) > 20:
         raise C.UserError("동 이름을 20자 이내로 적어 주세요.")
     crew = data.get("crew_id") or None
-    if crew and not C.one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew,)):
-        raise C.UserError("없는 수거팀입니다.")
     days = _weekday_list(data.get("weekdays") or [])
     kws = data.get("keywords") or []
     if isinstance(kws, str):
@@ -196,6 +194,8 @@ def save_dong(con, data: dict) -> str:
     if depot and not crew:
         raise C.UserError('동별 차고지를 사용하려면 기본 담당 수거팀을 지정해 주세요.')
     with C.tx(con):
+        if crew:
+            C.require_current_crew(con, crew)
         if depot and data.get('active', True):
             other = [d for d in list_dongs(con) if d['id'] != did and d['active'] and d['crew_id'] == crew and d.get('depot') and not DP.same(depot, d['depot'])]
             if other:

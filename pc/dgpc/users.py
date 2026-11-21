@@ -9,7 +9,7 @@ import re
 import secrets as _secrets
 import uuid
 
-from dgpc.core import UserError, audit, get_setting, now, one, rows, tx
+from dgpc.core import UserError, audit, get_setting, now, one, require_current_crew, rows, tx
 
 ROLES = {"ADMIN": "운영 관리자", "INTAKE": "접수 담당자", "FIELD": "수거팀", "LEAD": "팀장(검토자)", "DONG": "동 담당자"}
 
@@ -49,12 +49,12 @@ def create_user(con, username: str, display_name: str, role: str, password: str,
     _check_pw_rules(password)
     if one(con, "SELECT 1 AS x FROM app_user WHERE username=?", (username,)):
         raise UserError("이미 있는 아이디입니다.")
-    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
-        raise UserError("없는 수거팀입니다.")
     dongs = _validated_dongs(con, dong_ids, required=True) if role == "DONG" else []
     salt = _secrets.token_bytes(16)
     uid = str(uuid.uuid4())
     with tx(con):
+        if crew_id:
+            require_current_crew(con, crew_id)
         con.execute("INSERT INTO app_user (id, username, display_name, role, pw_salt, pw_hash, must_change, created_at, crew_id) VALUES (?,?,?,?,?,?,?,?,?)",
                     (uid, username, display_name.strip(), role, salt.hex(), _pw_hash(password, salt), 1 if must_change else 0, now(),
                      crew_id if role == "FIELD" else None))
@@ -179,9 +179,9 @@ def set_user_crew(con, uid: str, crew_id: str | None):
         raise UserError("사용자를 찾을 수 없습니다.")
     if u["role"] != "FIELD":
         raise UserError("수거팀 계정만 팀을 연결합니다.")
-    if crew_id and not one(con, "SELECT 1 AS x FROM crew WHERE id=?", (crew_id,)):
-        raise UserError("없는 수거팀입니다.")
     with tx(con):
+        if crew_id:
+            require_current_crew(con, crew_id)
         con.execute("UPDATE app_user SET crew_id=? WHERE id=?", (crew_id or None, uid))
         audit(con, "user", uid, "CREW", {"crew_id": crew_id})
 

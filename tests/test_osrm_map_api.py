@@ -122,6 +122,10 @@ class RouteMapHTTPTest(SessionHTTPTestCase):
                 self.assertIn('확정 당시', page)
                 self.assertIn('4.23 km', page)
                 self.assertIn('이동시간 직선 추정 구간 출발 → 1번', page)
+                figure = page.split('<section class="print-route"', 1)[1].split('</section>', 1)[0]
+                self.assertNotIn('4.23 km', figure)
+                self.assertNotIn('출발', figure)
+                self.assertNotIn('class="print-route-road"', figure)
                 self.assertNotIn('class="print-route-arrow"', page)
             finally:
                 conn.close()
@@ -212,8 +216,10 @@ class RouteMapHTTPTest(SessionHTTPTestCase):
             self.assertEqual((code, result['source'], len(calls)), (200, 'ESTIMATE', 1))
 
     def test_print_rejects_a_stop_changed_during_road_lookup(self):
-        _, _, _, _, receipts, confirmed = self.seed()
-        batch_id = confirmed[0]['batch_id']
+        day, crew, _, _, receipts, _ = self.seed()
+        # 인쇄 시 도로 조회가 필요한, 중간 하차 없는 연속 수거 두 건.
+        batch, = S.confirm_plan(self.con, day, {crew: [{'request_id': r['id']} for r in receipts[:2]]})
+        batch_id = batch['batch_id']
         entered, finish = Event(), Event()
 
         def road_reply(_):

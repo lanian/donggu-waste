@@ -183,6 +183,14 @@ def main():
             address.click(position={"x": address.bounding_box()["width"] - 10, "y": 10})
             expect(page.locator(".shell")).to_have_class(re.compile(r"\brail\b"))
             ok(page.evaluate("localStorage.getItem('dg-rail')") == "1", "넓은 화면 전환은 임시 메뉴만 정리하고 고정 rail 설정 유지")
+            page.set_viewport_size({"width": 2560, "height": 900})
+            for menu_state in ("접힘", "펼침"):
+                if menu_state == "펼침":
+                    page.locator(".rail-btn").click()
+                    expect(page.locator(".shell")).not_to_have_class(re.compile(r"\brail\b"))
+                right_gap = page.locator(".shell > main").evaluate("""main =>
+                    main.parentElement.getBoundingClientRect().right - main.getBoundingClientRect().right""")
+                ok(abs(right_gap) <= 1, f"2560px 메뉴 {menu_state}에서 본문이 오른쪽 끝까지 채워짐 (차이 {right_gap}px)")
             page.set_viewport_size({"width": 900, "height": 900})
             closed(page)
             page.screenshot(path=str(output / "menu-closed.png"))

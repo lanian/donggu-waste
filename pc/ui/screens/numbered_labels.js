@@ -27,15 +27,27 @@ async function screenNumberedLabels() {
   const myRoute = routeEpoch, myHash = location.hash;
   let view, loadSeq = 0, detailSeq = 0, loadingKey = '', result = null;
   const current = () => view?.isConnected && myRoute === routeEpoch && location.hash === myHash;
-  const stockPanel = labelStock(current);
+  const stockPanel = labelStock(current, () => load(true), showDongLedger);
   const q = numberInput('번호 찾기', s.q);
   q.placeholder = '번호 일부 · 앞 0 포함';
   const status = h('select', { 'aria-label': '번호 상태' }, h('option', { value: '', selected: !s.status }, '전체'), ...Object.entries(STATES).map(([v, t]) => h('option', { value: v, selected: v === s.status }, t)));
   const destination = h('input', { type: 'search', value: s.destination, 'aria-label': '배부처 찾기', placeholder: '배부처 일부' });
+  const dongNames = new Map((boot.dongs || []).map((d) => [d.id, d.name]));
+  const stockDong = h('select', { 'aria-label': '원장 재고 행정동' },
+    h('option', { value: '' }, '전체'), h('option', { value: 'unscoped' }, '재고 동 미지정'),
+    ...Array.from(dongNames, ([id, name]) => h('option', { value: id }, name)));
+  stockDong.value = s.stockDong || '';
+  const stockName = (label) => label.stock_dong_id ? dongNames.get(label.stock_dong_id) || '등록되지 않은 동' : '재고 동 미지정';
+  const ledgerTitle = h('h2', { tabindex: -1 }, '숫자 배출표 원장');
+  function showDongLedger(id) {
+    if (!current() || !dongNames.has(id)) return;
+    q.value = ''; status.value = ''; destination.value = ''; stockDong.value = id;
+    invalidate(); load(); ledgerTitle.focus();
+  }
   const summary = h('div', { class: 'kpis compact', 'aria-label': '전체 원장 현황' });
   const rows = h('div'), pager = h('div', { class: 'pager' }), count = h('b', {}, '0');
   const message = h('p', { class: 'msg', role: 'status' });
-  const saveFilters = () => Object.assign(s, { q: q.value, status: status.value, destination: destination.value });
+  const saveFilters = () => Object.assign(s, { q: q.value, status: status.value, destination: destination.value, stockDong: stockDong.value });
   const invalidate = () => {
     saveFilters(); loadSeq++; loadingKey = ''; s.page = 1; query.disabled = false;
     rows.setAttribute('aria-busy', 'true');
@@ -47,6 +59,7 @@ async function screenNumberedLabels() {
     saveFilters();
     if (s.q && !/^[0-9]{1,30}$/.test(s.q)) { message.textContent = '번호는 1~30자리 숫자로 찾아 주세요.'; return; }
     const params = { q: s.q, status: s.status, destination: s.destination, page: s.page };
+    if (s.stockDong) params.stock_dong = s.stockDong;
     const signature = JSON.stringify(params);
     if (force !== true && loadingKey === signature) return;
     const my = ++loadSeq;
@@ -59,10 +72,10 @@ async function screenNumberedLabels() {
       result = d; s.page = d.page;
       count.textContent = Number(d.total).toLocaleString('ko-KR');
       summary.replaceChildren(...[['ALL', '전체'], ...Object.entries(STATES)].map(([code, label]) => h('div', { class: 'kpi' }, h('span', { class: 'k' }, label), h('b', { class: 'v' }, `${Number(d.counts?.[code] || 0).toLocaleString('ko-KR')}개`), h('span', { class: 's' }, '전체 원장 기준'))));
-      rows.replaceChildren(grid(['번호', '상태', '배부처', '접수 연결', '입고 일시', '마지막 변경'], d.rows.map((x) => [
+      rows.replaceChildren(grid(['번호', '상태', '배부처', '접수 연결', '입고 일시', '마지막 변경', '재고 행정동'], d.rows.map((x) => [
         btn(x.number, () => openDetail(x.number), 'small code', { 'aria-label': x.number }), stateChip(x.status), x.destination || '-',
-        x.request_id ? h('a', { href: `#/request/${encodeURIComponent(x.request_id)}` }, '연결된 접수 보기') : '-', cell(kst(x.received_at), x.received_at), cell(kst(x.updated_at), x.updated_at)]), { empty: '조건에 맞는 번호가 없습니다.',
-        sort: { key: 'numbered-labels', cols: ['text', 'text', 'text', null, 'date', 'date'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' } }));
+        x.request_id ? h('a', { href: `#/request/${encodeURIComponent(x.request_id)}` }, '연결된 접수 보기') : '-', cell(kst(x.received_at), x.received_at), cell(kst(x.updated_at), x.updated_at), stockName(x)]), { empty: '조건에 맞는 번호가 없습니다.',
+        sort: { key: 'numbered-labels', cols: ['text', 'text', 'text', null, 'date', 'date', 'text'], note: '이 쪽에 보이는 행 안에서만 정렬합니다' } }));
       pager.replaceChildren(btn('‹ 이전', () => { s.page = result.page - 1; load(); }, 'small', { disabled: d.page <= 1 }), h('span', { class: 'pg' }, `${d.page} / ${d.pages}쪽 · 50개씩`), btn('다음 ›', () => { s.page = result.page + 1; load(); }, 'small', { disabled: d.page >= d.pages }));
       message.textContent = '';
     } catch (e) {
@@ -126,7 +139,7 @@ async function screenNumberedLabels() {
     const detailCurrent = () => current() && panel.isConnected && my === detailSeq;
     const redraw = () => {
       const label = history.label;
-      const info = h('div', { class: 'notice info' }, stateChip(label.status), ` · 배부처 ${label.destination || '없음'} · 입고 ${kst(label.received_at)}`,
+      const info = h('div', { class: 'notice info' }, stateChip(label.status), ` · 재고 행정동 ${stockName(label)} · 배부처 ${label.destination || '없음'} · 입고 ${kst(label.received_at)}`,
         label.request_id ? [' · ', h('a', { href: `#/request/${encodeURIComponent(label.request_id)}` }, '연결된 접수 보기')] : null);
       const localMessage = h('p', { class: 'msg', role: 'alert' });
       const printing = btn('인쇄 화면 열기', wrap(async () => {
@@ -233,14 +246,14 @@ async function screenNumberedLabels() {
     finally { searchSeq++; document.removeEventListener('keydown', searchEnter, true); }
   };
   const query = btn('조회', () => { s.page = 1; load(); }, 'primary');
-  const reset = btn('조회 초기화', () => { q.value = ''; status.value = ''; destination.value = ''; invalidate(); load(); }, 'small');
+  const reset = btn('조회 초기화', () => { q.value = ''; status.value = ''; destination.value = ''; stockDong.value = ''; invalidate(); load(); }, 'small');
   [q, destination].forEach((input) => { input.addEventListener('input', invalidate); input.addEventListener('keydown', (event) => { if (event.key === 'Enter') query.click(); }); });
-  status.addEventListener('change', () => { invalidate(); load(); });
+  [status, stockDong].forEach((select) => select.addEventListener('change', () => { invalidate(); load(); }));
   view = h('div', {}, pagehead('배출표 관리', ...(work ? [btn('기존 번호 재고 동 지정', () => rangeDialog('stock-dong'), 'small'), btn('번호 구간 배부', () => rangeDialog('distribute'), 'small'), btn('번호 구간 입고', () => rangeDialog('receive'), 'primary small')] : [])),
     stockPanel,
-    collectionLabelUsage(current), h('h2', {}, '숫자 배출표 원장'),
+    collectionLabelUsage(current), ledgerTitle,
     h('p', { class: 'muted' }, '실물 배출표의 입고·배부·사용·무효를 번호별로 관리합니다. 번호를 누르면 접수 연결과 변경 내역을 볼 수 있습니다.'), summary,
-    searchbox([['번호', q], ['상태', status], ['배부처', destination]], query, reset), message,
+    searchbox([['번호', q], ['상태', status], ['배부처', destination], ['재고 행정동', stockDong]], query, reset), message,
     h('div', { class: 'gridbar' }, h('span', { class: 'cnt' }, '조회 ', count, '개'), h('span', { class: 'grow' }), h('span', { class: 'muted small' }, '번호를 눌러 상세·인쇄')), rows, pager);
   setTimeout(() => { if (current()) load(); }, 0);
   return view;

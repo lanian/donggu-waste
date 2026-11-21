@@ -50,6 +50,35 @@ def main(exe=None):
             page.goto(url + '#/labels', wait_until='domcontentloaded')
             stock = page.get_by_role('region', name='동별 번호 자동 배정', exact=True)
             expect(stock.get_by_label('미배정 장수', exact=True)).to_have_text('4장', timeout=8000)
+            issues = stock.get_by_role('region', name='미배정 수거 내역', exact=True)
+            expect(issues.locator('a[href^="#/request/"]')).to_have_count(2)
+            expect(issues.get_by_text('2026-11-12', exact=True)).to_have_count(2)
+            expect(issues).to_contain_text('재고 부족')
+            assert '가상 장수 주민' not in issues.inner_text()
+            scope = stock.get_by_label('자동 배정 행정동', exact=True)
+            # 이전 범위의 늦은 응답이 선택한 동의 재고와 미배정 내역을 덮지 않는다.
+            original = get('label-auto?issues_page=1')
+            held = []
+            page.route('**/api/label-auto?*', lambda route: held.append(route), times=1)
+            with page.expect_request(lambda req: '/api/label-auto?' in req.url):
+                stock.get_by_role('button', name='재고 현황 새로고침', exact=True).click()
+            scope.select_option(other['id'])
+            expect(stock.get_by_label('미배정 장수', exact=True)).to_have_text('0장')
+            held.pop().fulfill(json=original)
+            expect(issues.locator('a[href^="#/request/"]')).to_have_count(0)
+            # 조회 실패와 미배정 0건을 구분하고 같은 조건으로 다시 조회한다.
+            page.route('**/api/label-auto?*', lambda route: route.fulfill(status=503, json={'error': '가상 재고 조회 실패'}), times=1)
+            scope.select_option(dong['id'])
+            expect(stock.get_by_role('status')).to_contain_text('가상 재고 조회 실패')
+            expect(issues.get_by_text('미배정 수거분이 없습니다.', exact=True)).to_have_count(0)
+            expect(stock.get_by_role('button', name='충장동 미배정 다시 배정', exact=True)).to_be_disabled()
+            stock.get_by_role('button', name='재고 현황 새로고침', exact=True).click()
+            expect(stock.get_by_label('미배정 장수', exact=True)).to_have_text('4장')
+            with page.expect_request(lambda req: req.method == 'POST' and req.url.endswith('/api/label-auto/sync')) as retry:
+                stock.get_by_role('button', name='충장동 미배정 다시 배정', exact=True).click()
+            assert retry.value.post_data_json['dong_id'] == dong['id']
+            expect(issues.locator('a[href^="#/request/"]')).to_have_count(2)
+            stock.screenshot(path=str(shots / 'label-pending.png'))
             page.get_by_role('button', name='번호 구간 입고', exact=True).click()
             dialog = page.get_by_role('dialog', name='번호 구간 입고', exact=True)
             dialog.get_by_label('시작 번호', exact=True).fill('000101')
@@ -59,6 +88,7 @@ def main(exe=None):
             dialog.get_by_role('button', name='입고 기록', exact=True).click()
             expect(dialog).to_have_count(0)
             expect(stock.get_by_label('미배정 장수', exact=True)).to_have_text('0장')
+            expect(issues).to_contain_text('미배정 수거분이 없습니다.')
             assert get('numbered-labels?destination=' + other['name'])['counts']['USED'] == 4  # counts are whole-ledger totals
             assert all(row['status'] == 'DISTRIBUTED' for row in get('numbered-labels?destination=' + other['name'])['rows'])
             before = get('numbered-labels')['counts']

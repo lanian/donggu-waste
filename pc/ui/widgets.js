@@ -210,7 +210,7 @@ async function webcamReadOnce(video, accept, { signal } = {}) {
     loop();
   });
 }
-const purgeLogTable = (log) => grid(['일시', '건수', '작업자', '실행', '기준'], log.map((x) => [cell(kst(x.at), x.at), x.count, x.actor || '', ({ MANUAL: '화면', CLOSE_APPROVE: '마감 확인', CLI: '명령' })[x.trigger] || x.trigger,
+const purgeLogTable = (log) => grid(['일시', '건수', '작업자', '실행', '기준'], log.map((x) => [cell(kst(x.at), x.at), x.count, x.actor || '', ({ MANUAL: '화면', CLOSE_APPROVE: '마감 확인', CLOSE_SOLO: '단독 마감', CLI: '명령' })[x.trigger] || x.trigger,
   `보유 ${x.criteria.retention_years}년 · ${x.criteria.cutoff} 이전 ${x.criteria.basis}`]), { num: [1], empty: '파기 기록이 없습니다.', sort: { key: 'purge-log', cols: ['date', 'num', 'text', 'text', 'text'] } });
 
 // ------------------------------------------------------------ 통계·보고서 (개인정보 없이 집계)

@@ -16,7 +16,7 @@ async function screenSend(batchArg) {
     }
     // 이전 QR이 휴대폰에 남아 있으면 배차가 0곳이어도 새 목록으로 교체해야 한다.
     function needsCard(batch) {
-      if (batch.status !== 'ACTIVE') return false;
+      if (batch.crew_archived || batch.status !== 'ACTIVE') return false;
       if (batch.stops.length || batch.final_unload) return true;
       const sent = lastSent.get(batch.crew_id);
       const bundle = sent?.bundles[0];
@@ -28,19 +28,20 @@ async function screenSend(batchArg) {
       : includeOther.checked ? all : current;
     body.replaceChildren(...(batches.length ? batches.map((b) => {
       const last = b.bundles[0];
+      const canSend = b.status === 'ACTIVE' && !b.crew_archived;
       const code = h('input', { placeholder: '휴대폰 화면의 수신 코드 (R-XXXX XXXX)', 'aria-label': '수신 코드', style: 'width:260px' });
       const msg = h('span', { class: 'msg' });
       return h('div', { class: 'card' + (b.status !== 'ACTIVE' ? ' muted' : '') },
         h('div', { class: 'row', style: 'justify-content:space-between' },
-          h('h2', {}, `${b.crew_name} · ${b.stops.length}곳 `, b.assign_ver > 1 ? h('span', { class: 'muted' }, `${b.assign_ver}차 목록 `) : null, b.status === 'ACTIVE' ? chip('현재', 'ok') : chip('이전 목록')),
+          h('h2', {}, `${b.crew_name} · ${b.stops.length}곳 `, b.assign_ver > 1 ? h('span', { class: 'muted' }, `${b.assign_ver}차 목록 `) : null, b.crew_archived ? chip('보관된 팀') : b.status === 'ACTIVE' ? chip('현재', 'ok') : chip('이전 목록')),
           h('div', { class: 'row' }, b.status === 'ACTIVE' ? btn('배차표 인쇄', () => window.open('/print/batch/' + b.id.slice(0, 8), 'dg-print'), 'small') : null,
-          b.status === 'ACTIVE' ? btn('QR 표시', wrap(async () => {
+          canSend ? btn('QR 표시', wrap(async () => {
             const r = await post('bundles', { batch_id: b.id });
             window.open('/bundle/' + r.bundle_id.slice(0, 8), 'dg-qr', 'width=760,height=900');
             toast(`QR ${r.frames}장 (${r.count}건) 표시`); load();
           }, msg), 'primary', { disabled: !b.device_id }) : null)),
-        !b.device_id ? h('div', { class: 'notice' }, '이 팀에 휴대폰이 연결되어 있지 않아 QR을 보낼 수 없습니다. ', boot.me.role === 'ADMIN' ? h('a', { href: '#/settings/crews' }, '설정에서 연결하기 →') : '운영 관리자에게 연결을 요청하세요.') : null,
-        b.resend_needed && b.status === 'ACTIVE' ? h('div', { class: 'notice' }, '전송 뒤에 수정된 접수가 있습니다. QR을 다시 표시해 새 목록을 전달하세요. 급한 변경은 수거팀에 전화로 먼저 알리세요.') : null,
+        !b.crew_archived && !b.device_id ? h('div', { class: 'notice' }, '이 팀에 휴대폰이 연결되어 있지 않아 QR을 보낼 수 없습니다. ', boot.me.role === 'ADMIN' ? h('a', { href: '#/settings/crews' }, '설정에서 연결하기 →') : '운영 관리자에게 연결을 요청하세요.') : null,
+        b.resend_needed && canSend ? h('div', { class: 'notice' }, '전송 뒤에 수정된 접수가 있습니다. QR을 다시 표시해 새 목록을 전달하세요. 급한 변경은 수거팀에 전화로 먼저 알리세요.') : null,
         b.final_unload ? h('p', { class: 'notice info small' }, [b.final_unload.eta, b.final_unload.label, '최종 하차 후 차고지 복귀'].filter(Boolean).join(' · ')) : null,
         b.status === 'ACTIVE' && !b.stops.length && !b.final_unload && needsCard(b)
           ? h('p', { class: 'notice info small' }, last?.sent_stops === false
