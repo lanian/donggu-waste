@@ -97,8 +97,12 @@ def main(exe=None):
             page.get_by_role('button', name='노선 계산', exact=True).click()
             expect(page.get_by_label('가상 A 전담팀 차고지', exact=True)).to_contain_text(pa['label'], timeout=30000)
             expect(page.get_by_label('가상 B 전담팀 차고지', exact=True)).to_contain_text(pb['label'])
-            page.wait_for_function("async () => {const C=await import('/core.js');return C.liveMaps.some(m=>m.getSource('routes'));}", timeout=15000)
-            lines = page.evaluate("async () => {const C=await import('/core.js');return C.liveMaps.find(m=>m.getSource('routes')).getSource('routes').serialize().data.features.map(f=>f.geometry.coordinates);}")
+            core = page.evaluate_handle("import('/core.js')")
+            lines = page.wait_for_function("""core => {
+                const map = core.liveMaps.find(m => m.getSource('routes'));
+                const features = map?.getSource('routes').serialize().data.features;
+                return features?.length && features.map(feature => feature.geometry.coordinates);
+            }""", arg=core, timeout=15000).json_value()
             assert sorted(line[0] for line in lines) == sorted([[pa['lon'], pa['lat']], [pb['lon'], pb['lat']]])
             assert all(line[0] == line[-1] for line in lines), '기본 복귀선이 팀 차고지가 아님'
             page.screenshot(path=str(shots / 'dong-depots-dispatch.png'), full_page=True)

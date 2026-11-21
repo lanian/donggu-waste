@@ -357,6 +357,7 @@ def field_wording(browser, url):
         seed(page, {"daylist": daylist(today, [stop(1, today)])})
         route(page, "#/intake")
         expect(page.locator(".addr-status")).to_have_text("주소를 직접 적어 주세요. 정확한 위치는 사무실이 PC에서 정합니다.")
+        page.get_by_text("휴대폰 저장 후 PC에 보내는 방법", exact=True).click()
         text = page.locator("main").inner_text()
         ok("PC 경유" not in text and "[+ 현장 품목 추가]" in text and "[품목 추가]" not in text,
            "접수: 주소 검색 PC 경유 설명 → '주소를 직접 적어 주세요…', 안내의 [품목 추가] → [+ 현장 품목 추가]")

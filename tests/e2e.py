@@ -209,7 +209,7 @@ def main():
             assert page.evaluate("import('./core.js').then(C => !C.st.lastReceipt && !C.ui.receipt)")
             page.evaluate("window.qrRetryWrites = 0; window.qrSaveFault = 'receipt'")
             save_again.click()
-            page.wait_for_function("window.qrRetryWrites >= 2")
+            page.wait_for_function("() => window.qrRetryWrites >= 2")
             expect(save_again).to_be_enabled()
             assert page.evaluate("window.qrPrematureReceipt === null")
             assert page.evaluate("import('./core.js').then(C => !C.st.lastReceipt && !C.ui.receipt)")

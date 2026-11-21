@@ -442,14 +442,19 @@ class DongUserMigrationTest(unittest.TestCase):
                                                          1, 0, "2020-01-01T00:00:00Z", "2026-11-01T00:00:00Z", crew, '{"theme":"dark","font":17}'))
                 fee = next(row["id"] for row in S.FEE_TABLE["rows"] if row["status"] == "CONFIRMED" and row.get("price", 0) > 0)
                 S.create_request(con, {"name": "가상 이전 접수", "phone": "01000000000", "address": "가상구 시험로 1", "items": [{"fee_rate_id": fee, "qty": 1}]})
-                before = {table: con.execute("SELECT * FROM " + table).fetchall() for table in ("app_user", "request", "pc_key", "audit_log")}
+                before = {}
+                for table in ("app_user", "request", "pc_key", "audit_log"):
+                    cursor = con.execute("SELECT * FROM " + table)
+                    columns = ", ".join(column[0] for column in cursor.description)
+                    before[table] = (columns, cursor.fetchall())
                 con.close()
                 con = store.connect()
                 try:
                     self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], store.LATEST)
                     self.assertEqual(store.run_migrations(con), [])
-                    for table, values in before.items():
-                        self.assertEqual(con.execute("SELECT * FROM " + table).fetchall(), values, table)
+                    for table, (columns, values) in before.items():
+                        self.assertCountEqual(con.execute(f"SELECT {columns} FROM {table}").fetchall(), values, table)
+                    self.assertEqual(con.execute("SELECT DISTINCT extra_work_min FROM request").fetchall(), [(0,)])
                     self.assertEqual(S.user_prefs(con, "old-admin"), {"theme": "dark", "font": 17})
                     self.assertTrue(S.check_login(con, "old_admin", "old-test-password"))
                     self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
