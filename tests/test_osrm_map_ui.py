@@ -171,6 +171,8 @@ def check_final_unload_map(page, origin, crew, confirmed):
             stop['unload_after'] = {'label': UNLOAD['label'], 'eta': f'10:{i}0',
                                     'volume_m3': 1, 'minutes': 20, **({'final': True} if i else {})}
         team['unloads'] = 2
+        result['route_blockers'] = [{'crew_id': crew, 'crew_name': '가상 지도 A팀',
+                                     'message': '방문·경유·복귀 순서에 도로로 연결되지 않는 구간이 있습니다.'}]
         route.fulfill(response=response, json=result)
 
     page.route('**/api/route', preview)
@@ -185,6 +187,8 @@ def check_final_unload_map(page, origin, crew, confirmed):
     review = page.get_by_role('region', name='노선 조정안')
     drawer = review.locator(f'.route-card[data-route-crew="{crew}"]')
     expect(review.locator('.matrix-note')).to_contain_text('최종 하차 후 차고지 복귀', timeout=30000)
+    expect(review.get_by_role('alert').filter(has_text='배정 확정이 보류되었습니다')).to_be_visible()
+    expect(page.get_by_role('button', name='배정 확정', exact=True)).to_be_disabled()
     expect(drawer.locator('.stopline.unload')).to_have_count(2)
     expect(drawer.locator('.stopline.unload').first).to_contain_text('중간 하차')
     expect(drawer.locator('.stopline.unload').last).to_contain_text('최종 하차')
@@ -221,6 +225,17 @@ def check_final_unload_map(page, origin, crew, confirmed):
     expect(confirmed_distance).to_contain_text('유료도로 제외를 적용할 수 없음')
     expect(confirmed_distance).to_contain_text('직선(점선) · 방향 없음 · 운행 참고 불가')
     expect(confirmed_distance).to_contain_text('최종 하차 후 차고지 복귀')
+    team['map_route']['history'] = {'state': 'ROAD_CHANGED', 'road_revision': 'trial-original',
+        'path': {'source': 'OSRM', 'distance_km': 4.23, 'toll_excluded': True,
+                 'geometry': {'type': 'LineString', 'coordinates': request['points']}},
+        'estimated_legs': ['출발 → 1번']}
+    page.get_by_role('button', name='확정 배차 지도 닫기', exact=True).click()
+    page.get_by_role('button', name='확정 배차 지도 보기', exact=True).click()
+    panel.get_by_label('지도 수거팀').select_option(crew)
+    expect(confirmed_distance).to_contain_text('확정 당시 노선')
+    expect(confirmed_distance).to_contain_text('도로 4.23km')
+    expect(confirmed_distance).to_contain_text('이동시간을 직선으로 추정한 구간 출발 → 1번')
+    expect(confirmed_distance).not_to_contain_text('화살표는 도로 경로의 진행 방향')
     print('최종 하차 지도 통과: 중간·최종 하차 구분 · 차고지 복귀 · 유료도로 제외와 직선 대체 표시')
 
 

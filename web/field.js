@@ -258,6 +258,46 @@ export function backupPhotoIds(st) {
   const ids = [...(st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => e.body && e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)];
   return [...new Set(ids.filter(Boolean))];
 }
+
+export const PHOTO_UPLOAD_LIMIT = 40 * 1024 * 1024; // PC server.MAX_BODY
+export const PHOTO_BATCH_BUDGET = 30 * 1024 * 1024;
+export const PHOTO_EMPTY_PAYLOAD_BYTES = JSON.stringify({ schema: 'dg.photos/1', photos: [] }).length;
+const photoEncoder = new TextEncoder();
+
+export function photoFileEntry({ photo_id, request_id, phase, sha256 }, data = '') {
+  return { photo_id, request_id, phase, sha256, data };
+}
+
+export function photoRecordBytes(photo, size) {
+  // 봉투를 만들기 전 UTF-8 JSON 값과 base64 사진 길이, 배열의 쉼표를 센다.
+  return photoEncoder.encode(JSON.stringify(photoFileEntry(photo))).length + 4 * Math.ceil(size / 3) + 1;
+}
+
+function packedPhotoIds(exports, byId) {
+  return new Set(exports.flatMap((entry) => {
+    if (Number.isSafeInteger(entry.bytes)) return entry.bytes > 0 && entry.bytes <= PHOTO_UPLOAD_LIMIT ? entry.ids : [];
+    // 구형 파일은 봉투 크기를 기록하지 않았다. 작은 파일만 기존 확인 대기로 보고, 큰 파일은 다시 나눠 만든다.
+    let size = PHOTO_EMPTY_PAYLOAD_BYTES;
+    for (const id of entry.ids) {
+      const photo = byId.get(id);
+      if (!photo || !Number.isSafeInteger(photo.bytes) || photo.bytes <= 0) return [];
+      size += photoRecordBytes(photo, photo.bytes);
+      if (size > PHOTO_BATCH_BUDGET) return [];
+    }
+    return entry.ids;
+  }));
+}
+
+export function photoRecovery(st) {
+  const metas = (st.events || []).filter((e) => e.kind === 'PHOTO_META').map((e) => ({ ...e.body, request_id: e.request_id }));
+  const byId = new Map([...(st.keptPhotos || []), ...metas].map((photo) => [photo.photo_id, photo]));
+  const allPhotos = [...byId.values()];
+  const recovered = new Set(st.recoveredPhotos || []);
+  const notRecovered = allPhotos.filter((photo) => !recovered.has(photo.photo_id));
+  const packed = packedPhotoIds(st.photoExports || [], byId);
+  return { allPhotos, recovered, notRecovered, unprepared: notRecovered.filter((photo) => !packed.has(photo.photo_id)) };
+}
+
 /** 목록에 실려 온 rel을 적용한다. 돌려주는 값: { events: 새로 반영된 기록 수, photos: 새로 회수 확인된 사진 수 } 또는 null(rel 없음). */
 export function applyRelease(st, rel) {
   if (!rel || !Number.isInteger(rel.seq) || rel.seq < 0) return null;

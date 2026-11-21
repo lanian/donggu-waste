@@ -142,6 +142,54 @@ class ReconExceptionTest(SessionHTTPTestCase):
         self.assertEqual(self.post(f'refunds/{cid}/approve', {'approve': True}, lead_cookie)[0], 200)
         self.assertEqual(S.one(self.con, 'SELECT status FROM refund_case WHERE id=?', (cid,))['status'], 'APPROVED')
 
+    def test_receipt_number_matches_cancelled_duplicate_and_conflicting_identifiers(self):
+        day = S.today_kst()
+        normal, dual, cancelled, other = [S.create_request(self.con, self.request_body()) for _ in range(4)]
+        amount = S.payment_status(self.con, normal['id'])['levied']
+        S.cancel_request(self.con, cancelled['id'], '가상 접수번호 대사')
+        raw = ('PC 접수번호,부과번호,금액,납부일,영수번호\n'
+               f'{normal["receipt_no"]},,{amount},{day},가상-접수\n'
+               f',{normal["levy_no"]},{amount},{day},가상-같은접수\n'
+               f'{dual["receipt_no"]},{dual["levy_no"]},{amount},{day},가상-두번호\n'
+               f'{cancelled["receipt_no"]},,{amount},{day},가상-취소\n'
+               f'{dual["receipt_no"]},{other["levy_no"]},{amount},{day},가상-충돌\n'
+               f'DG-20990101-9999,{other["levy_no"]},{amount},{day},가상-없는접수\n').encode()
+
+        code, preview = self.upload(raw, preview=True)
+        self.assertEqual(code, 200, preview)
+        self.assertEqual(preview['counts'], {'MATCH': 2, 'DUPLICATE': 1, 'CANCELLED': 1, 'UNMATCHED': 2})
+        rows = {r['line']: r for r in preview['rows']}
+        self.assertEqual(rows[2]['levy_no'], normal['levy_no'])
+        self.assertEqual(rows[2]['receipt_no'], normal['receipt_no'])
+        self.assertEqual(rows[3]['request_id'], normal['id'])
+        self.assertEqual(rows[5]['request_id'], cancelled['id'])
+        for n in (6, 7):
+            self.assertIn('같은 접수', rows[n]['note'])
+            self.assertNotIn('request_id', rows[n])
+        self.assertEqual(S.rows(self.con, 'SELECT * FROM payment'), [])
+
+        code, applied = self.upload(raw, token=preview['preview_token'])
+        self.assertEqual((code, applied.get('recorded')), (200, 2), applied)
+        ledger = S.rows(self.con, 'SELECT request_id FROM payment')
+        self.assertCountEqual(ledger, [{'request_id': normal['id']}, {'request_id': dual['id']}])
+        exceptions = self.get('recon-exceptions')[1]['rows']
+        case = next(r for r in exceptions if r['kind'] == 'CANCELLED')
+        self.assertEqual((case['receipt_no'], case['levy_no']), (cancelled['receipt_no'], cancelled['levy_no']))
+        self.assertTrue(all(r['request_id'] is None for r in exceptions if r['kind'] == 'UNMATCHED'))
+
+    def test_receipt_number_only_header_and_retry(self):
+        receipt = S.create_request(self.con, self.request_body())
+        amount = S.payment_status(self.con, receipt['id'])['levied']
+        day = S.today_kst()
+        raw = f'PC 접수번호,금액,납부일,영수번호\n{receipt["receipt_no"]},{amount},{day},가상-접수\n'.encode()
+        status, preview = self.upload(raw, preview=True)
+        self.assertEqual((status, preview.get('counts')), (200, {'MATCH': 1}), preview)
+        self.assertEqual(self.upload(raw, token=preview['preview_token'])[1]['recorded'], 1)
+        retry = f'부과번호,금액,납부일,영수번호,접수번호\n{receipt["levy_no"]},{amount},{day},가상-접수,외부-가상\n'.encode()
+        status, preview = self.upload(retry, preview=True)
+        self.assertEqual((status, preview.get('counts')), (200, {'ALREADY': 1}), preview)
+        self.assertEqual(len(S.rows(self.con, 'SELECT * FROM payment')), 1)
+
     def test_legacy_history_and_exceptions_only(self):
         self.con.execute('''INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json)
                             VALUES ('old', 'old-sha', ?, 'old-actor', 3, 1, ?)''',

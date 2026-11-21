@@ -49,7 +49,7 @@ async function screenDongs(arg = null) {
     if (!canWrite) return;
     create.disabled = !data?.dongs?.some((d) => d.active);
     calc.disabled = !data || !crewIds().length || routeBusy;
-    assign.disabled = !plan || plan.key !== planKey() || routeBusy || !plan.res.routes?.some((r) => r.stops?.length);
+    assign.disabled = !plan || plan.key !== planKey() || routeBusy || !!plan.res.route_blockers?.length || !plan.res.routes?.some((r) => r.stops?.length);
   }
   function invalidate() {
     routeSeq++; detailSeq++; plan = null; routeBusy = false;
@@ -312,6 +312,7 @@ async function screenDongs(arg = null) {
       plan = { res, key, date: value.date, dong: value.dong };
       routes.replaceChildren(h('div', { class: 'dw-section-head' }, h('h2', {}, '노선 미리보기'), chip('확정 전', 'warn')),
         h('p', { class: 'muted small' }, `${value.date} · ${dong.selectedOptions[0]?.textContent || ''} · 선택 범위의 예정일 접수만 배정합니다.`),
+        ...(res.route_blockers || []).map((issue) => h('p', { class: 'notice bad', role: 'alert' }, `${issue.crew_name} · ${issue.message} 배정 확정이 보류되었습니다.`)),
         ...(res.routes || []).map((r) => h('div', { class: 'dw-route' }, h('h3', {}, `${r.crew_name || r.crew_id} · ${(r.stops || []).length}곳`),
           r.depot ? h('p', { class: 'muted small' }, `출발: ${r.depot.label || '차고지'} · 종료: ${res.end_site?.label || r.depot.label || '차고지'}${r.end ? ` · 예상 ${r.end}` : ''}`) : null,
           h('ol', {}, ...(r.stops || []).map((stop) => { const q = res.requests?.[stop.request_id] || {}; return h('li', {}, h('time', {}, stop.eta || '—'), h('span', {}, q.receipt_no || '접수', h('small', {}, `${q.dong || ''} ${q.address || ''}`))); })))),
@@ -323,7 +324,7 @@ async function screenDongs(arg = null) {
   }
   async function commit() {
     const candidate = plan;
-    if (!current() || !canWrite || !candidate || candidate.key !== planKey() || routeBusy) return;
+    if (!current() || !canWrite || !candidate || candidate.key !== planKey() || routeBusy || candidate.res.route_blockers?.length) return;
     const valid = () => current() && plan === candidate && candidate.key === planKey();
     await modal({ title: '동별 배정 확정', ok: '이 범위로 배정 확정', body: [h('p', {}, `${candidate.date} · ${dong.selectedOptions[0]?.textContent || ''}의 계산 결과를 확정합니다.`),
       h('p', { class: 'muted small' }, '다른 동과 공유된 기존 배정은 교체하지 않습니다. 이미 전송한 팀은 전체 업무 담당자에게 새 목록 전송을 요청하세요.')],

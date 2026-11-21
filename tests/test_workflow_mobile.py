@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric import ec
 from playwright.sync_api import expect, sync_playwright
 
 from test_review_ui import PIN, mobile_server
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pc"))
+import dgproto
 
 passed = 0
 
@@ -93,6 +98,132 @@ def action(page, label):
 
 def go_home(page):
     page.evaluate("async () => { location.hash = '#/home'; await (await import('./core.js')).render(); }")
+
+
+def photo_recovery_regressions(browser):
+    """실제 휴대폰 보관·다운로드와 PC 규격으로 파일별 확인 대상만 복원한다."""
+    limit = 40 * 1024 * 1024  # PC server.MAX_BODY
+    with mobile_server() as url:
+        ctx, page = open_mobile(browser, url)
+        try:
+            kex = ec.generate_private_key(dgproto.CURVE)
+            signer = dgproto.pub_from_raw(bytes(page.evaluate("""async key => {
+                const P = await import('./proto.js');
+                window.__workflowPc.pcKexPub = new Uint8Array(key);
+                return Array.from(await P.exportRaw(window.__workflowDevice.sign.publicKey));
+            }""", list(dgproto.pub_raw(kex.public_key())))))
+            today = seed(page)["today"]
+            ids = [f"batch-photo-{i}" for i in range(4)]
+            legacy = {"code": "AAAA2222", "ids": ids, "name": "이전-큰-파일.dgp"}
+            seed(page, {"daylist": daylist(today, []), "photoExports": [legacy],
+                        "keptPhotos": [{"photo_id": pid, "request_id": f"가상-사진-{i}", "phase": "BEFORE"}
+                                       for i, pid in enumerate(ids)]})
+            page.evaluate("""async () => {
+                const C = await import('./core.js'), S = await import('./store.js'), P = await import('./proto.js');
+                for (const photo of C.st.keptPhotos) {
+                    const bytes = new Uint8Array(10.5 * 1024 * 1024);
+                    for (let i = 0; i < bytes.length; i += 65536) crypto.getRandomValues(bytes.subarray(i, i + 65536));
+                    photo.sha256 = P.toHex(await P.sha256(bytes)); photo.bytes = bytes.length;
+                    await S.putSecureBytes('ph:' + photo.photo_id, bytes);
+                }
+                await C.commit();
+                await C.render();
+            }""")
+            action(page, "사진 보내기").click()
+            photo_card = page.locator(".photo-card")
+            if not photo_card.evaluate("(el) => el.open"):
+                photo_card.locator(":scope > summary").click()
+
+            def download(button, timeout=60_000):
+                with page.expect_download(timeout=timeout) as pending_download:
+                    button.click()
+                item = pending_download.value
+                raw = item.path().read_bytes()
+                if len(raw) > limit:
+                    raise AssertionError(f"PC 사진 반입 한도 {limit}바이트 초과: {len(raw)}바이트")
+                header, payload, code = dgproto.open_envelope(raw, signer, kex)
+                assert header.btype == 4 and payload["schema"] == "dg.photos/1"
+                return item.suggested_filename, {p["photo_id"] for p in payload["photos"]}, code
+
+            make = photo_card.get_by_role("button", name="사진 파일 만들기")
+            first = download(make)
+            second = download(make)
+            ok(first[0] != second[0] and first[1] and second[1] and
+               not (first[1] & second[1]) and first[1] | second[1] == set(ids),
+               "이전 큰 파일의 미회수 사진 전체를 한도 안의 두 암호화 파일로 나눠 보냄")
+
+            def confirm(code):
+                box = page.locator(".photo-code-card")
+                if not box.evaluate("(el) => el.open"):
+                    box.locator("summary").click()
+                page.get_by_placeholder("사진 회수 코드 8자리").fill("P-" + code)
+                page.get_by_role("button", name="사진 회수 코드 입력", exact=True).click()
+                expect(page.locator(".toast")).to_contain_text("회수가 확인되었습니다")
+
+            confirm(second[2])
+            ok(set(page.evaluate("async () => (await import('./core.js')).st.recoveredPhotos")) == second[1],
+               "먼저 받은 두 번째 파일 확인 코드는 해당 파일의 사진만 회수 처리")
+            if not photo_card.evaluate("(el) => el.open"):
+                photo_card.locator(":scope > summary").click()
+            retry_box = photo_card.locator("details").filter(has_text="사진 파일 다시 만들기")
+            retry_box.locator("summary").click()
+            ok(page.evaluate("document.documentElement.scrollWidth <= innerWidth"),
+               "390px 화면에 파일명을 표시해도 가로로 넘치지 않음")
+            retried = download(retry_box.get_by_role("button", name=f"{first[0]} 다시 만들기", exact=True))
+            ok(retried[0] != first[0] and retried[1] == first[1] and retried[2] != first[2],
+               "다운로드에 실패한 파일은 확인 대기 사진만 새 파일과 새 코드로 만들 수 있음")
+            confirm(first[2])
+            ok(set(page.evaluate("async () => (await import('./core.js')).st.recoveredPhotos")) == set(ids),
+               "다시 만든 뒤에도 앞서 전달한 기존 사진 회수 코드를 사용할 수 있음")
+
+            seed(page, {"daylist": daylist(today, []),
+                        "keptPhotos": [{"photo_id": pid, "request_id": f"가상-{pid}", "phase": "AFTER"}
+                                       for pid in ("missing", "available")]})
+            page.evaluate("""async () => {
+                const C = await import('./core.js'), S = await import('./store.js'), P = await import('./proto.js');
+                const available = C.st.keptPhotos[1], bytes = new Uint8Array([1, 2, 3]);
+                available.sha256 = P.toHex(await P.sha256(bytes)); available.bytes = bytes.length;
+                await S.putSecureBytes('ph:' + available.photo_id, bytes);
+                await C.commit();
+                location.hash = '#/export';
+                await C.render();
+                const put = IDBObjectStore.prototype.put;
+                IDBObjectStore.prototype.put = function (value, key) {
+                    if (key === 's:state') {
+                        IDBObjectStore.prototype.put = put;
+                        throw new DOMException('가상 저장 실패', 'QuotaExceededError');
+                    }
+                    return put.call(this, value, key);
+                };
+            }""")
+            downloads = []
+            page.on("download", lambda item: downloads.append(item))
+            make.click()
+            expect(photo_card.get_by_role("alert")).to_contain_text("사진 회수 정보를 저장하지 못했습니다")
+            ok(not downloads and page.evaluate("""async () => {
+                const C = await import('./core.js'), S = await import('./store.js');
+                return !C.st.photoExports?.length && !(await S.getSecure('state')).photoExports?.length;
+            }"""), "확인 코드 저장에 실패한 파일은 내려받거나 생성된 것으로 표시하지 않음")
+            partial = download(make)
+            expect(page.get_by_text("원본을 읽을 수 없는 사진 1장", exact=False)).to_be_visible()
+            ok(partial[1] == {"available"}, "원본 누락을 알리고 읽은 사진의 확인 코드만 저장")
+
+            seed(page, {"daylist": daylist(today, []),
+                        "keptPhotos": [{"photo_id": "large-compressible", "request_id": "가상-대형", "phase": "AFTER"}]})
+            page.evaluate("""async () => {
+                const C = await import('./core.js'), S = await import('./store.js'), P = await import('./proto.js');
+                const photo = C.st.keptPhotos[0], bytes = new Uint8Array(31 * 1024 * 1024);
+                photo.sha256 = P.toHex(await P.sha256(bytes)); photo.bytes = bytes.length;
+                await S.putSecureBytes('ph:' + photo.photo_id, bytes);
+                await C.commit();
+                location.hash = '#/export';
+                await C.render();
+            }""")
+            large = download(make, timeout=12_000)
+            ok(large[1] == {"large-compressible"},
+               "큰 원본 한 장도 완성된 봉투가 PC 한도에 들면 따로 내보냄")
+        finally:
+            ctx.close()
 
 
 def mobile_workflow_regressions(browser, shots):
@@ -283,6 +414,7 @@ def main():
     with sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get("CHROME", "/usr/bin/google-chrome"), headless=True)
         try:
+            photo_recovery_regressions(browser)
             mobile_workflow_regressions(browser, shots)
         finally:
             browser.close()

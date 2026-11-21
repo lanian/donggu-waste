@@ -127,7 +127,7 @@ function reconImport(hist, canEdit, selectImport, owner, epoch) {
     }, msg);
     out.replaceChildren(h('div', { class: 'notice info' }, `${r.total}행 · `, ...Object.entries(r.counts).map(([k, n]) => chip(`${RECON[k] || k} ${n}`, k === 'MATCH' ? 'ok' : k === 'ALREADY' ? 'neutral' : 'warn')),
         prior ? h('strong', {}, ` 이미 반영한 파일입니다(${kst(prior.at)}).`) : null),
-      grid(['행', '부과번호', '접수번호', '금액', '납부일', '영수번호', '부과·납부', '판정', '설명'], r.rows.map((x) => [x.line, x.levy_no, x.receipt_no || '', x.amount != null ? won(x.amount) : '', x.paid_on, x.ref || '',
+      grid(['행', '부과번호', 'PC 접수번호', '금액', '납부일', '영수번호', '부과·납부', '판정', '설명'], r.rows.map((x) => [x.line, x.levy_no, x.receipt_no || x.input_receipt_no || '', x.amount != null ? won(x.amount) : '', x.paid_on, x.ref || '',
         x.levied != null ? `${won(x.levied)} / ${won(x.paid)}` : '', verdict(x.status), x.note || '']), { cls: 'recon', num: [0, 3], sort: { key: 'recon-preview', cols: ['num', 'text', 'text', 'num', 'date', 'text', null, 'text', 'text'] } }),
       h('div', { class: 'row' },
         prior?.exception_count ? btn('이 반입의 불일치 보기', () => selectImport(prior.id, prior.at), 'small') : null,
@@ -136,7 +136,7 @@ function reconImport(hist, canEdit, selectImport, owner, epoch) {
         exceptions ? h('span', { class: 'muted small' }, `불일치 ${exceptions}건은 대사 불일치 검토에서 이어서 처리합니다.`) : null));
   }, msg);
   return h('div', { class: 'card' }, h('h2', {}, '대사 (세외수입 납부 자료 맞추기)'),
-    canEdit ? h('p', { class: 'muted' }, '납부 자료 CSV(부과번호, 금액, 납부일, 영수번호 선택)를 미리 본 뒤 반영하세요. 같은 파일은 한 번만 반영됩니다.') : null,
+    canEdit ? h('p', { class: 'muted' }, '납부 자료 CSV에 부과번호 또는 PC 접수번호와 금액, 납부일을 넣고 미리 보세요. 두 번호를 모두 입력하면 같은 접수의 번호여야 합니다. 같은 파일은 한 번만 반영됩니다.') : null,
     canEdit ? h('div', { class: 'row' }, btn('서식 내려받기', wrap(() => download('recon-template', '동구-대사-서식.csv')), 'small'), file, btn('미리보기', preview, 'small primary')) : null,
     msg, out,
     hist?.length ? h('details', { class: 'tableview' }, h('summary', {}, `반영 기록 ${hist.length}건`), grid(['시각', '작업자', '행', '납부 기록', '판정 집계', '불일치 검토'], hist.map((x) => [

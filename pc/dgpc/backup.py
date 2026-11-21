@@ -199,6 +199,20 @@ def decrypt_to(raw: bytes, pem: bytes, password: str, dest: Path) -> str:
     return secret
 
 
+def _decrypt_file_to(src: Path, pem: bytes, password: str, dest: Path) -> str:
+    """도로망을 포함한 큰 자동 백업도 디스크에서 나누어 읽는다."""
+    with src.open("rb") as stream:
+        secret, offset = open_header(stream.read(4096), load_private(pem, password))
+        stream.seek(offset)
+        with dest.open("xb") as out:
+            shutil.copyfileobj(stream, out)
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
+    return secret
+
+
 # ------------------------------------------------------------------ 백업 만들기
 def _sha(p: Path, prefix: bytes = b"") -> str:
     """파일(앞에 prefix를 붙인 것으로 보고)의 sha256. 큰 파일도 조각으로 읽는다."""
@@ -231,6 +245,7 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
     lock: 서버의 DB 잠금. 주면 DB를 읽는 동안(설정 읽기·암호화 내보내기·결과 기록)만 잡고, 시간이 오래 걸리는
     파일 작업(봉인·해시·두 번째 위치 복사·보관 정리)은 잠금 밖에서 한다 → 백업 중에도 PC 화면이 거의 멈추지 않음."""
     from contextlib import nullcontext
+    from desktop_road_rules import RoadRulesError
     guard = lock if lock is not None else nullcontext()
     with guard:
         c = conf(con)
@@ -291,7 +306,7 @@ def make_auto(con, reason: str = "SCHEDULE", lock=None) -> dict:
                 if part2 is not None:
                     store.discard(part2)
         res["deleted"] = apply_retention(con, c, bdir)
-    except C.UserError as e:
+    except (C.UserError, RoadRulesError) as e:
         res["error"] = str(e)
     except Exception as e:  # 디스크·권한 문제 등: 내용(경로 외)은 남기지 않는다
         res["error"] = f"자동 백업 실패({e.__class__.__name__})"
@@ -398,7 +413,7 @@ def verify_auto(con, name: str, pem: bytes, password: str) -> dict:
         raise C.UserError("백업 파일이 없습니다.")
     tmp = backup_dir(con) / f".verify-{secrets.token_hex(6)}.db"
     try:
-        secret = decrypt_to(src.read_bytes(), pem, password, tmp)
+        secret = _decrypt_file_to(src, pem, password, tmp)
         try:
             bcon, n = store.open_backup(tmp, secret)
         except ValueError as e:
@@ -410,14 +425,14 @@ def verify_auto(con, name: str, pem: bytes, password: str) -> dict:
     return {"ok": True, "requests": n}
 
 
-def restore_auto(src: Path, pem: bytes, password: str) -> dict:
+def restore_auto(src: Path, pem: bytes, password: str, *, osrm_pack: Path | None = None) -> dict:
     """PC 업무 화면을 끈 상태에서만(pc_tool restore-auto)."""
     d = store.state_dir()
     d.mkdir(parents=True, exist_ok=True)
     tmp = d / f".restore-{secrets.token_hex(6)}.db"
     try:
-        secret = decrypt_to(Path(src).read_bytes(), pem, password, tmp)
-        return store.restore_from(tmp, secret)
+        secret = _decrypt_file_to(Path(src), pem, password, tmp)
+        return store.restore_from(tmp, secret, osrm_pack=osrm_pack)
     finally:
         if tmp.exists():
             tmp.unlink()

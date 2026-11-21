@@ -75,7 +75,40 @@ def main():
             page.get_by_role("button", name="전체 팀 보기", exact=True).click()
             expect(page.get_by_role("heading", name="가상 재계산 2팀", exact=False)).to_be_visible()
             assert fixture.current()[a]["assign_ver"] == 3
-            print("실HTTP UI 통과: 검토 전 미저장·취소·다른 곳의 배정 변경·재조회·확정·변경 팀만 전송·QR 수신 확인")
+
+            page.goto(root + "#/dispatch?date=" + DAY, wait_until="domcontentloaded")
+            page.get_by_role("button", name="현재 배정 불러오기", exact=True).click()
+            page.get_by_label("재계산 시작 시각 (선택)", exact=True).fill("10:00")
+            team.get_by_text("현재 위치·적재량", exact=True).click()
+            lat = team.get_by_label("가상 재계산 1팀 현재 위도", exact=True)
+            lon = team.get_by_label("가상 재계산 1팀 현재 경도", exact=True)
+            lat.fill("35.149")
+            recalculate = team.get_by_role("button", name="가상 재계산 1팀 남은 노선 재계산", exact=True)
+            recalculate.click()
+            expect(lon).to_be_focused()
+            expect(page.get_by_text("가상 재계산 1팀의 현재 위도와 경도를 모두 입력하세요.", exact=True)).to_be_visible()
+            lon.fill("126.91")
+            team.get_by_label("가상 재계산 1팀 현재 적재 부피(m³)", exact=True).fill("0.5")
+            held = []
+            route_url = root + 'api/route'
+            ctx.route(route_url, lambda route: held.append(route))
+            with page.expect_request(route_url):
+                recalculate.click()
+            expect(page.get_by_text('변경 팀의 남은 노선을 계산하는 중입니다…', exact=True)).to_be_visible()
+            lat.fill('35.1498')
+            held.pop().continue_()
+            expect(page.get_by_text('차량 정보나 시작 시각이 바뀌었습니다.', exact=False)).to_be_visible(timeout=20000)
+            expect(dialog).not_to_be_visible()
+            expect(lat).to_have_value('35.1498')
+            ctx.unroute(route_url)
+            recalculate.click()
+            expect(dialog.get_by_text("차량 현재 위치 · 10:00 출발", exact=False)).to_be_visible(timeout=20000)
+            expect(dialog.get_by_text("입력한 현재 적재 0.5m³", exact=True)).to_be_visible()
+            dialog.get_by_role("button", name="변경 배정 확정", exact=True).click()
+            expect(team).to_contain_text("갱신본 4")
+            assert [s["request_id"] for s in fixture.current()[a]["stops"]] == [one, extra]
+            assert fixture.current()[b]["assign_ver"] == 1
+            print("실HTTP UI 통과: 검토·취소·충돌·확정·QR 수신·현재 차량 정보로 순서 유지 재계산")
             ctx.close()
             browser.close()
     finally:

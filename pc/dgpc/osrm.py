@@ -13,6 +13,8 @@ EXECUTABLE = Path('bin/osrm-routed.exe')
 DATASET = Path('data/gwangju.osrm')
 MLD_FILES = {DATASET.with_suffix(ending) for ending in ('.osrm.partition', '.osrm.cells', '.osrm.cell_metrics', '.osrm.mldgr')}
 MAX_PACK_TABLE_POINTS = 200
+MAX_PACK_TABLE_CALLS = 64
+TABLE_TIMEOUT = 10
 MAX_RESPONSE = 16 * 1024 * 1024
 TOLL_EXCLUSION_UNAVAILABLE = 'TOLL_EXCLUSION_UNAVAILABLE'
 
@@ -111,3 +113,23 @@ def fetch_road(url: str, path: str, query: str, *, timeout: float) -> tuple[dict
         if 'exclude' in message.casefold():
             code = TOLL_EXCLUSION_UNAVAILABLE
     return data, code
+
+
+def table(url, points, sources, destinations, *, timeout):
+    path = f'/table/v1/driving/{coordinate_path(points)}'
+    radiuses = ';'.join(['200'] * len(points))
+    query = f'annotations=duration&radiuses={radiuses}'
+    if sources != list(range(len(points))):
+        query += '&sources=' + ';'.join(map(str, sources))
+    if destinations != list(range(len(points))):
+        query += '&destinations=' + ';'.join(map(str, destinations))
+    return fetch_road(url, path, query, timeout=timeout)
+
+
+def missing_segment_index(data, size):
+    message = data.get('message')
+    if isinstance(message, str):
+        match = re.fullmatch(r'Could not find a matching segment for coordinate ([0-9]{1,6})\.?', message)
+        if match and (index := int(match[1])) < size:
+            return index
+    return None

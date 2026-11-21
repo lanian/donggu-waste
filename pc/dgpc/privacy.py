@@ -432,6 +432,12 @@ def pseudonymize(con, rid: str, ts: str):
     """접수 한 건의 개인정보를 가명 처리(트랜잭션은 호출하는 쪽)."""
     con.execute("""UPDATE request SET req_ver=req_ver+1, name=?, phone=?, address=?, spot_note='', memo='', lat=NULL, lon=NULL, geo_source=NULL,
         cancel_reason=CASE WHEN cancel_reason IS NULL THEN NULL ELSE ? END, pii_purged_at=COALESCE(pii_purged_at, ?) WHERE id=?""", (PURGED, PURGED_PHONE, PURGED, PURGED, ts, rid))
+    # 도로 형상에도 방문 위치가 남는다. 여러 주소가 섞인 형상은 전체를 파기하고 방문 순서·도착 시각은 남긴다.
+    for bid, raw in con.execute("""SELECT b.id, b.route_json FROM assignment_batch b
+        JOIN assignment_stop s ON s.batch_id=b.id WHERE s.request_id=? AND b.route_json LIKE '%"route_history"%'""", (rid,)).fetchall():
+        stops = json.loads(raw)
+        if stops and stops[0].pop("route_history", None) is not None:
+            con.execute("UPDATE assignment_batch SET route_json=? WHERE id=?", (json.dumps(stops, ensure_ascii=False), bid))
     for ver, snap in con.execute("SELECT req_ver, snapshot_json FROM request_version WHERE request_id=?", (rid,)).fetchall():
         try:
             d = json.loads(snap)

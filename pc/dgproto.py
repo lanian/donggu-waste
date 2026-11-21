@@ -389,6 +389,29 @@ def _final_return(value) -> dict:
     return {"final": True, "depot": {"lat": lat, "lon": lon}, "stop_count": count}
 
 
+def _carry_load(value) -> dict:
+    if not isinstance(value, list) or len(value) != 2:
+        raise ProtocolError('BAD_FORMAT', '차량 적재량')
+    volume, weight = value
+    if (type(volume) not in (int, float) or not 0 <= volume <= 10**6 or type(weight) is not int
+            or not 0 <= weight <= 2**53 - 1 or not (volume or weight)):
+        raise ProtocolError('BAD_FORMAT', '차량 적재량')
+    return {'volume_m3': volume, 'weight_kg': weight}
+
+
+def _detached_unload(value) -> dict:
+    if not isinstance(value, list) or len(value) != 8:
+        raise ProtocolError('BAD_FORMAT', '최종 하차')
+    eta, label, minutes, volume, lat, lon, end_lat, end_lon = value
+    destination = _final_return([end_lat, end_lon, 1])
+    if (not destination or not _final_return([lat, lon, 1]) or not isinstance(eta, str) or not isinstance(label, str)
+            or type(minutes) is not int or not 0 <= minutes <= 600
+            or type(volume) not in (int, float) or not 0 <= volume <= 10**6):
+        raise ProtocolError('BAD_FORMAT', '최종 하차')
+    return {**destination, 'stop_count': 0, 'eta': eta, 'label': label, 'minutes': minutes, 'volume_m3': volume,
+            'lat': lat, 'lon': lon}
+
+
 def compact_daylist(p: dict, fee_rows: dict) -> dict:
     stops = []
     for s in p["stops"]:
@@ -448,6 +471,12 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
         stops.append(c)
     out = {"schema": "dg.daylist/2", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
            "fee": p["fee_table"]["version_id"], "s": stops}
+    if carry := p.get('carry_load'):
+        # 이전 앱은 적재 하차 의무를 놓치지 않도록 이 목록을 받지 않는다. 일반 목록은 종전 형식이다.
+        out.update(schema='dg.daylist/3', cl=[carry['volume_m3'], carry['weight_kg']])
+        if final := p.get('final_unload'):
+            out['fu'] = [final['eta'], final['label'], final['minutes'], final['volume_m3'],
+                         final['lat'], final['lon'], final['depot']['lat'], final['depot']['lon']]
     rel = norm_rel(p.get("rel"))
     if rel is not None:
         out["rel"] = rel  # v0.13 결과 반영 정보(선택 키): 서명된 봉투 안에 들어가므로 휴대폰이 그대로 믿는다
@@ -461,7 +490,7 @@ def compact_daylist(p: dict, fee_rows: dict) -> dict:
 
 
 def expand_daylist(p: dict, fee_rows: dict) -> dict:
-    if p.get("schema") != "dg.daylist/2":
+    if p.get('schema') not in ('dg.daylist/2', 'dg.daylist/3'):
         return p
     stops = []
     for c in p["s"]:
@@ -493,6 +522,10 @@ def expand_daylist(p: dict, fee_rows: dict) -> dict:
         ft.update(base_version=p["fb"], overrides=p.get("fo") or {}, effective_from=p.get("fe"))
     out = {"schema": "dg.daylist/1", "work_date": p["work_date"], "crew": p["crew"], "assign_ver": p["assign_ver"],
            "fee_table": ft, "stops": stops}
+    if p['schema'] == 'dg.daylist/3':
+        out['carry_load'] = _carry_load(p.get('cl'))
+        if not stops:
+            out['final_unload'] = _detached_unload(p.get('fu'))
     rel = norm_rel(p.get("rel"))
     if rel is not None:
         out["rel"] = rel

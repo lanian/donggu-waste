@@ -49,6 +49,28 @@ class TeamRecoveryTest(UsageHTTPCase):
     def team_row(self, crew, day=DAY):
         return next(r for r in self.summary(day)["result_recovery"] if r["crew_id"] == crew)
 
+    def test_no_result_receipt_if_an_event_cannot_be_saved_even_as_conflict(self):
+        crew, phone = self.team("가상 저장 장애 팀")
+        batch = self.plan(DAY, crew, self.request()[0], self.request()[0])
+        _, stops, _ = self.send(DAY, batch, phone)
+        events = [self.event(DAY, phone, stop) for stop in stops]
+        failed_id = str(uuid.UUID(events[-1]["event_id"]))
+        data = phone.seal({"schema": "dg.result/1", "work_date": DAY, "events": events}, P.TYPE_RESULT)
+        self.con.execute(f"""CREATE TRIGGER fixture_block_event BEFORE INSERT ON result_event
+            WHEN NEW.event_id='{failed_id}' BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END""")
+        try:
+            status, body, _ = self.post("import/result", data, self.admin_cookie)
+            self.assertEqual(status, 400, body)
+            self.assertIn("반영 확인 코드", body["error"])
+            for table in ("result_import", "result_event", "result_seq"):
+                self.assertEqual(self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+        finally:
+            self.con.execute("DROP TRIGGER fixture_block_event")
+        status, body, _ = self.post("import/result", data, self.admin_cookie)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["applied"], 2)
+        self.assertTrue(body["release_code"])
+
     def test_separate_files_duplicate_and_current_receipt_confirmation(self):
         crew, phone = self.team("가상 회수 A팀")
         receipts = [self.request()[0] for _ in range(2)]

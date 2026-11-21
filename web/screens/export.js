@@ -8,11 +8,40 @@ import { addrRoute, allStops, ask, backBtn, btn, commit, emptyState, errMsg, flo
 import { APP_VERSION } from '../app.js';
 import { closeCheckBox } from './stoplist.js';
 
+async function buildPhotoBatch(candidates, checkView, seal) {
+  const photos = [];
+  let size = F.PHOTO_EMPTY_PAYLOAD_BYTES, unavailable = 0, tooLarge = 0;
+  for (const photo of candidates) {
+    checkView();
+    let bytes;
+    try {
+      bytes = await S.getSecureBytes('ph:' + photo.photo_id);
+    } catch (error) {
+      checkView();
+      if (error?.name !== 'OperationError') throw error;
+    }
+    if (!bytes?.length) { unavailable++; continue; }
+    const length = F.photoRecordBytes(photo, bytes.length);
+    if (photos.length && size + length > F.PHOTO_BATCH_BUDGET) break;
+    const packed = F.photoFileEntry(photo, B.b64(bytes));
+    // 큰 사진 한 장은 압축·암호화한 실제 크기로 판단한다.
+    if (size + length > F.PHOTO_BATCH_BUDGET) {
+      const file = await seal([packed]);
+      if (file.bytes.length <= F.PHOTO_UPLOAD_LIMIT) return { file, ids: [photo.photo_id], unavailable, tooLarge };
+      tooLarge++;
+      continue;
+    }
+    photos.push(packed);
+    size += length;
+  }
+  return { file: photos.length ? await seal(photos) : null, ids: photos.map((p) => p.photo_id), unavailable, tooLarge };
+}
+
 async function screenExport() {
   await flushSteps();
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
   const targetState = st, targetList = st.daylist, targetHash = location.hash;
-  let view, cleaning = false;
+  let view, cleaning = false, makingPhotos = false, confirmingPhotos = false;
   const pending = unsent();  // 결과 파일에 담는 기록(D-코드 전 전부) — 전송 형식 그대로
   const ob = outbox();        // 화면 표시용: 보낼 기록·확인 대기
   const unconfirmedResults = () => allStops().filter((s) => !s.removed && !s.pii_purged && s.status !== 'CANCELLED' && deriveStop(s, st.events).resultNeedsConfirmation);
@@ -21,7 +50,6 @@ async function screenExport() {
     if (st !== targetState || !S.isUnlocked() || !view?.isConnected) throw new Error('현재 화면에서 다시 시도해 주세요.');
     if (unconfirmedResults().length) throw new Error('수량을 바꾼 접수의 수거 결과를 먼저 재확인해 주세요. 기록 보호가 필요하면 암호화 백업을 사용하세요.');
   };
-  const photoMetas = st.events.filter((e) => e.kind === 'PHOTO_META');
   const msg = msgBox(ui.exportMsg || '');
   ui.exportMsg = '';
   const note = (t, bad = false) => { ui.exportMsg = t; say(msg, t, bad); };
@@ -98,46 +126,96 @@ async function screenExport() {
 
   // 사진: 결과 파일과 따로, PC 공개키로 암호화한 사진 파일(.dgp)을 승인된 보안 매체로 옮긴다.
   // PC가 해시를 대조하고 알려 주는 "사진 회수 코드"를 넣은 사진만 이 휴대폰에서 지울 수 있다.
-  const recovered = new Set(st.recoveredPhotos || []);
-  const allPhotos = [...photoMetas.map((e) => ({ ...e.body, request_id: e.request_id })), ...(st.keptPhotos || [])];
-  const notRecovered = allPhotos.filter((p) => !recovered.has(p.photo_id));
+  const { allPhotos, recovered, notRecovered, unprepared } = F.photoRecovery(st);
   const pmsg = msgBox();
-  const makePhotos = btn(`사진 파일 만들기 (${notRecovered.length}장)`, async () => {
-    makePhotos.disabled = true; say(pmsg, '암호화하는 중…');
+  const photoViewCurrent = () => view?.isConnected && location.hash === targetHash && st === targetState && S.isUnlocked();
+  function checkPhotoView() {
+    if (!photoViewCurrent()) throw new Error('현재 화면에서 다시 시도해 주세요.');
+  }
+  const makePhotoBatch = async (candidates, button) => {
+    if (makingPhotos || confirmingPhotos || cleaning || !photoViewCurrent()) return;
+    makingPhotos = true;
+    button.disabled = true;
+    syncCleanup();
+    say(pmsg, '암호화하는 중…');
     try {
-      const photos = [];
-      for (const p of notRecovered) {
-        const b = await S.getSecureBytes('ph:' + p.photo_id);
-        if (b) photos.push({ photo_id: p.photo_id, request_id: p.request_id, phase: p.phase, sha256: p.sha256, data: B.b64(b) });
+      const signerKeyId = await P.keyId(await P.exportRaw(dev.sign.publicKey));
+      const recipient = await P.importEcdhPub(pc.pcKexPub);
+      const seal = async (photos) => {
+        checkPhotoView();
+        const header = { btype: 4, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: 0, dataVer: 1, signerKeyId };
+        const sealed = await P.seal({ schema: 'dg.photos/1', photos }, header, recipient, dev.sign.privateKey);
+        return { ...sealed, bundleId: header.bundleId };
+      };
+      const { file, ids, unavailable, tooLarge } = await buildPhotoBatch(candidates, checkPhotoView, seal);
+      const issues = [
+        unavailable ? `원본을 읽을 수 없는 사진 ${unavailable}장` : '',
+        tooLarge ? `한도를 넘은 사진 ${tooLarge}장` : '',
+      ].filter(Boolean);
+      const issueNote = issues.length ? ` ${issues.join(', ')}은 미회수로 남겨 두었습니다.` : '';
+      if (!file) throw new Error('이 파일에 담을 사진이 없습니다.' + issueNote);
+      checkPhotoView();
+      if (file.bytes.length > F.PHOTO_UPLOAD_LIMIT) throw new Error('PC의 사진 반입 한도를 넘었습니다.');
+      if (knownCodes().PHOTO.includes(file.receipt)) throw new Error('사진 회수 코드가 겹쳤습니다. 파일을 다시 만들어 주세요.');
+      const name = `DG_P_${P.uuidStr(dev.id).slice(0, 8)}_${P.uuidStr(file.bundleId)}.dgp`;
+      const entry = { code: file.receipt, ids, name, at: new Date().toISOString(), bytes: file.bytes.length };
+      st.photoExports = [...(st.photoExports || []), entry];
+      if (!await commit()) {
+        if (st === targetState && S.isUnlocked()) {
+          st.photoExports = st.photoExports.filter((old) => old !== entry);
+          await commit(); // 실패한 파일의 확인 정보가 복구 대기 상태에 남지 않게 한다.
+        }
+        throw new Error('사진 회수 정보를 저장하지 못했습니다. 다시 시도해 주세요.');
       }
-      const signRaw = await P.exportRaw(dev.sign.publicKey);
-      const header = { btype: 4, bundleId: P.randomBytes(16), deviceId: dev.id, assignVer: 0, dataVer: 1, signerKeyId: await P.keyId(signRaw) };
-      const sealed = await P.seal({ schema: 'dg.photos/1', photos }, header, await P.importEcdhPub(pc.pcKexPub), dev.sign.privateKey);
-      const name = `DG_P_${P.uuidStr(dev.id).slice(0, 8)}_${new Date().toISOString().slice(0, 16).replace(/\D/g, '')}.dgp`;
-      st.photoExports = [...(st.photoExports || []), { code: sealed.receipt, ids: photos.map((p) => p.photo_id), name, at: new Date().toISOString() }];
-      await commit();
-      const u = URL.createObjectURL(new File([sealed.bytes], name, { type: 'application/octet-stream' }));
+      checkPhotoView();
+      const u = URL.createObjectURL(new File([file.bytes], name, { type: 'application/octet-stream' }));
       const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
-      say(pmsg, `${name} (${(sealed.bytes.length / 1024).toFixed(0)}KB)을 저장했습니다. 승인된 보안 매체로 PC에 옮긴 뒤 사진 회수 코드(P-)를 받으세요.`);
-      if (view?.isConnected) photoCodeCard.open = true;  // 다음 단계(④ P-코드 넣기)를 펼친다(안내 글이 지워지지 않게 다시 그리지 않음)
-    } catch (e) { say(pmsg, '사진 파일을 만들지 못했습니다: ' + errMsg(e), true); }
-    makePhotos.disabled = false;
-  }, 'big', { disabled: !notRecovered.length });
+      const remaining = F.photoRecovery(st).unprepared.length;
+      const next = remaining ? ` 파일을 만들지 않은 사진 ${remaining}장은 [사진 파일 만들기]로 이어서 받으세요.`
+        : ' 승인된 보안 매체로 PC에 옮긴 뒤 파일마다 사진 회수 코드(P-)를 받으세요.';
+      note(`${name}에 사진 ${ids.length}장을 담았습니다.${issueNote}${next}`);
+      await render();
+    } catch (e) {
+      if (photoViewCurrent()) say(pmsg, '사진 파일을 만들지 못했습니다. ' + errMsg(e), true);
+    } finally {
+      makingPhotos = false;
+      if (photoViewCurrent()) { button.disabled = false; syncCleanup(); }
+    }
+  };
+  const makePhotos = btn(unprepared.length ? `사진 파일 만들기 (${unprepared.length}장)` : '새로 만들 사진 파일 없음',
+    (e) => makePhotoBatch(unprepared, e.currentTarget), 'big', { disabled: !unprepared.length });
+  const retries = (st.photoExports || []).slice().reverse().map((entry) => ({
+    name: entry.name || '이전 사진 파일', photos: notRecovered.filter((photo) => entry.ids.includes(photo.photo_id)),
+  })).filter(({ photos }) => photos.length);
   const pcode = h('input', { type: 'text', placeholder: '사진 회수 코드 8자리', 'aria-label': '사진 회수 코드 (P-)', class: 'code-in', autocapitalize: 'characters', autocomplete: 'off' });
   const pcodeMsg = h('p', { class: 'msg err', role: 'alert' });
   const pconfirm = btn('사진 회수 코드 입력', async () => {
+    if (makingPhotos || confirmingPhotos || cleaning || !photoViewCurrent()) return;
     const r = F.checkCode(pcode.value, 'PHOTO', knownCodes());
     pcodeMsg.textContent = r.error || '';
     if (r.error) return toast(r.error, 'bad');
     const ex = (st.photoExports || []).find((x) => x.code === r.code);
-    st.recoveredPhotos = [...new Set([...(st.recoveredPhotos || []), ...ex.ids])];
-    await commit(); toast(`사진 ${ex.ids.length}장 회수가 확인되었습니다`); render();
+    confirmingPhotos = true;
+    pconfirm.disabled = true;
+    syncCleanup();
+    try {
+      st.recoveredPhotos = [...new Set([...(st.recoveredPhotos || []), ...ex.ids])];
+      const saved = await commit();
+      if (!photoViewCurrent()) return;
+      if (!saved) return say(pcodeMsg, '사진 회수 확인을 저장하지 못했습니다. 같은 코드를 다시 입력해 주세요.', true);
+      toast(`사진 ${ex.ids.length}장 회수가 확인되었습니다`);
+      await render();
+    } finally {
+      confirmingPhotos = false;
+      if (photoViewCurrent()) { pconfirm.disabled = false; syncCleanup(); }
+    }
   }, 'big');
 
   const allConfirmed = !unsent().length && st.exports.every((x) => x.confirmed);
   const cleanupCurrent = () => view?.isConnected && location.hash === targetHash && st === targetState && st.daylist === targetList;
   const cleanupReady = () => st === targetState && st.daylist === targetList && !!targetList && S.isUnlocked()
-    && !unconfirmedResults().length && !writesPending() && !S.hasPendingSecure('state') && !unsent().length && st.exports.every((x) => x.confirmed);
+    && !makingPhotos && !confirmingPhotos && !unconfirmedResults().length && !writesPending()
+    && !S.hasPendingSecure('state') && !unsent().length && st.exports.every((x) => x.confirmed);
   const cleanupBlocked = () => { toast('저장 중인 사진이나 새 기록이 있습니다. PC 반영을 확인한 뒤 다시 정리해 주세요.', 'bad'); render(); };
   const cleanup = btn('오늘 자료 정리', async () => {
     if (cleaning || !cleanupCurrent()) return;
@@ -193,13 +271,12 @@ async function screenExport() {
   syncCleanup();
 
   const waitingCode = st.exports.some((x) => !x.confirmed);
-  const sentPhotos = new Set((st.photoExports || []).flatMap((x) => x.ids));
-  const cur = (pending.length && !waitingCode) || (!st.exports.length && !allPhotos.length) ? 0 : waitingCode ? 1 : notRecovered.some((p) => !sentPhotos.has(p.photo_id)) ? 2 : notRecovered.length ? 3 : 4;
+  const cur = (pending.length && !waitingCode) || (!st.exports.length && !allPhotos.length) ? 0 : waitingCode ? 1 : unprepared.length ? 2 : notRecovered.length ? 3 : 4;
   // 단계 카드 ①~⑤는 위 단계 표시와 1:1. 지금 단계만 펼치고 나머지는 한 줄 요약(지금 / ✓ 완료 / 대기)으로 접는다(눌러 펼칠 수 있음).
   const doneStep = [
     !ob.toSend && st.exports.length > 0,
     st.exports.length > 0 && !waitingCode,
-    allPhotos.length ? notRecovered.every((p) => sentPhotos.has(p.photo_id)) : cur > 2,
+    allPhotos.length ? !unprepared.length : cur > 2,
     allPhotos.length ? !notRecovered.length : cur > 3,
     false,
   ];
@@ -236,10 +313,14 @@ async function screenExport() {
     showQr, h('p', { class: 'small' }, '업무 메일을 쓸 수 없으면 [PC 화면 카메라로 보내기]로 PC 웹캠에 QR을 보여 주세요.'));
   // ③ 사진 보내기 · ④ 사진 회수 코드(P-) 넣기 · ⑤ 정리
   const photoCard = stepCard(2, `사진 보내기 · 사진 ${allPhotos.length}장 · 미회수 ${notRecovered.length}장`, 'photo-card',
-    h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 업무 메일이 아니라 승인된 보안 매체로 옮기세요. 회수가 확인되기 전에는 휴대폰에서 지우지 않습니다.'),
-    makePhotos, pmsg);
+    h('p', { class: 'small' }, '사진 파일은 PC에서만 열 수 있게 암호화됩니다. 승인된 보안 매체로 옮기세요. 사진이 많으면 여러 파일로 나뉘므로 남은 사진이 있을 때 [사진 파일 만들기]를 다시 누르세요.'),
+    makePhotos, pmsg,
+    retries.length ? h('details', { class: 'send-more' }, h('summary', {}, '사진 파일 다시 만들기'),
+      h('p', { class: 'small' }, 'PC에 도착하지 않은 파일을 고르면 아직 회수되지 않은 사진을 새 파일로 만듭니다. 크기에 따라 여러 번 필요할 수 있습니다.'),
+      h('ul', { class: 'small list' }, ...retries.map(({ name, photos }) => h('li', {},
+        btn(`${name} 다시 만들기`, (e) => makePhotoBatch(photos, e.currentTarget), 'ghost'))))) : null);
   const photoCodeCard = stepCard(3, 'P-코드 넣기 (사진 회수 코드)', 'photo-code-card',
-    h('p', { class: 'small' }, 'PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣거나, PC가 사진을 가져온 뒤 만든 새 목록을 받으면 회수가 확인됩니다.'),
+    h('p', { class: 'small' }, '파일마다 PC가 알려 주는 사진 회수 코드(P-로 시작)를 넣으세요. PC가 사진을 가져온 뒤 만든 새 팀 목록으로도 회수를 확인할 수 있습니다.'),
     codeBox('PHOTO', pcode), pcodeMsg, pconfirm);
   const cleanCard = stepCard(4, '정리', 'cleanup-card', cleanup, cleanupHint);
   // 결과 파일 단추(하단 고정)는 ① 단계일 때만 주 단추

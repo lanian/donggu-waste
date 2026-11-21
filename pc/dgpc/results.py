@@ -56,12 +56,19 @@ CORRECTABLE = ("name", "phone", "address", "spot_note", "planned_date")
 CANCELLED_OK_KINDS = ("CONTACT", "DIAL_INTENT", "PHOTO_META", "ARRIVE", "SMS_INTENT", "NAV_INTENT")
 
 
+def _duplicate_result(prev):
+    summary = json.loads(prev["summary_json"] or "{}")
+    if summary.get("failed"):
+        raise UserError("이전에 저장하지 못한 기록이 있어 반영 확인 코드를 발급할 수 없습니다. 휴대폰에 남아 있는 기록으로 새 결과 파일을 만들어 주세요.")
+    return {"duplicate_file": True, **summary, "release_code": prev["release_code"], "import_id": prev["id"]}
+
+
 def prepare_result(con, data: bytes) -> dict:
     """결과 파일 검증·복호(시간이 걸리는 서명 확인)만. 서버는 이 단계를 DB 잠금 밖(조회 전용 연결)에서 한다."""
     sha = hashlib.sha256(data).hexdigest()
     prev = one(con, "SELECT id, summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
     if prev:
-        return {"sha": sha, "duplicate": {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"], "import_id": prev["id"]}}
+        return {"sha": sha, "duplicate": _duplicate_result(prev)}
     dev_id, head, payload, release = _open_from_device(con, data, P.TYPE_RESULT)
     if payload.get("schema") != "dg.result/1":
         raise UserError("결과 파일 형식이 아닙니다.")
@@ -75,7 +82,7 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
     sha, dev_id, payload, release = prep["sha"], prep["dev_id"], prep["payload"], prep["release"]
     if one(con, "SELECT 1 AS x FROM result_import WHERE package_sha256=?", (sha,)):  # 잠금 밖에서 검증하는 사이 같은 파일이 먼저 들어옴
         prev = one(con, "SELECT id, summary_json, release_code FROM result_import WHERE package_sha256=?", (sha,))
-        return {"duplicate_file": True, **json.loads(prev["summary_json"] or "{}"), "release_code": prev["release_code"], "import_id": prev["id"]}
+        return _duplicate_result(prev)
     crew = one(con, "SELECT id FROM crew WHERE device_id=?", (dev_id,))
     imp = str(uuid.uuid4())
     counts = {"applied": 0, "skipped_duplicate": 0, "conflict": 0, "photos_expected": 0}
@@ -248,8 +255,9 @@ def import_result(con, data: bytes, channel: str = "MAIL", prepared: dict | None
                                  json.dumps({"pii_purged": True} if purged else ev.get("body") if isinstance(ev.get("body"), dict) else {}, ensure_ascii=False),
                                  "REJECTED" if purged else "CONFLICT",
                                  f"기록을 반영하지 못함(순번 {ev.get('seq')}): {type(ex).__name__}", ev.get("device_ts"), P.norm_gen(ev.get("gen"))))
-                except Exception:  # noqa: BLE001
-                    counts["failed"] = counts.get("failed", 0) + 1
+                except Exception as conflict_error:  # noqa: BLE001
+                    # 기록이 충돌함에도 없으면 수신 순번과 회수 코드가 전송된 것으로 남아서는 안 된다.
+                    raise UserError("수거 결과를 저장하지 못해 반영 확인 코드를 발급하지 않았습니다. 같은 파일로 다시 시도하세요.") from conflict_error
         for rid in touched:
             _refresh_status(con, rid, new_attempt=rid in attempted, new_location=rid in located)
         assigned = label_auto.sync(con, touched)

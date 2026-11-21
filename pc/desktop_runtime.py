@@ -48,9 +48,11 @@ CHILD_FAILURES = {
     "tls": (29, "HTTPS 인증서·개인키를 읽지 못했습니다. 파일 위치·유효기간·개인키 쌍을 확인하세요."),
     "os_error": (30, "자료 폴더나 파일을 읽고 쓰지 못했습니다. 폴더 권한과 저장공간을 확인하세요."),
     "unexpected": (31, "서버 시작 중 예상하지 못한 오류가 발생했습니다. 오류 기록 폴더를 정보화 담당자에게 전달하세요."),
+    "restore_pending": (32, "도로망과 DB 복원이 중단되어 서버를 시작하지 않았습니다. 같은 백업으로 복원을 다시 실행하세요."),
 }
 _STORE_EXITS = (("SQLCipher", "sqlcipher_missing"), ("DB를 열 수 없습니다", "db_key"),
-                ("PC 자료가 없습니다", "db_missing"), ("DB 구조 버전", "db_newer"))
+                ("PC 자료가 없습니다", "db_missing"), ("DB 구조 버전", "db_newer"),
+                ("도로망과 DB 복원이 중단되었습니다", "restore_pending"))
 
 
 def classify_child_error(error):
@@ -403,6 +405,8 @@ def child_main(state, port, *, connection=None):
             # 부모에서 선택한 키를 이 자식의 메모리에서만 사용한다. 콘솔 입력은 호출하지 않는다.
             store.db_key = lambda create=False: key
             store._keyring_get = lambda: None
+            if (state / store.ROAD_RESTORE_PENDING).exists():
+                raise ChildStartError("restore_pending")
             if not (state / "pc.db").exists():
                 if not create:
                     # 설정이 저장된 PC에서 DB가 없는 폴더: 부모 화면의 확인 없이는 빈 새 DB를 만들지 않는다.

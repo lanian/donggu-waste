@@ -1,7 +1,7 @@
 """로컬 도로 통행 규칙을 검증한 뒤 OSRM 도로망을 교체하고 복원한다."""
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zlib
 
 from dgpc import osrm
 
@@ -25,6 +26,10 @@ _DIRECTIONS = ('forward', 'reverse')
 _SUFFIXES = ('.properties', '.partition', '.cells', '.cell_metrics', '.mldgr')
 _STATE_LIMIT = 256 * 1024
 _RULE_LIMIT = 200
+_BACKUP_BLOCK = 1024 * 1024
+_BACKUP_BYTES = 512 * _BACKUP_BLOCK
+_BACKUP_ROWS = 2048
+_BACKUP_NAME = re.compile(r'state\.json|[0-9a-f]{32}/(?:rules\.json|trial\.osrm\.[A-Za-z0-9_.-]{0,63}[A-Za-z0-9])')
 _SEARCH_METRES = 150
 _SNAP_METRES = 3
 _KST = timezone(timedelta(hours=9))
@@ -95,13 +100,21 @@ def _lease_directory(directory):
         raise RoadRulesError('도로 정보 폴더를 열 수 없습니다. 다른 실행 앱이 이 폴더를 사용하는지 확인하세요.') from error
 
 
-def _read_document(path):
+def _document_bytes(path):
     if not _local_path(path) or not path.is_file() or path.stat().st_size > _STATE_LIMIT:
         raise ValueError('invalid road rules document')
-    document = json.loads(path.read_bytes())
+    return path.read_bytes()
+
+
+def _parse_document(raw):
+    document = json.loads(raw)
     if not isinstance(document, dict) or document.get('schema') != _SCHEMA:
         raise ValueError('invalid road rules schema')
     return document
+
+
+def _read_document(path):
+    return _parse_document(_document_bytes(path))
 
 
 def _write_document(path, document):
@@ -121,6 +134,169 @@ def _write_document(path, document):
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _graph_hashes(dataset):
+    if not _local_path(dataset.parent):
+        raise ValueError('nonlocal generation')
+    files = sorted(dataset.parent.glob(dataset.name + '.*'))
+    if not {dataset.with_name(dataset.name + suffix) for suffix in _SUFFIXES}.issubset(files):
+        raise ValueError('incomplete generation')
+    hashes = {}
+    for file in files:
+        if not _local_path(file) or not file.is_file() or not file.stat().st_size:
+            raise ValueError('incomplete generation')
+        hashes[file.name] = _file_hash(file)
+    return hashes
+
+
+def _generation_record(root, generation, fingerprint):
+    dataset = root / generation / 'trial.osrm'
+    document = _read_document(dataset.parent / 'rules.json')
+    if document.get('graph_hashes') != _graph_hashes(dataset):
+        raise RoadRulesError('도로 그래프가 미리보기 때와 다릅니다. 도로 팩을 다시 확인하세요.')
+    records = document.get('rules')
+    if (document.get('base_fingerprint') != fingerprint or not isinstance(records, list)
+            or len(records) > _RULE_LIMIT):
+        raise ValueError('invalid recorded rules')
+    seen = set()
+    for record in records:
+        if (not isinstance(record, dict) or not isinstance(record.get('road_id'), str)
+                or not record['road_id'].isdigit() or record['road_id'] in seen
+                or record.get('direction') not in _DIRECTIONS
+                or not all(isinstance(record.get(key), str) for key in ('name', 'checked_on', 'evidence'))):
+            raise ValueError('invalid rule')
+        seen.add(record['road_id'])
+    return document
+
+
+def _snapshot_files(root):
+    """업무 계산에서 참조하는 적용판·이전판과 그 기준 팩만 선택한다."""
+    raw = _document_bytes(root / 'state.json')
+    state = _parse_document(raw)
+    active, previous, fingerprint = state['active_id'], state['previous_id'], state['base_fingerprint']
+    if (not (active == _BASE or _id(active)) or not (previous is None or previous == _BASE or _id(previous))
+            or not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint)):
+        raise ValueError('invalid road version')
+    files = {'state.json': hashlib.sha256(raw).hexdigest()}
+    for generation in {active, previous} - {_BASE, None}:
+        record = _generation_record(root, generation, fingerprint)
+        for name, digest in record['graph_hashes'].items():
+            files[f'{generation}/{name}'] = digest
+        files[f'{generation}/rules.json'] = _file_hash(root / generation / 'rules.json')
+    return state, files
+
+
+def write_road_backup(con, schema, root):
+    """SQLCipher 백업 안에만 적용 도로 정보 파일을 작은 조각으로 보관한다."""
+    if not (root / 'state.json').exists() and not (root / 'state.json').is_symlink():
+        return
+    try:
+        _, files = _snapshot_files(root)
+        con.execute('SAVEPOINT dg_road_snapshot')
+        try:
+            con.execute(f"""CREATE TABLE {schema}.dg_backup_road_files (
+                name TEXT NOT NULL, part INTEGER NOT NULL, bytes BLOB NOT NULL,
+                PRIMARY KEY (name, part)) WITHOUT ROWID""")
+            total = count = 0
+            for name, expected in files.items():
+                if not _BACKUP_NAME.fullmatch(name):
+                    raise ValueError('invalid road filename')
+                digest = hashlib.sha256()
+                with (root / name).open('rb') as file:
+                    for part, body in enumerate(iter(lambda: file.read(_BACKUP_BLOCK), b'')):
+                        total += len(body)
+                        count += 1
+                        if total > _BACKUP_BYTES or count > _BACKUP_ROWS:
+                            raise ValueError('oversize road archive')
+                        digest.update(body)
+                        con.execute(f'INSERT INTO {schema}.dg_backup_road_files VALUES (?,?,?)',
+                                    (name, part, zlib.compress(body, level=1)))
+                if digest.hexdigest() != expected:
+                    raise ValueError('road snapshot changed')
+            # 다른 프로세스가 생성한 백업도 적용판을 한 시점에만 묶어야 한다.
+            if _file_hash(root / 'state.json') != files['state.json']:
+                raise ValueError('road state changed')
+        except BaseException:
+            con.execute('ROLLBACK TO dg_road_snapshot')
+            raise
+        finally:
+            con.execute('RELEASE dg_road_snapshot')
+    except (KeyError, OSError, ValueError) as error:
+        raise RoadRulesError('적용 도로 정보를 백업하지 못했습니다. 도로 자료와 저장 공간을 확인하세요.') from error
+
+
+def stage_road_backup(con, root, pack):
+    """백업의 상대 이름과 조각 크기를 검사한 뒤 격리 폴더에서 두 도로판을 확인한다."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='dg_backup_road_files'").fetchone():
+        return None
+    if pack is None:
+        raise RoadRulesError('도로망이 포함된 백업입니다. 대상 PC의 기준 도로 팩을 --osrm-pack으로 지정하세요.')
+    try:
+        fingerprint = graph_fingerprint(Path(pack))
+    except (OSError, ValueError) as error:
+        raise RoadRulesError('복원할 PC의 기준 도로 팩을 읽지 못했습니다.') from error
+    try:
+        names, last_name, expected_part, total = set(), None, 0, 0
+        rows = con.execute("""SELECT name, part, CASE WHEN length(bytes) <= ? THEN bytes ELSE NULL END
+            FROM dg_backup_road_files ORDER BY name, part LIMIT ?""", (_BACKUP_BLOCK + 4096, _BACKUP_ROWS + 1))
+        with ExitStack() as stack:
+            for idx, (name, part, packed) in enumerate(rows):
+                if (idx >= _BACKUP_ROWS or not isinstance(name, str) or not _BACKUP_NAME.fullmatch(name)
+                        or not isinstance(packed, bytes)):
+                    raise ValueError('invalid archived road file')
+                if name != last_name:
+                    if last_name is not None:
+                        out.flush()
+                        os.fsync(out.fileno())
+                    stack.close()
+                    names.add(name)
+                    last_name, expected_part = name, 0
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    out = stack.enter_context(path.open('xb'))
+                if part != expected_part:
+                    raise ValueError('missing archived road block')
+                expected_part += 1
+                reader = zlib.decompressobj()
+                body = reader.decompress(packed, _BACKUP_BLOCK + 1)
+                total += len(body)
+                if (not body or len(body) > _BACKUP_BLOCK or not reader.eof or reader.unused_data
+                        or total > _BACKUP_BYTES or name.endswith('.json') and out.tell() + len(body) > _STATE_LIMIT):
+                    raise ValueError('invalid archived road block')
+                out.write(body)
+            if last_name is not None:
+                out.flush()
+                os.fsync(out.fileno())
+        state, files = _snapshot_files(root)
+        if names != files.keys():
+            raise ValueError('unexpected archived road file')
+    except (KeyError, OSError, ValueError, zlib.error) as error:
+        raise RoadRulesError('백업의 도로 정보가 손상됐습니다. 다른 백업 파일을 확인하세요.') from error
+    if state['base_fingerprint'] != fingerprint:
+        raise RoadRulesError('백업과 기준 도로 팩 버전이 다릅니다. 백업 때 사용한 도로 팩을 지정하세요.')
+    return state
+
+
+@contextmanager
+def road_restore_move_plan(state, incoming, retained):
+    """활성 엔진을 배제한 채 도로 판을 바꿀 같은 볼륨의 이동 목록을 만든다."""
+    root = state.resolve() / 'road-rules'
+    if not _local_path(root):
+        raise RoadRulesError('대상 도로 자료가 다른 위치를 가리킵니다. 자료 폴더를 확인하세요.')
+    with _lease_directory(root):
+        old = [p for p in root.iterdir() if p.name == 'state.json' or _id(p.name)]
+        if any(not _local_path(p) or (not p.is_file() if p.name == 'state.json' else not p.is_dir()) for p in old):
+            raise RoadRulesError('대상 도로 자료의 파일 형식을 확인하세요.')
+        if old:
+            retained.mkdir()
+        staged = sorted(incoming.iterdir(), key=lambda p: p.name == 'state.json')
+        moves = [(p, retained / p.name) for p in old] + [(p, root / p.name) for p in staged]
+        try:
+            yield moves
+        finally:
+            if old and retained.exists() and not any(retained.iterdir()):
+                retained.rmdir()
 
 
 def _valid_coords(coords):
@@ -248,6 +424,11 @@ class RoadRulesManager:
             if self._root.exists() or self._kit.is_dir():
                 self._lease = _lease_directory(self._root)
                 self._fingerprint = graph_fingerprint(self._pack)
+            else:
+                try:
+                    self._fingerprint = graph_fingerprint(self._pack)
+                except (OSError, ValueError):
+                    pass  # 조회 전용 팩은 런타임에서 별도로 검증한다.
             if self._state_file.exists() or self._state_file.is_symlink():
                 document = _read_document(self._state_file)
                 active, previous = document['active_id'], document['previous_id']
@@ -271,42 +452,16 @@ class RoadRulesManager:
             return []
         if not _id(generation):
             raise ValueError('invalid generation')
-        dataset = self._dataset(generation)
-        document = _read_document(dataset.parent / 'rules.json')
-        if document.get('graph_hashes') != self._graph_hashes(dataset):
-            raise RoadRulesError('도로 그래프가 미리보기 때와 다릅니다. 도로 팩을 다시 확인하세요.')
-        records = document.get('rules')
-        if (document.get('base_fingerprint') != self._fingerprint or not isinstance(records, list)
-                or len(records) > _RULE_LIMIT):
-            raise ValueError('invalid recorded rules')
-        seen = set()
-        for record in records:
-            if (not isinstance(record, dict) or not isinstance(record.get('road_id'), str)
-                    or not record['road_id'].isdigit() or record['road_id'] in seen
-                    or record.get('direction') not in _DIRECTIONS
-                    or not all(isinstance(record.get(key), str) for key in ('name', 'checked_on', 'evidence'))):
-                raise ValueError('invalid rule')
-            seen.add(record['road_id'])
-        return records
-
-    @staticmethod
-    def _graph_hashes(dataset):
-        if not _local_path(dataset.parent):
-            raise ValueError('nonlocal generation')
-        files = list(dataset.parent.glob(dataset.name + '.*'))
-        if not {dataset.with_name(dataset.name + suffix) for suffix in _SUFFIXES}.issubset(files):
-            raise ValueError('incomplete generation')
-        hashes = {}
-        for file in files:
-            if not _local_path(file) or not file.is_file() or not file.stat().st_size:
-                raise ValueError('incomplete generation')
-            hashes[file.name] = _file_hash(file)
-        return hashes
+        return _generation_record(self._root, generation, self._fingerprint)['rules']
 
     @property
     def revision(self):
         with self._lock:
             return self._active
+
+    @property
+    def base_fingerprint(self):
+        return self._fingerprint
 
     @property
     def status(self):
@@ -502,7 +657,7 @@ class RoadRulesManager:
                 self._need_kit()  # 빌드와 카탈로그가 같은 편집 자료를 가리키는지 재확인한다.
                 if dataset != self._dataset(generation):
                     raise RoadRulesError('도로 엔진이 시험 그래프를 만들지 못했습니다.')
-                hashes = self._graph_hashes(dataset)
+                hashes = _graph_hashes(dataset)
                 candidate = self._factory(dataset)
                 endpoint = self._ready(candidate)
                 deadline = time.monotonic() + 30

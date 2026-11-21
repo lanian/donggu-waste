@@ -1355,7 +1355,9 @@ class Handler(BaseHTTPRequestHandler):
         "", sum(b.get("count") or len(b.get("stops") or []) for b in out), f"배정 목록 {qs['date']}") if out else None))  # 이름·주소 포함: 건수만
     def ep_batches(self, qs):
         """그날 배정 목록(수거팀은 자기 팀만)."""
-        out = S.list_batches(self.c, qs["date"], route_map=qs.get('route_map') == '1')
+        route_map = qs.get('route_map') == '1'
+        out = S.list_batches(self.c, qs["date"], route_map=route_map,
+                             current_road=DW.road_history_basis(self.c) if route_map else None)
         if self.crew_scope() is not None:
             out = [b for b in out if b["crew_id"] == self.crew_scope()]
         return out
@@ -1779,9 +1781,19 @@ class Handler(BaseHTTPRequestHandler):
     def ep_assign(self, qs):
         """배정 확정."""
         d = self.json_body()
+        plan = d.get('plan')
+        if not isinstance(plan, dict) or any(not isinstance(stops, list) or any(
+                not isinstance(stop, dict) or not isinstance(stop.get('request_id'), str) for stop in stops)
+                for stops in plan.values()):
+            raise S.UserError('확정할 팀별 배정 목록을 확인하세요.')
+        histories = None
         if d.get('depot_basis'):
-            self.check_depot_basis(self.c, d['depot_basis'], d['date'], d['plan'])
-        return S.confirm_plan(self.c, d["date"], d["plan"], d.get("adjust_reason", ""), bool(d.get("adjusted")))
+            proof = self.check_depot_basis(self.c, d['depot_basis'], d['date'], plan)
+            histories = AS.matching_histories(plan, proof.get('histories'))
+        elif S.travel_method(self.c) == 'OSRM':
+            raise S.StaleError('배정 전에 방문 순서의 도로 연결을 확인하도록 노선을 먼저 계산하세요.')
+        return S.confirm_plan(self.c, d["date"], plan, d.get("adjust_reason", ""), bool(d.get("adjusted")),
+                              histories=histories)
 
     @endpoint("POST", "assign/edit", WORK)
     def ep_assign_edit(self, qs):
@@ -2129,7 +2141,7 @@ class Handler(BaseHTTPRequestHandler):
             if plan is not None and (not set(plan).issubset(proof['crew_ids']) or any(s['request_id'] not in proof['request_ids'] for stops in plan.values() for s in stops)):
                 raise ValueError()
             if refresh_inputs:
-                return  # 재계산(순서 유지 포함)은 같은 승인 범위에서 최신 자료·현재 도로망을 읽고 새 증명을 만든다. 확정은 엄격하게 검사한다.
+                return proof  # 순서 유지 재계산은 같은 승인 범위에서 최신 자료와 도로망의 새 증명을 만든다.
             road = proof.get('road_revision')
         except (KeyError, TypeError, ValueError, S.UserError):
             raise S.StaleError('접수·차고지·수거팀·배정 또는 계산 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
@@ -2142,6 +2154,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError()
         except (KeyError, TypeError, ValueError, S.UserError):
             raise S.StaleError('접수·차고지·수거팀·배정 또는 계산 설정이 바뀌었습니다. 노선을 다시 계산해 주세요.')
+        return proof
 
     def check_assignment_review(self, con, review):
         """검토했던 팀의 배정과 관련 접수·계산 조건을 다시 검사한다."""
@@ -2155,6 +2168,37 @@ class Handler(BaseHTTPRequestHandler):
         except S.UserError as error:
             raise S.StaleError("처리된 접수나 팀 배정이 바뀌었습니다. 현재 배정을 다시 불러와 주세요.") from error
 
+    @staticmethod
+    def live_route_state(raw, fixed, crews, departure):
+        if not isinstance(raw, dict) or not set(raw).issubset(fixed):
+            raise S.UserError('변경 대상 팀의 현재 차량 정보만 입력하세요.')
+        if raw and not departure:
+            raise S.UserError('차량의 현재 위치를 쓰려면 재계산 시작 시각을 입력하세요.')
+        out = {}
+        for crew in crews:
+            cid = crew['id']
+            if cid not in raw:
+                continue
+            value, name = raw[cid], crew['name']
+            try:
+                if not isinstance(value, dict) or any(type(value.get(k)) not in (int, float) for k in ('lat', 'lon')):
+                    raise ValueError()
+                point = DP.point({'lat': value['lat'], 'lon': value['lon']}, '차량 현재 위치')
+            except (KeyError, OverflowError, ValueError, S.UserError) as error:
+                raise S.UserError(f'{name}: 현재 위치의 위도·경도를 국내 범위의 숫자로 입력하세요.') from error
+            volume, kg = value.get('volume_m3', 0), value.get('weight_kg', 0)
+            cap_m3, cap_kg = float(crew['capacity_m3']), float(crew['capacity_kg'] or 0)
+            if type(volume) not in (int, float) or not 0 <= volume <= cap_m3 or volume != round(volume, 2):
+                raise S.UserError(f'{name}: 현재 적재 부피를 0~{cap_m3:g}m³ 범위의 소수점 둘째 자리까지 입력하세요.')
+            if type(kg) in (int, float) and kg > 0 and not cap_kg:
+                raise S.UserError(f'{name}: 현재 적재 중량을 사용하려면 수거팀·차량 설정에 최대 적재 중량을 지정하세요.')
+            if type(kg) not in (int, float) or not 0 <= kg <= cap_kg or int(kg) != kg:
+                raise S.UserError(f'{name}: 현재 적재 중량을 0~{cap_kg:g}kg 범위의 정수로 입력하세요.')
+            if not (fixed[cid] or volume or kg):
+                raise S.UserError(f'{name}: 남은 방문과 적재량이 없습니다. 차량 정보를 지운 뒤 배정을 변경하세요.')
+            out[cid] = {'point': point, 'volume_m3': volume, 'weight_kg': int(kg)}
+        return out
+
     def route_plan(self, d):
         """노선 계산: 자료 모으기는 잠금 안(짧게), 계산(OR-Tools·카카오 길찾기)은 잠금 밖, 이력 저장만 다시 잠금 안(카카오 이동시간은 저장하지 않음)."""
         date = d.get("date")
@@ -2164,6 +2208,7 @@ class Handler(BaseHTTPRequestHandler):
         ids = set(d.get("request_ids") or []) if change is None else set()
         review = None
         departure = ""
+        live_state = {}
         retry_osrm = d.get('retry_osrm') is True
         with LOCK:
             denied = self._write_session_error()
@@ -2174,16 +2219,30 @@ class Handler(BaseHTTPRequestHandler):
             if change is not None:
                 if not isinstance(change, dict):
                     raise S.UserError("확정 배정에서 변경할 접수와 팀을 확인하세요.")
-                departure = change.get("start_after") or ""
+                departure = change.get("start_after")
+                if departure is None:
+                    departure = ""
                 if not isinstance(departure, str) or (departure and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", departure)):
                     raise S.UserError("재계산을 시작할 시각을 확인하세요.")
+                recalculate = change.get('recalculate', False)
+                if type(recalculate) is not bool or (recalculate and (change.get('op') != 'reorder' or not departure)):
+                    raise S.UserError('방문 순서를 유지해 재계산하려면 시작 시각을 입력하세요.')
                 draft = AS.prepare_edit(c, date, change.get("op"), change, review=True)
                 fixed = {cid: [s["request_id"] for s in stops] for cid, stops in draft["changes"].items()}
                 crew_ids = list(fixed)
                 crews = [draft["crews"][cid] for cid in crew_ids]
+                live_state = self.live_route_state(change.get('live_state', {}), fixed, crews, departure)
                 ids = {rid for stops in fixed.values() for rid in stops}
                 affected = ids | {s["request_id"] for cid in crew_ids for s in draft["current"].get(cid, {}).get("stops", [])}
                 change = {k: change[k] for k in ("op", "request_id", "crew_id", "to_crew_id", "position", "order", "assign_ver", "expected_order") if k in change}
+                if recalculate:
+                    if not ids and not live_state:
+                        raise S.UserError('재계산할 남은 방문이 없습니다.')
+                    change['recalculate'] = True
+                if departure:
+                    change['start_after'] = departure
+                if live_state:
+                    change['live_state'] = live_state
                 review = {"kind": "assignment_edit", "date": date, "user_id": self.user["user_id"], "change": change,
                           "request_ids": sorted(affected), "inputs": self.route_inputs(c, date, sorted(affected), crew_ids),
                           "road_revision": S.managed_road_revision(c)}
@@ -2220,23 +2279,27 @@ class Handler(BaseHTTPRequestHandler):
             ov = S.volume_overrides(c)
             context = DP.resolve(reqs, crews, A.list_dongs(c), st['depot'], st['end_site'],
                                  keep_dong_crews=st['capacity']['prefer_dong_crew'])
-            basis = DW._proof({'kind': 'depot', 'date': date, 'request_ids': [r['id'] for r in reqs],
-                               'crew_ids': [c['id'] for c in crews], 'signature': context['signature'], 'at': time.time(),
-                               'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews]),
-                               'road_revision': S.managed_road_revision(c)})
+            road_basis = DW.road_history_basis(c)
+            basis_data = {'kind': 'depot', 'date': date, 'request_ids': [r['id'] for r in reqs],
+                          'crew_ids': [c['id'] for c in crews], 'signature': context['signature'], 'at': time.time(),
+                          'inputs': self.route_inputs(c, date, [r['id'] for r in reqs], [crew['id'] for crew in crews]),
+                          'road_revision': road_basis['revision']}
         if retry_osrm and osrm_status == 'STARTING' and osrm.bundled:
             osrm_url, osrm_status = osrm.bundled.wait_ready(8)
         pref = context['crew_defaults']
         required = context['crew_required']
         if fixed is None:
             required = {**pref, **required}
-        late = {crew["id"] for crew in crews if departure and fixed[crew["id"]]
+        working = (set(live_state) | {cid for cid, stops in fixed.items() if stops}) if review is not None else set()
+        late = {crew["id"] for crew in crews if departure and crew["id"] in working
                 and routing.to_min(departure, 0) >= routing.to_min(crew["shift_end"], 1020)}
         if late:
             res = {"routes": [], "matrix_source": None, "infeasible": True, "unassigned": [
-                {"request_id": rid, "reason": "재계산 시작 시각이 팀 근무 종료 시각과 같거나 더 늦습니다."} for cid in late for rid in fixed[cid]]}
+                {"request_id": rid, "reason": "재계산 시작 시각이 팀 근무 종료 시각과 같거나 더 늦습니다."} for cid in late for rid in fixed[cid]],
+                "route_issues": [{"crew_name": crew["name"], "message": "재계산 시작 시각이 팀 근무 종료 시각과 같거나 더 늦습니다."}
+                                 for crew in crews if crew["id"] in late and not fixed[crew["id"]]]}
         else:
-            plan_crews = [{**crew, "shift_start": departure} if departure and fixed[crew["id"]] and departure > crew["shift_start"] else crew
+            plan_crews = [{**crew, "shift_start": departure} if departure and crew["id"] in working and departure > crew["shift_start"] else crew
                           for crew in crews]
             res = routing.plan(reqs, plan_crews, st["depot"], osrm_url=osrm_url, osrm_status=osrm_status, service_base=st["service_min_base"],
                            travel_method=method, kakao_key=kakao_key,
@@ -2244,9 +2307,12 @@ class Handler(BaseHTTPRequestHandler):
                            volume_overrides=ov, unload_site=st["unload_site"], unload_min=st["unload_min"],
                            max_unloads=st["max_unloads"], end_site=st["end_site"], final_unload_return=True, crew_pref=pref,
                            unload_hours=st["unload_hours"], lunch=st["lunch"], base_first=st["base_first"],
-                           crew_depots=context['crew_depots'], crew_required=required, fixed_plan=fixed if ids or review is None else None)
+                           crew_depots=context['crew_depots'], crew_required=required, fixed_plan=fixed if ids or live_state or review is None else None,
+                           **({'live_state': live_state} if live_state else {}))
         res['fixed_order'] = fixed is not None
         res["prefer_dong_crew"] = bool(st["capacity"]["prefer_dong_crew"])
+        histories = AS.route_histories(res, reqs, road_basis, osrm_url, osrm_status)
+        basis = DW._proof(basis_data if review is not None else {**basis_data, 'histories': histories})
         with LOCK:
             denied = self._write_session_error()
             if denied:
@@ -2256,11 +2322,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 review["depot_basis"] = basis
                 self.check_assignment_review(CON, review)
-                if not res.get("infeasible"):
+                if not res.get("infeasible") and not res.get("route_blockers"):
                     plan = {r["crew_id"]: [S._clean_stop(s) for s in r["stops"]] for r in res["routes"]}
                     if {cid: [s["request_id"] for s in stops] for cid, stops in plan.items()} != fixed:
                         raise S.StaleError("변경할 접수가 달라졌습니다. 현재 배정을 다시 불러와 주세요.")
-                    res["review_basis"] = DW._proof({**review, "plan": plan, "matrix_source": res["matrix_source"], "at": time.time()})
+                    res["review_basis"] = DW._proof({**review, "plan": plan, "histories": histories,
+                                                    "matrix_source": res["matrix_source"], "at": time.time()})
         res['depot_basis'] = basis
         if method == "KAKAO":  # 좌표만 보냈다는 기록(건수만). 받은 이동시간은 저장하지 않는다(다음 계산은 다시 묻는다)
             mi = res.get("matrix_info") or {}
@@ -2347,9 +2414,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_out(error)
                 if not b:
                     return self.send_json({"error": "없음"}, 404)
-                d = S.dispatch_sheet(CON, b["id"], protected=protected, route_positions=positions)
+                current_road = DW.road_history_basis(CON) if positions else None
+                d = S.dispatch_sheet(CON, b["id"], protected=protected, route_positions=positions, current_road=current_road)
                 stamp = AS.print_sheet_stamp(CON, b["id"])
-                endpoint, road_status = S.local_osrm(CON) if positions and d["stops"] else ("", "")
+                history = d.get('map_route', {}).get('history')
+                endpoint, road_status = S.local_osrm(CON) if positions and d["stops"] and not history else ("", "")
         except S.UserError as error:
             if not protected:
                 raise
@@ -2363,11 +2432,12 @@ class Handler(BaseHTTPRequestHandler):
             return label, pair if len(pair) == 2 and None not in pair else None
 
         waypoints = []
-        if d["stops"]:
+        detached = d.get('final_unload')
+        if d["stops"] or detached:
             depots = d.get("map_route", {})
             waypoints.append(visit("출발", depots.get("depot") if depots.get("complete") else None))
             unload_count = 0
-            final_unload = False
+            final_unload = bool(detached)
             for stop in d["stops"]:
                 waypoints.append(visit(str(stop["seq"]), stop if positions else None))
                 if unload := stop.get("unload_after"):
@@ -2375,8 +2445,10 @@ class Handler(BaseHTTPRequestHandler):
                     last = unload.get("final") is True
                     final_unload |= last
                     waypoints.append(visit("최종 하차" if last else f"하차{unload_count}", unload if positions else None))
+            if detached:
+                waypoints.append(visit('최종 하차', detached if positions else None))
             waypoints.append(visit("차고지 복귀" if final_unload else "종료", depots.get("end") if depots.get("complete") else None))
-        line = {}
+        line = history.get('path', {}) if history else {}
         coordinates = [pair for _, pair in waypoints]
         if endpoint and 2 <= len(coordinates) <= 500 and all(coordinates):
             try:
@@ -2385,8 +2457,22 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             else:
                 line = routing.road_path(points, endpoint)  # 로컬 길찾기 동안에는 업무 DB 잠금을 잡지 않는다.
+        history_note = ""
+        if history:
+            history_note = {
+                'CURRENT': '확정 당시 노선', 'ROAD_CHANGED': '확정 당시 노선 · 현재 도로망이 변경되어 운행에 사용하지 마세요.',
+                'UNVERIFIED': '확정 당시 노선 · 현재 도로망 버전을 확인할 수 없어 운행에 사용하지 마세요.',
+                'VISITS_CHANGED': '확정 뒤 방문 위치나 순서가 바뀌어 현재 방문 순서를 표시합니다. 도착 시각은 확정 당시 기준입니다.',
+            }[history['state']]
+            if history.get('matrix_note'):
+                history_note += ' · 계산 기준 ' + history['matrix_note']
+            if history.get('estimated_legs'):
+                history_note += ' · 이동시간 직선 추정 구간 ' + ', '.join(history['estimated_legs'])
+        elif line.get('geometry'):
+            history_note = '이전 배정 · 현재 도로망으로 표시한 경로'
         route = route_figure(waypoints, geometry=line.get("geometry"), distance_km=line.get("distance_km"),
                              toll_excluded=line.get("toll_excluded") is True, geographic=positions,
+                             note=history_note, historical=bool(history and history['state'] != 'CURRENT'),
                              caption=f"{d['work_date']} · {d['crew']} · 갱신본 {d['assign_ver']}")
         rows_html = []
         for s in d["stops"]:
@@ -2420,9 +2506,18 @@ class Handler(BaseHTTPRequestHandler):
                 u = s["unload_after"]
                 action = "최종 하차 후 차고지 복귀" if u.get("final") is True else "하차"
                 rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(u["eta"])}</td><td colspan="{5 if protected else 7}">{e(u["label"])} {action} · 약 {u["volume_m3"]}m³ · {u["minutes"]}분</td></tr>')
+        if detached:
+            body = f'{e(detached["label"])} 최종 하차 후 차고지 복귀 · 약 {detached["volume_m3"]}m³ · {detached["minutes"]}분'
+            frames = d.get('unload_qr_frames') or []
+            for i, frame in enumerate(frames, 1):
+                image, _ = qr_png_data_uri(frame, 'M')
+                part = f'<span>{i}/{len(frames)}</span>' if len(frames) > 1 else ''
+                body += f'<div class="visit-qr-part"><img class="visit-qr" src="{image}" alt="최종 하차 QR {i}/{len(frames)}">{part}</div>'
+            rows_html.append(f'<tr class="u"><td class="n">⇩</td><td>{e(detached["eta"])}</td><td colspan="{5 if protected else 7}">{body}</td></tr>')
         if protected:
             columns = '<th>행정동</th><th>품목</th><th>건별 수신 QR</th>'
-            note = '상세정보는 등록된 휴대폰에서 확인합니다. [오늘 목록 받기]에서 해당 행의 QR을 읽으세요. QR이 여러 개면 모두 읽어야 한 건을 가져옵니다.'
+            note = ('등록된 휴대폰의 [오늘 목록 받기]에서 최종 하차 QR을 읽으세요. QR이 여러 장이면 모두 읽으세요.' if detached else
+                    '상세정보는 등록된 휴대폰에서 확인합니다. [오늘 목록 받기]에서 해당 행의 QR을 읽으세요. QR이 여러 개면 모두 읽어야 한 건을 가져옵니다.')
             if positions:
                 note += ' 노선도에는 수거 위치가 표시되므로 출력물을 업무용으로만 사용하세요.'
         else:
@@ -2443,7 +2538,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_out(error)
             if not batch or batch["status"] != "ACTIVE" or stamp != AS.print_sheet_stamp(CON, b["id"]):
                 return self.send_json({"error": "배정 또는 접수가 바뀌었습니다. 최신 배차표를 다시 열어 주세요."}, 409)
-            if line.get("geometry") and (endpoint, road_status) != S.local_osrm(CON):
+            if ((history and current_road != DW.road_history_basis(CON))
+                    or (not history and line.get("geometry") and (endpoint, road_status) != S.local_osrm(CON))):
                 return self.send_json({"error": "도로망이 바뀌었습니다. 배차표를 다시 열어 주세요."}, 409)
         return self.send_bytes(page.encode(), "text/html; charset=utf-8")
 

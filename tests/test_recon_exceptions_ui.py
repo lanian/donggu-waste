@@ -11,7 +11,7 @@ def main():
     fixture = ReconExceptionTest()
     fixture.setUp()
     try:
-        raw, _, different, _, _, day = fixture.mixed_file()
+        raw, _, different, cancelled, amount, day = fixture.mixed_file()
         fixture.con.execute("""INSERT INTO recon_import (id, sha256, at, actor, rows, matched, summary_json)
                                VALUES ('old', 'legacy-summary', ?, 'legacy', 3, 1, '{"MATCH":1,"AMOUNT_DIFF":2}')""", (S.now(),))
         root = f'http://127.0.0.1:{fixture.port}/'
@@ -76,9 +76,24 @@ def main():
             expect(review.get_by_role('cell', name='수납 원장 대조', exact=True)).to_be_visible()
             expect(review.get_by_role('cell', name='session_worker', exact=True)).to_be_visible()
             assert len(S.rows(fixture.con, 'SELECT * FROM payment')) == 1
+
+            review.get_by_role('button', name='닫기', exact=True).click()
+            receipt_csv = ('PC 접수번호,부과번호,금액,납부일\n'
+                           f'{different["receipt_no"]},,{amount},{day}\n'
+                           f'{different["receipt_no"]},{cancelled["levy_no"]},{amount},{day}\n').encode()
+            select_file('receipt.csv', receipt_csv)
+            page.get_by_role('button', name='미리보기', exact=True).click()
+            expect(page.get_by_role('columnheader', name='PC 접수번호')).to_be_visible()
+            expect(page.get_by_text('부과번호와 PC 접수번호가 같은 접수에 연결되지 않음', exact=True)).to_be_visible()
+            expect(page.get_by_text('접수 연결 불가 1', exact=True)).to_be_visible()
+            commit.click()
+            page.get_by_role('dialog', name='대사 반영').get_by_role('button', name='기록', exact=True).click()
+            expect(queue.get_by_role('row').filter(has_text='접수 연결 불가').get_by_role('cell', name=cancelled['levy_no'], exact=True)).to_be_visible()
+            assert S.payment_status(fixture.con, different['id'])['paid'] == amount
+            assert S.payment_status(fixture.con, cancelled['id'])['paid'] == 0
             ctx.close()
             browser.close()
-            print('실HTTP UI 통과: 예외만 반입 · 혼합 반입 · 재조회 · 완료 · 재반입 차단 · 이력 · 이전 집계')
+            print('실HTTP UI 통과: 예외만 반입 · 혼합 반입 · 재조회 · 완료 · 재반입 차단 · 이력 · 이전 집계 · PC 접수번호 검증')
     finally:
         fixture.tearDown()
 

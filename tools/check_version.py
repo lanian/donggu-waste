@@ -7,6 +7,7 @@
   2. 태그로 실행할 때(예: v0.9.1) 태그 버전이 위 버전과 같은지
   3. web/sw.js 가 미리 저장(precache)하는 파일이 모두 web/ 에 있는지
      (하나라도 없으면 서비스 워커 설치가 실패해 오프라인 실행이 안 된다)
+  4. --base로 지정한 기준에서 배포할 web/ 자료가 바뀌면 서비스 워커 버전도 바뀌었는지
 
 실행
   python tools/check_version.py               # 1·3
@@ -19,11 +20,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+SW_VERSION = r"^const\s+VERSION\s*=\s*['\"]([^'\"]+)['\"]"
 
 
 def find(path: Path, pattern: str) -> str:
@@ -39,16 +42,35 @@ def precache_files(sw: Path) -> list[str]:
     return re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)) if m else []
 
 
+def check_changed_assets(root: Path, base: str, version: str) -> str | None:
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.PIPE)
+
+    try:
+        sha = git("rev-parse", "--verify", "--end-of-options", base + "^{commit}").decode("ascii").strip()
+        if not git("diff", "--name-only", "-z", sha, "--", "web/"):
+            return None
+        previous = re.search(SW_VERSION, git("show", f"{sha}:web/sw.js").decode("utf8"), re.M)
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return "배포 기준에서 휴대폰 앱 버전을 읽지 못했습니다. Git 비교 기준을 확인하세요."
+    if not previous:
+        return "배포 기준 소스에서 서비스 워커 버전 선언을 찾지 못했습니다."
+    if previous.group(1) == version:
+        return f"휴대폰 배포 자료를 바꿨지만 서비스 워커 버전({version})이 같습니다. 앱·PC 버전을 함께 올려 주세요."
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", help="배포 태그 (예: v0.9.1). 생략하면 GitHub Actions 태그 실행일 때 자동으로 읽음")
     ap.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
+    ap.add_argument("--base", help="배포 자료와 비교할 Git 기준 커밋")
     a = ap.parse_args(argv)
     root = a.root.resolve()
     web = root / "web"
 
     app_v = find(web / "app.js", r"^export\s+const\s+APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
-    sw_v = find(web / "sw.js", r"^const\s+VERSION\s*=\s*['\"]([^'\"]+)['\"]")
+    sw_v = find(web / "sw.js", SW_VERSION)
     tag = a.tag
     if tag is None and os.environ.get("GITHUB_REF_TYPE") == "tag":
         tag = os.environ.get("GITHUB_REF_NAME")
@@ -59,7 +81,8 @@ def main(argv=None) -> int:
     for name, v in (("APP_VERSION", app_v), ("sw.js VERSION", sw_v)):
         if not SEMVER.match(v):
             errors.append(f"{name} '{v}' 가 x.y.z 형식이 아닙니다")
-    pc_init = (ROOT / "pc" / "dgpc" / "__init__.py").read_text(encoding="utf8") if (ROOT / "pc" / "dgpc" / "__init__.py").exists() else ""
+    pc_file = root / "pc" / "dgpc" / "__init__.py"
+    pc_init = pc_file.read_text(encoding="utf8") if pc_file.exists() else ""
     m_pc = re.search(r'__version__\s*=\s*"([^"]+)"', pc_init)
     pc_v = m_pc.group(1) if m_pc else ""
     print(f"pc/dgpc  __version__ = {pc_v}")
@@ -67,6 +90,8 @@ def main(argv=None) -> int:
         errors.append(f"PC __version__({pc_v}) 과 APP_VERSION({app_v}) 이 다릅니다 — 같은 번호로 맞추세요")
     if app_v != sw_v:
         errors.append(f"APP_VERSION({app_v}) 과 sw.js VERSION({sw_v}) 이 다릅니다 — 두 파일을 같은 버전으로 맞추세요")
+    if a.base and (error := check_changed_assets(root, a.base, sw_v)):
+        errors.append(error)
     if tag:
         print(f"태그                   = {tag}")
         tv = tag[1:] if tag.startswith("v") else None

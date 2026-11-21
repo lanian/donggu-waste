@@ -40,7 +40,7 @@ const NO_PHOTO = { DARK: '어두움', REFUSED: '주민 촬영 거부', CAMERA: '
 const REFUND_ST = { DRAFT: '자동 생성(신청 전)', REQUESTED: '결재 대기', APPROVED: '결재 완료(지급 전)', REJECTED: '반려', PAID: '지급 완료', VOID: '해소·취소' };
 const REFUND_CAUSE = { CANCELLED: '납부 뒤 취소', OVERPAID: '과납', PARTIAL: '일부 수거 차액', MANUAL: '기타' };
 const ACCESS = { VIEW: '상세 조회', LIST: '목록 조회', PRINT: '출력', EXPORT: '내보내기', PHOTO: '사진 보기', SEARCH: '주소·중복 조회' };
-const RECON = { MATCH: '일치', AMOUNT_DIFF: '금액 다름', UNMATCHED: '부과번호 없음', DUPLICATE: '파일 안 중복', ALREADY: '이미 반영', AMOUNT_PENDING: '금액 미확정', CANCELLED: '취소된 접수', BAD: '형식 오류' };
+const RECON = { MATCH: '일치', AMOUNT_DIFF: '금액 다름', UNMATCHED: '접수 연결 불가', DUPLICATE: '파일 안 중복', ALREADY: '이미 반영', AMOUNT_PENDING: '금액 미확정', CANCELLED: '취소된 접수', BAD: '형식 오류' };
 
 // ------------------------------------------------------------ 도우미
 function h(tag, attrs = {}, ...kids) {

@@ -248,7 +248,7 @@ function finalReturn(value) {
 }
 
 export function expandDaylist(p, feeTable) {
-  if (!p || p.schema !== 'dg.daylist/2') return p;
+  if (!p || !['dg.daylist/2', 'dg.daylist/3'].includes(p.schema)) return p;
   const rows = Object.fromEntries((feeTable ? feeTable.rows : []).map((r) => [r.id, r]));
   const stops = p.s.map((c) => ({
     seq: c.q, request_id: fromSid(c.i), receipt_no: c.r, req_ver: c.v, name: c.n, phone: c.p, address: c.a, dong: c.d || '',
@@ -277,5 +277,24 @@ export function expandDaylist(p, feeTable) {
   const fee_table = { version_id: p.fee };
   if (p.fb) Object.assign(fee_table, { base_version: p.fb, overrides: p.fo || {}, effective_from: p.fe || null });
   const rel = normRel(p.rel);
-  return { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops, ...(rel ? { rel } : {}) };
+  const out = { schema: 'dg.daylist/1', work_date: p.work_date, crew: p.crew, assign_ver: p.assign_ver, fee_table, stops, ...(rel ? { rel } : {}) };
+  if (p.schema === 'dg.daylist/3') {
+    if (!Array.isArray(p.cl) || p.cl.length !== 2) throw new ProtocolError('BAD_FORMAT', '차량 적재량');
+    const [volume, weight] = p.cl;
+    if (!Number.isFinite(volume) || volume < 0 || volume > 1e6 || !Number.isSafeInteger(weight) || weight < 0 || !(volume || weight)) {
+      throw new ProtocolError('BAD_FORMAT', '차량 적재량');
+    }
+    out.carry_load = { volume_m3: volume, weight_kg: weight };
+    if (!stops.length) {
+      if (!Array.isArray(p.fu) || p.fu.length !== 8) throw new ProtocolError('BAD_FORMAT', '최종 하차');
+      const [eta, label, minutes, amount, lat, lon, endLat, endLon] = p.fu;
+      const destination = finalReturn([endLat, endLon, 1]);
+      if (!destination.final || !finalReturn([lat, lon, 1]).final || typeof eta !== 'string' || typeof label !== 'string'
+          || !Number.isInteger(minutes) || minutes < 0 || minutes > 600 || !Number.isFinite(amount) || amount < 0 || amount > 1e6) {
+        throw new ProtocolError('BAD_FORMAT', '최종 하차');
+      }
+      out.final_unload = { ...destination, stop_count: 0, eta, label, minutes, volume_m3: amount, lat, lon };
+    }
+  }
+  return out;
 }

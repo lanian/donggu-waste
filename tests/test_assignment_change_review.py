@@ -12,7 +12,9 @@ from dgpc.pc_collection import save as save_pc_collection
 DAY = "2099-01-05"
 
 
-class AssignmentChangeReviewTest(UsageHTTPCase):
+class AssignmentChangeReviewCase(UsageHTTPCase):
+    post_timeout = 20
+
     def setUp(self):
         super().setUp()
         self.crews = [S.save_crew(self.con, {"name": f"가상 재계산 {i}팀", "capacity_m3": 8,
@@ -36,7 +38,7 @@ class AssignmentChangeReviewTest(UsageHTTPCase):
                 "expected_order": {c: [s["request_id"] for s in cur.get(c, {}).get("stops", [])] for c in affected}, **details}
 
     def review(self, change, expected=200, cookie=None):
-        status, result, _ = self.post("route", {"date": DAY, "time_limit": 1, "assignment_change": change}, cookie or self.admin_cookie)
+        status, result, _ = self.post("route", {"date": DAY, "time_limit": 2, "assignment_change": change}, cookie or self.admin_cookie)
         self.assertEqual(status, expected, result)
         return result
 
@@ -45,6 +47,8 @@ class AssignmentChangeReviewTest(UsageHTTPCase):
         self.assertEqual(status, expected, result)
         return result
 
+
+class AssignmentChangeReviewTest(AssignmentChangeReviewCase):
     def test_insert_reorder_move_remove_and_only_changed_revisions(self):
         a, b, c = self.crews
         r1, r2, r3, keep = [self.receipt(f"가상 방문 {i}") for i in range(4)]

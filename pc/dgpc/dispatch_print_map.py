@@ -92,12 +92,15 @@ def _stops(visits, project):
     return "".join(marks)
 
 
-def route_figure(visits, *, geometry=None, distance_km=None, toll_excluded=False, geographic=False, caption=""):
+def route_figure(visits, *, geometry=None, distance_km=None, toll_excluded=False, geographic=False, caption="",
+                 note="", historical=False):
     """외부 요청 없이, 확정된 순서나 인쇄 폭에 맞춘 경로 형상을 반환한다."""
     title = "배차 노선도" if geographic else "방문 순서도"
     frame = f'<section class="print-route" aria-labelledby="print-route-title"><h2 id="print-route-title">{title}</h2>'
     if caption:
         frame += f'<p class="print-route-caption">{escape(caption)}</p>'
+    if note:
+        frame += f'<p class="print-route-note">{escape(note)}</p>'
     if not geographic:
         return frame + _visit_order(visits) + "</section>"
 
@@ -115,10 +118,15 @@ def route_figure(visits, *, geometry=None, distance_km=None, toll_excluded=False
     project = _projector(points + road)
     if road:
         projected = [project(p) for p in road]
-        shape = f'<path class="print-route-road" d="{_line(projected)}" stroke="#333" stroke-width="3"/>' + _arrows(projected)
+        dash = ' stroke-dasharray="8 5"' if historical else ""
+        shape = f'<path class="print-route-road" d="{_line(projected)}" stroke="#333" stroke-width="3"{dash}/>'
+        if not historical:
+            shape += _arrows(projected)
         distance = f" · {distance_km:.2f} km" if type(distance_km) in (float, int) and 0 <= distance_km < float("inf") else ""
         toll = " · 유료도로 제외" if toll_excluded else ""
-        legend = f"도로 경로{distance}{toll} · 번호는 배차표 순서 · 화살표는 진행 방향"
+        legend = f"도로 경로{distance}{toll} · 번호는 배차표 순서"
+        if not historical:
+            legend += " · 화살표는 진행 방향"
         credit = '<span class="print-route-credit">© OpenStreetMap contributors · openstreetmap.org/copyright</span>'
     else:
         segments = [_line([project(a), project(b)]) for (_, a), (_, b) in pairwise(positioned)

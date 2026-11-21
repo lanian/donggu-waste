@@ -61,6 +61,7 @@ function mergePrintedVisit(pl) {
   if (old?.work_date !== pl.work_date) {
     if (unsent().length) reject('UNSENT_PREVIOUS');
     beginListDay(pl);
+    if (pl.carry_load) pl.carry_since_seq = st.seq;
     st.daylist = { ...pl, printed_since_seq: st.seq };
     st.localOrder = null;
     st.lastBundleHash = null;
@@ -118,10 +119,14 @@ async function screenScan() {
         go('#/qrtest-result');
         return;
       }
-      const printed = opened.payload.schema === 'dg.visit/1';
-      const pl = P.expandDaylist(printed ? { ...opened.payload, schema: 'dg.daylist/2' } : opened.payload, BUILTIN_FEES);
+      const printed = ['dg.visit/1', 'dg.visit/2'].includes(opened.payload.schema);
+      const printedUnload = opened.payload.schema === 'dg.unload/1';
+      const carry = ['dg.daylist/3', 'dg.visit/2', 'dg.unload/1'].includes(opened.payload.schema);
+      const pl = P.expandDaylist(printed || printedUnload ? { ...opened.payload, schema: carry ? 'dg.daylist/3' : 'dg.daylist/2' } : opened.payload, BUILTIN_FEES);
       if (pl.schema !== 'dg.daylist/1') throw Object.assign(new Error('목록 형식 아님'), { code: 'BAD_VERSION' });
       if (!(pl.fee_table && (pl.fee_table.version_id === BUILTIN_FEES.version_id || pl.fee_table.base_version === BUILTIN_FEES.version_id || pl.fee_table.rows))) throw Object.assign(new Error(''), { code: 'FEE_VERSION_MISSING' });
+      if (carry && (opened.header.btype !== P.TYPE_DAYLIST || opened.header.assignVer !== pl.assign_ver)) throw Object.assign(new Error(''), { code: 'BAD_VERSION' });
+      if (printedUnload && (pl.stops.length || !pl.final_unload)) throw Object.assign(new Error(''), { code: 'BAD_VERSION' });
       if (printed) {
         if (!stillScanning()) return;
         if (opened.header.btype !== P.TYPE_DAYLIST || opened.header.assignVer !== pl.assign_ver) throw Object.assign(new Error(''), { code: 'BAD_VERSION' });
@@ -133,6 +138,9 @@ async function screenScan() {
       }
       const hash = P.toHex(await P.sha256(envBytes));
       const old = st.daylist;
+      if (printedUnload && (pl.work_date < todayKST() || (old?.work_date === pl.work_date && old.crew !== pl.crew))) {
+        throw Object.assign(new Error(''), { code: pl.work_date < todayKST() ? 'QR_OLD_DATE' : 'QR_VISIT_REFRESH' });
+      }
       // v0.13 결과 반영 정보(rel): PC가 이미 가져온 기록·사진을 코드 입력 없이 반영됨으로. 목록을 받지 않게 되더라도(지난 날짜 등)
       // 서명된 PC 정보이므로 먼저 적용한다. rel이 말한 번호를 넘는 기록은 그대로 미전송으로 남는다.
       const rel = P.normRel(pl.rel);
@@ -172,14 +180,26 @@ async function screenScan() {
           // 이전 날짜 기록에 남은 메모 글·좌표도 지운다(수량·결과 기록은 사진 회수 때까지 남김).
           beginListDay(pl);
         }
+        if (pl.carry_load) {
+          // 같은 갱신본을 새 QR로 다시 받아도 그 사이에 기록한 하차를 유지한다.
+          const samePlan = old?.work_date === pl.work_date && old.crew === pl.crew && old.assign_ver === pl.assign_ver;
+          pl.carry_since_seq = samePlan && Number.isSafeInteger(old.carry_since_seq) ? old.carry_since_seq : st.seq;
+        }
         st.daylist = pl; st.lastBundleHash = hash;
         // 현장 접수: PC 목록에 들어왔으면(같은 접수 ID) PC 것을 쓰고, PC 반영이 확인된 다른 날 건은 이 휴대폰에서 내린다
         reconcileFieldStops(pl);
         // 이 휴대폰에서 바꾼 방문 순서는 새 목록(새 날짜·갱신본)에는 쓰지 않는다
         if (st.localOrder && (st.localOrder.work_date !== pl.work_date || st.localOrder.assign_ver !== pl.assign_ver)) st.localOrder = null;
         ui.diffSummary = diff && diff.summary ? diff.summary : '';
-        await commit();
+        if (!printedUnload && !(await commit()) && carry) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
         if (ui.diffSummary) toast(ui.diffSummary);
+      }
+      if (printedUnload) {
+        if (st.lastReceipt?.work_date !== pl.work_date || st.lastReceipt?.ver !== pl.assign_ver) st.lastReceipt = null;
+        if (!await commit()) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
+        col.drop(current); await S.putRaw('collect', col.bundles);
+        if (stillScanning()) { ui.receipt = null; toast('최종 하차 일정을 가져왔습니다'); go('#/home'); }
+        return;
       }
       col.drop(current); await S.putRaw('collect', col.bundles);
       const rc = opened.receipt;
@@ -187,7 +207,7 @@ async function screenScan() {
       ui.diffSummary = ''; ui.relDone = null;
       // 수신 코드는 PC 담당자가 받아 적을 때까지 첫 화면에 남긴다(다시 보기 단추). [PC에 알렸음]을 누르거나 다음 목록을 받으면 내린다.
       st.lastReceipt = { code: rc, at: new Date().toISOString(), work_date: pl.work_date, ver: pl.assign_ver, count: ui.receipt.count, diff: ui.receipt.diff, told: false };
-      await commit();
+      if (!(await commit()) && carry) throw Object.assign(new Error(''), { code: 'QR_VISIT_SAVE' });
       go('#/received');
     } catch (e) {
       say(msg, errMsg(e), true);

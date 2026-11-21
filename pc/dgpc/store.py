@@ -15,7 +15,10 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
+import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 
 try:
@@ -26,6 +29,8 @@ except ImportError:  # pragma: no cover
     ENCRYPTED = False
 
 KEYRING_SERVICE = "dongu-bulky-waste-pc"
+ROAD_RESTORE_PENDING = ".road-restore-pending"
+_DB_SIDECARS = ("-wal", "-shm", "-journal")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -242,6 +247,8 @@ def connect(create: bool = False, readonly: bool = False):
     if not ENCRYPTED and os.environ.get("DG_ALLOW_PLAIN_DB") != "1":
         sys.exit("SQLCipher 모듈(sqlcipher3)이 없어 실행을 멈춥니다. 'pip install -r pc/requirements.txt' 후 다시 실행하세요.")
     d = state_dir()
+    if (d / ROAD_RESTORE_PENDING).exists():
+        sys.exit("도로망과 DB 복원이 중단되었습니다. 같은 백업으로 복원을 다시 실행하세요.")
     path = d / "pc.db"
     if not path.exists() and not create:
         sys.exit("PC 자료가 없습니다. 먼저 'python pc_tool.py init'을 실행하세요.")
@@ -645,7 +652,41 @@ _RESTORE_RE = re.compile(r"^pc\.db\.before-restore-(\d{8}-\d{6})(?:-\d+)?$")
 
 def restore_copy_retention(d: Path | None = None, now: float | None = None) -> list[str]:
     """보관 규칙을 벗어난 복원 전 사본(곁 파일 포함)을 지운다(가장 새 것은 늘 남김). 지운 파일 이름 목록."""
-    return _apply_copy_rule(_dated_copies(d or state_dir(), _RESTORE_RE), now)
+    import datetime as _dt
+    import time as _time
+    root = (d or state_dir()).resolve()
+    if not root.is_dir() or (root / ROAD_RESTORE_PENDING).exists():
+        return []
+    groups = {}
+    for path in root.iterdir():
+        suffix = next((ext for ext in (".road-rules", *_DB_SIDECARS) if path.name.endswith(ext)), "")
+        name = path.name.removesuffix(suffix)
+        pattern = _RESTORE_RE.fullmatch(name)
+        if not pattern or path.resolve() != path or (not path.is_dir() if suffix == ".road-rules" else not path.is_file()):
+            continue
+        groups.setdefault(name, []).append(path)
+    copies = []
+    for name, paths in groups.items():
+        try:
+            made_at = _dt.datetime.strptime(_RESTORE_RE.fullmatch(name)[1], "%Y%m%d-%H%M%S").timestamp()
+        except ValueError:
+            made_at = min(path.stat().st_mtime for path in paths)
+        copies.append((made_at, name, paths))
+    now = _time.time() if now is None else now
+    gone = []
+    for i, (made_at, name, paths) in enumerate(sorted(copies, reverse=True)):
+        if not i or (i < PRE_MIGRATION_KEEP and now - made_at <= PRE_MIGRATION_DAYS * 86400):
+            continue
+        try:
+            for path in paths:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+        except OSError:
+            continue
+        gone.append(name)
+    return gone
 
 
 def run_migrations(con, path: Path | None = None) -> list[int]:
@@ -862,16 +903,22 @@ def backup_to(con, dest: Path, passphrase: str) -> Path:
     # 임시 이름으로 다 쓴 뒤에만 정식 이름으로 바꾼다: 도중에 실패한 반쪽 파일이 백업 목록·보관 정리에 끼지 않게
     part = part_path(dest)
     try:
+        from desktop_road_rules import write_road_backup
+        roads = state_dir().resolve() / "road-rules"
         if ENCRYPTED:
             con.execute(f"ATTACH DATABASE {_quote(str(part))} AS bk KEY {_quote(passphrase)}")
             try:
                 _export_sqlcipher(con, "bk")
+                write_road_backup(con, "bk", roads)
             finally:
                 con.execute("DETACH DATABASE bk")
         else:  # 개발용 평문 모드
             out = dbapi.connect(str(part))
-            con.backup(out)
-            out.close()
+            try:
+                con.backup(out)
+                write_road_backup(out, "main", roads)
+            finally:
+                out.close()
         try:
             os.chmod(part, 0o600)
         except OSError:
@@ -930,56 +977,106 @@ def _key_opens(path: Path, key: str) -> bool:
         c.close()
 
 
-def restore_from(src: Path, passphrase: str) -> dict:
+def _install_restore(state: Path, database: Path, roads: Path | None):
+    """같은 볼륨에서 DB와 도로판을 옮기고, 실패하면 역순으로 되돌린다."""
+    import datetime as _dt
+    from desktop_road_rules import road_restore_move_plan
+
+    cur = state / "pc.db"
+    stamp = _dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    kept, k = state / f"pc.db.before-restore-{stamp}", 1
+    while any(Path(str(kept) + suffix).exists() for suffix in ("", ".road-rules", *_DB_SIDECARS)):
+        kept, k = state / f"pc.db.before-restore-{stamp}-{k}", k + 1
+    retained = kept.with_name(kept.name + ".road-rules")
+    marker = state / ROAD_RESTORE_PENDING
+    road_plan = road_restore_move_plan(state, roads, retained) if roads else nullcontext([])
+    with road_plan as moves:
+        had_db = cur.exists()
+        if had_db:
+            moves.append((cur, kept))
+        # 전원 중단으로 pc.db만 먼저 옮겨졌을 때도 예전 SQLite 곁 파일을 새 DB 옆에 두지 않는다.
+        for ext in _DB_SIDECARS:
+            side = Path(str(cur) + ext)
+            if side.exists():
+                moves.append((side, Path(str(kept) + ext)))
+        moves.append((database, cur))
+        pending = marker.exists()
+        if roads and not pending:
+            with marker.open("xb") as file:
+                file.write(b"road and database restore\n")
+                file.flush()
+                os.fsync(file.fileno())
+        moved = []
+        try:
+            for source, target in moves:
+                source.rename(target)
+                moved.append((source, target))
+        except BaseException:
+            try:
+                for source, target in reversed(moved):
+                    target.rename(source)
+                if roads and not pending:
+                    marker.unlink()
+            except OSError as error:
+                raise ValueError("복원 도중 파일 이동을 되돌리지 못했습니다. 같은 백업으로 복원을 다시 실행하세요.") from error
+            raise
+        if roads:
+            marker.unlink()
+    return (str(kept) if had_db else None, str(retained) if retained.exists() else None)
+
+
+def restore_from(src: Path, passphrase: str, *, osrm_pack: Path | None = None) -> dict:
     """백업 파일을 현재 DB 키로 다시 암호화해 업무 DB로 되돌린다. 기존 DB는 지우지 않고 옆에 보관한다.
 
     PC 업무 화면(serve)을 끈 상태에서만 실행한다.
     """
-    import datetime as _dt
-    bcon, n = open_backup(src, passphrase)
-    try:
-        version = int(bcon.execute("PRAGMA user_version").fetchone()[0])
-        if version > LATEST:
-            raise ValueError(f"백업 DB 구조 버전({version})이 이 프로그램({LATEST})보다 새것입니다. 최신 PC 프로그램으로 복원하세요.")
-        d = state_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        cur = d / "pc.db"
-        tmp = d / "pc.db.restoring"
-        for f in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
-            if f.exists():
-                f.unlink()
-        key = db_key(create=not cur.exists()) if ENCRYPTED else None
-        if ENCRYPTED and cur.exists() and not _key_opens(cur, key):
-            # 키 저장소 없이 손으로 넣은 DB 키가 틀리면, 그 키로 다시 암호화해 바꿔 넣은 DB는 다음부터 열리지 않는다
-            raise ValueError("DB 키(비밀번호)가 지금 업무 DB와 맞지 않습니다. 복원하지 않았습니다. 키를 확인한 뒤 다시 하세요.")
-        if ENCRYPTED:
-            bcon.execute(f"ATTACH DATABASE {_quote(str(tmp))} AS cur KEY {_quote(key)}")
+    from desktop_road_rules import stage_road_backup
+
+    d = state_dir().resolve()
+    d.mkdir(parents=True, exist_ok=True)
+    cur = d / "pc.db"
+    with tempfile.TemporaryDirectory(prefix=".dg-restore-", dir=d) as directory:
+        stage = Path(directory)
+        temp_db, temp_roads = stage / "restored.db", stage / "roads"
+        bcon, n = open_backup(src, passphrase)
+        try:
+            version = int(bcon.execute("PRAGMA user_version").fetchone()[0])
+            if version > LATEST:
+                raise ValueError(f"백업 DB 구조 버전({version})이 이 프로그램({LATEST})보다 새것입니다. 최신 PC 프로그램으로 복원하세요.")
             try:
-                _export_sqlcipher(bcon, "cur")
-            finally:
-                bcon.execute("DETACH DATABASE cur")
-        else:
-            out = dbapi.connect(str(tmp))
-            try:
-                bcon.backup(out)
-            finally:
-                out.close()
-    finally:
-        bcon.close()
-    kept = None
-    if cur.exists():
-        stamp = _dt.datetime.now().strftime('%Y%m%d-%H%M%S')
-        kept, k = d / f"pc.db.before-restore-{stamp}", 1
-        while kept.exists():  # 같은 초에 두 번 복원(보관 정리는 '-n' 이름도 같은 사본으로 본다)
-            kept, k = d / f"pc.db.before-restore-{stamp}-{k}", k + 1
-        cur.rename(kept)
-        for ext in ("-wal", "-shm"):
-            side = Path(str(cur) + ext)
-            if side.exists():
-                side.rename(Path(str(kept) + ext))
-    tmp.rename(cur)
+                road_state = stage_road_backup(bcon, temp_roads, osrm_pack)
+            except dbapi.DatabaseError as error:
+                raise ValueError("백업의 도로 정보 표를 읽을 수 없습니다.") from error
+            if road_state is None and (d / ROAD_RESTORE_PENDING).exists():
+                raise ValueError("도로망과 DB 복원이 중단되었습니다. 도로망이 포함된 같은 백업으로 복원을 다시 실행하세요.")
+            key = db_key(create=not cur.exists()) if ENCRYPTED else None
+            if ENCRYPTED and cur.exists() and not _key_opens(cur, key):
+                raise ValueError("DB 키(비밀번호)가 지금 업무 DB와 맞지 않습니다. 복원하지 않았습니다. 키를 확인한 뒤 다시 하세요.")
+            if ENCRYPTED:
+                bcon.execute(f"ATTACH DATABASE {_quote(str(temp_db))} AS cur KEY {_quote(key)}")
+                try:
+                    _export_sqlcipher(bcon, "cur")
+                    if road_state is not None:
+                        bcon.execute("DROP TABLE cur.dg_backup_road_files")
+                        for _ in bcon.execute("PRAGMA cur.incremental_vacuum"):
+                            pass  # 반환되는 행마다 한 페이지씩 돌려주므로 끝까지 실행한다.
+                finally:
+                    bcon.execute("DETACH DATABASE cur")
+            else:
+                out = dbapi.connect(str(temp_db))
+                try:
+                    bcon.backup(out)
+                    out.execute("DROP TABLE IF EXISTS dg_backup_road_files")
+                finally:
+                    out.close()
+        finally:
+            bcon.close()
+        try:
+            kept, kept_roads = _install_restore(d, temp_db, temp_roads if road_state is not None else None)
+        except OSError as error:
+            raise ValueError("복원 파일을 설치하지 못했습니다. PC 프로그램을 종료하고 자료 폴더를 확인하세요.") from error
     try:
         os.chmod(cur, 0o600)
     except OSError:
         pass
-    return {"requests": n, "kept": str(kept) if kept else None}
+    return {"requests": n, "kept": kept, "road_state": road_state, "kept_roads": kept_roads}

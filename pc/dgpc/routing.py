@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+from itertools import product
 import math
 import time
 from pathlib import Path
@@ -116,37 +117,87 @@ def estimate_matrix(points) -> list[list[int]]:
     return [[0 if i == j else _estimate_min(a, b) for j, b in enumerate(points)] for i, a in enumerate(points)]
 
 
-def _osrm_matrix(points, url):
+def _osrm_matrix(points, url, counts, pairs, *, managed=False):
+    original = [tuple(p) for p in points]
+    points = list(counts) if managed else original
     size = len(points)
     if size <= 1 or not url:
-        return estimate_matrix(points), 0, 0, None
-    radiuses = ';'.join(['200'] * size)
-    path = f'/table/v1/driving/{osrm.coordinate_path(points)}'
-    data, code = osrm.fetch_road(url, path, f'annotations=duration&radiuses={radiuses}', timeout=10)
-    if code == 'NoTable':
-        # OSRM Table의 NoTable은 요청한 지점 사이에 경로가 없다는 응답이다.
-        matrix = [[0 if a == b else None for b in points] for a in points]
-        return matrix, 0, sum(row.count(None) for row in matrix), code
-    durations = data.get('durations')
-    if (code != 'Ok' or not isinstance(durations, list) or len(durations) != size
-            or any(not isinstance(row, list) or len(row) != size for row in durations)):
-        return estimate_matrix(points), 0, 0, code
-    matrix, road, unreachable = [], 0, 0
-    for i, row in enumerate(durations):
-        line = []
-        for j, seconds in enumerate(row):
-            if points[i] == points[j]:
-                line.append(0)
-            elif seconds is None:
-                line.append(None)
-                unreachable += 1
-            elif type(seconds) in (float, int) and 0 <= seconds < 10**9:
-                line.append(math.ceil(seconds / 60))
-                road += 1
-            else:
-                line.append(_estimate_min(points[i], points[j]))
-        matrix.append(line)
-    return matrix, road, unreachable, code
+        return estimate_matrix(original), 0, 0, None, None
+    # 한 블록에 출발·도착 좌표를 모두 보내야 하므로 서로 다른 두 블록의 합도 한도 이하여야 한다.
+    width = osrm.MAX_PACK_TABLE_POINTS // 2 if managed and size > osrm.MAX_PACK_TABLE_POINTS else size
+    blocks = [range(i, min(i + width, size)) for i in range(0, size, width)]
+    weights = [counts[p] if managed else 1 for p in points]
+    unresolved = -1  # 도로에서 확정한 0분·연결 불가(None)와 구분한다.
+    matrix = [[unresolved] * size for _ in points]
+    for i, row in enumerate(matrix):
+        row[i] = 0
+    deadline = time.monotonic() + osrm.TABLE_TIMEOUT
+    road, unreachable, calls = 0, 0, 0
+    status, skipped = None, set()
+    for source_block, destination_block in product(blocks, repeat=2):
+        while True:
+            sources = [i for i in source_block if i not in skipped]
+            destinations = [i for i in destination_block if i not in skipped]
+            indices = list(dict.fromkeys([*sources, *destinations]))
+            if not sources or not destinations or len(indices) < 2:
+                break
+            timeout = deadline - time.monotonic() if managed else osrm.TABLE_TIMEOUT
+            if timeout <= 0 or calls >= osrm.MAX_PACK_TABLE_CALLS:
+                status = 'TABLE_BUDGET'
+                break
+            local = {i: n for n, i in enumerate(indices)}
+            data, code = osrm.table(url, [points[i] for i in indices], [local[i] for i in sources],
+                                    [local[j] for j in destinations], timeout=timeout)
+            calls += 1
+            if code == osrm.TOLL_EXCLUSION_UNAVAILABLE:
+                status = code
+                break
+            # 실패 사유는 이후 성공/연결없음 응답으로 덮지 않는다.
+            if isinstance(code, str) and (status is None or (status in ('Ok', 'NoTable') and code != 'Ok')):
+                status = code
+            if managed and code == 'NoSegment':
+                index = osrm.missing_segment_index(data, len(indices))
+                if index is not None:
+                    skipped.add(indices[index])
+                    continue
+            durations = data.get('durations')
+            if code == 'NoTable':
+                # 응답으로 연결 없음이 확인된 방향은 추정하지 않는다.
+                durations = [[None] * len(destinations) for _ in sources]
+            elif (code != 'Ok' or not isinstance(durations, list) or len(durations) != len(sources)
+                    or any(not isinstance(row, list) or len(row) != len(destinations) for row in durations)):
+                break
+            for i, row in zip(sources, durations):
+                for j, seconds in zip(destinations, row):
+                    if points[i] == points[j]:
+                        matrix[i][j] = 0
+                        continue
+                    if seconds is None:
+                        matrix[i][j] = None
+                        unreachable += weights[i] * weights[j]
+                    elif type(seconds) in (float, int) and 0 <= seconds < 10**9:
+                        matrix[i][j] = math.ceil(seconds / 60)
+                        road += weights[i] * weights[j]
+            break
+        if status in ('TABLE_BUDGET', osrm.TOLL_EXCLUSION_UNAVAILABLE):
+            break
+    if len(original) != size:
+        lookup = {p: i for i, p in enumerate(points)}
+        slots = [lookup[p] for p in original]
+        matrix = [[matrix[i][j] for j in slots] for i in slots]
+    estimate_mask = None
+    if road + unreachable < pairs:
+        original_size = len(original)
+        if road or unreachable:
+            estimate_mask = bytearray((original_size**2 + 7) // 8)
+        for i, row in enumerate(matrix):
+            for j, minutes in enumerate(row):
+                if minutes == unresolved:
+                    row[j] = _estimate_min(original[i], original[j])
+                    if estimate_mask is not None and original[i] != original[j]:
+                        index = i * original_size + j
+                        estimate_mask[index // 8] |= 1 << (index % 8)
+    return matrix, road, unreachable, status, estimate_mask
 
 
 def matrix(points: list[tuple[float, float]], osrm_url: str = '') -> tuple[list[list[int | None]], str]:
@@ -271,7 +322,7 @@ OSRM_STATUS = {
     'MISSING': '연결 주소와 동봉 도로 자료 없음',
     'INVALID_PACK': '동봉 도로 자료 또는 실행 파일 확인 필요',
     'FAILED': '동봉 OSRM을 시작하지 못함',
-    'PACK_LIMIT': f'동봉 OSRM의 한 번 조회 한도({osrm.MAX_PACK_TABLE_POINTS}개 좌표) 초과',
+    'TABLE_BUDGET': '동봉 OSRM 분할 조회 한도에 도달함',
     'TooBig': '로컬 OSRM 한 번에 조회할 수 있는 지점 수 초과',
     'NoSegment': '도로 자료 범위 또는 도로와의 거리 확인 필요',
     'NoTable': '지점 사이에 도로 연결 없음',
@@ -293,15 +344,17 @@ def build_matrix(points, osrm_url: str = "", method: str | None = None, kakao_ke
         counts[tuple(p)] = counts.get(tuple(p), 0) + 1
     pairs = len(points)**2 - sum(n*n for n in counts.values())
     if m == "OSRM":
-        if osrm_status == 'READY' and len(points) > osrm.MAX_PACK_TABLE_POINTS:
-            return estimate_matrix(points), 'ESTIMATE', {'requested': 'OSRM', 'road_pairs': 0, 'unreachable_pairs': 0,
-                                                         'fallback_pairs': pairs, 'status': 'PACK_LIMIT'}
-        mat, road, unreachable, code = _osrm_matrix(points, osrm_url)
+        mat, road, unreachable, code, estimate_mask = _osrm_matrix(
+            points, osrm_url, counts, pairs, managed=osrm_status == 'READY')
         status = code if isinstance(code, str) and code in OSRM_STATUS else osrm_status
-        return mat, 'OSRM' if road or unreachable else 'ESTIMATE', {
+        info = {
             'requested': 'OSRM', 'road_pairs': road, 'unreachable_pairs': unreachable,
             'fallback_pairs': pairs - road - unreachable, 'status': status,
         }
+        if estimate_mask is not None:
+            # 계산에서 사용한 방향만 표시하는 내부 자료. API의 matrix_info에서는 제외한다.
+            info['_osrm_estimate_mask'] = estimate_mask
+        return mat, 'OSRM' if road or unreachable else 'ESTIMATE', info
     info = {'road_pairs': 0, 'fallback_pairs': pairs}
     if m == "KAKAO":
         info.update(requested='KAKAO', error='카카오모빌리티 REST 키가 없음')
@@ -315,13 +368,19 @@ def matrix_note(source: str | None, info: dict | None) -> str:
         return "도로 시간: 카카오모빌리티 · 유료도로 제외" + (f" (일부 직선 추정 {n}쌍)" if n else "")
     if source == "OSRM":
         road_note = '(로컬 OSRM, 유료도로 제외)'
+        fallback_note = ''
+        if n:
+            fallback_note = f" · 직선 대체 {n}쌍"
+            status = info.get('status')
+            if status not in ('Ok', 'NoTable') and (reason := OSRM_STATUS.get(status)):
+                fallback_note += f" · {reason}"
         if blocked := info.get('unreachable_pairs'):
             if info.get('road_pairs'):
                 label = '도로·직선 혼합' if n else '도로 이동시간'
             else:
                 label = '도로 이동시간 없음' if n else '이동 가능한 도로 연결 없음'
-            return f"{label}{road_note} · 도로 연결 불가 {blocked}쌍(방향별)" + (f" · 직선 대체 {n}쌍" if n else "")
-        return f"도로·직선 혼합{road_note} · 직선 대체 {n}쌍" if n else f"전체 실제 도로 이동시간{road_note}"
+            return f"{label}{road_note} · 도로 연결 불가 {blocked}쌍(방향별)" + fallback_note
+        return f"도로·직선 혼합{road_note}{fallback_note}" if n else f"전체 실제 도로 이동시간{road_note}"
     if info.get("requested") == "KAKAO":
         return "직선거리 추정(도로 아님) — 카카오모빌리티로 구하지 못함" + (f": {info['error']}" if info.get("error") else "")
     if info.get("requested") == "OSRM":
@@ -383,13 +442,16 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
          crew_pref: dict | None = None, pref_penalty: int = 30, travel_method: str | None = None, kakao_key: str = "",
          unload_hours: dict | None = None, lunch: dict | None = None,
          base_first: bool = True, crew_depots: dict | None = None, crew_required: dict[str, str | None] | None = None,
-         fixed_plan: dict | None = None, osrm_status: str = '', final_unload_return: bool = False) -> dict:
+         fixed_plan: dict | None = None, osrm_status: str = '', final_unload_return: bool = False,
+         live_state: dict | None = None) -> dict:
     """requests: id, lat, lon, items, appt_start/end, must_today, urgent, priority, waiting_days
     crews: id, name, capacity_m3, capacity_kg(0·없음 = 무게 안 따짐), shift_start, shift_end
     crew_pref: {request_id: 선호 팀 id} (행정동 기본 담당 팀, 약한 선호)
     crew_required: {request_id: 담당 팀 id}, 등록 동의 담당팀 미연결은 None (자동 추천에서 미배정)
     unload_hours: {"start","end"} 반입지가 받는 시간 / lunch: {"start","end","minutes"} 그 사이에 쉬는 시간
-    final_unload_return: 종료지 대신 반입지에서 최종 하차한 뒤 팀별 출발 차고지로 복귀"""
+    final_unload_return: 종료지 대신 반입지에서 최종 하차한 뒤 팀별 차고지로 복귀
+    live_state: 검증된 팀별 현재 위치 및 적재량. 확정 배정의 남은 방문을 고정 순서로 계산할 때 사용."""
+    live_state = live_state or {}
     fixed_crews = {}
     excluded = []
     required_crew = crew_required or {}
@@ -409,7 +471,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                 if required_crew.get(rid) not in (None, cid):
                     raise UserError('이 동의 고정 담당 수거팀으로 배정하세요.')
                 fixed_crews[rid] = cid
-        if not fixed_crews:
+        if not fixed_crews and not live_state:
             raise UserError('재계산할 접수를 하나 이상 배정하세요.')
         excluded = [{'request_id': r['id'], 'reason': '담당자가 이번 추천안에서 제외', 'must_today': bool(r.get('must_today'))} for r in requests if r['id'] not in fixed_crews]
         requests = [r for r in requests if r['id'] in fixed_crews]
@@ -433,7 +495,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     if not crews:
         return {"routes": [], "unassigned": unassigned + [{"request_id": r["id"], "reason": "선택한 팀이 없음"} for r in reqs],
                 "matrix_source": None}
-    if not reqs:
+    if not reqs and not live_state:
         return {"routes": [{"crew_id": c["id"], "crew_name": c["name"], "stops": [], "end": None, "depot": depots[c['id']]} for c in crews],
                 "unassigned": unassigned, "matrix_source": None}
     starts = [to_min(c.get("shift_start"), 540) for c in crews]
@@ -465,21 +527,33 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             return {'routes': [], 'matrix_source': None, 'unassigned': unassigned}
 
     scale = 100  # 부피를 정수로 (0.01m³ 단위)
-    caps = [max(1, int(float(c.get("capacity_m3", 8)) * scale)) for c in crews]  # 0·음수 용량은 계산기를 멈추게 하므로 막는다
+    caps = [max(1, int(round(float(c.get("capacity_m3", 8)) * scale, 9))) for c in crews]  # 올림 없이 0.01m³ 단위로 내림
     use_kg = any(cap > 0 for cap in kg_caps)
     kcaps = [max(0, int(cap)) or 10 ** 6 for cap in kg_caps]
+    loaded_m3 = [round(live_state.get(c['id'], {}).get('volume_m3', 0) * scale) for c in crews]
+    loaded_kg = [live_state.get(c['id'], {}).get('weight_kg', 0) for c in crews]
     has_unload_site = bool(unload_site and unload_site.get("lat") is not None and unload_site.get("lon") is not None)
     use_end = bool(end_site and end_site.get("lat") is not None and end_site.get("lon") is not None)
     use_unload = has_unload_site and max_unloads > 0
     final_unload = has_unload_site and final_unload_return and not use_end
+    unload_only = {k for k, crew in enumerate(crews)
+                   if fixed_plan is not None and not fixed_plan.get(crew['id']) and (loaded_m3[k] or loaded_kg[k])}
+    if unload_only and not final_unload:
+        return {'routes': [], 'infeasible': True, 'matrix_source': None, 'unassigned': unassigned,
+                'route_issues': [{'crew_name': crews[k]['name'], 'message':
+                                  '남은 방문이 없는 적재 차량에 최종 하차 노선을 만들려면 반입지를 지정하고 별도 종료지를 비워 주세요.'}
+                                 for k in sorted(unload_only)]}
     unload_duration = int(unload_min)
     uh = (to_min((unload_hours or {}).get("start"), 0), to_min((unload_hours or {}).get("end"), 24 * 60)) if unload_hours else None
     garage_points = [(depots[c['id']]['lat'], depots[c['id']]['lon']) for c in crews]
+    departures = {**depots, **{cid: state['point'] for cid, state in live_state.items()}}
+    start_points = [(departures[c['id']]['lat'], departures[c['id']]['lon']) for c in crews]
     unload_point = (float(unload_site['lat']), float(unload_site['lon'])) if use_unload or final_unload else None
     end_point = (float(end_site['lat']), float(end_site['lon'])) if use_end else None
     sites = [p for p in (unload_point, end_point) if p is not None]
     # 같은 좌표의 방문·하차 노드는 이동시간을 한 번만 조회한다.
-    matrix_points = list(dict.fromkeys([garage_points[0], *(v['point'] for v in visits), *sites, *garage_points[1:]]))
+    return_points = garage_points if not use_end else []
+    matrix_points = list(dict.fromkeys([start_points[0], *(v['point'] for v in visits), *sites, *start_points[1:], *return_points]))
     matrix_index = {p: i for i, p in enumerate(matrix_points)}
     travel_minutes, source, minfo = build_matrix(matrix_points, osrm_url, travel_method, kakao_key, osrm_status)
     matrix_info = {k: v for k, v in minfo.items() if k in ('api_calls', 'road_pairs', 'unreachable_pairs', 'fallback_pairs', 'requested', 'status')}
@@ -493,6 +567,21 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         arrival = max(clock + to_site, uh[0] if uh else 0)
         unloaded = arrival + unload_duration
         return unloaded + to_garage if not uh or unloaded <= uh[1] else None
+
+    if unload_only:
+        site = matrix_index[unload_point]
+        issues = []
+        for k in sorted(unload_only):
+            incoming = travel_minutes[matrix_index[start_points[k]]][site]
+            returning = travel_minutes[site][matrix_index[garage_points[k]]]
+            finish = finish_unload(starts[k], incoming, returning)
+            if finish is None or finish > ends[k]:
+                message = ('현재 위치에서 반입지를 거쳐 차고지로 갈 수 있는 도로 경로가 없습니다.'
+                           if incoming is None or returning is None else '반입지 운영시간과 팀 근무시간 안에 하차·복귀할 수 없습니다.')
+                issues.append({'crew_name': crews[k]['name'], 'message': message})
+        if issues:
+            return {'routes': [], 'infeasible': True, 'matrix_source': source, 'matrix_info': matrix_info,
+                    'matrix_note': matrix_note(source, minfo), 'unassigned': unassigned, 'route_issues': issues}
 
     def can_group(group, visit, group_cap, group_kg):
         if group['required'] != visit['required'] or group['must'] != visit['must']:
@@ -517,8 +606,8 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         for k, crew in enumerate(crews):
             if group['required'] not in (None, crew['id']) or (kg_caps[k] > 0 and weight > kg_caps[k]):
                 continue
-            departure = matrix_index[garage_points[k]]
-            return_to = matrix_index[end_point] if use_end else departure
+            departure = matrix_index[start_points[k]]
+            return_to = matrix_index[end_point] if use_end else matrix_index[garage_points[k]]
             outgoing = travel_minutes[departure][node]
             if outgoing is None:
                 continue
@@ -553,7 +642,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         group['base'] = group['base'] or visit['base']
 
     def nodes_for(groups):
-        points = [garage_points[0], *(g['point'] for g in groups)]
+        points = [start_points[0], *(g['point'] for g in groups)]
         n_groups = len(groups)
         mid_count = len(crews) * max_unloads if use_unload else 0
         n_unloads = mid_count + (len(crews) if final_unload else 0)
@@ -569,14 +658,13 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         demand = [0] + [round(g['volume'] * scale) for g in groups] + [-max(caps)] * n_unloads + tail
         kdemand = [0] + [round(g['kg']) for g in groups] + [-max(kcaps)] * n_unloads + tail
         depot_nodes = {points[0]: 0}
-        start_nodes = []
-        for coords in garage_points:
+        for coords in (*start_points, *return_points):
             if coords not in depot_nodes:
                 depot_nodes[coords] = len(points)
                 points.append(coords)
                 service.append(0); demand.append(0); kdemand.append(0)
-            start_nodes.append(depot_nodes[coords])
-        end_nodes = [end_node] * len(crews) if use_end else start_nodes
+        start_nodes = [depot_nodes[coords] for coords in start_points]
+        end_nodes = [end_node] * len(crews) if use_end else [depot_nodes[coords] for coords in garage_points]
         indices = [matrix_index[p] for p in points]
         tmat = [[travel_minutes[i][j] for j in indices] for i in indices]
         return points, unload_nodes, final_nodes, service, demand, kdemand, start_nodes, end_nodes, tmat
@@ -586,7 +674,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
     must_count = sum(v['must'] for v in visits)
     soft_scores = {r['id']: 3_000 * int(r.get('priority') or 0) + 300 * int(r.get('waiting_days') or 0)
                    + (20_000 if r.get('urgent') else 0) for r in reqs}
-    soft_min = min(soft_scores.values())
+    soft_min = min(soft_scores.values(), default=0)
     soft_scores = {rid: score - soft_min for rid, score in soft_scores.items()}
     unload_cost = COST * unload_duration if use_unload else 0
     base_cost_limit = sum(v['base'] for v in visits) * max(caps) if base_first else 0
@@ -629,7 +717,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         final_indices = [mgr.NodeToIndex(node) for node in final_nodes]
         final_ends = {idx: model.End(k) for k, idx in enumerate(final_indices)}
         final_returns = {idx: tmat[node][end_nodes[k]] for k, (idx, node) in enumerate(zip(final_indices, final_nodes))}
-        idle_steps = {model.Start(k): idx for k, idx in enumerate(final_indices)}
+        idle_steps = {model.Start(k): idx for k, idx in enumerate(final_indices) if k not in unload_only}
         # 빈 팀도 수거지를 독립적으로 삽입할 수 있게 종료 전 노드를 둔다.
         # 수거지가 없는 차량에 대해서는 이 노드의 가상 시각과 가상 거리를 결과에 쓰지 않는다.
         clock_limit = 24 * 60 + (max((leg or 0) for leg in final_returns.values()) + unload_duration if final_indices else 0)
@@ -690,12 +778,15 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         for k in range(v):
             tdim.CumulVar(model.Start(k)).SetRange(starts[k], ends[k])
             tdim.CumulVar(model.End(k)).SetRange(starts[k], clock_limit if final_indices else ends[k])
+            if crews[k]['id'] in live_state:
+                # 첫 방문 전 하차는 저장·휴대폰 목록에 표현할 수 없다. 하차 후 다시 계산한다.
+                model.NextVar(model.Start(k)).RemoveValues([mgr.NodeToIndex(node) for node in unload_nodes])
         solver = model.solver()
         last_unload_start = uh[1] - unload_duration if uh else None
         for k, idx in enumerate(final_indices):
             model.VehicleVar(idx).SetValue(k)
             model.NextVar(idx).SetValue(model.End(k))
-            active = solver.IsDifferentCstVar(model.NextVar(model.Start(k)), idx)
+            active = solver.IntConst(1) if k in unload_only else solver.IsDifferentCstVar(model.NextVar(model.Start(k)), idx)
             if final_returns[idx] is None or (uh and last_unload_start < uh[0]):
                 active.SetValue(0)
             solver.Add(tdim.CumulVar(model.End(k)) <= ends[k] + clock_limit * (1 - active))
@@ -722,15 +813,18 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                     iv = model.solver().FixedDurationIntervalVar(first, last, brk[2], False, f"lunch{k}")
                     tdim.SetBreakIntervalsOfVehicle([iv], k, visit)
                     breaks.append((k, iv))
-        dims = [("Load", demand, caps, max(caps))]
+        dims = [("Load", demand, caps, max(caps), loaded_m3)]
         if use_kg:
-            dims.append(("Weight", kdemand, kcaps, max(kcaps)))
-        for name, dem, cp, mx in dims:
+            dims.append(("Weight", kdemand, kcaps, max(kcaps), loaded_kg))
+        for name, dem, cp, mx, initial in dims:
             cb = model.RegisterUnaryTransitCallback(lambda i, dem=dem: dem[mgr.IndexToNode(i)])
             keep.append(cb)
             # 반입지에서는 적재량을 0으로 되돌릴 수 있게 여유(slack)를 둔다. 일반 지점은 여유 0.
-            model.AddDimensionWithVehicleCapacity(cb, mx if use_unload or final_unload else 0, cp, True, name)
+            model.AddDimensionWithVehicleCapacity(cb, mx if use_unload or final_unload else 0, cp, not live_state, name)
             dim = model.GetDimensionOrDie(name)
+            if live_state:
+                for k, load in enumerate(initial):
+                    dim.CumulVar(model.Start(k)).SetValue(load)
             if use_unload or final_unload:
                 for node in range(1, 1 + n_groups):
                     dim.SlackVar(mgr.NodeToIndex(node)).SetValue(0)
@@ -785,11 +879,11 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             node_for = {g["members"][0][0]["id"]: node for node, g in enumerate(groups, start=1)}
             seed = []
             for k, crew in enumerate(crews):
-                path, load, kg, count = [], 0, 0, 0
+                path, load, kg, count = [], loaded_m3[k], loaded_kg[k], 0
                 for rid in fixed_plan.get(crew["id"], []):
                     node = node_for[rid]
                     if load + demand[node] > caps[k] or kg + kdemand[node] > kcaps[k]:
-                        if not unload_nodes or count >= max_unloads or demand[node] > caps[k] or kdemand[node] > kcaps[k]:
+                        if not path or not unload_nodes or count >= max_unloads or demand[node] > caps[k] or kdemand[node] > kcaps[k]:
                             break
                         path.append(unload_nodes[k * max_unloads + count])
                         load, kg, count = 0, 0, count + 1
@@ -849,7 +943,7 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         if fixed_plan is not None:
             by_request = {g["members"][0][0]["id"]: (node, g) for node, g in enumerate(groups, start=1)}
             for k, crew in enumerate(crews):
-                clock, prev, volume, weight, unloads = starts[k], start_nodes[k], 0, 0, 0
+                clock, prev, volume, weight, unloads = starts[k], start_nodes[k], loaded_m3[k], loaded_kg[k], 0
                 ids = fixed_plan.get(crew["id"], [])
                 for rid in ids:
                     node, group = by_request[rid]
@@ -859,6 +953,9 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                     if too_big:
                         reason = "이 접수의 부피 또는 중량이 차량 적재한도를 넘습니다."
                     elif exceeds:
+                        if prev == start_nodes[k] and crew['id'] in live_state:
+                            issues.append({"request_id": rid, "reason": "현재 적재량으로 첫 방문의 물량을 실을 수 없습니다. 먼저 반입지에서 하차한 뒤 차량의 위치와 적재량을 갱신해 다시 계산하세요."})
+                            break
                         if not unload_nodes or unloads >= max_unloads:
                             reason = "누적 적재한도를 넘습니다. 반입지 설정과 하차 횟수를 확인하세요."
                         else:
@@ -910,8 +1007,11 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
         default_issue = ("도로 연결·근무시간·쉬는 시간·반입지 조건을 함께 만족하는 노선을 찾지 못했습니다."
                          if has_unreachable else "해를 찾지 못함: 근무시간·쉬는 시간·반입지 시간을 확인하세요")
         return {"routes": [], "matrix_source": source, "infeasible": True, "matrix_note": matrix_note(source, minfo), "matrix_info": matrix_info,
-                "unassigned": unassigned + (issues or [{"request_id": r["id"], "reason": default_issue} for r in reqs])}
+                "unassigned": unassigned + (issues or [{"request_id": r["id"], "reason": default_issue} for r in reqs]),
+                **({'route_issues': [{'crew_name': crews[k]['name'], 'message': default_issue}
+                                     for k in sorted(unload_only)]} if unload_only else {})}
     routes, visited = [], set()
+    estimated_pairs = minfo.get('_osrm_estimate_mask')
     lunch_by = {}  # 쉬는 시간 시작(분): 해의 구간 변수에서 이름으로 찾는다
     if breaks:
         ivc = sol.IntervalVarContainer()
@@ -921,25 +1021,31 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
             if nm.startswith("lunch"):
                 lunch_by[int(nm[5:])] = el.StartValue()
     for k, c in enumerate(crews):
-        idx, stops, load, kg, unloads = model.Start(k), [], 0, 0, 0
+        idx, stops, load, kg, unloads = model.Start(k), [], loaded_m3[k], loaded_kg[k], 0
         start_min = sol.Min(tdim.CumulVar(idx))
         drive_min, distance_km, work_minutes = 0, 0.0, 0
-        idle = final_nodes and mgr.IndexToNode(sol.Value(model.NextVar(idx))) == final_nodes[k]
+        estimated_legs, from_label = [], '출발'
+        detached_unload = None
+        idle = final_nodes and k not in unload_only and mgr.IndexToNode(sol.Value(model.NextVar(idx))) == final_nodes[k]
         if idle:
             idx = model.End(k)
             start_min = starts[k]
         while not model.IsEnd(idx):
             node = mgr.IndexToNode(idx)
             if node in unload_set or node in final_set:
-                if stops:
+                if stops or k in unload_only:
                     t = sol.Min(tdim.CumulVar(idx))
                     unload_after = {"eta": hhmm(t), "label": unload_site.get("label") or "반입지",
                                     "volume_m3": round(load / scale, 2), "minutes": unload_duration}
                     if node in final_set:
                         unload_after["final"] = True
-                    stops[-1]["unload_after"] = unload_after
-                    stops[-1]["unload_kg"] = int(kg)
+                    if stops:
+                        stops[-1]["unload_after"] = unload_after
+                        stops[-1]["unload_kg"] = int(kg)
+                    else:
+                        detached_unload = {**unload_after, 'lat': unload_point[0], 'lon': unload_point[1]}
                     unloads += 1
+                    from_label = '최종 하차' if node in final_set else f'{len(stops)}번 뒤 하차'
                 load, kg = 0, 0
             elif 1 <= node <= n_groups:
                 g = groups[node - 1]
@@ -954,16 +1060,28 @@ def plan(requests: list[dict], crews: list[dict], depot: dict, *, osrm_url: str 
                                   "same_place": len(g["members"]), **({"pref_crew_id": pc, "off_pref": pc != c["id"]} if pc else {})})
                     visited.add(r["id"])
                     t += svc
+                from_label = f'{len(stops)}번'
             next_idx = sol.Value(model.NextVar(idx))
             next_node = mgr.IndexToNode(next_idx)
             if not (idx == model.Start(k) and next_idx == model.End(k)):
                 drive_min += tmat[node][next_node]
                 distance_km += haversine_km(points[node], points[next_node])
+                if estimated_pairs:
+                    a, b = matrix_index[points[node]], matrix_index[points[next_node]]
+                    cell = a * len(matrix_points) + b
+                    if estimated_pairs[cell // 8] & (1 << (cell % 8)):
+                        to_label = ('최종 하차' if next_node in final_set else f'{len(stops)}번 뒤 하차' if next_node in unload_set
+                                    else ('종료' if use_end else '차고지 복귀') if model.IsEnd(next_idx) else f'{len(stops) + 1}번')
+                        estimated_legs.append(f'{from_label} → {to_label}')
             idx = next_idx
         lunch_at = hhmm(lunch_by[k]) if k in lunch_by and not idle else None
         finish = start_min if idle else sol.Min(tdim.CumulVar(idx))
-        routes.append({"crew_id": c["id"], "crew_name": c["name"], "stops": stops, "end": hhmm(finish), "depot": depots[c['id']],
+        actual = live_state.get(c['id'])
+        routes.append({"crew_id": c["id"], "crew_name": c["name"], "stops": stops, "end": hhmm(finish), "depot": departures[c['id']],
+                       **({'garage': depots[c['id']], 'initial_load': {'volume_m3': actual['volume_m3'], 'weight_kg': actual['weight_kg']}} if actual else {}),
+                       **({'final_unload': detached_unload} if detached_unload else {}),
                        'start': hhmm(start_min), 'drive_min': drive_min, 'work_min': work_minutes,
+                       **({'estimated_legs': estimated_legs} if estimated_legs else {}),
                        'duration_min': finish - start_min, 'distance_km': round(distance_km, 2),
                        "capacity_m3": c.get("capacity_m3", 8), "capacity_kg": int(float(c.get("capacity_kg") or 0)), "unloads": unloads,
                        "end_load_m3": round(load / scale, 2), "end_load_kg": int(kg),

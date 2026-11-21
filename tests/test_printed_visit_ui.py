@@ -37,7 +37,7 @@ def main(exe=None):
             requests = [api(pc, pc_url, 'requests/' + r['id']) for r in requests]
             garage = {'lat': 35.147, 'lon': 126.920, 'label': '가상 차고지'}
             unload = {'lat': 35.152, 'lon': 126.926, 'label': '가상 반입지'}
-            api(pc, pc_url, 'settings', {'depot': garage, 'unload_site': unload})
+            api(pc, pc_url, 'settings', {'depot': garage, 'unload_site': unload, 'external': {'travel_method': 'ESTIMATE'}})
             stops = [{'request_id': r['id']} for r in requests]
             stops[-1]['unload_after'] = {'label': unload['label'], 'eta': '10:00', 'minutes': 20, 'volume_m3': 1.25, 'final': True}
             batch = api(pc, pc_url, 'assign', {'date': day, 'plan': {crew: stops}})[0]['batch_id']
@@ -181,7 +181,34 @@ def main(exe=None):
             api(pc, pc_url, 'bundles/' + bundle['bundle_id'] + '/receipt', {'code': full['code']})
             app.evaluate('(frames) => window.printedQr(frames)', images[0])
             expect(app.get_by_text('이미 받은 것보다 오래된 목록입니다.', exact=False)).to_be_visible()
-            print('보호 배차표: 오프라인 건별·다중 조각 수신, 다른 기기·낡은 갱신본 거부, 중복·수거기록 보존, 일반 인쇄·최신 팀 목록 수신 확인 통과')
+
+            # 이미 실은 물량만 반입해야 하는 갱신본에는 수거 행을 만들지 않는다.
+            api(pc, pc_url, 'assign', {'date': day, 'plan': {crew: [{'request_id': requests[1]['id']}]}})
+            review = api(pc, pc_url, 'route', {'date': day, 'time_limit': 1, 'assignment_change': {
+                'op': 'remove', 'request_id': requests[1]['id'], 'start_after': '10:00',
+                'assign_ver': {crew: 3}, 'expected_order': {crew: [requests[1]['id']]},
+                'live_state': {crew: {'lat': 35.149, 'lon': 126.924, 'volume_m3': 0.5, 'weight_kg': 0}},
+            }})
+            assert review['routes'][0]['stops'] == [] and review.get('review_basis'), review
+            detached = api(pc, pc_url, 'assign/edit', {'date': day, 'review_basis': review['review_basis']})['batches'][0]
+            assert detached['count'] == 0
+            sheet.goto(pc_url + 'print/batch/' + detached['batch_id'][:8])
+            expect(sheet.locator('tbody')).to_contain_text('최종 하차 후 차고지 복귀')
+            unload_images = [img.get_attribute('src') for img in sheet.get_by_role('img', name='최종 하차 QR', exact=False).all()]
+            assert unload_images and not sheet.locator('.visit-qr-cell').count()
+            app.evaluate('(frames) => window.printedQr(frames)', unload_images)
+            app.get_by_role('button', name='QR 다시 읽기', exact=True).click()
+            action = app.get_by_role('region', name='지금 할 일')
+            expect(action.get_by_role('button', name='최종 하차 기록', exact=True)).to_be_visible(timeout=20000)
+            app.get_by_role('button', name='최종 하차 기록', exact=True).click()
+            expect(app.get_by_label('반입지', exact=True)).to_have_value(unload['label'])
+            app.get_by_label('중량 (kg)', exact=True).fill('10')
+            app.get_by_role('button', name='최종 하차 기록', exact=True).click()
+            expect(app.get_by_role('button', name='차고지 복귀 길안내', exact=False)).to_be_visible()
+            saved = app.evaluate("import('./store.js').then(S => S.getSecure('state'))")
+            assert saved['daylist']['final_unload']['stop_count'] == 0 and saved['lastReceipt'] is None
+            assert [entry['kind'] for entry in saved['events']] == ['ATTEMPT', 'UNLOAD']
+            print('보호 배차표: 오프라인 건별·다중 조각 수신, 다른 기기·이전 갱신본 거부, 수거기록 보존, 방문 없는 하차 QR·복귀 안내 통과')
         finally:
             phone.close()
             pc.close()

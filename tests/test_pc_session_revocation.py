@@ -105,7 +105,7 @@ class SessionHTTPTestCase(unittest.TestCase):
         self.directory.cleanup()
 
     def post(self, path, body=None, cookie=None, extra_headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=getattr(self, 'post_timeout', 5))
         try:
             headers = {"X-DG-CSRF": "1", "Content-Type": "application/json"}
             if cookie:

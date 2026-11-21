@@ -10,6 +10,12 @@ const PATH_ERRORS = {
   NoSegment: '도로 자료 범위 확인 필요', NoRoute: '연결된 도로 경로 없음', TooBig: '한 번에 조회할 지점 수 초과',
   SETTINGS_CHANGED: '도로 설정이 바뀜', UNAVAILABLE: '도로 조회 실패', TOLL_EXCLUSION_UNAVAILABLE: '현재 도로 자료에서 유료도로 제외를 적용할 수 없음',
 };
+const HISTORY_NOTES = {
+  CURRENT: '확정 당시 노선',
+  ROAD_CHANGED: '확정 당시 노선 · 현재 도로망이 바뀌어 운행에 사용하지 마세요',
+  UNVERIFIED: '확정 당시 노선 · 현재 도로망 버전을 확인할 수 없어 운행에 사용하지 마세요',
+  VISITS_CHANGED: '확정 뒤 방문 위치·순서가 바뀜 · 도착 시각은 확정 당시 기준',
+};
 
 function straightKm(path) {
   const rad = Math.PI / 180;
@@ -45,7 +51,8 @@ function directionImage() {
 export function confirmedMapRoutes(batches) {
   return batches.filter((batch) => batch.status === 'ACTIVE').map((batch) => ({
     id: batch.crew_id, name: batch.crew_name, batchId: batch.id, stops: batch.stops.filter((stop) => !stop.map_skipped),
-    depot: batch.map_route?.depot, end: batch.map_route?.end, complete: batch.map_route?.complete,
+    depot: batch.map_route?.depot, end: batch.map_route?.end, complete: batch.map_route?.complete, history: batch.map_route?.history,
+    finalUnload: batch.map_route?.final_unload,
   }));
 }
 
@@ -116,17 +123,22 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
     const origin = coords(route.depot) || coords(depot), end = coords(route.end);
     const stops = route.stops.flatMap((stop) => [coords(stop), coords(stop.via)].filter(Boolean));
     const lastStop = route.stops.at(-1);
-    const finalUnload = lastStop?.final_unload ? lastStop.via : null;
-    const path = [origin, ...stops, end].filter(Boolean);
+    const finalUnload = route.finalUnload || (lastStop?.final_unload ? lastStop.via : null);
+    const path = [origin, ...stops, coords(route.finalUnload), end].filter(Boolean);
     const complete = route.complete !== false && origin && end && route.stops.every((stop) => !!coords(stop));
-    const straight = path.length > 1 && stops.length ? { type: 'LineString', coordinates: path } : null;
-    return { id: route.id, name: route.name, batchId: route.batchId, color: i % 4, origin, finalUnload, path, straight, complete,
-      km: straight ? straightKm(path) : 0, road: null, reason: '', pending: false };
+    const straight = path.length > 1 && (stops.length || finalUnload) ? { type: 'LineString', coordinates: path } : null;
+    const history = route.history;
+    const saved = history?.path;
+    const road = saved?.source === 'OSRM' ? saved : null;
+    return { id: route.id, name: route.name, batchId: route.batchId, color: i % 4, origin, end, finalUnload, path, straight, complete,
+      km: straight ? straightKm(path) : 0, road, history, historical: !!road && history.state !== 'CURRENT',
+      estimatedLegs: history?.estimated_legs || route.estimatedLegs || [],
+      reason: PATH_ERRORS[saved?.reason] || '', pending: false };
   });
   const visibleRoutes = () => routeLines.filter((line) => includes(line.id));
   const visibleLines = () => visibleRoutes().filter((line) => line.straight);
   const geojson = () => ({ type: 'FeatureCollection', features: visibleLines().map((line) => ({ type: 'Feature',
-    properties: { c: line.color, road: !!line.road }, geometry: line.road?.geometry || line.straight })) });
+    properties: { c: line.color, road: !!line.road, historical: line.historical }, geometry: line.road?.geometry || line.straight })) });
 
   function showPaths() {
     const visible = visibleLines();
@@ -137,10 +149,16 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
       const hint = line.pending ? ' · 도로 조회 중' : line.reason ? ` · ${line.reason}` : '';
       const toll = line.road?.toll_excluded === true ? ' · 유료도로 제외' : '';
       const finish = line.finalUnload ? ' · 최종 하차 후 차고지 복귀' : '';
-      return h('div', {}, `${line.name} · ${kind} ${km.toFixed(2)}km${toll}${hint}${finish}`);
+      const history = line.history;
+      const basis = history ? [
+        HISTORY_NOTES[history.state], history.road_revision ? `도로망 ${history.road_revision}` : '',
+        history.start && history.end_at ? `예정 ${history.start}~${history.end_at}` : '', history.matrix_note,
+      ].filter(Boolean).join(' · ') : line.batchId && line.road ? '이전 배정 · 현재 도로 경로' : '';
+      return h('div', {}, `${line.name} · ${kind} ${km.toFixed(2)}km${toll}${hint}${finish}`, basis ? h('div', {}, basis) : null,
+        line.estimatedLegs.length ? h('div', {}, `이동시간을 직선으로 추정한 구간 ${line.estimatedLegs.join(', ')}`) : null);
     }), ...(visible.some((line) => !line.road) ? [h('div', {}, '직선(점선) · 방향 없음 · 운행 참고 불가')] : []),
-    ...(hasRoad ? [h('div', {}, '화살표는 도로 경로의 진행 방향입니다.'),
-      h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' }, '© OpenStreetMap contributors')] : []));
+    ...(visible.some((line) => line.road && !line.historical) ? [h('div', {}, '화살표는 도로 경로의 진행 방향입니다.')] : []),
+    ...(hasRoad ? [h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' }, '© OpenStreetMap contributors')] : []));
     drawLines();
   }
 
@@ -151,7 +169,7 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
     pathsRequest = request;
     for (const line of visibleLines()) {
       line.pending = false;
-      if (!roadEnabled || line.road) continue;
+      if (!roadEnabled || line.road || line.history) continue;
       if (!line.complete || line.path.length > 500) {
         line.reason = line.complete ? PATH_ERRORS.TooBig : '방문·경유·종료 위치 확인 필요';
         continue;
@@ -248,7 +266,7 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
           road?.geometry.coordinates.forEach((at) => bounds.extend(at));
         }
         visiblePoints().forEach(({ at }) => bounds.extend(at));
-        if (bounds.isEmpty() || !points.size) return;
+        if (bounds.isEmpty() || (!points.size && !visibleLines().some((line) => line.finalUnload))) return;
         const padding = Math.min(50, Math.floor(Math.min(box.clientWidth, box.clientHeight) / 5));
         map.fitBounds(bounds, { padding, maxZoom: 15, duration: 0 });
       };
@@ -283,6 +301,14 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
           marker.getElement().tabIndex = -1;
           drawn.push(marker);
         }
+        const returnSites = new Set();
+        for (const { end, finalUnload } of visibleRoutes()) {
+          if (!end || !finalUnload || origins.has(String(end)) || finalSites.has(String(end)) || returnSites.has(String(end))) continue;
+          returnSites.add(String(end));
+          const marker = M.pin(ml, map, { lng: end[0], lat: end[1], label: '복귀', name: '차고지 복귀', cls: 'me' });
+          marker.getElement().tabIndex = -1;
+          drawn.push(marker);
+        }
         visiblePoints().forEach((point) => {
           const marker = M.pin(ml, map, { lng: point.lon, lat: point.lat, label: point.label, cls: point.color,
             name: `${point.visit} · ${point.name}`, onClick: () => updateSelection(point.request_id) });
@@ -305,9 +331,11 @@ export function routeMap({ routes, depot, unassigned = [], view = {}, boxClass =
         routeSource = map.getSource('routes');
         drawLines = () => routeSource.setData(geojson());
         const paint = { 'line-width': 3, 'line-color': ['match', ['get', 'c'], 0, '#2557a7', 1, '#a5560d', 2, '#6c3fb5', '#0e7490'] };
-        const roadOnly = ['==', ['get', 'road'], true];
+        const roadOnly = ['all', ['==', ['get', 'road'], true], ['==', ['get', 'historical'], false]];
         map.addLayer({ id: 'routes', type: 'line', source: 'routes', filter: ['==', ['get', 'road'], false], paint: { ...paint, 'line-dasharray': [2, 1] } });
         map.addLayer({ id: 'routes-road', type: 'line', source: 'routes', filter: roadOnly, paint });
+        map.addLayer({ id: 'routes-road-history', type: 'line', source: 'routes', filter: ['==', ['get', 'historical'], true],
+          paint: { ...paint, 'line-dasharray': [3, 2] } });
         map.addImage('route-direction-chevron', directionImage(), { pixelRatio: 2 });
         map.addLayer({ id: 'routes-direction', type: 'symbol', source: 'routes', filter: roadOnly,
           layout: { 'symbol-placement': 'line', 'symbol-spacing': 48, 'icon-image': 'route-direction-chevron',

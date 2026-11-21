@@ -190,7 +190,7 @@ def revenue_csv(con, start: str, end: str, unit: str = "day", kind: str = "metho
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
-# ------------------------------------------------------------------ 대사 (세외수입 납부 자료 CSV: 부과번호·금액·납부일)
+# ------------------------------------------------------------------ 대사 (세외수입 납부 자료 CSV: 부과번호 또는 PC 접수번호, 금액, 납부일)
 RECON_EXCEPTION_KINDS = frozenset(('AMOUNT_DIFF', 'UNMATCHED', 'CANCELLED', 'AMOUNT_PENDING', 'DUPLICATE', 'BAD'))
 RECON_REVIEW_STATUS = {'OPEN': '미해결', 'IN_REVIEW': '검토 중', 'RESOLVED': '해결 완료'}
 RECON_REVIEW_BASIS = {
@@ -207,8 +207,8 @@ RECON_REVIEW_BASIS = {
 def recon_template() -> bytes:
     buf = io.StringIO()
     w = C.safe_csv_writer(buf)
-    w.writerow(["부과번호", "금액", "납부일", "영수번호", "납부방법"])
-    w.writerow(["2026-00-00001", "12000", "2026-11-03", "가상-0001", "가상계좌"])
+    w.writerow(["부과번호", "금액", "납부일", "영수번호", "납부방법", "PC 접수번호"])
+    w.writerow(["2026-00-00001", "12000", "2026-11-03", "가상-0001", "가상계좌", ""])
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
@@ -234,16 +234,20 @@ def parse_recon(con, raw: bytes) -> dict:
     head = [c.strip().replace(" ", "") for c in rd[0][1]]
     def col(*names):
         return next((head.index(n) for n in names if n in head), None)
-    ci = {"levy": col("부과번호", "고지번호"), "amount": col("금액", "납부금액", "수납금액"), "date": col("납부일", "수납일", "납부일자"),
+    ci = {"levy": col("부과번호", "고지번호"), "receipt": col("PC접수번호"),
+          "amount": col("금액", "납부금액", "수납금액"), "date": col("납부일", "수납일", "납부일자"),
           "ref": col("영수번호", "거래번호", "수납번호"), "method": col("납부방법", "수납방법")}
-    if ci["levy"] is None or ci["amount"] is None or ci["date"] is None:
-        raise C.UserError("머리줄에 '부과번호, 금액, 납부일' 열이 있어야 합니다. [서식 내려받기]를 참고하세요.")
+    if (ci["levy"] is None and ci["receipt"] is None) or ci["amount"] is None or ci["date"] is None:
+        raise C.UserError("머리줄에 부과번호 또는 PC 접수번호와 금액, 납부일 열이 있어야 합니다. [서식 내려받기]를 참고하세요.")
+    if head.count("PC접수번호") > 1:
+        raise C.UserError("PC 접수번호 열을 하나만 넣어 주세요.")
     if len(rd) > 5001:
         raise C.UserError("한 번에 5,000행까지 넣을 수 있습니다.")
     get = lambda r, k: (r[ci[k]].strip() if ci[k] is not None and ci[k] < len(r) else "")
     out, seen = [], {}
     for n, r in rd[1:]:
-        levy, ref, method = get(r, "levy"), get(r, "ref")[:40], get(r, "method")[:20]
+        levy, receipt = get(r, "levy"), get(r, "receipt")
+        ref, method = get(r, "ref")[:40], get(r, "method")[:20]
         date = get(r, "date").replace(".", "-").replace("/", "-")
         if re.fullmatch(r"\d{8}", date):
             date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
@@ -252,18 +256,29 @@ def parse_recon(con, raw: bytes) -> dict:
         except ValueError:
             amount = None
         row = {"line": n, "levy_no": levy, "amount": amount, "paid_on": date, "ref": ref, "method": method}
-        if not levy or amount is None or not 0 < amount < 2**63 or not C._date_ok(date):
-            row.update(status="BAD", note="부과번호·금액·납부일 형식 확인")
+        if receipt:
+            row["input_receipt_no"] = receipt
+        if not (levy or receipt) or amount is None or not 0 < amount < 2**63 or not C._date_ok(date):
+            row.update(status="BAD", note="접수 식별 번호·금액·납부일 형식 확인")
             out.append(row); continue
-        q = C.one(con, "SELECT * FROM request WHERE levy_no=?", (levy,))
+        select = "SELECT id, receipt_no, levy_no, dong, status FROM request WHERE "
+        if levy and receipt:
+            q = C.one(con, select + "levy_no=? AND receipt_no=?", (levy, receipt))
+            missing = "부과번호와 PC 접수번호가 같은 접수에 연결되지 않음"
+        elif levy:
+            q = C.one(con, select + "levy_no=?", (levy,))
+            missing = "PC에 없는 부과번호"
+        else:
+            q = C.one(con, select + "receipt_no=?", (receipt,))
+            missing = "PC에 없는 접수번호"
         if not q:
-            row.update(status="UNMATCHED", note="PC에 없는 부과번호")
+            row.update(status="UNMATCHED", note=missing)
             out.append(row); continue
-        row.update(request_id=q["id"], receipt_no=q["receipt_no"], dong=q["dong"])
-        if levy in seen:
-            row.update(status="DUPLICATE", note=f"파일 {seen[levy]}행과 같은 부과번호")
+        row.update(request_id=q["id"], receipt_no=q["receipt_no"], levy_no=q["levy_no"] or "", dong=q["dong"])
+        if q["id"] in seen:
+            row.update(status="DUPLICATE", note=f"파일 {seen[q['id']]}행과 같은 접수")
             out.append(row); continue
-        seen[levy] = n
+        seen[q["id"]] = n
         dup = C.one(con, """SELECT 1 AS x FROM payment WHERE request_id=? AND void_reason IS NULL AND kind='PAY' AND source='대사'
             AND ((receipt_ref IS NOT NULL AND receipt_ref!='' AND receipt_ref=?)
                  OR (amount=? AND paid_on=? AND (?='' OR receipt_ref IS NULL OR receipt_ref='')))""", (q["id"], ref, amount, date, ref))

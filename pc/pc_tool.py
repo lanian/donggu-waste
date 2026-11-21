@@ -232,7 +232,7 @@ def cmd_restore(a):
     if not a.yes and input("계속할까요? (yes 입력): ").strip() != "yes":
         sys.exit("취소했습니다.")
     try:
-        r = store.restore_from(a.file, _backup_pass(False))
+        r = store.restore_from(a.file, _backup_pass(False), osrm_pack=a.osrm_pack)
     except ValueError as e:
         sys.exit(str(e))
     c = store.connect()
@@ -240,6 +240,16 @@ def cmd_restore(a):
     with S.tx(c):
         S.audit(c, "backup", os.path.basename(a.file), "RESTORE", {"file": os.path.basename(a.file), "requests": r["requests"]})
     print(f"복원 완료: 접수 {r['requests']}건." + (f" 이전 DB 보관: {r['kept']}" if r["kept"] else ""))
+    _restored_roads(r)
+
+
+def _restored_roads(result):
+    if state := result["road_state"]:
+        print(f"도로망 복원 완료: 기준 팩 {state['base_fingerprint'][:12]} · 적용판 {state['active_id']} · 이전판 {state['previous_id'] or '없음'}")
+        if result["kept_roads"]:
+            print(f"복원 전 도로 자료 보관: {result['kept_roads']}")
+    else:
+        print("이 백업에는 적용 도로망이 없습니다. 업무 시작 전에 별도 보관한 도로 통행 정보와 기준 팩을 확인하세요.")
 
 
 def cmd_reset_admin(a):
@@ -374,7 +384,7 @@ def cmd_restore_auto(a):
         sys.exit("취소했습니다.")
     pw = os.environ.get("DG_BACKUP_PASS") or getpass.getpass("백업 개인키 보호 비밀번호: ")
     try:
-        r = backup.restore_auto(Path(a.file), Path(a.key).read_bytes(), pw)
+        r = backup.restore_auto(Path(a.file), Path(a.key).read_bytes(), pw, osrm_pack=a.osrm_pack)
     except (S.UserError, ValueError) as e:
         sys.exit(str(e))
     c = store.connect()
@@ -382,6 +392,7 @@ def cmd_restore_auto(a):
     with S.tx(c):
         S.audit(c, "backup", os.path.basename(a.file), "RESTORE", {"file": os.path.basename(a.file), "requests": r["requests"], "auto": True})
     print(f"복원 완료: 접수 {r['requests']}건." + (f" 이전 DB 보관: {r['kept']}" if r["kept"] else ""))
+    _restored_roads(r)
 
 
 def main(argv=None):
@@ -410,12 +421,14 @@ def main(argv=None):
     s.add_parser("status").set_defaults(fn=cmd_status)
     s.add_parser("backup").set_defaults(fn=cmd_backup)
     rs = s.add_parser("restore"); rs.add_argument("file"); rs.add_argument("--yes", action="store_true"); rs.set_defaults(fn=cmd_restore)
+    rs.add_argument("--osrm-pack", type=Path, help="도로망이 포함된 백업의 기준 도로 팩 폴더")
     ra = s.add_parser("reset-admin"); ra.add_argument("--username", default="admin"); ra.set_defaults(fn=cmd_reset_admin)
     s.add_parser("purge-photos").set_defaults(fn=cmd_purge_photos)
     s.add_parser("vacuum", help="(서버 끈 상태) DB 빈 공간 정리·조금씩 돌려주기 켜기").set_defaults(fn=cmd_vacuum)
     pp = s.add_parser("purge-pii"); pp.add_argument("--preview", action="store_true"); pp.set_defaults(fn=cmd_purge_pii)
     s.add_parser("backup-auto").set_defaults(fn=cmd_backup_auto)
     rsa = s.add_parser("restore-auto"); rsa.add_argument("file"); rsa.add_argument("--key", required=True); rsa.add_argument("--yes", action="store_true")
+    rsa.add_argument("--osrm-pack", type=Path, help="도로망이 포함된 백업의 기준 도로 팩 폴더")
     rsa.set_defaults(fn=cmd_restore_auto)
     ia = s.add_parser("import-addr"); ia.add_argument("path"); ia.add_argument("--region", default="", help="시군구명 거르기 (예: 동구)")
     ia.add_argument("--columns", help="열 번호 직접 지정 (예: road=7,main=9,sub=10,x=16,y=17,sigungu=4)")

@@ -25,6 +25,7 @@ async function screenSend(batchArg) {
           }, msg), 'primary', { disabled: !b.device_id }) : null)),
         !b.device_id ? h('div', { class: 'notice' }, '이 팀에 휴대폰이 연결되어 있지 않아 QR을 보낼 수 없습니다. ', boot.me.role === 'ADMIN' ? h('a', { href: '#/settings/crews' }, '설정에서 연결하기 →') : '운영 관리자에게 연결을 요청하세요.') : null,
         b.resend_needed && b.status === 'ACTIVE' ? h('div', { class: 'notice' }, '전송 뒤에 수정된 접수가 있습니다. QR을 다시 표시해 새 목록을 전달하세요. 급한 변경은 수거팀에 전화로 먼저 알리세요.') : null,
+        b.final_unload ? h('p', { class: 'notice info small' }, `${b.final_unload.eta} ${b.final_unload.label} · 최종 하차 후 차고지 복귀`) : null,
         h('div', { class: 'stopchain', 'aria-label': '방문 순서' }, ...b.stops.map((x) => h('span', { class: 'node' }, h('b', {}, x.seq), x.name))),
         last ? h('div', { class: 'row' }, last.receipt_confirmed_at ? chip('휴대폰 수신 확인됨', 'ok') : [chip('QR 표시함 · 수신 미확인', 'warn'), h('span', { class: 'muted small' }, '수신 코드(R-):')],
           last.receipt_confirmed_at ? null : code, last.receipt_confirmed_at ? null : btn('수신 확인', wrap(async () => { await post(`bundles/${last.id}/receipt`, { code: code.value }); toast('수신이 확인되었습니다'); load(); }, msg)), msg)

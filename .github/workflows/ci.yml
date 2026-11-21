@@ -40,10 +40,20 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
       - uses: actions/setup-python@v7
         with: { python-version: '${{ env.PYTHON_VERSION }}' }
       # 태그 실행이면 GITHUB_REF_TYPE=tag · GITHUB_REF_NAME=v… 를 읽어 태그까지 비교
-      - run: python tools/check_version.py
+      - name: 앱 버전 일치와 배포 기준 검사
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+        run: |
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            python tools/check_version.py --base "$BASE_SHA"
+          else
+            python tools/check_version.py
+          fi
+      - run: python tests/test_version_gate.py
 
   test:
     name: 단위·로직 시험 (Linux)
@@ -79,6 +89,13 @@ jobs:
       - run: python tests/test_request_followups.py
       - run: python tests/test_team_result_recovery.py
       - run: python tests/test_recon_exceptions.py
+      - run: python tests/test_osrm_runtime.py
+      - run: python tests/test_osrm_map_api.py
+      - run: python tests/test_dispatch_print_map.py
+      - run: python tests/test_road_edit_build.py
+      - run: python tests/test_road_rules_manager.py
+      - run: python tests/test_road_backup.py
+      - run: python tests/test_road_rules_api.py
       - run: python tests/test_default_dongs.py
       - run: python tests/test_dong_order.py
       - run: python tests/test_dong_depots.py
@@ -86,7 +103,9 @@ jobs:
       - run: python tests/test_route_review.py
       - run: python tests/test_route_review_api.py
       - run: python tests/test_assignment_change_review.py
+      - run: python tests/test_live_replanning.py
       - run: python tests/test_dong_depots_api.py
+      - run: python tests/test_dong_route_recheck_api.py
       - run: python tests/test_dong_centers.py
       - run: python tests/test_dong_centers_api.py
       - run: python tests/test_pc_collection.py
@@ -149,6 +168,8 @@ jobs:
           - test_mobile_memo_save
           - test_mobile_add_save
           - test_mobile_unload_save
+          - test_mobile_final_unload
+          - test_mobile_final_unload_home
           - test_mobile_layout
           - test_mobile_intake_save
           - test_mobile_intake_picker
@@ -156,6 +177,7 @@ jobs:
           - test_mobile_field_layout
           - test_mobile_photo_preview
           - test_dispatch_workflow_ui
+          - test_printed_visit_ui
           - test_assignment_change_review_ui
           - test_collection_help_mobile
           - test_mobile_pc_input_help
@@ -166,6 +188,8 @@ jobs:
           - test_request_followups_ui
           - test_team_result_recovery_ui
           - test_recon_exceptions_ui
+          - test_osrm_map_ui
+          - test_road_rules_ui
           - test_pc_item_picker
           - test_pc_item_picker_flow
           - test_workflow
@@ -260,6 +284,9 @@ jobs:
           python tests/test_pc_launcher.py
           python tests/test_desktop_paths.py
           python tests/test_desktop_lifecycle.py
+          python tests/test_osrm_runtime.py
+          python tests/test_road_edit_build.py
+          python tests/test_road_rules_manager.py
           python tests/test_desktop_app.py
           python tests/test_desktop_tray.py
           python tests/test_desktop_ui.py

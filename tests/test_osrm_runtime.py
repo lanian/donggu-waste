@@ -128,20 +128,128 @@ class MatrixTest(unittest.TestCase):
         self.assertEqual(source, 'ESTIMATE')
         self.assertEqual(leaked, [])
 
-    def test_managed_table_handles_above_default_limit_and_reports_oversize(self):
+    def test_managed_table_splits_over_200_and_preserves_directions(self):
         points = [(35.14 + i / 10000, 126.92) for i in range(201)]
-        durations = [[0 if i == j else 60 for j in range(101)] for i in range(101)]
-        with loopback(lambda _: (200, {}, {'code': 'Ok', 'durations': durations})) as (url, calls):
-            _, source, info = routing.build_matrix(points[:101], url, 'OSRM', osrm_status='READY')
-            self.assertEqual((source, info['road_pairs'], info['fallback_pairs']), ('OSRM', 101 * 100, 0))
-            _, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
-            self.assertEqual((source, info['fallback_pairs']), ('ESTIMATE', 201 * 200))
-            self.assertIn('200개 좌표', routing.matrix_note(source, info))
-            self.assertEqual(len(calls), 1)
+        ids = {point: i for i, point in enumerate(routing.osrm.coordinate_path(points).split(';'))}
+
+        def reply(path):
+            coords, sources, destinations = table_axes(path)
+            if len(coords) > 200:
+                return 400, {}, {'code': 'TooBig'}
+            sources = [ids[coords[i]] for i in sources]
+            destinations = [ids[coords[i]] for i in destinations]
+            durations = [[None if (i, j) == (0, 200) else (3 if i < j else 5) * 60
+                          for j in destinations] for i in sources]
+            return 200, {}, {'code': 'Ok', 'durations': durations}
+
+        with loopback(reply) as (url, calls):
+            for count in (101, 200):
+                calls.clear()
+                _, source, info = routing.build_matrix(points[:count], url, 'OSRM', osrm_status='READY')
+                self.assertEqual((source, info['road_pairs'], info['fallback_pairs'], len(calls)),
+                                 ('OSRM', count * (count - 1), 0, 1))
+            calls.clear()
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(all(len(table_axes(path)[0]) <= 200 for path in calls))
+        self.assertTrue(all(parse_qs(urlsplit(path).query)['exclude'] == ['toll'] for path in calls))
+        self.assertEqual((source, info['road_pairs'], info['unreachable_pairs'], info['fallback_pairs']),
+                         ('OSRM', 201 * 200 - 1, 1, 0))
+        self.assertEqual((matrix[0][199], matrix[199][0], matrix[0][200], matrix[200][0]), (3, 5, None, 5))
+        self.assertNotIn('_osrm_estimate_mask', info)
+
+    def test_managed_table_preserves_success_after_one_block_http_failure(self):
+        points = [(35.14 + i / 10000, 126.92) for i in range(201)]
+        first, *_, last = routing.osrm.coordinate_path(points).split(';')
+
+        def reply(path):
+            coords, sources, destinations = table_axes(path)
+            if first in [coords[i] for i in sources] and last in [coords[j] for j in destinations]:
+                return 503, {}, {}
+            return 200, {}, {'code': 'Ok', 'durations': [[240] * len(destinations) for _ in sources]}
+
+        with loopback(reply) as (url, _):
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertEqual(source, 'OSRM')
+        self.assertGreater(info['fallback_pairs'], 0)
+        self.assertGreater(info['road_pairs'], 0)
+        self.assertEqual(info['road_pairs'] + info['fallback_pairs'], 201 * 200)
+        self.assertEqual(matrix[0][200], routing.estimate_matrix(points)[0][200])
+        self.assertEqual(matrix[200][0], 4)
+        self.assertIn('도로·직선 혼합', routing.matrix_note(source, info))
+        estimates = info.get('_osrm_estimate_mask')
+        self.assertIsInstance(estimates, bytearray)
+        self.assertEqual(sum(byte.bit_count() for byte in estimates), info['fallback_pairs'])
+        self.assertTrue(estimates[200 // 8] & (1 << (200 % 8)))
+        reverse = 200 * len(points)
+        self.assertFalse(estimates[reverse // 8] & (1 << (reverse % 8)))
+
+    def test_managed_table_isolates_a_point_with_no_matching_segment(self):
+        points = [*self.points, (35.182, 126.947), (34.5, 126.1)]
+        bad_point = routing.osrm.coordinate_path(points[-1:])
+
+        def reply(path):
+            coords, sources, destinations = table_axes(path)
+            if bad_point in coords:
+                return 400, {}, {'code': 'NoSegment',
+                                 'message': f'Could not find a matching segment for coordinate {coords.index(bad_point)}'}
+            return 200, {}, {'code': 'Ok', 'durations': [[240] * len(destinations) for _ in sources]}
+
+        with loopback(reply) as (url, calls):
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertEqual((source, info['road_pairs'], info['fallback_pairs'], info['status']), ('OSRM', 6, 6, 'NoSegment'))
+        self.assertEqual((len(calls), matrix[0][2], matrix[3][0]), (2, 4, routing.estimate_matrix(points)[3][0]))
+        self.assertIn('도로 자료 범위', routing.matrix_note(source, info))
+
+    def test_managed_table_uses_unique_input_coordinates_with_repeated_pairs(self):
+        points = [self.points[0]] * 200 + [self.points[1]]
+        body = {'code': 'Ok', 'durations': [[0, 120], [180, 0]]}
+        with loopback(lambda _: (200, {}, body)) as (url, calls):
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertEqual((source, info['road_pairs'], info['fallback_pairs'], len(calls)), ('OSRM', 400, 0, 1))
+        self.assertEqual(table_axes(calls[0])[0], routing.osrm.coordinate_path(self.points).split(';'))
+        self.assertEqual((matrix[0][199], matrix[199][200], matrix[200][199]), (0, 2, 3))
+
+    def test_managed_table_estimate_mask_retains_original_indices_for_duplicates(self):
+        points = [self.points[0], self.points[0], self.points[1]]
+        response = {'code': 'Ok', 'durations': [[0, 'invalid'], [180, 0]]}
+        with loopback(lambda _: (200, {}, response)) as (url, _):
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertEqual((source, info['road_pairs'], info['fallback_pairs']), ('OSRM', 2, 2))
+        self.assertEqual(matrix, [[0, 0, routing._estimate_min(*self.points)],
+                                  [0, 0, routing._estimate_min(*self.points)], [3, 3, 0]])
+        self.assertEqual(info['_osrm_estimate_mask'], bytearray([0b00100100, 0]))
+
+    def test_managed_table_call_budget_keeps_finished_blocks(self):
+        points = [(35.14 + i / 10000, 126.92) for i in range(201)]
+
+        def reply(path):
+            _, sources, destinations = table_axes(path)
+            return 200, {}, {'code': 'Ok', 'durations': [[240] * len(destinations) for _ in sources]}
+
+        with loopback(reply) as (url, calls), patch.object(routing.osrm, 'MAX_PACK_TABLE_CALLS', 1):
+            matrix, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='READY')
+        self.assertEqual((source, info['status'], len(calls)), ('OSRM', 'TABLE_BUDGET', 1))
+        self.assertEqual(info['road_pairs'] + info['fallback_pairs'], 201 * 200)
+        self.assertEqual((matrix[0][1], matrix[0][200]), (4, routing.estimate_matrix(points)[0][200]))
+        self.assertIn('분할 조회 한도', routing.matrix_note(source, info))
+
+    def test_configured_table_preserves_provider_limit_behavior(self):
+        points = [(35.14 + i / 10000, 126.92) for i in range(101)]
         with loopback(lambda _: (400, {}, {'code': 'TooBig'})) as (url, calls):
-            _, source, info = routing.build_matrix(points[:101], url, 'OSRM', osrm_status='CONFIGURED')
+            _, source, info = routing.build_matrix(points, url, 'OSRM', osrm_status='CONFIGURED')
             self.assertIn('지점 수 초과', routing.matrix_note(source, info))
             self.assertEqual((source, info['fallback_pairs'], len(calls)), ('ESTIMATE', 101 * 100, 1))
+
+
+def table_axes(path):
+    url = urlsplit(path)
+    coords = url.path.rsplit('/', 1)[1].split(';')
+    query = parse_qs(url.query)
+    axes = []
+    for key in ('sources', 'destinations'):
+        axes.append(list(map(int, query[key][0].split(';'))) if key in query else list(range(len(coords))))
+    return coords, *axes
 
 
 class DirectedRoutingTest(unittest.TestCase):

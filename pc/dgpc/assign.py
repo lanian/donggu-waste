@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import dgproto as P
 from dgpc import privacy as _pv, route_depots as DP
@@ -16,7 +17,7 @@ from dgpc.devices import list_crews, pc_key
 from dgpc.fees import FEE_ROWS, fee_table_for_phone, volume_overrides
 
 # ------------------------------------------------------------------ 배정
-def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason: str = "", adjusted: bool = False) -> list[dict]:
+def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason: str = "", adjusted: bool = False, *, histories=None) -> list[dict]:
     """plan = {crew_id: [{request_id, eta}, ...]} 순서대로. 팀별로 새 배정 버전을 만든다."""
     crews = {c["id"]: c for c in list_crews(con)}
     for cid in plan:
@@ -45,7 +46,9 @@ def confirm_plan(con, work_date: str, plan: dict[str, list[dict]], adjust_reason
     out = []
     with tx(con):
         for cid, stops in plan.items():
-            out.append(_write_batch(con, cid, work_date, stops, crews[cid]["name"], {**({"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else {})}))
+            out.append(_write_batch(con, cid, work_date, stops, crews[cid]["name"],
+                                    {"adjusted": True, "reason": adjust_reason.strip()[:200]} if adjusted else None,
+                                    history=(histories or {}).get(cid)))
         _release_dropped(con, replaced)
     return out
 
@@ -66,7 +69,121 @@ def _last_final_unload(stops):
     return last if last.get("final") is True else None
 
 
-def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: str, extra: dict | None = None, action: str = "CONFIRM") -> dict:
+def _route_record(raw):
+    stops = json.loads(raw or "[]")
+    if isinstance(stops, dict):  # 남은 방문 0건의 반입·복귀 노선은 배정 헤더에만 있다.
+        return [], stops.get("route_history")
+    return stops, stops[0].get("route_history") if stops and isinstance(stops[0], dict) else None
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _stop_digest(stops):
+    return _digest([_clean_stop(s) for s in stops])
+
+
+def _waypoints(depot, stops, end, *, via_key):
+    sites = [depot]
+    for stop in stops:
+        sites.append(stop)
+        if stop.get(via_key):
+            sites.append(stop[via_key])
+    sites.append(end)
+    if any(not s or s.get('lat') is None or s.get('lon') is None for s in sites):
+        return []
+    return [[round(float(s['lon']), 6), round(float(s['lat']), 6)] for s in sites]
+
+
+def route_histories(result, requests, road_basis, endpoint, road_status):
+    """계산 중 로컬 도로 형상과 시간 기준을 함께 캡처한다. 호출자는 최신 입력을 다시 검사한다."""
+    from dgpc import routing
+    locations = {r['id']: {'lat': r.get('lat'), 'lon': r.get('lon')} for r in requests}
+    source = result.get('matrix_source')
+    routes = [r for r in result['routes'] if r['stops'] or r.get('final_unload')]
+
+    def capture(route):
+        stops = route['stops']
+        unload_site = result.get('unload_site')
+        visits = [{**locations[s['request_id']], 'via': unload_site if s.get('unload_after') else None} for s in stops]
+        depot = route.get('depot')
+        end = result.get('end_site') or route.get('garage') or depot
+        detached_unload = route.get('final_unload')
+        if detached_unload:
+            detached_unload = {**(unload_site or {}), **detached_unload, 'depot': end}
+            visits.append(detached_unload)
+        points = _waypoints(depot, visits, end, via_key='via')
+        path = {'source': 'ESTIMATE', 'reason': road_status}
+        if endpoint and len(points) >= 2:
+            if len(points) > 500:
+                path['reason'] = 'TooBig'
+            else:
+                path = routing.road_path(routing.route_points(points), endpoint)
+        if points and path.get('source') != 'OSRM':
+            path['distance_km'] = round(sum(routing.haversine_km((ay, ax), (by, bx))
+                                           for (ax, ay), (bx, by) in zip(points, points[1:])), 2)
+        return route['crew_id'], {
+            'stop_digest': _stop_digest(stops),
+            'waypoint_digest': _digest([[s['request_id'] for s in stops], points]),
+            'depot': depot, 'end': end, 'unload_site': unload_site, 'path': path,
+            'road_basis': road_basis, 'matrix_source': source,
+            'matrix_note': result.get('matrix_note', ''), 'start': route.get('start'), 'end_at': route.get('end'),
+            'estimated_legs': route.get('estimated_legs', []),
+            **({'final_unload': detached_unload} if detached_unload else {}),
+            **({'initial_load': route['initial_load']} if 'initial_load' in route else {}),
+        }
+
+    if not routes:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(4, len(routes))) as executor:
+        histories = dict(executor.map(capture, routes))
+    blockers = []
+    for route in routes:
+        cid = route['crew_id']
+        path = histories[cid]['path']
+        route['road_summary'] = {k: v for k, v in path.items() if k != 'geometry'}
+        if path.get('reason') == 'NoRoute':
+            blockers.append({'crew_id': cid, 'crew_name': route['crew_name'], 'message': NO_ROAD_CONNECTION})
+    if blockers:
+        result['route_blockers'] = blockers
+    return histories
+
+
+NO_ROAD_CONNECTION = '방문·경유·복귀 순서에 도로로 연결되지 않는 구간이 있습니다. 위치 또는 순서를 확인한 뒤 다시 계산하세요.'
+
+
+def matching_histories(plan, histories):
+    """서명된 계산안의 방문 순서·시간과 해당 경로 상태를 확정 전에 검증한다."""
+    if histories is None:
+        raise StaleError('확정에 필요한 도로 확인 정보가 없습니다. 노선을 다시 계산하세요.')
+    if any(h['path'].get('reason') == 'NoRoute' for h in histories.values()):
+        raise StaleError(NO_ROAD_CONNECTION, code='ROUTE_CONNECTION_BLOCKED')
+    trips = {cid for cid, stops in plan.items() if stops or cid in histories}
+    if trips != set(histories) or any(_stop_digest(plan[cid]) != h['stop_digest'] for cid, h in histories.items()):
+        raise StaleError('계산한 방문 순서·도착 시각·하차 일정과 다릅니다. 노선을 다시 계산하세요.')
+    return histories
+
+
+def history_for_view(history, stops, waypoints, current_road):
+    if not history:
+        return None
+    result = {k: history[k] for k in ('matrix_source', 'matrix_note', 'start', 'end_at')}
+    basis = history['road_basis']
+    result['road_revision'] = basis['revision']
+    if not waypoints or history.get('waypoint_digest') != _digest([[s['request_id'] for s in stops], waypoints]):
+        return {**result, 'state': 'VISITS_CHANGED'}
+    result['estimated_legs'] = history.get('estimated_legs', [])
+    if basis != current_road:
+        state = 'ROAD_CHANGED'
+    elif basis['configured'] or (basis['method'] == 'OSRM' and basis['revision'] in (None, 'base') and not basis.get('fingerprint')):
+        state = 'UNVERIFIED'
+    else:
+        state = 'CURRENT'
+    return {**result, 'state': state, 'path': history.get('path', {})}
+
+
+def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: str, extra: dict | None = None, action: str = "CONFIRM", *, history=None) -> dict:
     """팀의 그날 배정 새 버전(assign_ver = 지난 최대 + 1)을 만들고 이전 버전은 SUPERSEDED. 트랜잭션은 호출하는 쪽."""
     _check_fixed_crew(con, cid, stops)
     prev = one(con, "SELECT MAX(assign_ver) AS v FROM assignment_batch WHERE crew_id=? AND work_date=?", (cid, work_date))["v"] or 0
@@ -76,18 +193,28 @@ def _write_batch(con, cid: str, work_date: str, stops: list[dict], crew_name: st
     for stop in clean[:-1]:
         if unload := stop.get("unload_after"):
             unload.pop("final", None)
+    site = history.get('unload_site') if history else None
     if unload := _last_final_unload(clean):
-        site = get_setting(con, "unload_site")
+        site = site or get_setting(con, "unload_site")
         if site:
             unload.update(lat=site["lat"], lon=site["lon"])
-        requests = []
-        for chunk in _chunks([stop["request_id"] for stop in clean]):
-            marks = ",".join("?" for _ in chunk)
-            requests.extend(rows(con, f"SELECT id,dong FROM request WHERE id IN ({marks})", chunk))
-        if depot := _team_depot(con, requests, {"id": cid, "name": crew_name}):
+        depot = history.get('end') if history else None
+        if not depot:
+            requests = []
+            for chunk in _chunks([stop["request_id"] for stop in clean]):
+                marks = ",".join("?" for _ in chunk)
+                requests.extend(rows(con, f"SELECT id,dong FROM request WHERE id IN ({marks})", chunk))
+            depot = _team_depot(con, requests, {"id": cid, "name": crew_name})
+        if depot:
             unload["depot"] = depot
+    route_record = clean
+    if history:
+        if clean:
+            clean[0]['route_history'] = history
+        elif history.get('final_unload'):
+            route_record = {'route_history': history}
     con.execute("INSERT INTO assignment_batch (id, crew_id, work_date, assign_ver, status, route_json, created_at) VALUES (?,?,?,?,'ACTIVE',?,?)",
-                (bid, cid, work_date, prev + 1, json.dumps(clean, ensure_ascii=False), now()))
+                (bid, cid, work_date, prev + 1, json.dumps(route_record, ensure_ascii=False), now()))
     for i, st in enumerate(clean, 1):
         con.execute("INSERT INTO assignment_stop VALUES (?,?,?,?)", (bid, st["request_id"], i, st["eta"] or None))
         con.execute("INSERT INTO active_assignment VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET batch_id=excluded.batch_id", (st["request_id"], bid))
@@ -127,7 +254,10 @@ def current_assignment(con, work_date: str) -> list[dict]:
     out = rows(con, """SELECT b.id AS batch_id, b.crew_id, c.name AS crew_name, b.assign_ver, b.route_json, b.created_at FROM assignment_batch b
         JOIN crew c ON c.id=b.crew_id WHERE b.work_date=? AND b.status='ACTIVE' ORDER BY c.name""", (work_date,))
     for b in out:
-        route = {x["request_id"]: x for x in json.loads(b.pop("route_json") or "[]") if isinstance(x, dict)}
+        planned, history = _route_record(b.pop("route_json"))
+        if history and history.get('final_unload'):
+            b['final_unload'] = history['final_unload']
+        route = {x["request_id"]: x for x in planned if isinstance(x, dict)}
         # 지금도 이 배정에 묶인 접수만: 다른 날·다른 팀으로 옮겨 간 접수(지난 배정 기록만 남은 것)는 부분 수정에서 다시 쓰지 않는다
         b["stops"] = rows(con, """SELECT s.seq, s.eta, r.id AS request_id, r.receipt_no, r.status, r.dong, r.lat, r.lon FROM assignment_stop s
             JOIN request r ON r.id=s.request_id
@@ -230,7 +360,7 @@ def prepare_edit(con, work_date: str, op: str, data: dict, *, review=False) -> d
         if sorted(order) != sorted(x["request_id"] for x in old) or len(set(order)) != len(order):
             raise UserError("순서 목록이 지금 배정과 다릅니다(빠지거나 더해진 접수). 다시 열어 확인하세요.")
         by = {x["request_id"]: x for x in old}
-        if review and order == [x["request_id"] for x in old]:
+        if review and data.get('recalculate') is not True and order == [x["request_id"] for x in old]:
             raise UserError("방문 순서에 변경이 없습니다.")
         changes[cid] = [by[i] for i in order]
     if review and (set(seen) != set(changes) or any(not crews[cid]["active"] for cid in changes)):
@@ -248,7 +378,9 @@ def apply_edit(con, work_date, op, data, prepared, plan, *, reviewed=None):
     if reviewed:
         detail.update(reviewed=True, matrix_source=reviewed["matrix_source"])
     with tx(con):
-        out = [_write_batch(con, cid, work_date, stops, crews[cid]["name"], detail, action="EDIT") for cid, stops in plan.items()]
+        histories = matching_histories(plan, reviewed.get("histories")) if reviewed else {}
+        out = [_write_batch(con, cid, work_date, stops, crews[cid]["name"], detail, action="EDIT", history=histories.get(cid))
+               for cid, stops in plan.items()]
         _release_dropped(con, old_ids)
     return {"batches": out, "resend_needed": [b["crew_id"] for b in out]}
 
@@ -281,7 +413,7 @@ def _kept_visit(batch_id, active_batch, status):
     return status != 'CANCELLED' and (active_batch == batch_id or active_batch is None and status in FINAL)
 
 
-def list_batches(con, work_date: str, *, route_map=False) -> list[dict]:
+def list_batches(con, work_date: str, *, route_map=False, current_road=None) -> list[dict]:
     out = rows(con, """SELECT b.*, c.name AS crew_name, c.device_id FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
         WHERE b.work_date=? ORDER BY c.name, b.assign_ver DESC""", (work_date,))
     if route_map:
@@ -298,9 +430,14 @@ def list_batches(con, work_date: str, *, route_map=False) -> list[dict]:
         last = b["bundles"][0]["displayed_at"] if b["bundles"] else None
         b["resend_needed"] = bool(last and any(s["updated_at"] > last for s in b["stops"]))
         saved_route = b.pop("route_json", None)
+        if not b['stops']:
+            _, header = _route_record(saved_route)
+            if header and header.get('final_unload'):
+                b['final_unload'] = header['final_unload']
         if show_route:
             crew = {'id': b['crew_id'], 'name': b['crew_name']}
-            planned = [s for s in json.loads(saved_route or '[]') if isinstance(s, dict)]
+            planned, history = _route_record(saved_route)
+            planned = [s for s in planned if isinstance(s, dict)]
             via = {s['request_id']: s['unload_after'] for s in planned if s.get('unload_after')}
             final = _last_final_unload(planned)
             stops = []
@@ -308,7 +445,7 @@ def list_batches(con, work_date: str, *, route_map=False) -> list[dict]:
             for stop in b['stops']:
                 dong, active_batch = stop.pop('dong'), stop.pop('active_batch')
                 rid = stop['request_id']
-                if final and not _kept_visit(b['id'], active_batch, stop['status']):
+                if (final or history) and not _kept_visit(b['id'], active_batch, stop['status']):
                     stop['map_skipped'] = True
                     if rid in via and stops:
                         via[stops[-1]['id']] = via[rid]
@@ -320,7 +457,8 @@ def list_batches(con, work_date: str, *, route_map=False) -> list[dict]:
                 if visit := via.get(stop['request_id']):
                     if visit is final:
                         stop['final_unload'] = True
-                    site = DP.point(visit) if visit.get('lat') is not None and visit.get('lon') is not None else unload
+                    site = (DP.point(visit) if visit.get('lat') is not None and visit.get('lon') is not None
+                            else history.get('unload_site') if history else unload)
                     if site:
                         stop['via'] = site
                     else:
@@ -328,10 +466,33 @@ def list_batches(con, work_date: str, *, route_map=False) -> list[dict]:
             b['map_route'] = _map_depots(stops, crew, dongs, depot, None if final else end,
                                          saved_depot=final.get('depot') if final else None)
             b['map_route']['complete'] &= complete
+            if history:
+                m = b['map_route']
+                m.update(depot=history.get('depot'), end=history.get('end'))
+                detached = _detached_final(history, final) if not map_stops else None
+                if detached:
+                    m['final_unload'] = detached
+                points = _waypoints(m['depot'], [*map_stops, detached] if detached else map_stops, m['end'], via_key='via')
+                m['complete'] = bool(points) and complete
+                m['history'] = history_for_view(history, map_stops, points, current_road)
     return out
 
 
 # ------------------------------------------------------------------ 목록 묶음 (QR)
+def _carry_load(history):
+    load = (history or {}).get('initial_load') or {}
+    return load if load.get('volume_m3') or load.get('weight_kg') else None
+
+
+def _detached_final(history, final=None):
+    if not _carry_load(history):
+        return None
+    site = history.get('final_unload') or final
+    if not site or not history.get('end'):
+        return None
+    return {**site, 'depot': history['end'], 'stop_count': 0}
+
+
 def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
     b = one(con, "SELECT b.*, c.name AS crew_name, c.device_id FROM assignment_batch b JOIN crew c ON c.id=b.crew_id WHERE b.id=?", (batch_id,))
     if not b:
@@ -340,8 +501,11 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
         raise UserError("새 배정 버전이 있습니다. 최신 배정으로 전송하세요.")
     stops = []
     # 배정 확정 때 저장한 반입지 경유(하차) 위치: 그 지점을 마친 뒤 반입지에 들른다
-    unload_by = {x["request_id"]: x["unload_after"] for x in json.loads(b["route_json"] or "[]") if isinstance(x, dict) and x.get("unload_after")}
-    us = get_setting(con, "unload_site")  # 반입지 좌표를 함께 보낸다(휴대폰 길안내용, 설정에 있을 때만)
+    planned, history = _route_record(b["route_json"])
+    if history and history.get('path', {}).get('reason') == 'NoRoute':
+        raise UserError(NO_ROAD_CONNECTION)
+    unload_by = {x["request_id"]: x["unload_after"] for x in planned if isinstance(x, dict) and x.get("unload_after")}
+    us = history.get('unload_site') if history else get_setting(con, "unload_site")
     if us and us.get("lat") is not None:
         for u_ in unload_by.values():
             u_.setdefault("lat", us["lat"]); u_.setdefault("lon", us["lon"])
@@ -391,6 +555,10 @@ def build_daylist(con, batch_id: str) -> tuple[dict, dict]:
             final.update(depot=depot, stop_count=len(stops))
     payload = {"schema": "dg.daylist/1", "work_date": b["work_date"], "crew": b["crew_name"], "assign_ver": b["assign_ver"],
                "fee_table": fee_table_for_phone(con), "stops": stops}
+    if not stops and (detached := _detached_final(history, _last_final_unload(planned))):
+        payload['final_unload'] = detached
+    if (payload.get('final_unload') or _last_final_unload(stops)) and (carry := _carry_load(history)):
+        payload['carry_load'] = carry
     if b.get("device_id"):  # 휴대폰이 지워도 되는 것: PC가 이미 받은 기록 순번·회수한 사진 (dgproto가 서명해 싣는다)
         payload["rel"] = release_info(con, b["device_id"])
     return payload, b
@@ -552,10 +720,11 @@ def print_sheet_stamp(con, batch_id: str) -> list[dict]:
         WHERE s.batch_id=? ORDER BY s.seq""", (batch_id,))
 
 
-def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positions: bool = False) -> dict:
+def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positions: bool = False, current_road=None) -> dict:
     """인쇄용 배차표. 보호 인쇄는 이 팀 휴대폰용 암호화 QR을 방문별로 만든다."""
     payload, b = build_daylist(con, batch_id)
     stops = payload["stops"]
+    unload_frames = None
     if protected:
         if not b["device_id"]:
             raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정 → 수거팀에서 등록된 휴대폰을 연결하세요.")
@@ -563,9 +732,13 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
         sign = pc_key(con, "sign")
         compact = P.compact_daylist({**payload, "rel": None}, FEE_ROWS)
         for stop, row in zip(stops, compact["s"], strict=True):
-            visit = {**compact, "schema": "dg.visit/1", "s": [row]}
+            visit_schema = 'dg.visit/2' if compact['schema'] == 'dg.daylist/3' else 'dg.visit/1'
+            visit = {**compact, "schema": visit_schema, "s": [row]}
             bundle_id, envelope, _ = _seal_daylist(visit, dev, sign)
             stop["qr_frames"] = P.split_frames(envelope, bundle_id)
+        if payload.get('final_unload'):
+            bundle_id, envelope, _ = _seal_daylist({**compact, 'schema': 'dg.unload/1'}, dev, sign)
+            unload_frames = P.split_frames(envelope, bundle_id)
     with tx(con):
         detail = {"stops": len(stops), "protected": protected}
         if protected and route_positions:
@@ -576,6 +749,10 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
         st["status"] = one(con, "SELECT status FROM request WHERE id=?", (st["request_id"],))["status"]
     sheet = {"work_date": payload["work_date"], "crew": payload["crew"], "assign_ver": payload["assign_ver"], "fee_version": payload["fee_table"]["version_id"],
              "stops": stops, "printed_at": dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M")}
+    if detached := payload.get('final_unload'):
+        sheet['final_unload'] = detached
+        if unload_frames:
+            sheet['unload_qr_frames'] = unload_frames
     if route_positions:
         from dgpc.area import list_dongs
         requests = [{'id': st['request_id'], 'dong': st['dong']} for st in stops]
@@ -584,4 +761,11 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
         end = None if final else get_setting(con, 'end_site')
         sheet['map_route'] = _map_depots(requests, crew, list_dongs(con), get_setting(con, 'depot'), end,
                                          saved_depot=final.get('depot') if final else None)
+        _, history = _route_record(b["route_json"])
+        if history:
+            m = sheet['map_route']
+            m.update(depot=history.get('depot'), end=history.get('end'))
+            points = _waypoints(m['depot'], [*stops, detached] if detached else stops, m['end'], via_key='unload_after')
+            m['complete'] = bool(points)
+            m['history'] = history_for_view(history, stops, points, current_road)
     return sheet

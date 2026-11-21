@@ -14,6 +14,7 @@ import { finalUnloadState } from '../final-unload.js';
 import { addEvent, ask, backBtn, backName, btn, camInput, cancelAsked, changeReqs, commit, dial, digits, dongOf, errMsg, fieldEditable, findStop, flushSteps, fmtPhone, go, h, handoff, isSolo, msgBox, nextSeq, onLock, openExternal, pcStops, pcWorkDate, pendingPhotos, photoUrls, quantityInput, reduceMotion, render, ro, saveFailed, saving, say, sheet, smsTemplates, st, stepper, toast, todayKST, ui } from '../core.js';
 import { NO_LOC, navBtn } from '../widgets.js';
 import { loadChip, nextToVisit, stateBadge, stopState } from './stoplist.js';
+import { intermediateUnload } from './unload.js';
 
 const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
 const collectionWrites = new WeakMap();
@@ -763,22 +764,25 @@ async function screenStop(id) {
   // 다음 지점: 홈 '지금 할 일'과 같은 기준(결과 미기록·재확인 필요)으로 뒤 번호부터, 없으면 앞 번호로 돌아가 찾는다.
   const next = nextToVisit(seqList, stop, st.events);
   // 결과 선택 영역으로 이동하는 버튼은 실제 저장과 구분한다. 저장한 뒤에만 다음 지점으로 이동한다.
-  // 결과 저장 전에는 전화·길안내 모두 이 지점, 저장한 뒤에는 모두 다음 지점: [← · N번 전화 · N번 길안내 · 다음 N번 ▶].
-  // 다음 지점이 없으면 [목록으로]이고 전화는 이 지점 그대로.
+  // 결과를 저장하면 중간 하차 또는 다음 지점으로 안내한다.
   const saved = resultConfirmed && (d.outcome || stop.status === 'CANCELLED');
-  const final = saved && !next && !busySave && !pendingSave && !collectionPending() ? finalUnloadState(st, todayKST()) : null;
+  const mid = seqList.includes(stop) && (saved || pendingSave) ? intermediateUnload(st, todayKST(), seqList) : null;
+  const final = saved && !mid && !next && !busySave && !pendingSave && !collectionPending() ? finalUnloadState(st, todayKST()) : null;
   const goFinal = final?.ready && final.hasLoad && !final.recorded;
-  const nextLoc = next ? deriveStop(next, st.events).loc : null;
+  const back = ui.stopBackTo || '#/home';
+  const nextRoute = mid?.route || (next ? `#/stop/${next.request_id}` : goFinal ? '#/unload/final' : back);
+  const nextLabel = mid ? (mid.pending ? '중간 하차 저장 확인' : '중간 하차 기록')
+    : next ? `다음 ${next.seq}번 ▶` : goFinal ? '최종 하차 기록' : `${backName(back)}${ro(backName(back))}`;
   const dock = h('nav', { class: 'dock four', 'aria-label': '빠른 동작' },
-    btn('←', () => go(ui.stopBackTo || '#/home'), 'dock-back', { 'aria-label': `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))} 돌아가기` }),
-    saved && next ? btn(`${next.seq}번 전화`, () => dial(next), 'dock-call', { disabled: !!next.pii_purged || !next.phone })
+    btn('←', () => go(back), 'dock-back', { 'aria-label': `${backName(back)}${ro(backName(back))} 돌아가기` }),
+    mid ? h('span') : saved && next ? btn(`${next.seq}번 전화`, () => dial(next), 'dock-call', { disabled: !!next.pii_purged || !next.phone })
       : btn('전화', () => dial(stop), 'dock-call', { disabled: purged || !stop.phone }),
-    saved ? (next ? navBtn(`${next.seq}번 길안내`, next, nextLoc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
+    mid ? (mid.pending || !NAV.hasCoord(mid.site) ? h('span') : navBtn('반입지 길안내', null, mid.site, NAV.navLabel('UNLOAD'), 'dock-nav'))
+      : saved ? (next ? navBtn(`${next.seq}번 길안내`, next, deriveStop(next, st.events).loc, NAV.navLabel(next.seq), 'dock-nav') : h('span'))
       : navBtn('길안내', stop, d.loc, NAV.navLabel(stop.seq), 'dock-nav'),
     busySave ? btn('저장 중…', null, 'primary dock-next', { disabled: true })
-      : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next') : saved
-      ? btn(next ? `다음 ${next.seq}번 ▶` : goFinal ? '최종 하차 기록' : `${backName(ui.stopBackTo || '#/home')}${ro(backName(ui.stopBackTo || '#/home'))}`,
-        () => go(next ? `#/stop/${next.request_id}` : goFinal ? '#/unload/final' : ui.stopBackTo || '#/home'), 'primary dock-next')
+      : mid?.pending || saved ? btn(nextLabel, () => go(nextRoute), 'primary dock-next')
+      : pendingSave ? btn('저장 다시 시도', retryCollection, 'primary dock-next')
       : btn(d.resultNeedsConfirmation ? '수거 결과 재확인 ↓' : '수거 결과 선택 ↓', () => goSection('st-result'), 'primary dock-next'));
   // 단계 표시: 연락 → 품목 → 사진 → 결과. 누르면 그 단계로 스크롤한 뒤 그 구역 제목에 초점(스크린리더·키보드가 따라가게), 끝난 단계는 ✓
   const goSection = (sid) => {

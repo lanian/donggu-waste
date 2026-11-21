@@ -284,7 +284,7 @@ class DongWorkHTTPTest(SessionHTTPTestCase):
         uid, cookie = self.account()
         route = self.basis(cookie)
         self.assertEqual(set(route["requests"]), {self.ra})
-        plan = {self.crew: [{"request_id": self.ra, "eta": "10:00"}]}
+        plan = {r["crew_id"]: r["stops"] for r in route["routes"]}
         payload = {"date": self.day, "dong": "all", "plan": plan, "basis": route["basis"], "client_req_id": "assign-once"}
         status, assigned, _ = self.post("dong-work/assign", payload, cookie)
         self.assertEqual(status, 200, assigned)

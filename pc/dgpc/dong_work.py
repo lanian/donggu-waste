@@ -9,7 +9,7 @@ import json
 import secrets
 import time
 
-from . import area as A, core as C, routing, route_depots as DP, service as S, users as U
+from . import area as A, assign as AS, core as C, osrm, routing, route_depots as DP, service as S, users as U
 
 READ_ROLES = frozenset({"ADMIN", "INTAKE", "LEAD", "DONG"})
 WRITE_ROLES = frozenset({"ADMIN", "INTAKE", "DONG"})
@@ -310,6 +310,13 @@ def _read_proof(value) -> dict:
     except (ValueError, TypeError, KeyError):
         raise C.StaleError("노선 계산 정보가 없거나 만료되었습니다. 다시 계산하세요.")
 
+def road_history_basis(con):
+    method = S.travel_method(con)
+    configured = C.get_setting(con, "osrm_url") if method == "OSRM" else None
+    return {"revision": S.managed_road_revision(con), "method": method,
+            "fingerprint": getattr(osrm.bundled, "base_fingerprint", None) if method == "OSRM" and not configured else None,
+            "configured": hashlib.sha256(configured.encode()).hexdigest() if configured else None}
+
 
 def prepare_route(con, user: dict, data: dict) -> dict:
     """반영 잠금에서 현재 범위·버전과 계산에 필요한 자료만 준비한다."""
@@ -346,7 +353,8 @@ def prepare_route(con, user: dict, data: dict) -> dict:
     basis["proof"] = _proof(signed)
     method = S.travel_method(con)
     osrm_url, osrm_status = S.local_osrm(con)
-    return {"user_scope": fingerprint(u), "basis": basis, "requests": reqs, "crews": crews, "settings": settings, 'route_context': context,
+    return {"user_scope": fingerprint(u), "basis": basis, "proof": signed, "requests": reqs, "crews": crews,
+            "settings": settings, 'route_context': context, "road_basis": road_history_basis(con),
             "osrm_url": osrm_url, "osrm_status": osrm_status,
             "method": method, "kakao_key": S.secret(con, "kakao_rest_key") if method == "KAKAO" else "",
             "overrides": S.volume_overrides(con)}
@@ -369,7 +377,8 @@ def calculate(prepared: dict) -> dict:
                                      "pref_crew_id": pref.get(r["id"]), "items": [f'{i["name"]} {i["spec"]} {i["qty"]}' for i in r.get("items", [])],
                                      "m3": round(sum(routing.volume_of(i, ov) for i in r.get("items", [])), 2),
                                      "kg": int(sum(routing.weight_of(i) for i in r.get("items", []))), "tags": routing.tags_of(r.get("items", []))} for r in reqs}
-    result["basis"] = prepared["basis"]
+    histories = AS.route_histories(result, reqs, prepared["road_basis"], prepared["osrm_url"], prepared["osrm_status"])
+    result["basis"] = {**prepared["basis"], "proof": _proof({**prepared["proof"], "histories": histories})}
     return result
 
 
@@ -434,7 +443,7 @@ def assign(con, user: dict, data: dict) -> list[dict]:
         for batch in S.current_assignment(con, date):
             if batch["crew_id"] in plan and any(stop["request_id"] not in allowed for stop in batch["stops"]):
                 raise C.StaleError("다른 동의 접수가 함께 배정된 팀입니다. 전체 업무 담당자에게 배정 조정을 요청하세요.")
-        return S.confirm_plan(con, date, plan)
+        return S.confirm_plan(con, date, plan, histories=AS.matching_histories(plan, proof.get("histories")))
 
     return C.idempotent(con, u["username"], "dong-work/assign", data.get("client_req_id"), apply)
 
