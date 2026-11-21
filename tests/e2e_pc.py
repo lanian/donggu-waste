@@ -241,6 +241,8 @@ def run():
         ctx.on("requestfinished", lambda r: INFLIGHT.discard(r))
         ctx.on("requestfailed", lambda r: (INFLIGHT.discard(r), print("PC 화면 요청 실패:", urllib.parse.urlsplit(r.url).path, r.failure, flush=True)))
         page = ctx.new_page()
+        # 결과 미회수 배지는 팀 근무가 끝난 뒤 센다. 시험 날짜의 18시(한국)부터 브라우저 시계를 진행한다.
+        page.clock.install(time=today + "T18:00:00+09:00")
         LAST_PAGE.append(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
