@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import dgproto as P
 from dgpc.external import urlopen
+from usb_pairing import UsbReceiver, discover_usb_ipv4
 
 
 class PairingError(ValueError):
@@ -149,6 +150,8 @@ def totp_number(key, step):
 
 
 class Pairing:
+    qr_prefix = "DGPAIR1."
+
     def __init__(self, relay):
         self.relay = relay
         self.id = secrets.token_hex(16)
@@ -169,7 +172,7 @@ class Pairing:
         self._check()
         expires_at = int(time.time() + self.deadline - time.monotonic())
         data = {"registration": registration, "relay": self.relay, "secret": self.secret, "expires_at": expires_at}
-        return "DGPAIR1." + _b64(json.dumps(data, separators=(",", ":")).encode())
+        return self.qr_prefix + _b64(json.dumps(data, separators=(",", ":")).encode())
 
     def create_remote(self):
         self._check()
@@ -221,32 +224,61 @@ class Pairing:
         return code
 
 
+class UsbPairing(Pairing):
+    qr_prefix = "DGUSB1."
+
+    def __init__(self, address):
+        super().__init__("")
+        self.receiver = UsbReceiver(address, self.room, self.deadline)
+        try:
+            self.relay = self.receiver.start()
+        except (OSError, ValueError) as exc:
+            self.receiver.close()
+            raise PairingError("USB 등록 연결을 열 수 없습니다. 케이블과 USB 테더링을 확인하고 다시 시도하세요.") from exc
+
+    def read_payload(self):
+        self._check()
+        return self.receiver.payload()
+
+    def close_remote(self):
+        self.receiver.close()
+
+
 class Sessions:
     """관리자 로그인 세션당 등록 QR 하나. 서버가 DB 쓰기 잠금 안에서 접근한다."""
     def __init__(self):
         self._sessions = {}
 
-    def start(self, owner, relay):
-        address = relay_url(relay)
-        if not address or not owner:
+    def start(self, owner, relay, *, usb_address=None):
+        address = relay_url(relay) if usb_address is None else ""
+        if not owner or (usb_address is None and not address):
             raise PairingError("관리자로 로그인하고 간편 등록 중계 주소를 설정해 주세요.")
         for key, session in list(self._sessions.items()):
             if session.deadline <= time.monotonic() or key == owner:
                 self.drop(key, session.id)
         if len(self._sessions) >= 64:
             raise PairingError("사용 중인 등록 세션이 많습니다. 잠시 후 다시 시도해 주세요.")
-        self._sessions[owner] = Pairing(address)
+        self._sessions[owner] = UsbPairing(usb_address) if usb_address is not None else Pairing(address)
         return self._sessions[owner]
 
     def get(self, owner, session_id, relay):
         session = self._sessions.get(owner)
-        if not session or session.id != session_id or session.relay != relay_url(relay):
+        if not session or session.id != session_id:
+            raise PairingError(_STALE)
+        if not isinstance(session, UsbPairing) and session.relay != relay_url(relay):
             raise PairingError(_STALE)
         session._check()
         return session
 
-    def drop(self, owner, session_id):
+    def drop(self, owner, session_id=None):
         session = self._sessions.get(owner)
-        if session and session.id == session_id:
+        if session and (session_id is None or session.id == session_id):
             session._closed = True
             del self._sessions[owner]
+            if isinstance(session, UsbPairing):
+                session.receiver.close()
+            return session
+
+    def clear(self):
+        for owner in list(self._sessions):
+            self.drop(owner)

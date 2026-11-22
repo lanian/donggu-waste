@@ -1,4 +1,6 @@
 """서로 다른 로컬 출처의 PC·정적 휴대폰 앱·중계에서 QR과 등록번호로 기기를 인증한다."""
+import http.client
+import json
 import os
 import re
 import sys
@@ -7,6 +9,7 @@ import unittest
 from contextlib import contextmanager
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
@@ -112,6 +115,83 @@ def open_new_phone(phone, mobile):
 
 
 class PhonePairingE2E(UsageHTTPCase):
+    def test_usb_registration_from_qr_to_approved_phone_and_encrypted_list(self):
+        from usb_pairing import UsbReceiver
+
+        class LoopbackReceiver(UsbReceiver):
+            def start(self):
+                port = urlsplit(super().start()).port
+                self.host = f"192.168.42.2:{port}"
+                self.origin = "http://" + self.host
+                return self.origin
+
+        def forward_usb(route):
+            # 합성 USB 주소의 TCP 연결만 루프백으로 옮긴다. 브라우저의 출처와 수신기의 검사는 실제 경로 그대로다.
+            req = route.request
+            url = urlsplit(req.url)
+            conn = http.client.HTTPConnection("127.0.0.1", url.port, timeout=3)
+            try:
+                headers = {**req.all_headers(), "host": url.netloc}
+                conn.request(req.method, url.path, headers=headers, body=req.post_data_buffer)
+                reply = conn.getresponse()
+                route.fulfill(status=reply.status, headers=dict(reply.getheaders()), body=reply.read())
+            finally:
+                conn.close()
+
+        pc_url = f"http://127.0.0.1:{self.port}/"
+        with patch("device_pairing.discover_usb_ipv4", return_value="127.0.0.1"), \
+                patch("device_pairing.UsbReceiver", LoopbackReceiver), \
+                serving(PagesServer(("127.0.0.1", 0), PagesHandler)) as site, sync_playwright() as pw:
+            browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path,
+                proxy={"server": "http://127.0.0.1:1", "bypass": "127.0.0.1,localhost"})
+            try:
+                admin = browser.new_context(service_workers="block")
+                admin.add_cookies([{"name": "dg_s", "value": self.admin_cookie.split("=", 1)[1], "url": pc_url}])
+                approver = ApprovalApp(admin, pc_url, "session-admin-test-123")
+                pc = admin.new_page()
+                pc.goto(pc_url + "#/settings/devices")
+                mobile = browser.new_context(service_workers="block", viewport={"width": 390, "height": 844})
+                mobile.route("http://192.168.42.2:*/**", forward_usb)
+                phone = mobile.new_page()
+                register = open_new_phone(phone, site + PagesHandler.prefix)
+                pc.get_by_role("button", name="USB로 수거폰 등록", exact=True).click()
+                dialog = pc.get_by_role("dialog")
+                qr = dialog.get_by_role("img", name=re.compile("등록 QR"))
+                expect(qr).to_be_visible()
+                show_qr_to_camera(phone, qr.get_attribute("src"))
+                register.click()
+                link = phone.get_by_role("link", name="USB로 PC에 전달")
+                with mobile.expect_page() as popup:
+                    link.click()
+                delivery = popup.value
+                expect(delivery.get_by_role("status")).to_contain_text("PC가 등록 자료를 받았습니다")
+                self.assertFalse(urlsplit(delivery.url).fragment)
+                delivery.close()
+                otp = phone.get_by_label("PC에 입력할 등록번호")
+                expect(otp).to_have_text(re.compile(r"^\d{6}$"))
+                dialog.get_by_label("휴대폰 등록번호 6자리", exact=True).fill(otp.inner_text())
+                dialog.get_by_role("button", name="등록번호 확인", exact=True).click()
+                expect(pc.get_by_role("dialog", name="새 수거폰 등록 승인")).to_be_visible()
+                device, = devices.list_devices(self.con)
+                self.assertFalse(device["confirmed_at"])
+                approver.approve_dialog(pc)
+                pc.get_by_role("dialog", name="어느 팀에 연결할까요?").get_by_role("button", name="나중에").click()
+                device, = devices.list_devices(self.con)
+                self.assertTrue(device["confirmed_at"])
+                result = devices.make_qr_test(self.con, device["id"], 20, chunk=600)
+                frames = self.con.execute("SELECT frames_json FROM qr_test WHERE id=?", (result["test_id"],)).fetchone()[0]
+                count = phone.evaluate("""async frames => {
+                    const P = await import('./proto.js'), S = await import('./store.js');
+                    const pc = await S.getRaw('pc'), dev = await S.getRaw('device'), c = new P.Collector();
+                    let frame;
+                    for (const text of frames) frame = c.add(text);
+                    const opened = await P.openEnvelope(c.assemble(frame.key), await P.importEcdsaPub(pc.pcSignPub), dev.kex.privateKey, dev.id);
+                    return opened.payload.params.count;
+                }""", json.loads(frames))
+                self.assertEqual(count, 20)
+            finally:
+                browser.close()
+
     def test_registration_file_from_offline_phone_then_admin_approval_without_relay(self):
         pc_url = f"http://127.0.0.1:{self.port}/"
         with serving(PagesServer(("127.0.0.1", 0), PagesHandler)) as site, sync_playwright() as pw:

@@ -14,6 +14,18 @@ function clearPairing() {
 }
 onLock(clearPairing);
 addEventListener('hashchange', () => { if (location.hash.split('?')[0] !== '#/register') clearPairing(); });
+function pairingActive(session) {
+  return pairing === session && S.isUnlocked() && Date.now() < session.expires;
+}
+function expirePairing(session) {
+  if (pairing !== session) return;
+  clearPairing(); ui.pairingExpired = true; render();
+}
+addEventListener('pageshow', (event) => {
+  if (!event.persisted || !pairing?.usb) return;
+  if (!pairingActive(pairing)) expirePairing(pairing);
+  else render();
+});
 function rescan() {
   clearPairing();
   ui.pairingExpired = false;
@@ -46,29 +58,56 @@ function registrationFileControls(code) {
     h('p', {}, '등록 파일을 업무 메일이나 승인된 매체로 PC에 전달하세요. PC의 [설정 → 기기 → 수거폰 등록 파일]에서 엽니다.'),
     h('div', { class: 'row' }, save, share), msg);
 }
+function numberDisplay(session) {
+  const number = h('output', { class: 'fp', 'aria-label': 'PC에 입력할 등록번호', 'aria-live': 'off' });
+  const countdown = h('p', { class: 'small' });
+  let shownStep = -1;
+  const update = async () => {
+    if (!pairingActive(session)) return;
+    const now = Date.now(), step = Math.floor(now / 30000);
+    countdown.textContent = `다음 번호까지 ${30 - Math.floor(now / 1000) % 30}초`;
+    if (shownStep !== step) {
+      shownStep = step;
+      const value = await registrationNumber(session.packet.signingKey, step);
+      if (pairingActive(session) && shownStep === step) number.textContent = value;
+    }
+  };
+  clearInterval(numberTimer);
+  numberTimer = setInterval(update, 500);
+  update();
+  return h('div', {}, number, countdown);
+}
+async function usbPairingCard(session, dev, code) {
+  try {
+    // 화면이 다시 그려지거나 전송을 재시도해도 같은 암호문과 등록번호 키를 사용한다.
+    session.preparing ??= makePairSubmission(session, code, dev.sign.privateKey);
+    session.packet = await session.preparing;
+  } catch (error) {
+    session.preparing = null;
+    return h('section', { class: 'card' }, h('h2', {}, 'USB로 수거폰 등록'), msgBox(errMsg(error)),
+      btn('전달 다시 준비', () => render(), 'big'));
+  }
+  if (!pairingActive(session)) return null;
+  const result = h('div', {}, session.handoffOpened ? numberDisplay(session) : null);
+  const link = h('a', { class: 'btn primary big', href: session.packet.handoff, target: '_blank', rel: 'noopener noreferrer',
+    onclick: (event) => {
+      if (!pairingActive(session)) { event.preventDefault(); expirePairing(session); return; }
+      if (!session.handoffOpened) {
+        session.handoffOpened = true;
+        result.replaceChildren(numberDisplay(session));
+      }
+    } }, 'USB로 PC에 전달');
+  return h('section', { class: 'card' }, h('h2', {}, 'USB로 수거폰 등록'),
+    h('p', {}, 'USB 테더링을 켜고 아래 버튼을 누르세요. PC 연결 화면이 새로 열립니다.'), link,
+    h('p', {}, '새로 열린 화면에 ‘PC가 등록 자료를 받았습니다’가 보이면 수거 앱으로 돌아와 아래 6자리를 PC에 입력하세요.'),
+    result, h('p', { class: 'small' }, '번호는 30초마다 바뀝니다. PC에 도착하지 않으면 USB 연결을 확인하고 다시 전달하세요.'));
+}
 function pairingCard(session, dev, code) {
   const msg = msgBox(), result = h('div', {});
-  const current = () => pairing === session && S.isUnlocked() && Date.now() < session.expires;
-  async function displayNumber() {
-    if (!current()) return;
-    const number = h('output', { class: 'fp', 'aria-label': 'PC에 입력할 등록번호', 'aria-live': 'off' });
-    const countdown = h('p', { class: 'small' });
+  const current = () => pairingActive(session);
+  function displayNumber() {
     send.hidden = true;
-    result.replaceChildren(number, countdown);
-    let shownStep = -1;
-    const update = async () => {
-      if (!current()) return;
-      const now = Date.now(), step = Math.floor(now / 30000);
-      countdown.textContent = `다음 번호까지 ${30 - Math.floor(now / 1000) % 30}초`;
-      if (shownStep !== step) {
-        shownStep = step;
-        const value = await registrationNumber(session.packet.signingKey, step);
-        if (current() && shownStep === step) number.textContent = value;
-      }
-    };
-    clearInterval(numberTimer);
-    numberTimer = setInterval(update, 500);
-    await update();
+    result.replaceChildren(numberDisplay(session));
   }
   const send = btn('등록번호 받기', async () => {
     if (!current() || session.controller) return;
@@ -82,7 +121,7 @@ function pairingCard(session, dev, code) {
       if (!current()) return;
       session.submitted = true;
       say(msg, '아래 번호를 관리자 PC에 입력하세요.');
-      await displayNumber();
+      displayNumber();
     } catch (error) { if (current()) say(msg, errMsg(error), true); }
     finally { session.controller = null; send.disabled = false; }
   }, 'primary big');
@@ -123,10 +162,7 @@ async function screenRegister() {
         ui.rescanPc = false; ui.pairingExpired = false;
         if (session) {
           pairing = session;
-          expiryTimer = setTimeout(() => {
-            if (pairing !== session) return;
-            clearPairing(); ui.pairingExpired = true; render();
-          }, Math.max(0, session.expires - Date.now()));
+          expiryTimer = setTimeout(() => expirePairing(session), Math.max(0, session.expires - Date.now()));
         }
         render();
       } catch (e) { say(msg, errMsg(e), true); }
@@ -138,7 +174,8 @@ async function screenRegister() {
   if (pairing && (!P.eq(pc.pcSignPub, pairing.pc.pcSignPub) || !P.eq(pc.pcKexPub, pairing.pc.pcKexPub))) clearPairing();
   if (pairing || ui.pairingExpired) return h('main', { class: 'with-dock' }, back,
     flowSteps(['PC 등록 QR 읽기', 'PC에 등록번호 입력'], 1),
-    pairing ? pairingCard(pairing, dev, code) : h('section', { class: 'card' }, h('h2', {}, '등록 시간이 끝났습니다'), h('p', {}, 'PC에서 새 간편 등록 QR을 열고 다시 읽으세요.')),
+    pairing ? (pairing.usb ? await usbPairingCard(pairing, dev, code) : pairingCard(pairing, dev, code))
+      : h('section', { class: 'card' }, h('h2', {}, '등록 시간이 끝났습니다'), h('p', {}, 'PC에서 새 간편 등록 QR을 열고 다시 읽으세요.')),
     btn('PC 등록 QR 다시 읽기', rescan, 'ghost link'), footBar(btn('완료', () => go('#/home'), 'primary huge')));
   const fp = await P.fingerprint(pc.pcSignPub, pc.pcKexPub, dev.id, kexRaw, signRaw);
   const ta = h('textarea', { readonly: true, rows: 4, class: 'code' }); ta.value = code;

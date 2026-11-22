@@ -399,8 +399,15 @@ async function crewChooser(dev) {
       return c.name;
     } });
 }
-function adminOtpInput() {
-  return h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, autocomplete: 'one-time-code' });
+function stripOtpSeparators(value) { return value.replace(/[\s-]/g, ''); }
+function sixDigitInput(placeholder) {
+  return h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder, oninput: (event) => {
+    const input = event.currentTarget, value = stripOtpSeparators(input.value);
+    if (value === input.value) return;
+    const caret = stripOtpSeparators(input.value.slice(0, input.selectionStart)).length;
+    input.value = value;
+    input.setSelectionRange(caret, caret);
+  } });
 }
 function deviceApproval() {
   const owner = sessionOwner();
@@ -425,12 +432,14 @@ function deviceApproval() {
     const started = await modal({ title: replace ? '관리자 OTP 교체' : '관리자 OTP 설정', owner, ok: '설정 QR 받기', body: [
       h('label', { class: 'f' }, '관리자 비밀번호', pw),
       recovery && h('label', { class: 'f' }, '기존 OTP 또는 복구코드', recovery)], onOk: async () => {
-      if (!pw.value || (recovery && !recovery.value.trim())) throw new Error('관리자 인증 정보를 입력하세요.');
-      return call('devices/approval/setup/start', { password: pw.value, ...(recovery && { recovery_code: recovery.value.trim() }) });
+      const proof = recovery?.value.trim() || '';
+      if (!pw.value || (recovery && !proof)) throw new Error('관리자 인증 정보를 입력하세요.');
+      const otp = stripOtpSeparators(proof);
+      return call('devices/approval/setup/start', { password: pw.value, ...(recovery && { recovery_code: /^[0-9]{6}$/.test(otp) ? otp : proof }) });
     } });
     pw.value = ''; if (recovery) recovery.value = '';
     if (!started || !current()) return false;
-    const otp = adminOtpInput();
+    const otp = sixDigitInput();
     const codes = await modal({ title: '관리자 인증 앱 연결', owner, ok: '연결 확인', body: [
       h('p', {}, '관리자 휴대폰의 Google OTP에서 계정 추가 → QR 코드 스캔을 선택하세요. 이 QR은 관리자 본인만 읽으세요.'),
       h('img', { alt: '관리자 OTP 설정 QR', src: started.qr_image, style: 'width:240px;max-width:100%;image-rendering:pixelated' }),
@@ -447,14 +456,14 @@ function deviceApproval() {
     return current();
   }
 
-  async function approve(dev, matchedByRelay = false) {
+  async function approve(dev, matchedByCode = false) {
     const latest = await call('devices/approval/status');
     if (!current()) return false;
     showStatus(latest.configured);
     if (!configured && !(await setup(false))) return false;
-    const pw = h('input', { type: 'password', autocomplete: 'current-password' }), otp = adminOtpInput();
+    const pw = h('input', { type: 'password', autocomplete: 'current-password' }), otp = sixDigitInput();
     const accepted = await modal({ title: '새 수거폰 등록 승인', owner, ok: '등록 승인', body: [
-      h('p', {}, `${dev.label || dev.id.slice(0, 8)} 수거폰 · ${matchedByRelay ? '수거폰 등록번호 확인 완료' : '지문 ' + fp9(dev.fingerprint || '')}`),
+      h('p', {}, `${dev.label || dev.id.slice(0, 8)} 수거폰 · ${matchedByCode ? '수거폰 등록번호 확인 완료' : '지문 ' + fp9(dev.fingerprint || '')}`),
       h('label', { class: 'f' }, '관리자 비밀번호', pw),
       h('label', { class: 'f' }, '관리자 OTP 6자리', otp),
       h('p', { class: 'small muted' }, '관리자 휴대폰의 Google OTP에 표시된 번호를 입력하세요.')], onOk: async () => {
@@ -471,12 +480,24 @@ function devicePairingCard(approval) {
   const relay = h('input', { type: 'url', class: 'fill', placeholder: 'https://', value: boot.settings.device_pairing_relay_url || '',
     'aria-label': '간편 등록 중계 주소' });
   const call = (path, body) => api(path, { method: 'POST', body, _prefsOwner: owner });
-  const begin = btn('6자리 간편 등록 시작', wrap(async () => {
-    const pair = await call('devices/pair/start', {});
+  const usbButton = btn('USB로 수거폰 등록', wrap(() => start('usb'), msg), 'primary');
+  const relayButton = btn('6자리 간편 등록 시작', wrap(() => start('relay'), msg), 'small', { disabled: !relay.value });
+  async function start(transport) {
+    const isUsb = transport === 'usb';
+    const other = isUsb ? relayButton : usbButton;
+    other.disabled = true;
+    try {
+      await register(isUsb);
+    } finally {
+      other.disabled = isUsb && !boot?.settings?.device_pairing_relay_url;
+    }
+  }
+  async function register(isUsb) {
+    const pair = await call('devices/pair/start', isUsb ? { transport: 'usb' } : {});
     const path = `devices/pair/${encodeURIComponent(pair.id)}`;
     let confirmed;
     try {
-      if (!begin.isConnected || sessionOwner() !== owner) return;
+      if (!msg.isConnected || sessionOwner() !== owner) return;
       const expires = Date.now() + pair.expires_in * 1000;
       const time = h('p', { class: 'small muted' });
       function updateTime() {
@@ -485,11 +506,13 @@ function devicePairingCard(approval) {
       }
       updateTime();
       const timer = setInterval(updateTime, 1000);
-      const otp = h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, autocomplete: 'one-time-code', placeholder: '000000' });
+      const otp = sixDigitInput('000000');
       const label = h('input', { maxlength: 80, placeholder: '예: 수거 1팀' });
       try {
-        await modal({ title: '휴대폰 간편 등록', owner, ok: '등록번호 확인', body: [
-          h('p', {}, '휴대폰 앱의 기기 등록에서 이 QR을 읽고 [등록번호 받기]를 누르세요.'),
+        await modal({ title: isUsb ? 'USB로 수거폰 등록' : '휴대폰 간편 등록', owner, ok: '등록번호 확인', body: [
+          h('p', {}, isUsb
+            ? '수거폰 앱의 [기기 등록]에서 이 QR을 읽고 [USB로 PC에 전달]을 누르세요. 전달이 끝나면 수거폰 앱으로 돌아가 6자리 등록번호를 확인하세요.'
+            : '휴대폰 앱의 기기 등록에서 이 QR을 읽고 [등록번호 받기]를 누르세요.'),
           h('img', { alt: '간편 등록 QR', src: pair.qr_image, style: 'width:260px;max-width:100%;image-rendering:pixelated' }), time,
           h('label', { class: 'f' }, '휴대폰 등록번호 6자리', otp),
           h('p', { class: 'small muted' }, '수거폰에서 30초마다 바뀌는 번호입니다. 새 수거폰은 이 번호를 확인한 뒤 관리자가 등록을 승인합니다.'),
@@ -505,33 +528,35 @@ function devicePairingCard(approval) {
     }
     if (!confirmed || sessionOwner() !== owner) return;
     setBoot(await api('bootstrap', { _prefsOwner: owner }));
-    if (!begin.isConnected) return;
+    if (!msg.isConnected) return;
     const device = boot.devices.find((d) => d.id === confirmed.device_id);
     if (!device) { setBoot(null); render(true); return; }
     if (!confirmed.confirmed && !(await approval.approve(device, true))) {
-      if (sessionOwner() === owner && begin.isConnected) render(true);
+      if (sessionOwner() === owner && msg.isConnected) render(true);
       return;
     }
-    if (sessionOwner() !== owner || !begin.isConnected) return;
+    if (sessionOwner() !== owner || !msg.isConnected) return;
     toast('기기 등록 완료');
     if (!boot.crews.some((c) => c.active && c.device_id === device.id)) {
       const name = await crewChooser(device);
       if (name) toast(`${name}에 연결했습니다`);
     }
     if (sessionOwner() === owner) { setBoot(null); render(true); }
-  }, msg), 'primary', { disabled: !relay.value });
+  }
   const save = btn('중계 주소 저장', wrap(async () => {
     const settings = await call('settings', { device_pairing_relay_url: relay.value.trim() });
     if (sessionOwner() !== owner || !boot) return;
     const saved = settings.device_pairing_relay_url || '';
     setBoot({ ...boot, settings: { ...boot.settings, device_pairing_relay_url: saved } });
-    relay.value = saved; begin.disabled = !saved; msg.textContent = saved ? '중계 주소를 저장했습니다.' : '간편 등록 중계 연결을 해제했습니다.';
+    relay.value = saved; relayButton.disabled = !saved || !!usbButton.dataset.busy;
+    msg.textContent = saved ? '중계 주소를 저장했습니다.' : '간편 등록 중계 연결을 해제했습니다.';
   }, msg), 'small');
   return h('section', { class: 'card' }, h('h2', {}, '6자리 간편 등록'),
-    h('p', {}, 'PC의 QR을 휴대폰으로 읽으면 휴대폰에 표시되는 6자리 번호로 기기를 등록할 수 있습니다.'),
-    begin, h('details', { class: 'free' }, h('summary', {}, '간편 등록 중계 설정'),
-      h('p', { class: 'small muted' }, '기관에서 사용하는 HTTPS 중계 주소를 저장하세요. 주소가 없으면 아래 기본 QR 등록을 이용하세요.'),
-      h('label', { class: 'f' }, '간편 등록 중계 주소', relay), save), msg);
+    h('p', {}, '데이터용 USB 케이블로 수거폰을 PC에 연결하고, 휴대폰에서 USB 테더링(아이폰은 개인용 핫스팟)을 켜세요. 중계 서버나 등록 파일 없이 6자리로 등록할 수 있습니다.'),
+    usbButton, msg, h('div', { class: 'row' }, h('span', { class: 'small muted' }, '기관 중계로 등록'), relayButton),
+    h('details', { class: 'free' }, h('summary', {}, '간편 등록 중계 설정'),
+      h('p', { class: 'small muted' }, '케이블 없이 등록할 때는 기관의 HTTPS 중계 주소를 저장한 뒤 간편 등록을 시작하세요.'),
+      h('label', { class: 'f' }, '간편 등록 중계 주소', relay), save));
 }
 function settingsDevices() {
   const owner = sessionOwner(), approval = deviceApproval();

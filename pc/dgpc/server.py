@@ -688,7 +688,9 @@ class Handler(BaseHTTPRequestHandler):
         if not tok:
             return self.send_json({"error": "로그인이 필요합니다.", "login": True}, 401)
         if p == "logout" and method == "POST":
-            SESSIONS.pop(tok, None)
+            with LOCK:
+                SESSIONS.pop(tok, None)
+                PAIRINGS.drop(tok)
             return self.send_json({"ok": True}, extra={"Set-Cookie": "dg_s=; Max-Age=0" + self.cookie_flags()})
         sess = SESSIONS.get(tok)
         if not sess:  # session() 확인과 이 사이에 다른 요청(로그아웃·비밀번호 재설정·만료 정리)이 지움
@@ -1942,18 +1944,29 @@ class Handler(BaseHTTPRequestHandler):
     def ep_pair_start(self, qs):
         """휴대폰 6자리 등록에 사용할 일회용 QR 만들기."""
         from pc_tool import qr_png_data_uri
-        self.body()
+        body = self.json_body()
+        if not isinstance(body, dict) or set(body) - {"transport"} or body.get("transport", "relay") not in ("relay", "usb"):
+            raise S.UserError("사용할 수 없는 수거폰 등록 방식입니다.")
+        usb_address = None
+        if body.get("transport") == "usb":
+            if not same_machine(self.client_address[0], self.connection.getsockname()[0]):
+                return json_status({"error": "USB 등록은 수거폰을 연결한 업무 PC에서 시작하세요."}, 403)
+            try:
+                usb_address = PAIR.discover_usb_ipv4()
+            except ValueError as exc:
+                raise S.UserError(str(exc)) from exc
         with LOCK:
             if error := self._write_session_error():
                 return error
             owner = self.session()
             relay = S.get_setting(CON, "device_pairing_relay_url")
-            if not relay:
+            if not relay and usb_address is None:
                 raise S.UserError("설정 → 기기에서 간편 등록 중계 주소를 먼저 저장해 주세요.")
-            room = PAIRINGS.start(owner, relay)
             registration = S.registration_text(CON)
+            room = PAIRINGS.start(owner, relay, usb_address=usb_address)
         try:
-            room.create_remote()
+            if usb_address is None:
+                room.create_remote()
             image, _ = qr_png_data_uri(room.qr_text(registration))
             with LOCK:
                 if error := self._write_session_error():
@@ -1986,6 +1999,8 @@ class Handler(BaseHTTPRequestHandler):
                 return error
             current = PAIRINGS.get(owner, pair_id, S.get_setting(CON, "device_pairing_relay_url"))
             if not payload:
+                if isinstance(current, PAIR.UsbPairing):
+                    raise S.UserError("수거폰에서 USB 전송을 누르고 전송 완료를 확인한 뒤 번호를 입력하세요.")
                 raise S.UserError("휴대폰에서 등록번호를 받은 다음 입력해 주세요.")
             code = current.device_code(payload, body["otp"])
             with S.tx(CON):
@@ -2005,8 +2020,9 @@ class Handler(BaseHTTPRequestHandler):
             if error := self._write_session_error():
                 return error
             owner = self.session()
-            room = PAIRINGS.get(owner, pair_id, S.get_setting(CON, "device_pairing_relay_url"))
-            PAIRINGS.drop(owner, pair_id)
+            room = PAIRINGS.drop(owner, pair_id)
+            if room is None:
+                return {"ok": True}
         with contextlib.suppress(PAIR.PairingError):
             room.close_remote()
         return {"ok": True}
@@ -2102,6 +2118,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.json_body_cache.get("active"):
             for k in [k for k, v in list(SESSIONS.items()) if v["user_id"] == uid]:
                 SESSIONS.pop(k, None)
+                PAIRINGS.drop(k)
         return {"ok": True}
 
     @endpoint("POST", "users/{id}/password", ADMIN)
@@ -2110,6 +2127,7 @@ class Handler(BaseHTTPRequestHandler):
         S.set_password(self.c, uid, self.json_body().get("password", ""), must_change=True)
         for k in [k for k, v in list(SESSIONS.items()) if v["user_id"] == uid]:
             SESSIONS.pop(k, None)
+            PAIRINGS.drop(k)
         return {"ok": True}
 
     @endpoint("POST", "geocode/missing", WORK)
@@ -2913,6 +2931,8 @@ def serve(port: int = 8765, lan: dict | None = None, host: str | None = None,
     finally:
         stop.set()
         srv.server_close()
+        with LOCK:
+            PAIRINGS.clear()
         if on_ready:
             # 실행 앱은 정상 종료를 보장한다. 요청 접수와 예약 작업을 멈춘 뒤 이미 수락한 작업을 마친다.
             if scheduled:
