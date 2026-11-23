@@ -19,7 +19,7 @@ def send_camera_image(phone, image):
     }""", src)
 
 
-def open_scanner(phone, pwa):
+def open_scanner(phone, pwa, *, deny_first=False):
     phone.goto(pwa)
     phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
     phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
@@ -27,10 +27,13 @@ def open_scanner(phone, pwa):
     phone.get_by_role("button", name="수거팀으로 시작", exact=True).click()
     entry = phone.get_by_role("button", name="배차 QR로 업무 시작", exact=True)
     expect(entry).to_be_visible()
-    phone.evaluate("""() => {
+    phone.evaluate("""denyFirst => {
         const canvas = document.createElement('canvas'); canvas.width = canvas.height = 820;
         window.cameraCanvas = canvas;
+        window.cameraStarts = 0;
         navigator.mediaDevices.getUserMedia = async () => {
+            window.cameraStarts++;
+            if (denyFirst && window.cameraStarts === 1) throw new DOMException('denied', 'NotAllowedError');
             const stream = canvas.captureStream(15);
             const track = stream.getVideoTracks()[0];
             const redraw = () => {
@@ -40,10 +43,45 @@ def open_scanner(phone, pwa):
             };
             redraw(); return stream;
         };
-    }""")
+    }""", deny_first)
     entry.click()
     expect(phone).to_have_url(pwa + "#/guest-list")
-    phone.get_by_role("button", name="배차 QR 읽기", exact=True).click()
+    steps = phone.get_by_role("list", name="배차 QR 읽는 순서")
+    expect(steps.locator('[aria-current="step"]')).to_contain_text("열쇠 QR")
+    expect(steps).to_contain_text("목록 QR")
+    if deny_first:
+        expect(phone.get_by_text("카메라 권한을 허용해 주세요.", exact=False)).to_be_in_viewport()
+        phone.get_by_role("button", name="카메라 다시 열기").click()
+    expect(phone.locator("video")).to_have_js_property("paused", False)
+    assert phone.evaluate("window.cameraStarts") == (2 if deny_first else 1)
+
+
+def cancel_during_permission_prompt(phone):
+    start = phone.get_by_role("button", name="배차 QR로 업무 시작", exact=True)
+    cancel = phone.get_by_role("button", name="촬영 취소", exact=True)
+    phone.evaluate("""() => {
+        const media = navigator.mediaDevices;
+        const normal = media.getUserMedia.bind(media);
+        window.promptOpened = new Promise(ready => {
+            media.getUserMedia = () => {
+                media.getUserMedia = normal;
+                return new Promise((resolve, reject) => {
+                    window.denyOldPrompt = () => reject(new DOMException('denied', 'NotAllowedError'));
+                    ready();
+                });
+            };
+        });
+    }""")
+    start.click()
+    phone.evaluate("window.promptOpened")
+    cancel.click()
+    start.click()
+    expect(phone.locator("video")).to_have_js_property("paused", False)
+    phone.evaluate("window.newTrack = document.querySelector('video').srcObject.getVideoTracks()[0]")
+    phone.evaluate("denyOldPrompt()")
+    cancel.click()
+    expect(start).to_be_visible()
+    assert phone.evaluate("newTrack.readyState") == "ended"
 
 
 def assign_visit(pc, office):
@@ -68,7 +106,20 @@ def main():
         pc = browser.new_context()
         try:
             phone = phone_ctx.new_page()
-            open_scanner(phone, pwa)
+            open_scanner(phone, pwa, deny_first=True)
+            phone.evaluate("window.firstTrack = document.querySelector('video').srcObject.getVideoTracks()[0]")
+            cancel = phone.get_by_role("button", name="촬영 취소", exact=True)
+            expect(cancel).to_be_in_viewport(ratio=1)
+            cancel.click()
+            expect(phone).to_have_url(pwa + "#/home")
+            assert phone.evaluate("firstTrack.readyState") == "ended"
+            phone.goto(pwa + "#/guest-list")
+            expect(phone.get_by_role("button", name="배차 QR 읽기", exact=True)).to_be_visible()
+            assert phone.evaluate("window.cameraStarts") == 2
+            phone.goto(pwa + "#/home")
+            cancel_during_permission_prompt(phone)
+            phone.get_by_role("button", name="배차 QR로 업무 시작", exact=True).click()
+            expect(phone.locator("video")).to_have_js_property("paused", False)
 
             day, crew, req, fee, address = assign_visit(pc, office)
             desk = pc.new_page()
@@ -81,6 +132,8 @@ def main():
             expect(phone.get_by_text("목록 QR을 비추세요", exact=False).first).to_be_visible(timeout=15000)
             key_read = phone.get_by_text("열쇠 읽음", exact=True)
             expect(key_read).to_be_in_viewport(ratio=1)
+            steps = phone.get_by_role("list", name="배차 QR 읽는 순서")
+            expect(steps.locator('[aria-current="step"]')).to_contain_text("목록 QR")
             assert key_read.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 24
             expect(phone.get_by_text("PC에서 [목록 QR 표시]를 누르세요.", exact=True)).to_be_in_viewport(ratio=1)
             desk.get_by_role("button", name="목록 QR 표시", exact=True).click()
@@ -90,6 +143,11 @@ def main():
             phone_ctx.set_offline(True)
             send_camera_image(phone, qr.screenshot())
             expect(phone.get_by_text(address, exact=False).first).to_be_visible(timeout=20000)
+            phone.goto(pwa + "#/home")
+            phone.get_by_role("button", name="받은 배차 목록 열기", exact=True).click()
+            expect(phone.get_by_text(address, exact=False).first).to_be_visible()
+            expect(phone.locator("video")).to_have_count(0)
+            assert phone.evaluate("window.cameraStarts") == 4
             assert fee["name"] in phone.locator("main").inner_text()
             for private in ("가상 비공개 신청인", "01000001234", "시험용 비공개 메모"):
                 assert private not in phone.locator("main").inner_text()

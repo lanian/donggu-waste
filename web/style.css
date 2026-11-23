@@ -484,6 +484,25 @@ main.center > p { color: var(--muted); }
 .progress { height: 12px; border-radius: var(--r-pill); background: var(--neutral-bg); overflow: hidden; margin: 12px 0 4px; }
 .progress .fill { height: 100%; width: 0; background: var(--brand); border-radius: var(--r-pill); transition: width .2s; }
 .count { font-size: var(--t-xl); font-weight: 800; text-align: center; margin: 4px 0; }
+.guest-scanner [hidden] { display: none !important; }
+.guest-scanner .msg:empty { min-height: 0; margin: 0; }
+.guest-scan-steps { display: flex; gap: 6px; padding: 0; margin: 0 0 12px; list-style: none; }
+.guest-scan-steps li { flex: 1; padding: 7px 4px; text-align: center; line-height: 1.4; font-size: var(--t-sm);
+  color: var(--muted); border-bottom: 3px solid var(--line-strong); }
+.guest-scan-steps [aria-current="step"] { border-bottom-color: currentColor; color: var(--field-ink);
+  background: var(--field-bg); font-weight: 800; }
+.guest-scan-steps .complete { color: var(--ok-ink); }
+.guest-scan-steps .complete::before { content: '✓ '; }
+.guest-scan-steps .complete + [aria-current="step"] { background: var(--ok-bg); color: var(--ok-ink); }
+.guest-camera-view { display: grid; place-items: center; position: relative; overflow: hidden; margin-top: 10px;
+  height: clamp(132px, 35vh, 330px); height: clamp(132px, 35svh, 330px); border-radius: var(--r-control); background: #101816; }
+.guest-camera-view .cam { height: 100%; width: 100%; margin: 0; border-radius: 0; object-fit: contain; }
+.guest-camera-view::after { content: ''; position: absolute; pointer-events: none; height: 73%; max-width: 85%; aspect-ratio: 1;
+  --guide: linear-gradient(white, white);
+  background: var(--guide) left top, var(--guide) right top, var(--guide) left bottom, var(--guide) right bottom,
+    var(--guide) left top, var(--guide) right top, var(--guide) left bottom, var(--guide) right bottom;
+  background-size: 20px 3px, 20px 3px, 20px 3px, 20px 3px, 3px 20px, 3px 20px, 3px 20px, 3px 20px;
+  background-repeat: no-repeat; filter: drop-shadow(0 0 1px #17201b); }
 .guest-scan-stage { display: grid; gap: 2px; padding: 10px 14px; border-inline-start: 5px solid currentColor;
   border-radius: var(--r-control); background: var(--field-bg); color: var(--field-ink); }
 .guest-scan-stage.key-read { background: var(--ok-bg); color: var(--ok-ink); }

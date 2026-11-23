@@ -697,7 +697,7 @@ def home_unload_empty(browser, url):
         expect(guest).to_be_enabled()
         guest.click()
         expect(page).to_have_url(url + "#/guest-list")
-        expect(page.get_by_role("button", name="배차 QR 읽기", exact=True)).to_be_enabled()
+        expect(page.get_by_text("열쇠 QR을 비추세요", exact=True)).to_be_visible()
         ok(True, "개인폰 홈에서 기기 등록 없이 현장 업무용 배차 QR을 받는다")
     finally:
         ctx.close()

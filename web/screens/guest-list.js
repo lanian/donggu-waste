@@ -1,7 +1,7 @@
 import { GuestScan, guestUpdate } from '../guest-list.js';
 import * as S from '../store.js';
 import { guestWorkControls } from './guest-work.js';
-import { backBtn, btn, h, msgBox, onLock, render, say, sheet, st, startCamera, stopCamera, toast, todayKST } from '../core.js';
+import { backBtn, btn, go, h, msgBox, onLock, render, say, sheet, st, startCamera, stopCamera, toast, todayKST } from '../core.js';
 
 const STORE = 'guestList';
 const WORK = 'guestWorkJournal';
@@ -43,7 +43,12 @@ function readableError(error) {
 }
 
 let leaveView = null;
-function leaveGuest() { leaveView?.(); leaveView = null; }
+let scanOnEntry = false;
+export function startGuestDispatch() {
+  scanOnEntry = true;
+  go('#/guest-list');
+}
+function leaveGuest() { scanOnEntry = false; leaveView?.(); leaveView = null; }
 onLock(leaveGuest);
 window.addEventListener('hashchange', () => { if (location.hash !== '#/guest-list') leaveGuest(); });
 window.addEventListener('pagehide', leaveGuest);
@@ -52,6 +57,7 @@ window.addEventListener('pageshow', (event) => {
 });
 
 export async function screenGuestList() {
+  const startFromHome = scanOnEntry;
   leaveGuest();
   const owner = st, route = location.hash;
   const view = h('main'), body = h('section', { class: 'card' });
@@ -77,7 +83,8 @@ export async function screenGuestList() {
   });
   if (!alive()) return view;
   saved = stored;
-  view.append(h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '배차와 현장 기록')), body);
+  const heading = h('h1', { class: 'bar-title' }, '배차와 현장 기록');
+  view.append(h('header', { class: 'bar' }, backBtn(), heading), body);
   const onNewDay = () => {
     if (shown() && saved && saved.work_date < todayKST()) { view.replaceChildren(); render(); }
     else if (alive() && saved) scheduleDayCheck();
@@ -136,7 +143,7 @@ export async function screenGuestList() {
         h('p', {}, '이번 배차에는 방문할 수거지가 없습니다.'),
     ].filter(Boolean) : [h('p', {}, '받은 배차 목록이 없습니다. PC의 목록 전송 화면에서 배차 QR을 여세요.')]),
     ...controls.logs,
-    btn('배차 QR 읽기', showScanner, 'primary big'),
+    btn('배차 QR 읽기', () => showScanner(), 'primary big'),
     ...(saved ? [btn('목록 지우기', async () => {
       if (!await confirm('조회 목록을 지울까요?', titleOf(saved) + ' 배차를 이 휴대폰에서 지웁니다.' + (work ? ' 저장한 현장 기록과 초안은 별도로 보관됩니다.' : ''), '지우기', 'danger')) return;
       try {
@@ -151,17 +158,23 @@ export async function screenGuestList() {
     }, 'ghost big')] : []),
     message);
   }
-  function showScanner() {
+  function showScanner(fromHome = false) {
     scan.clear(); decoded = null;
+    heading.textContent = '배차 QR 읽기';
     const video = h('video', { playsinline: true, muted: true, class: 'cam' });
-    const label = h('span'), headline = h('strong'), hint = h('span');
-    const stage = h('div', { class: 'guest-scan-stage', role: 'status', 'aria-atomic': 'true', tabindex: '-1' }, label, headline, hint);
+    const preview = h('div', { class: 'guest-camera-view' }, video);
+    const keyStep = h('li', {}, '1단계 · 열쇠 QR'), listStep = h('li', {}, '2단계 · 목록 QR');
+    const steps = h('ol', { class: 'guest-scan-steps', 'aria-label': '배차 QR 읽는 순서' }, keyStep, listStep);
+    const headline = h('strong'), hint = h('span');
+    const stage = h('div', { class: 'guest-scan-stage', role: 'status', 'aria-atomic': 'true', tabindex: '-1' }, headline, hint);
     const progress = h('p', { class: 'count', role: 'status', hidden: true });
     function showStage(hasKey) {
       stage.classList.toggle('key-read', hasKey);
-      label.textContent = hasKey ? '2단계 · 목록 QR' : '1단계 · 열쇠 QR';
+      (hasKey ? keyStep : listStep).removeAttribute('aria-current');
+      (hasKey ? listStep : keyStep).setAttribute('aria-current', 'step');
+      keyStep.classList.toggle('complete', hasKey);
       headline.textContent = hasKey ? '열쇠 읽음' : '열쇠 QR을 비추세요';
-      hint.textContent = hasKey ? 'PC에서 [목록 QR 표시]를 누르세요.' : 'PC의 목록 전송 화면에서 배차 QR을 여세요.';
+      hint.textContent = hasKey ? 'PC에서 [목록 QR 표시]를 누르세요.' : 'PC에 표시된 열쇠 QR을 카메라 가운데에 맞추세요.';
     }
     const message = msgBox(), retry = btn('카메라 다시 열기', () => decoded ? save() : camera(), 'big', { hidden: true });
     const active = () => shown() && body.contains(video);
@@ -236,23 +249,34 @@ export async function screenGuestList() {
     };
     const camera = async () => {
       if (!active() || busy) return;
-      retry.hidden = true;
+      retry.hidden = true; preview.hidden = false; say(message, '');
       try { await startCamera(video, receive); }
-      catch (e) { if (active()) { say(message, readableError(e), true); retry.hidden = false; } }
+      catch (e) {
+        if (active()) {
+          preview.hidden = true; say(message, readableError(e), true); retry.hidden = false;
+        }
+      }
     };
     showStage(false);
-    body.replaceChildren(stage, progress, video, message, retry, restart,
-      btn('목록으로 돌아가기', () => { stopCamera(); render(); }, 'ghost big'));
+    body.classList.add('guest-scanner');
+    body.replaceChildren(steps, stage, progress, message, retry, preview, restart,
+      btn(fromHome ? '촬영 취소' : '목록으로 돌아가기', () => {
+        stopCamera();
+        if (fromHome) go('#/home'); else render();
+      }, 'ghost big'));
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && active() && !busy && !decoded) retry.hidden = false;
     }, { signal: controller.signal });
-    stage.focus();
-    camera();
+    // 라우터가 새 화면을 붙인 뒤에만 카메라를 요청한다. 그 사이 떠난 화면은 촬영하지 않는다.
+    requestAnimationFrame(() => {
+      if (active()) { stage.focus(); camera(); }
+    });
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden || !shown()) return;
     if (saved && saved.work_date < todayKST()) onNewDay();
   }, { signal: controller.signal });
-  showList();
+  if (startFromHome && !saved && !groups.some(g => !g.closed && (g.entries.length || g.draft))) showScanner(true);
+  else showList();
   return view;
 }

@@ -555,7 +555,11 @@ async function startCamera(video, onText) {
   camera = cam;
   try {
     cam.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
-  } catch (e) { camera = null; throw Object.assign(new Error('카메라를 열 수 없습니다. 카메라 권한을 허용해 주세요.'), { code: 'CAMERA' }); }
+  } catch (e) {
+    if (cam.stop) return;  // 취소한 권한 요청이 뒤늦게 끝나도 새 촬영의 종료 핸들을 보존한다.
+    camera = null;
+    throw Object.assign(new Error('카메라를 열 수 없습니다. 카메라 권한을 허용해 주세요.'), { code: 'CAMERA' });
+  }
   if (cam.stop) { cam.stream.getTracks().forEach((t) => t.stop()); return; }
   video.srcObject = cam.stream; await video.play().catch(() => {});
   const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });

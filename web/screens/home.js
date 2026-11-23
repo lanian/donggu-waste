@@ -7,7 +7,7 @@ import { finalUnloadState, TOLL_GUIDANCE } from '../final-unload.js';
 import { appLogo, btn, commit, flushSteps, go, h, isSolo, lockNow, mdOf, outbox, pcStops, pcWorkDate, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, toast, todayKST, ui } from '../core.js';
 import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
-import { loadGuestList, pendingGuestRecords } from './guest-list.js';
+import { loadGuestList, pendingGuestRecords, startGuestDispatch } from './guest-list.js';
 import { screenHomeSolo } from './solo.js';
 import { openFinder } from './find.js';
 import { daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, needsResult, nextQuick, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
@@ -69,7 +69,7 @@ async function screenHome() {
   else if (reconfirm) next = { key: 'stop', title: `${reconfirm.s.seq}번 수거 결과를 재확인하세요`, detail: '결과 저장 뒤 수량이 바뀌었습니다. 현재 수량에 맞는 결과를 다시 선택해 저장하세요.', label: `${reconfirm.s.seq}번 결과 재확인`, run: () => go(`#/stop/${reconfirm.s.request_id}`) };
   else if (guest) next = { key: 'guest', title: guest.schema === 'dg.guest-work/1' ? '받은 배차에서 현장 업무를 이어가세요' : '받은 배차 목록을 확인하세요', detail: `${guest.work_date} · ${guest.crew} · 수거지 ${guest.stops.length}곳`, label: '받은 배차 목록 열기', run: () => go('#/guest-list') };
   else if (archivedRecords) next = { key: 'guest', title: '이전 배차의 현장 기록이 남아 있습니다', detail: `기록·초안 ${archivedRecords}건을 확인하고 결과 파일을 전달하세요. 같은 화면에서 새 배차도 받을 수 있습니다.`, label: '현장 기록 이어보기', run: () => go('#/guest-list') };
-  else if (!registered) next = { key: 'guest', title: '수거팀 배차를 받으세요', detail: 'PC의 [목록 전송]에서 팀의 [현장 업무 QR]을 열고 열쇠와 목록을 차례로 읽으세요.', label: '배차 QR로 업무 시작', run: () => go('#/guest-list') };
+  else if (!registered) next = { key: 'guest', title: '수거팀 배차를 받으세요', detail: 'PC에서 [목록 전송 → 현장 업무 QR]을 여세요. 아래 버튼을 누르면 휴대폰 카메라가 열립니다.', label: '배차 QR로 업무 시작', run: startGuestDispatch };
   else if (past && (ob.toSend || ob.waiting || waitingResult)) next = {
     key: 'send', title: '지난 목록의 결과부터 마무리하세요', detail: `${mdOf(dl.work_date)} 목록의 기록이 남아 있습니다(${sendDetail}). 결과를 보내고 결과 반영 코드(D-)를 넣은 뒤 오늘 목록을 받으세요.`,
     label: ob.toSend ? '결과 보내기' : '결과 반영 코드 넣기', run: () => go('#/export'),
