@@ -689,8 +689,17 @@ def home_unload_empty(browser, url):
         ok(page.locator(".empty-actions").count() == 0 and count == 2, f"지금 할 일이 같은 동작이면 빈 상태 단추는 빼고 문구만 (보이는 단추 {count}개)")
         seed(page, registered=False)
         expect(page.locator(".next-action .btn.primary")).to_have_text("기기 등록")
-        ok(page.locator(".empty-actions").get_by_role("button", name="오늘 목록 받기", exact=True).count() == 1,
-           "지금 할 일이 다른 동작(기기 등록)이면 빈 상태 단추 그대로")
+        expect(page.locator(".empty")).to_contain_text("조회용 배차는 [등록 없이 배차 목록 보기]에서 확인하세요.")
+        expect(page.get_by_role("button", name="오늘 목록 받기", exact=True)).to_have_count(0)
+        guest_name = "등록 없이 배차 목록 보기"
+        expect(page.get_by_role("button", name=guest_name, exact=True)).to_have_count(1)
+        guest = page.get_by_role("region", name="자주 쓰는 기능", exact=True).get_by_role("button", name=guest_name, exact=True)
+        expect(guest).to_be_enabled()
+        guest.click()
+        expect(page).to_have_url(url + "#/guest-list")
+        expect(page.get_by_role("heading", name="배차 목록 조회", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name="조회용 QR 읽기", exact=True)).to_be_enabled()
+        ok(True, "미등록폰 빈 목록은 기기 등록과 조회용 목록을 안내하고, 홈 도구 하나로 QR 조회 화면을 연다")
     finally:
         ctx.close()
 
