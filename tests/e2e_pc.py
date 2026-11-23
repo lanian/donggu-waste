@@ -265,8 +265,12 @@ def run():
         expect(rdy).to_be_visible()
         expect(rdy.locator("li.no", has_text="자동 백업 키")).to_be_visible()
         ok(rdy.locator("li.no", has_text="자동 백업 키").locator("a.fix").get_attribute("href") == "#/settings/backup"
-           and rdy.locator("li.no", has_text="수거팀").count() == 1 and "✗" in rdy.inner_text(),
-           "오늘 현황(관리자): 운영 준비 점검(✗ 항목 + 고칠 설정 탭 링크)")
+           and "✗" in rdy.locator("li.no", has_text="자동 백업 키").inner_text(),
+           "오늘 현황(관리자): 미설정 백업 키에 ✗ 표시와 고칠 설정 탭 링크")
+        optional_device = rdy.locator("li.ok", has_text="선택한 등록 기기 상태")
+        expect(optional_device).to_contain_text("현장 업무 QR")
+        ok(optional_device.locator("a.fix").count() == 0,
+           "등록 기기가 없어도 수거팀은 현장 업무 QR로 시작할 수 있으며 기기 설정을 요구하지 않음")
         ok(page.locator(".ops-warn").is_visible() and "예약 작업" in page.locator(".ops-warn").inner_text(), "예약 작업 기록이 없으면 오늘 현황에 경고 띠")
 
         # 휴대폰 등록·팀
