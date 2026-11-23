@@ -7,6 +7,7 @@ import { finalUnloadState, TOLL_GUIDANCE } from '../final-unload.js';
 import { appLogo, btn, commit, flushSteps, go, h, isSolo, lockNow, mdOf, outbox, pcStops, pcWorkDate, pendingPhotos, render, saveFailed, st, tabBar, themeToggle, toast, todayKST, ui } from '../core.js';
 import { navBtn, unloadLoc } from '../widgets.js';
 import { screenMode } from './mode.js';
+import { loadGuestList } from './guest-list.js';
 import { screenHomeSolo } from './solo.js';
 import { openFinder } from './find.js';
 import { daySummary, dongChips, emptyFilter, filterDong, filterQ, homeBanners, isStopDone, needsResult, nextQuick, routeItems, setupCard, stopCard, stopSearch, tripHeads, workerBar } from './stoplist.js';
@@ -18,6 +19,7 @@ async function screenHome() {
   if (!st.mode) return screenMode();
   if (isSolo()) return screenHomeSolo();
   const registered = !!(await S.getRaw('pc')) && !!(await S.getRaw('device'));
+  const guest = registered ? null : await loadGuestList().catch(() => null);
   const ob = outbox();  // 화면 표시용: 보낼 기록(어느 파일에도 없음) · 확인 대기(보냈지만 D-코드 전)
   const dl = st.daylist;
   const wd = pcWorkDate();
@@ -64,7 +66,8 @@ async function screenHome() {
     label: registered ? '결과 보내기' : '기록 보호용 백업', run: () => go(registered ? '#/export' : '#/backup'),
   };
   else if (reconfirm) next = { key: 'stop', title: `${reconfirm.s.seq}번 수거 결과를 재확인하세요`, detail: '결과 저장 뒤 수량이 바뀌었습니다. 현재 수량에 맞는 결과를 다시 선택해 저장하세요.', label: `${reconfirm.s.seq}번 결과 재확인`, run: () => go(`#/stop/${reconfirm.s.request_id}`) };
-  else if (!registered) next = { key: 'register', title: '관리자와 기기를 연결하세요', detail: '오늘 목록 받기와 결과 보내기에 필요한 등록입니다. 현장·전화 접수는 아래에서 먼저 받을 수 있습니다.', label: '기기 등록', run: () => go('#/register') };
+  else if (guest) next = { key: 'guest', title: '받은 배차 목록을 확인하세요', detail: `${guest.work_date} · ${guest.crew} · 수거지 ${guest.stops.length}곳`, label: '받은 배차 목록 열기', run: () => go('#/guest-list') };
+  else if (!registered) next = { key: 'register', title: '휴대폰에서 수거 결과 보내기', detail: '현장 결과를 PC로 보내려면 기기를 등록하세요. 배차 확인만 할 때는 아래에서 등록 없이 목록을 볼 수 있습니다.', label: '기기 등록', run: () => go('#/register') };
   else if (past && (ob.toSend || ob.waiting || waitingResult)) next = {
     key: 'send', title: '지난 목록의 결과부터 마무리하세요', detail: `${mdOf(dl.work_date)} 목록의 기록이 남아 있습니다(${sendDetail}). 결과를 보내고 결과 반영 코드(D-)를 넣은 뒤 오늘 목록을 받으세요.`,
     label: ob.toSend ? '결과 보내기' : '결과 반영 코드 넣기', run: () => go('#/export'),
@@ -136,7 +139,8 @@ async function screenHome() {
   const unloads = st.events.filter((e) => e.kind === 'UNLOAD').length;
   out.push(h('section', { class: 'actions home-tools', 'aria-label': '자주 쓰는 기능' },
     h('h2', { class: 'section-label' }, '자주 쓰는 기능'), h('div', { class: 'grid2' },
-      btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered }),
+      registered ? btn('오늘 목록 받기', () => go('#/scan'), 'big')
+        : btn('등록 없이 배차 목록 보기', () => go('#/guest-list'), 'big'),
       btn(sendTool, () => go('#/export'), 'big' + (stale ? ' warn' : '')),
       btn('+ 접수 등록', () => { ui.form = null; go('#/intake'); }, 'big intake-btn'), btn('날짜·접수 찾기', openFinder, 'big'),
       btn(unloads ? `하차 기록 (${unloads}회)` : '하차 기록', () => go('#/unload'), 'big'),
@@ -146,8 +150,8 @@ async function screenHome() {
   out.push(h('h2', { id: 'collection-list', tabindex: '-1' }, '수거 목록'));
   if (!today.length) {
     // 지금 할 일이 같은 [오늘 목록 받기]면 빈 상태에는 문구만 둔다(같은 단추를 세 번 보이지 않게)
-    out.push(h('p', { class: 'empty' }, '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.'),
-      next.key === 'scan' ? null : h('div', { class: 'empty-actions' }, btn('오늘 목록 받기', () => go('#/scan'), 'big', { disabled: !registered })));
+    out.push(h('p', { class: 'empty' }, registered ? '오늘 목록이 없습니다. PC 담당자의 QR을 받으세요.' : '현장 결과를 입력할 수거 목록이 없습니다. 조회용 배차는 [등록 없이 배차 목록 보기]에서 확인하세요.'),
+      registered && next.key !== 'scan' ? h('div', { class: 'empty-actions' }, btn('오늘 목록 받기', () => go('#/scan'), 'big')) : null);
   } else {
     const active = stops.filter(({ s }) => !s.removed && s.status !== 'CANCELLED' && !s.pii_purged);
     const remain = active.filter(({ s, d }) => !isStopDone(s, d));

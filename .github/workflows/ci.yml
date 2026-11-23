@@ -83,6 +83,7 @@ jobs:
       - run: python tests/test_pc_session_revocation.py   # 지연 저장·가져오기·작업 등록의 세션 취소
       - run: python tests/test_privacy_write_guards.py
       - run: python tests/test_pc_device_revocation.py
+      - run: python tests/test_guest_list.py
       - run: |
           python tests/test_pairing_relay.py
           python tests/test_pairing_pc.py
@@ -202,6 +203,9 @@ jobs:
           - test_printed_visit_ui
           - test_assignment_change_review_ui
           - test_send_team_visibility
+          - test_guest_send_ui
+          - test_guest_list_workflow
+          - test_guest_mobile_guards
           - test_collection_help_mobile
           - test_mobile_pc_input_help
           - test_date_visibility_ui

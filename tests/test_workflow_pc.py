@@ -195,7 +195,12 @@ def run_suite(browser):
             board = home(page, url, today)
             expect(board.locator(".workflow-primary")).to_have_attribute("href", "#/settings/crews")
             expect(board.locator('[data-step="send"]')).to_contain_text("휴대폰 연결 확인 1팀")
-            ok(True, "연결 휴대폰이 없으면 관리자에게 연결 설정을 먼저 안내")
+            guest = board.get_by_role("link", name="미등록폰 조회용 QR 보기", exact=False)
+            expect(guest).to_have_attribute("href", "#/send?date=" + today, timeout=2500)
+            guest.click()
+            expect(page.locator("#send-date")).to_have_value(today)
+            expect(page.get_by_role("button", name="미등록폰 조회용 QR", exact=True)).to_be_visible()
+            ok(True, "연결 휴대폰이 없으면 등록 설정과 선택일의 미등록폰 조회용 QR을 안내")
 
             for role in ("LEAD", "FIELD", "INTAKE"):
                 username = "workflow" + role.lower()
@@ -228,6 +233,7 @@ def run_suite(browser):
                         expect(b.locator(".workflow-primary")).to_have_attribute("href", "#/send?date=" + today)
                         expect(b.locator('a[href^="#/settings"]')).to_have_count(0)
                         expect(b.locator('[data-step="send"]')).to_contain_text("운영 관리자에게")
+                        expect(b.get_by_role("link", name="미등록폰 조회용 QR 보기", exact=False)).to_have_attribute("href", "#/send?date=" + today)
                         b.locator(".workflow-primary").click()
                         expect(p.locator("#send-date")).to_have_value(today)
                     ok(True, role + " 주 동작과 단계 링크가 실제 역할 권한을 지킴")

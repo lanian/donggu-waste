@@ -214,6 +214,7 @@ async function screenSettings() {
       btn('기본 문구로', () => set({ smsTemplates: null }, '기본 문구로 되돌렸습니다'), 'big')));
 
   const linkCard = card('이 휴대폰 연결',
+    btn('등록 없이 배차 목록 보기', () => go('#/guest-list'), 'big'),
     solo ? null : btn('기기 등록', () => go('#/register'), 'big'),
     btn('사용 방식 바꾸기', async () => {
       if (st.requests.length || st.daylist || st.events.length) return toast('자료가 있어 바꿀 수 없습니다. 백업·정리 후 바꿔 주세요.', 'bad');

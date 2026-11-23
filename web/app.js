@@ -10,6 +10,7 @@ import { screenCalculator } from './screens/calculator.js';
 import { screenExport } from './screens/export.js';
 import { screenHelp } from './screens/help.js';
 import { screenHome } from './screens/home.js';
+import { screenGuestList } from './screens/guest-list.js';
 import { screenFind } from './screens/find.js';
 import { screenIntake } from './screens/intake.js';
 import { screenLock, screenSetup } from './screens/lock.js';
@@ -23,7 +24,7 @@ import { screenFix, screenPcInputHelp, screenStop } from './screens/stop.js';
 import { screenUnload } from './screens/unload.js';
 
 setRender(render);  // 화면 모듈이 core 의 render() 로 다시 그릴 수 있게
-export const APP_VERSION = '0.14.44';
+export const APP_VERSION = '0.14.45';
 let renderSeq = 0;
 const listRoutes = ['#/home', '#/find'];
 const detailRoutes = ['stop', 'add', 'fix', 'intake', 'map', 'pick', 'pc-input'];
@@ -110,7 +111,7 @@ async function render() {
       ui.stopBackId = arg;
     } else if (route !== 'find' && !related) { ui.stopBackTo = '#/home'; ui.stopBackId = null; }
     view = await ({
-      home: screenHome, calculator: screenCalculator, find: screenFind, scan: screenScan, received: screenReceived, register: screenRegister,
+      home: screenHome, calculator: screenCalculator, find: screenFind, scan: screenScan, 'guest-list': screenGuestList, received: screenReceived, register: screenRegister,
       'qrtest-result': screenQrTestResult, resultqr: screenResultQr, stop: () => screenStop(arg), 'pc-input': () => screenPcInputHelp(arg), add: () => screenAdd(arg), export: screenExport, settings: screenSettings, unload: () => screenUnload(arg),
       check: screenCheck, help: screenHelp, mode: screenMode, intake: async () => { setRegisteredNow(!!(await S.getRaw('pc')) && !!(await S.getRaw('device'))); return screenIntake(arg); }, fix: () => screenFix(arg), backup: screenBackup, map: () => screenMap(arg), pick: () => screenPick(arg),
     }[route] || screenHome)();

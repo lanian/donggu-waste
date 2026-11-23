@@ -242,6 +242,10 @@ async function screenScan() {
   };
   if (!readyToSave) setTimeout(() => stillScanning() && startCamera(video, async (text) => {
     if (finishing || !stillScanning()) return;
+    if (text.startsWith('DGVIEW1:') || text.startsWith('DGV1.')) {
+      say(msg, '미등록폰 조회용 QR입니다. [등록 없이 배차 목록 보기]에서 열쇠 QR부터 읽으세요.', true);
+      return;
+    }
     let r;
     try { r = col.add(text); } catch (e) { if (e.code === 'QR_NOT_OURS' || e.code === 'BAD_VERSION') say(msg, errMsg(e), true); return; }
     if (!current) current = r.key;

@@ -2707,6 +2707,7 @@ def v13_refactor():
         ("POST", ("route-path",), ("ADMIN", "INTAKE", "FIELD", "LEAD")),
         ("GET", ("road-rules", "road-rules/roads"), ("ADMIN",)),
         ("POST", ("road-rules/preview", "road-rules/apply", "road-rules/rollback"), ("ADMIN",)),
+        ("POST", ("guest-lists",), ("ADMIN", "INTAKE")),  # 미등록폰 조회용 배차 발급
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}

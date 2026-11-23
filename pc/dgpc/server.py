@@ -41,14 +41,14 @@ import queue
 
 from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, osrm, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
-from . import device_approval
+from . import device_approval, guest_list
 from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
 ROOT = resource_root()
 UI = ROOT / "pc" / "ui"
 WEB = ROOT / "web"
 WEB_ALLOWED = {"fees.js", "fees-data.js", "fee-calculator.js", "fee-calculator.css", "labels-data.js", "map.js", "proto.js", "nav.js", "vendor/jsQR.js", "vendor/maplibre/maplibre-gl.mjs", "vendor/maplibre/maplibre-gl-worker.mjs",
-               "vendor/maplibre/maplibre-gl.css"}
+               "vendor/maplibre/maplibre-gl.css", "vendor/qrcode.mjs"}
 UI_FILES = {"/": "index.html", "/index.html": "index.html", "/start.js": "start.js", "/pc.js": "pc.js", "/core.js": "core.js", "/widgets.js": "widgets.js", "/date_filters.js": "date_filters.js", "/pc.css": "pc.css",
             # 화면 모듈(pc/ui/screens/*.js): 폴더에 있는 파일만, 이름 그대로
             **{f"/screens/{f.name}": f"screens/{f.name}" for f in sorted((UI / "screens").glob("*.js"))}, "/print.css": "print.css", "/print.js": "print.js", "/doc.css": "doc.css",
@@ -1839,6 +1839,14 @@ class Handler(BaseHTTPRequestHandler):
         """휴대폰 수신 확인 코드."""
         S.confirm_receipt(self.c, bid, self.json_body().get("code", ""))
         return {"ok": True}
+
+    @endpoint("POST", "guest-lists", WORK)
+    def ep_guest_list(self, qs):
+        """등록하지 않은 휴대폰에서 조회할 배차 목록 QR을 발급한다."""
+        body = self.json_body()
+        if not isinstance(body, dict):
+            raise S.UserError("배차 목록을 선택해 주세요.")
+        return guest_list.issue(self.c, body.get("batch_id"))
 
     @endpoint("POST", "conflicts/{id}", WORK)
     def ep_conflict(self, qs, eid):

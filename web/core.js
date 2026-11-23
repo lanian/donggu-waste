@@ -253,6 +253,12 @@ async function afterUnlock() {
   await claimSession();
   if (!S.isUnlocked()) { await render(); return; }  // 기다리는 사이 더 나중에 연 창이 있어 이 창은 잠김
   await loadState();
+  // 사용 방식에 관계없이 PIN을 풀 때 수거일이 지난 개인폰 조회 사본을 정리한다.
+  try {
+    const { loadGuestList } = await import('./screens/guest-list.js');
+    await loadGuestList();
+  } catch { if (S.isUnlocked()) toast('조회용 배차를 열지 못했습니다. 조회 화면에서 다시 확인해 주세요.', 'bad'); }
+  if (!S.isUnlocked() || !st) return;
   if (S.hasPendingSecure('state')) await commit();  // 잠금 전에 못 쓴 암호문을 복원했으면 다시 저장한다.
   // 자료 보존(persist) 요청 결과를 상태에 남긴다: 거절되면 첫 화면에 알림(바뀌었을 때만 저장)
   S.persist().then((ok) => { if (st && st.storagePersisted !== !!ok) { st.storagePersisted = !!ok; commit(); if (location.hash === '#/home') render(); } }).catch(() => {});

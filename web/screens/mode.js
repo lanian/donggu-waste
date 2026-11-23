@@ -2,16 +2,19 @@
 import { appLogo, ask, btn, commit, go, h, render, st } from '../core.js';
 
 function screenMode() {
-  const pick = async (mode) => {
+  const pick = async (mode, route = '#/home') => {
     if (mode === 'SOLO' && !(await ask('이 휴대폰만으로 쓰면 접수 원본이 이 휴대폰에만 저장됩니다. 분실·고장·데이터 삭제 시 원본까지 사라지므로 매일 백업 파일을 만들어 안전한 곳에 보관해야 합니다.', '이 휴대폰만으로 시작', { title: '이 휴대폰만으로 사용' }))) return;
-    st.mode = mode; await commit(); go('#/home'); render();
+    st.mode = mode;
+    if (await commit()) { go(route); render(); }
   };
   return h('main', {},
     h('header', { class: 'bar' }, appLogo(), h('h1', { class: 'bar-title' }, '사용 방식 선택')),
     h('section', { class: 'card mode-card' },
       h('h2', {}, 'PC와 연결해서 사용 (권장)'),
       h('p', {}, 'PC가 접수 원본을 갖고, 휴대폰은 QR로 오늘 목록을 받아 현장 기록 후 결과 파일을 보냅니다.'),
-      btn('PC와 연결해서 사용', () => pick('PC'), 'primary big')),
+      btn('PC와 연결해서 사용', () => pick('PC'), 'primary big'),
+      btn('등록 없이 배차 목록 보기', () => pick('PC', '#/guest-list'), 'big'),
+      h('p', { class: 'small' }, '조회만 할 때는 PC의 미등록폰 조회용 QR을 읽으세요. 수거 결과는 담당자가 PC에서 입력합니다.')),
     h('section', { class: 'card mode-card' },
       h('h2', {}, '이 휴대폰만으로 사용'),
       h('p', {}, '전화 접수 등록부터 연락·수거 기록까지 이 휴대폰에서 모두 합니다. PC가 필요 없습니다.'),
