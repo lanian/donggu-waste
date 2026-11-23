@@ -109,19 +109,30 @@ export async function screenGuestList() {
   function showScanner() {
     scan.clear(); decoded = null;
     const video = h('video', { playsinline: true, muted: true, class: 'cam' });
-    const progress = h('p', { class: 'count', role: 'status', tabindex: '-1' }, '열쇠 QR을 비추세요');
+    const label = h('span'), headline = h('strong'), hint = h('span');
+    const stage = h('div', { class: 'guest-scan-stage', role: 'status', 'aria-atomic': 'true', tabindex: '-1' }, label, headline, hint);
+    const progress = h('p', { class: 'count', role: 'status', hidden: true });
+    function showStage(hasKey) {
+      stage.classList.toggle('key-read', hasKey);
+      label.textContent = hasKey ? '2단계 · 목록 QR' : '1단계 · 열쇠 QR';
+      headline.textContent = hasKey ? '열쇠 읽음' : '열쇠 QR을 비추세요';
+      hint.textContent = hasKey ? 'PC에서 [목록 QR 표시]를 누르세요.' : 'PC의 [미등록폰 조회용 QR]에서 시작하세요.';
+    }
     const message = msgBox(), retry = btn('카메라 다시 열기', () => decoded ? save() : camera(), 'big', { hidden: true });
     const active = () => shown() && body.contains(video);
     let busy = false;
     const restart = btn('열쇠부터 다시 읽기', () => {
       if (!active() || busy) return;
       scan.clear(); decoded = null; restart.hidden = true;
-      progress.textContent = '열쇠 QR을 비추세요'; say(message, '');
+      showStage(false); updateProgress(''); say(message, '');
       retry.textContent = '카메라 다시 열기';
-      progress.focus(); camera();
+      stage.focus(); camera();
     }, 'big', { hidden: true });
     const updateProgress = (text) => {
-      if (progress.textContent !== text) progress.textContent = text;
+      if (progress.textContent !== text) {
+        progress.hidden = !text;
+        progress.textContent = text;
+      }
     };
     const save = async () => {
       if (!active() || busy || !decoded) return;
@@ -156,8 +167,8 @@ export async function screenGuestList() {
         const step = scan.add(text);
         if (step.kind === 'key') {
           restart.hidden = false;
+          if (!stage.classList.contains('key-read')) { showStage(true); say(message, ''); }
           if (!scan.total) updateProgress('목록 QR을 비추세요');
-          if (!message.textContent) say(message, 'PC에서 목록 QR을 표시하세요.');
           return;
         }
         updateProgress('목록 QR ' + step.got + ' / ' + step.total);
@@ -170,7 +181,7 @@ export async function screenGuestList() {
           decoded = opened;
         } catch (e) {
           if (active()) {
-            scan.clear(); progress.textContent = '열쇠 QR을 다시 비추세요';
+            scan.clear(); showStage(false); updateProgress(''); restart.hidden = true;
             retry.textContent = 'QR 다시 읽기'; retry.hidden = false;
           }
           throw e;
@@ -184,12 +195,13 @@ export async function screenGuestList() {
       try { await startCamera(video, receive); }
       catch (e) { if (active()) { say(message, readableError(e), true); retry.hidden = false; } }
     };
-    body.replaceChildren(progress, h('p', { class: 'small' }, 'PC에서 열쇠 QR을 먼저 읽고, 이어서 목록 QR을 모두 비추세요.'),
-      video, message, retry, restart, btn('목록으로 돌아가기', () => { stopCamera(); render(); }, 'ghost big'));
+    showStage(false);
+    body.replaceChildren(stage, progress, video, message, retry, restart,
+      btn('목록으로 돌아가기', () => { stopCamera(); render(); }, 'ghost big'));
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && active() && !busy && !decoded) retry.hidden = false;
     }, { signal: controller.signal });
-    progress.focus();
+    stage.focus();
     camera();
   }
   document.addEventListener('visibilitychange', () => {

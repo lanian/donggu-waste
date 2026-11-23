@@ -540,6 +540,12 @@ table.dongedit td { padding: 4px 6px; } table.dongtbl td, table.dongtbl th { pad
 .dlg-b { display: flex; flex-direction: column; gap: 8px; } .dlg-b label.f input, .dlg-b label.f select { width: 100%; }
 .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .dlg-busy { margin-right: auto; align-self: center; color: var(--muted); font-size: 0.8929rem; } .dlg-busy:empty { display: none; }
+.guest-qr-stage { margin: 0; padding: 8px 12px; border-inline-start: 5px solid currentColor; border-radius: 4px;
+  font-size: 1.5rem; line-height: 1.3; color: var(--info); background: var(--info-bg); }
+.guest-qr-stage.list { color: var(--ok-fg); background: var(--green-tint); }
+.dlg:has(.guest-qr-stage) { display: flex; flex-direction: column; overflow: hidden; }
+.dlg:has(.guest-qr-stage) > .dlg-b { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.dlg:has(.guest-qr-stage) canvas { flex: none; }
 .dlg .msg { margin: 6px 0 0; color: var(--bad); }
 /* 세션 만료 알림 */
 .sess-warn { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 70; display: flex; gap: 12px; align-items: center; background: var(--sticker); color: var(--sticker-ink);

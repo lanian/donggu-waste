@@ -105,8 +105,11 @@ def main():
             restart = page.get_by_role("button", name="열쇠부터 다시 읽기", exact=True)
             restart.click()
             expect(page.get_by_text("다른 열쇠 QR입니다.", exact=False)).to_be_visible()
+            expect(page.get_by_text("열쇠 읽음", exact=True)).to_be_visible()
             assert page.evaluate(guest) == newer
             restart.click()
+            expect(page.get_by_text("1단계 · 열쇠 QR", exact=True)).to_be_visible()
+            expect(page.get_by_text("열쇠 읽음", exact=True)).to_have_count(0)
             page.evaluate("frames => { window.guestFrames = frames; }", codes)
             expect(page.get_by_text("이번 배차에는 방문할 수거지가 없습니다.")).to_be_visible()
             assert page.evaluate(guest) == final

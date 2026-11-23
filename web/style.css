@@ -484,6 +484,10 @@ main.center > p { color: var(--muted); }
 .progress { height: 12px; border-radius: var(--r-pill); background: var(--neutral-bg); overflow: hidden; margin: 12px 0 4px; }
 .progress .fill { height: 100%; width: 0; background: var(--brand); border-radius: var(--r-pill); transition: width .2s; }
 .count { font-size: var(--t-xl); font-weight: 800; text-align: center; margin: 4px 0; }
+.guest-scan-stage { display: grid; gap: 2px; padding: 10px 14px; border-inline-start: 5px solid currentColor;
+  border-radius: var(--r-control); background: var(--field-bg); color: var(--field-ink); }
+.guest-scan-stage.key-read { background: var(--ok-bg); color: var(--ok-ink); }
+.guest-scan-stage > strong { font-size: var(--t-2xl); line-height: 1.2; }
 .toast { position: fixed; left: 50%; bottom: calc(24px + var(--safe-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--card);
   padding: 12px 20px; border-radius: var(--r-pill); font-weight: 700; z-index: 20; max-width: 90vw; pointer-events: none; box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
 .toast.bad { background: var(--bad); color: var(--on-bad); border-radius: var(--r-card); pointer-events: auto; cursor: pointer; display: flex; gap: 12px; align-items: center; min-height: var(--tap); }

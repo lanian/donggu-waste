@@ -22,7 +22,7 @@ def send_camera_image(phone, image):
 def main():
     with mobile_server() as pwa, pc_server() as office, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path)
-        phone_ctx = browser.new_context(viewport={"width": 390, "height": 844})
+        phone_ctx = browser.new_context(viewport={"width": 360, "height": 640})
         pc = browser.new_context()
         try:
             phone = phone_ctx.new_page()
@@ -69,6 +69,10 @@ def main():
             expect(qr).to_be_visible()
             send_camera_image(phone, qr.screenshot())
             expect(phone.get_by_text("목록 QR을 비추세요", exact=False).first).to_be_visible(timeout=15000)
+            key_read = phone.get_by_text("열쇠 읽음", exact=True)
+            expect(key_read).to_be_in_viewport(ratio=1)
+            assert key_read.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 24
+            expect(phone.get_by_text("PC에서 [목록 QR 표시]를 누르세요.", exact=True)).to_be_in_viewport(ratio=1)
             desk.get_by_role("button", name="목록 QR 표시", exact=True).click()
             qr = dialog.get_by_role("img", name="목록 QR", exact=True)
             expect(qr).to_be_visible()

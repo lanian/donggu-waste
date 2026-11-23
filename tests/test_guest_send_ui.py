@@ -26,6 +26,7 @@ def main():
                                            'password': 'guest-display-qa-1234'})
             assert setup.ok
             page = ctx.new_page()
+            page.set_viewport_size({'width': 960, 'height': 540})
             page.route('**/api/batches?**', lambda r: r.fulfill(json=rows))
 
             def issue(route):
@@ -54,10 +55,20 @@ def main():
                                 canvas.width, canvas.height)?.data; }""")
 
             assert read('열쇠 QR') == key_qr
+            first_stage = dlg.get_by_role('heading', name='1단계 · 열쇠 QR')
+            expect(first_stage).to_be_in_viewport(ratio=1)
+            key_color = first_stage.evaluate('el => getComputedStyle(el).backgroundColor')
+            expect(dlg.get_by_role('button', name='목록 QR 표시')).to_be_in_viewport(ratio=1)
             expect(dlg.get_by_role('img', name='목록 QR', exact=True)).to_have_count(0)
             expect(dlg.get_by_text(DAY, exact=False).first).to_be_visible()
             dlg.get_by_role('button', name='목록 QR 표시').click()
             assert read('목록 QR') == frames[0]
+            second_stage = dlg.get_by_role('heading', name='2단계 · 목록 QR')
+            expect(second_stage).to_be_in_viewport(ratio=1)
+            assert second_stage.evaluate('el => getComputedStyle(el).backgroundColor') != key_color
+            dlg.get_by_role('button', name='열쇠 QR 다시 보기').click()
+            expect(first_stage).to_be_in_viewport(ratio=1)
+            dlg.get_by_role('button', name='목록 QR 표시').click()
             dlg.get_by_role('button', name='다음 QR').click()
             assert read('목록 QR') == frames[1]
             dlg.get_by_role('button', name='이전 QR').click()
