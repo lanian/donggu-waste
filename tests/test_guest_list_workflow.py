@@ -134,6 +134,7 @@ def main():
             expect(key_read).to_be_in_viewport(ratio=1)
             steps = phone.get_by_role("list", name="배차 QR 읽는 순서")
             expect(steps.locator('[aria-current="step"]')).to_contain_text("목록 QR")
+            expect(phone.get_by_role("button", name="촬영 취소", exact=True)).to_be_in_viewport(ratio=1)
             assert key_read.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 24
             expect(phone.get_by_text("PC에서 [목록 QR 표시]를 누르세요.", exact=True)).to_be_in_viewport(ratio=1)
             desk.get_by_role("button", name="목록 QR 표시", exact=True).click()

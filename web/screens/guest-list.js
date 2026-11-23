@@ -259,11 +259,12 @@ export async function screenGuestList() {
     };
     showStage(false);
     body.classList.add('guest-scanner');
-    body.replaceChildren(steps, stage, progress, message, retry, preview, restart,
-      btn(fromHome ? '촬영 취소' : '목록으로 돌아가기', () => {
-        stopCamera();
-        if (fromHome) go('#/home'); else render();
-      }, 'ghost big'));
+    const cancel = btn(fromHome ? '촬영 취소' : '목록으로 돌아가기', () => {
+      stopCamera();
+      if (fromHome) go('#/home'); else render();
+    }, 'ghost big');
+    body.replaceChildren(steps, stage, progress, message, retry, preview,
+      h('div', { class: 'guest-scan-actions' }, restart, cancel));
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && active() && !busy && !decoded) retry.hidden = false;
     }, { signal: controller.signal });

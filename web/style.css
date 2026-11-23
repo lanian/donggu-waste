@@ -486,6 +486,8 @@ main.center > p { color: var(--muted); }
 .count { font-size: var(--t-xl); font-weight: 800; text-align: center; margin: 4px 0; }
 .guest-scanner [hidden] { display: none !important; }
 .guest-scanner .msg:empty { min-height: 0; margin: 0; }
+.guest-scan-actions { display: flex; gap: 6px; margin-top: 8px; }
+.guest-scan-actions .btn { flex: 1; min-width: 0; margin: 0; padding-inline: 6px; word-break: keep-all; }
 .guest-scan-steps { display: flex; gap: 6px; padding: 0; margin: 0 0 12px; list-style: none; }
 .guest-scan-steps li { flex: 1; padding: 7px 4px; text-align: center; line-height: 1.4; font-size: var(--t-sm);
   color: var(--muted); border-bottom: 3px solid var(--line-strong); }
