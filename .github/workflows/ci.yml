@@ -84,6 +84,7 @@ jobs:
       - run: python tests/test_privacy_write_guards.py
       - run: python tests/test_pc_device_revocation.py
       - run: python tests/test_guest_list.py
+      - run: python tests/test_guest_work.py
       - run: |
           python tests/test_pairing_relay.py
           python tests/test_pairing_pc.py
@@ -205,6 +206,8 @@ jobs:
           - test_send_team_visibility
           - test_guest_send_ui
           - test_guest_list_workflow
+          - test_guest_work_flow
+          - test_guest_work_mobile
           - test_guest_mobile_guards
           - test_collection_help_mobile
           - test_mobile_pc_input_help

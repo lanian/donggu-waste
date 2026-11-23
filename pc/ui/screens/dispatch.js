@@ -86,7 +86,7 @@ async function screenDispatch() {
   const crewHint = h('span', { class: 'muted small' });
   const syncCalc = () => { const none = ![...s.crews].some((id) => crews.some((c) => c.id === id)); calcBtn.disabled = none; crewHint.textContent = none ? '팀을 하나 이상 고르세요.' : ''; };
   const crewBox = h('div', { class: 'row crewpick' }, ...crews.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: s.crews.has(c.id), onchange: (e) => { e.target.checked ? s.crews.add(c.id) : s.crews.delete(c.id); requestSeq++; s.edit = null; syncCalc(); draw(); } }),
-    `${c.name} (${c.capacity_m3}m³${c.capacity_kg ? ` · ${Number(c.capacity_kg).toLocaleString()}kg` : ''}, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 휴대폰 미연결'})`)), crewHint);
+    `${c.name} (${c.capacity_m3}m³${c.capacity_kg ? ` · ${Number(c.capacity_kg).toLocaleString()}kg` : ''}, ${c.shift_start}~${c.shift_end}${c.device_id ? '' : ', 현장 업무 QR 사용'})`)), crewHint);
   const msg = h('p', { class: 'msg' });
   const planMsg = h('p', { class: 'msg' });
   const progress = h('nav', { class: 'dispatch-steps', 'aria-label': '배정 진행 단계' }, ...['대상 확인', '노선 조정', '배정 확정'].map((label, i) => h('span', {}, h('b', {}, i + 1), label)));

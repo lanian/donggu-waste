@@ -108,8 +108,10 @@ def open_new_phone(phone, mobile):
     phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
     phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
     phone.get_by_role("button", name="PIN 설정", exact=True).click()
-    phone.get_by_role("button", name="PC와 연결해서 사용", exact=True).click()
-    register = phone.locator(".next-action").get_by_role("button", name="기기 등록", exact=True)
+    phone.get_by_role("button", name="수거팀으로 시작", exact=True).click()
+    phone.get_by_role("link", name="설정", exact=True).click()
+    phone.locator("details.set-group.admin > summary").click()
+    register = phone.get_by_role("button", name="기기 등록", exact=True)
     expect(register).to_be_visible()
     return register
 

@@ -31,7 +31,7 @@ def _visits(daylist):
     return visits
 
 
-def issue(con, batch_id: str):
+def issue(con, batch_id: str, *, work_fields=None):
     if not isinstance(batch_id, str) or not 1 <= len(batch_id) <= 36:
         raise UserError("배차 목록을 선택해 주세요.")
     with tx(con):
@@ -42,13 +42,16 @@ def issue(con, batch_id: str):
         info = {"work_date": daylist["work_date"], "crew": daylist["crew"], "assign_ver": daylist["assign_ver"]}
         visits = _visits(daylist)
         detail = {"crew_id": batch["crew_id"], "work_date": info["work_date"], "count": len(visits)}
-        audit(con, "guest_list", batch_id, "ISSUE", detail)
+        entity = "guest_work_list" if work_fields else "guest_list"
+        audit(con, entity, batch_id, "ISSUE", detail)
         # 같은 배정 차수 안에서도 주소와 잔여 수량이 바뀐다. 이번 발급 이력의 순번으로 이전 QR을 구분한다.
         issue_no = con.execute(
-            "SELECT id FROM audit_log WHERE entity='guest_list' AND entity_id=? AND action='ISSUE' ORDER BY id DESC LIMIT 1",
-            (batch_id,),
+            "SELECT id FROM audit_log WHERE entity=? AND entity_id=? AND action='ISSUE' ORDER BY id DESC LIMIT 1",
+            (entity, batch_id),
         ).fetchone()[0]
         projection = {"schema": "dg.guest-list/1", **info, "crew_id": batch["crew_id"], "issue_no": issue_no, "stops": visits}
+        if work_fields:
+            projection.update(schema="dg.guest-work/1", **work_fields(con, daylist, batch, issue_no))
         plain = json.dumps(projection, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         size_error = "조회용 QR로 보내기에는 목록이 너무 큽니다. 배차표 인쇄를 이용해 주세요."
         if len(plain) > MAX_PLAINTEXT:
@@ -61,6 +64,7 @@ def issue(con, batch_id: str):
         if len(envelope) > CHUNK_SIZE * MAX_FRAMES:
             raise UserError(size_error)
         frames = ["DGV1." + frame for frame in dgproto.split_frames(envelope, bundle_id.bytes, CHUNK_SIZE)]
-        privacy.record_access(con, "EXPORT", batch_id, len(visits), "등록 없이 배차 목록 조회용 QR 발급")
+        purpose = "수거팀 현장 업무 QR 발급" if work_fields else "등록 없이 배차 목록 조회용 QR 발급"
+        privacy.record_access(con, "EXPORT", batch_id, len(visits), purpose)
     encoded_key = base64.urlsafe_b64encode(key).decode("ascii").rstrip("=")
     return {**info, "key_qr": context + ":" + encoded_key, "frames": frames, "count": len(visits)}

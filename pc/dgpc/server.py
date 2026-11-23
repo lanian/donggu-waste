@@ -41,7 +41,7 @@ import queue
 
 from . import area as A, assign as AS, backup as BK, dong_work as DW, external as X, finance as FN, followups as FU, geo, ops as OPS, osrm, privacy as PV, routing, service as S, store, users as U
 from .paths import resource_root
-from . import device_approval, guest_list
+from . import device_approval, guest_list, guest_work
 from . import numbered_labels as NL, label_auto as LA, official_forms as OF, operation_print as OP, pc_collection as PC, reports as RP, route_depots as DP, vworld as VW
 
 ROOT = resource_root()
@@ -1847,6 +1847,21 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             raise S.UserError("배차 목록을 선택해 주세요.")
         return guest_list.issue(self.c, body.get("batch_id"))
+
+    @endpoint("POST", "guest-work-lists", WORK)
+    def ep_guest_work_list(self, qs):
+        """기기 연결 없이 사용할 팀별 현장 업무 QR을 발급한다."""
+        return guest_work.issue(self.c, self.json_body())
+
+    @endpoint("POST", "guest-work-preview", WORK)
+    def ep_guest_work_preview(self, qs):
+        """수거팀의 현장 결과 파일과 현재 배차를 대조해 미리 본다."""
+        return guest_work.review(self.c, self.json_body(), self.user["user_id"])
+
+    @endpoint("POST", "guest-work-apply", WORK)
+    def ep_guest_work_apply(self, qs):
+        """담당자가 검토한 현장 결과를 현재 배차에 한 번 반영한다."""
+        return guest_work.review(self.c, self.json_body(), self.user["user_id"], apply=True)
 
     @endpoint("POST", "conflicts/{id}", WORK)
     def ep_conflict(self, qs, eid):

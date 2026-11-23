@@ -33,7 +33,7 @@ async function screenQrTest() {
   return h('div', {}, pagehead('QR 실측'),
     h('div', { class: 'card' }, h('p', { class: 'muted' }, '기관 휴대폰으로 QR 전송 시간과 인식률을 잽니다. 가상 자료만 쓰며 업무 자료에 섞이지 않습니다. 휴대폰은 [오늘 목록 받기]로 읽으면 "실측 모드"로 결과만 보여 주고 저장하지 않습니다.'),
       devs.length ? h('div', { class: 'row' }, lab('휴대폰', F.device), lab('건수', F.count), lab('주소 길이', F.addr), lab('조각 크기', F.chunk), lab('오류 복원', F.ec), lab('표시 속도', F.fps), btn('실측 QR 표시', run, 'primary'))
-        : h('p', { class: 'err' }, '설정에서 휴대폰을 먼저 등록하세요.'), msg),
+        : h('p', { class: 'err' }, '등록 기기 전송을 실측할 때는 설정에서 시험할 휴대폰을 선택하세요. 팀 배차는 목록 전송의 현장 업무 QR에서 시작합니다.'), msg),
     h('div', { class: 'card tablecard' }, sortable(h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ...['시각', '자료', '조건', '크기', '결과', '휴대폰 결과 입력'].map((x) => h('th', {}, x)))), tbody),
       { key: 'qrtest', cols: ['date', 'text', 'text', 'num', 'text', null] })),
     h('p', { class: 'muted' }, '휴대폰에 나온 시간·인식 횟수·확인 4자리를 입력하세요. 확인 4자리가 맞아야 전체 복원이 정확했다는 뜻입니다. 같은 조건을 10회 반복해 평균을 비교하세요.'));

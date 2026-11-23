@@ -65,17 +65,15 @@ function workflowCard(sum, batches, unassigned, pd, date) {
   const active = batches.filter((b) => b.status === 'ACTIVE');
   const receiptByBatch = new Map((sum.result_recovery || []).map((r) => [r.batch_id, r.receipt_status]));
   const receipt = (b) => receiptByBatch.get(b.id) || (!b.bundles[0] ? 'UNSENT' : b.bundles[0].receipt_confirmed_at ? 'CONFIRMED' : 'UNCONFIRMED');
-  const unsent = active.filter((b) => receipt(b) === 'UNSENT').length;
+  const unsent = active.filter((b) => !b.guest_work_issued && receipt(b) === 'UNSENT').length;
   const resend = active.filter((b) => receipt(b) !== 'UNSENT' && b.resend_needed).length;
   const unreceived = active.filter((b) => receipt(b) === 'UNCONFIRMED' && !b.resend_needed).length;
-  const disconnected = active.filter((b) => !b.device_id || !(boot.devices || []).some((d) => d.id === b.device_id && d.status === 'ACTIVE' && d.confirmed_at)).length;
+  const workIssued = active.filter((b) => b.guest_work_issued).length;
   const ended = afterWork(date), future = date > boot.today, closed = sum.closed;
   const approvalRequired = (sum.close_approval_required ?? boot.settings.close_approval_required) !== false;
   const awaitsReview = approvalRequired && closed?.approval_required !== false && closed?.status === 'RECORDED';
   const noResult = (sum.no_result || []).length, photos = sum.photos_missing || 0;
   const closeHref = `#/close?date=${date}`, dispatchHref = `#/dispatch?date=${date}`, sendHref = `#/send?date=${date}`;
-  const guestAvailable = office && !!disconnected && date >= boot.today;
-  const connectHelp = role === 'ADMIN' ? '지문을 확인하고 수거팀에 연결하세요.' : '운영 관리자에게 휴대폰 연결을 요청하세요.';
   const sendCounts = [resend && `재전송 ${resend}팀`, unsent && `미전송 ${unsent}팀`, unreceived && `수신 미확인 ${unreceived}팀`].filter(Boolean);
   const resultStatus = sum.conflicts ? `충돌 ${sum.conflicts}건 확인` : photos ? `사진 ${photos}장 미회수`
     : noResult ? (ended ? `결과 ${noResult}건 미회수` : '수거 진행 중') : (sum.by_status.DONE ? `수거 완료 ${sum.by_status.DONE}건 반영` : '수거 후 결과 확인');
@@ -84,12 +82,10 @@ function workflowCard(sum, batches, unassigned, pd, date) {
   const steps = [
     { key: 'intake', title: '접수', status: sum.total ? `접수 ${sum.total}건` : '접수 없음', detail: '전화·현장 접수를 확인합니다.', href: office ? '#/request/new' : '#/requests', link: office ? '접수 등록' : '접수 보기' },
     { key: 'dispatch', title: '배정', status: office && unassigned === null ? '미배정 확인 필요' : office && unassigned ? `미배정 ${unassigned}건` : active.length ? `${active.length}팀 배정` : '확정 배정 없음', detail: office ? '미배정 사유·방문 순서를 확인합니다.' : '접수 담당자가 배정합니다.', href: office ? dispatchHref : null, link: '배정·노선 보기' },
-    { key: 'send', title: '목록 전달', status: disconnected ? `휴대폰 연결 확인 ${disconnected}팀` : sendCounts.join(' · ') || (active.length ? `수신 확인 ${active.length}팀` : '배정 후 전달'),
-      detail: disconnected ? '휴대폰에서 결과까지 보내려면 ' + connectHelp : '등록폰의 R-수신 코드를 PC에 입력합니다.',
-      href: office ? (disconnected && role === 'ADMIN' ? '#/settings/crews' : sendHref) : null,
-      link: disconnected && role === 'ADMIN' ? '휴대폰 연결 확인' : guestAvailable ? '미등록폰 조회용 QR 보기' : '목록 전송 보기',
-      guestHref: guestAvailable && role === 'ADMIN' ? sendHref : null },
-    { key: 'results', title: '결과 확인', status: resultStatus, detail: '휴대폰 결과·사진을 가져오고 D/P 코드를 전달합니다.', href: resultsAllowed ? '#/results' : null, link: '결과 가져오기' },
+    { key: 'send', title: '목록 전달', status: [...sendCounts, workIssued && `현장 업무 QR 발급 ${workIssued}팀`].filter(Boolean).join(' · ') || (active.length ? `수신 확인 ${active.length}팀` : '배정 후 전달'),
+      detail: '수거팀에 현장 업무 QR을 보여 주세요. 등록 기기로 전달한 경우에는 수신 코드를 확인합니다.',
+      href: office ? sendHref : null, link: '목록 전송 보기' },
+    { key: 'results', title: '결과 확인', status: resultStatus, detail: '수거팀의 현장 업무 결과 파일을 열어 내역을 확인하고 반영합니다.', href: resultsAllowed ? '#/results' : null, link: '결과 가져오기' },
     { key: 'close', title: '마감', status: closeStatus, detail: closed ? '기록된 마감과 변경 내역을 확인합니다.' : `금액 확인 ${(sum.pending_fee || []).length}건 · 수납 확인 ${(sum.payments || []).length}건`, href: closeHref, link: '일일 마감 보기' },
   ];
   let next;
@@ -111,11 +107,8 @@ function workflowCard(sum, batches, unassigned, pd, date) {
     next = { key: 'dispatch', label: '미배정 현황 확인', href: dispatchHref, why: '미배정 건수를 불러오지 못했습니다. 배정 화면에서 선택일의 접수를 확인하세요.' };
   } else if (unassigned) {
     next = { key: 'dispatch', label: `미배정 ${unassigned}건 배정하기`, href: dispatchHref, why: '노선을 계산하거나 현재 배정에 추가한 뒤 확정하세요. 미배정 사유도 확인할 수 있습니다.' };
-  } else if (disconnected) {
-    next = { key: 'send', label: role === 'ADMIN' ? '휴대폰 연결 확인' : '목록 전송 확인', href: role === 'ADMIN' ? '#/settings/crews' : sendHref,
-      why: `휴대폰에서 현장 결과를 보낼 ${disconnected}팀은 기기 연결을 확인하세요.${guestAvailable ? ' 배차만 볼 때는 조회용 QR을 사용할 수 있습니다.' : ''}` };
   } else if (sendCounts.length) {
-    next = { key: 'send', label: '목록 전송으로 이어가기', href: sendHref, why: `${sendCounts.join(' · ')}. 최신 목록을 전달하고 휴대폰의 R-수신 코드로 확인하세요.` };
+    next = { key: 'send', label: '목록 전송으로 이어가기', href: sendHref, why: `${sendCounts.join(' · ')}. 팀의 현장 업무 QR을 보여 주거나 등록 기기로 목록을 전달하세요.` };
   } else if (photos || (ended && noResult)) {
     next = { key: 'results', label: '결과 가져오기', href: '#/results', why: '휴대폰에서 결과·사진 보내기를 마친 뒤 파일 또는 QR을 가져오세요. D/P 확인 코드도 전달하세요.' };
   } else if (!sum.total && !active.length) {
@@ -130,8 +123,7 @@ function workflowCard(sum, batches, unassigned, pd, date) {
     h('div', { class: 'workflow-next' }, h('div', {}, h('strong', {}, '다음 처리'), h('p', {}, next.why)), h('a', { class: 'workflow-primary', href: next.href }, next.label, ' →')),
     h('ol', { class: 'workflow-steps', 'aria-label': 'PC·휴대폰 업무 순서' }, ...steps.map((step, i) => h('li', { class: 'workflow-step' + (step.key === next.key ? ' current' : ''), 'data-step': step.key, 'aria-current': step.key === next.key ? 'step' : null },
       h('span', { class: 'workflow-number', 'aria-hidden': 'true' }, i + 1), h('h3', {}, step.title), h('strong', { class: 'workflow-state' }, step.status), h('p', {}, step.detail),
-      step.href ? h('a', { class: 'workflow-link', href: step.href }, step.link, ' →') : h('span', { class: 'workflow-owner' }, '담당자 처리'),
-      step.guestHref ? h('a', { class: 'workflow-link', href: step.guestHref }, '미등록폰 조회용 QR 보기 →') : null))));
+      step.href ? h('a', { class: 'workflow-link', href: step.href }, step.link, ' →') : h('span', { class: 'workflow-owner' }, '담당자 처리')))));
 }
 
 async function screenHome() {

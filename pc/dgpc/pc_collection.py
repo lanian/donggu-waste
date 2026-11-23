@@ -17,11 +17,15 @@ def revision(con, rid):
     return entry['version'] if entry else 0
 
 
-def preview(con, req):
+def basis(con, req):
     rid = req['id']
     events = C.rows(con, "SELECT event_id FROM result_event WHERE request_id=? AND apply_status='APPLIED' ORDER BY rowid", (rid,))
     active = C.one(con, 'SELECT batch_id FROM active_assignment WHERE request_id=?', (rid,))
-    basis = hashlib.sha256(json.dumps([req['req_ver'], req['status'], active, events], sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([req['req_ver'], req['status'], active, events], sort_keys=True).encode()).hexdigest()
+
+
+def preview(con, req):
+    rid = req['id']
     state = req.get('state') or derive(con, req)
     trace = collection.read_traces(con, [{'id': rid}])[rid]
     previous = {line['line_id']: line['qty_collected'] for line in trace['lines']}
@@ -32,10 +36,10 @@ def preview(con, req):
         lines.append({'line_id': line['line_id'], 'name': line['name'], 'spec': line['spec'], 'unit_label': line['unit_label'],
                       'received': line['qty_received'], 'unit_price': line['price'], 'confirmed': confirmed,
                       'previous': before, 'remaining': confirmed - before, 'kind': line['kind']})
-    return {'basis': basis, 'lines': lines, 'previous_total': sum(line['previous'] for line in lines)}
+    return {'basis': basis(con, req), 'lines': lines, 'previous_total': sum(line['previous'] for line in lines)}
 
 
-def save(con, rid, data):
+def save(con, rid, data, *, guest_entry=None):
     if not isinstance(data, dict):
         raise C.UserError('수거 입력 내용을 확인해 주세요.')
     with C.tx(con):
@@ -45,7 +49,9 @@ def save(con, rid, data):
         key = data.get('client_req_id')
         if not isinstance(key, str) or not key.strip() or len(key) > 80:
             raise C.UserError('수거 저장 요청 번호가 없습니다. 입력창을 다시 열어 주세요.')
-        return C.idempotent(con, C.ACTOR.get(), 'pc-collection/' + rid, key, lambda: _save(con, req, data))
+        # 현장 제출의 업무 기록 번호와 담당자 화면의 직접 입력 번호를 구분한다.
+        scope = 'guest-collection/' if guest_entry else 'pc-collection/'
+        return C.idempotent(con, C.ACTOR.get(), scope + rid, key, lambda: _save(con, req, data, guest_entry))
 
 
 def _quantity(value, label, minimum=0):
@@ -109,7 +115,7 @@ def _item_results(lines, items):
     return results
 
 
-def _save(con, req, data):
+def _save(con, req, data, guest_entry):
     from dgpc.intake import _snapshot
     from dgpc.results import _refresh_status
     rid = req['id']
@@ -163,7 +169,8 @@ def _save(con, req, data):
     counts = label_auto.sync(con, [rid])
     response = {'id': rid, 'req_ver': version, 'status': outcome, 'collected_on': day, 'added': total - current['previous_total'], 'total': total,
                 'labels_assigned': counts['new_assigned'], 'labels_pending': counts['pending']}
-    con.execute('UPDATE result_import SET summary_json=? WHERE id=?', (json.dumps({'source': 'PC', 'applied': sequence - first_sequence, **response}), imp))
+    origin = {'guest_entry': guest_entry} if guest_entry else {}
+    con.execute('UPDATE result_import SET summary_json=? WHERE id=?', (json.dumps({'source': 'PC', 'applied': sequence - first_sequence, **origin, **response}), imp))
     C.audit(con, 'request', rid, 'PC_COLLECTION', {**response, 'batch_id': batch['id'] if batch else None,
-                                                  'reason': reason.strip(), **C._after_close(con, rid)})
+                                                  **origin, 'reason': reason.strip(), **C._after_close(con, rid)})
     return response

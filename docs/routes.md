@@ -172,6 +172,9 @@
 | `bundles` | ✓ | ✓ |  |  |  | write |  |  | 휴대폰 목록 묶음 만들기. |
 | `bundles/{id}/receipt` | ✓ | ✓ |  |  |  | write |  |  | 휴대폰 수신 확인 코드. |
 | `guest-lists` | ✓ | ✓ |  |  |  | write |  |  | 등록하지 않은 휴대폰에서 조회할 배차 목록 QR을 발급한다. |
+| `guest-work-lists` | ✓ | ✓ |  |  |  | write |  |  | 기기 연결 없이 사용할 팀별 현장 업무 QR을 발급한다. |
+| `guest-work-preview` | ✓ | ✓ |  |  |  | write |  |  | 수거팀의 현장 결과 파일과 현재 배차를 대조해 미리 본다. |
+| `guest-work-apply` | ✓ | ✓ |  |  |  | write |  |  | 담당자가 검토한 현장 결과를 현재 배차에 한 번 반영한다. |
 | `conflicts/{id}` | ✓ | ✓ |  |  |  | write |  |  | 충돌 하나 처리. |
 | `pilot` | ✓ | ✓ |  |  |  | write |  |  | 시범 운영 비교 설정 저장. |
 | `close` | ✓ | ✓ |  |  |  | write |  |  | 마감 기록(담당자). |
@@ -217,4 +220,4 @@
 | `road-rules/apply` | ✓ |  |  |  |  | none |  |  | 검증한 도로망으로 전환하는 작업. |
 | `road-rules/rollback` | ✓ |  |  |  |  | none |  |  | 이전에 사용한 도로망으로 복원하는 작업. |
 
-경로 188개 (로그인 전 4개 제외).
+경로 191개 (로그인 전 4개 제외).

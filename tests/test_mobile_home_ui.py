@@ -41,7 +41,7 @@ def main():
             dates = seed(page)
             today = dates['today']
             record = stop(1, today)
-            pc_names = ['오늘 목록 받기', '결과 보내기', '+ 접수 등록', '날짜·접수 찾기', '하차 기록', '빠른 수수료 계산']  # 4단계: 하차 기록도 도구 묶음 안
+            pc_names = ['오늘 목록 받기', '결과 보내기', '+ 접수 등록', '날짜·접수 찾기', '하차 기록', '빠른 수수료 계산', '배차 QR로 현장 업무']
             solo_names = ['+ 접수 등록', '날짜·접수 찾기', '하차 기록', '빠른 수수료 계산', '백업·복원']  # 4단계: PC와 같은 이름·순서
             assert_tools(page, pc_names)
             for width in (360, 390, 430):

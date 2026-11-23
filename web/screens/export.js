@@ -40,6 +40,11 @@ async function buildPhotoBatch(candidates, checkView, seal) {
 async function screenExport() {
   await flushSteps();
   const pc = await S.getRaw('pc'), dev = await S.getRaw('device');
+  if (!pc || !dev) return h('main', {},
+    h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '결과 보내기')),
+    h('section', { class: 'card' }, h('p', {}, '현장 기록을 저장한 배차에서 결과 파일을 만들어 PC 담당자에게 전달하세요.'),
+      btn('배차와 현장 기록', () => go('#/guest-list'), 'primary big'),
+      st.events.length || st.intakeDraft ? btn('기존 기록 암호화 백업', () => go('#/backup'), 'big') : null));
   const targetState = st, targetList = st.daylist, targetHash = location.hash;
   let view, cleaning = false, makingPhotos = false, confirmingPhotos = false;
   const pending = unsent();  // 결과 파일에 담는 기록(D-코드 전 전부) — 전송 형식 그대로

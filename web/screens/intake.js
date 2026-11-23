@@ -368,8 +368,8 @@ function screenIntake(id) {
   }, 'ghost');
   view = h('main', { class: 'intake-form' },
     h('header', { class: 'bar' }, cancel, h('h1', { class: 'bar-title' }, fieldEdit ? `접수 고치기 ${editing.receipt_no}` : editing ? `접수 수정 ${editing.receipt_no}` : onField ? '접수 등록 (PC로 보냄)' : '전화 접수 등록')),
-    onField && !registeredNow ? h('section', { class: 'card callout warn' }, h('p', {}, '이 휴대폰은 아직 PC에 등록되지 않았습니다. 접수는 이 휴대폰에 저장되지만, 기기 등록을 마쳐야 [결과 보내기]로 PC에 보낼 수 있습니다.'),
-      btn('기기 등록', () => go('#/register'), 'ghost')) : null,
+    onField && !registeredNow ? h('section', { class: 'card callout warn' }, h('p', {}, '이 접수 양식은 등록 기기의 결과 파일에 포함됩니다. 팀 배차 QR로 일할 때는 [배차와 현장 기록]에서 현장 접수를 추가하세요.'),
+      btn('배차와 현장 기록', () => go('#/guest-list'), 'ghost')) : null,
     onField ? h('details', { class: 'callout info intake-intro' }, h('summary', {}, '휴대폰 저장 후 PC에 보내는 방법'),
       h('p', { class: 'small' }, '수거 중 주민이 새로 요청했거나 전화로 받은 건은 [결과 보내기]로 PC에 전달하세요. 사무실에서 주소와 품목을 확인하고 수수료를 다시 계산합니다. 표에 없는 품목은 확인 대기로 보냅니다.'),
       h('p', { class: 'small' }, '이미 받은 접수에 물건이 늘었으면 해당 지점에서 [+ 현장 품목 추가]를 누르세요.')) : null,

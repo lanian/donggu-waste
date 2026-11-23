@@ -100,7 +100,8 @@ def _recovery_visits(con, batch_ids):
             FROM origins)
         GROUP BY request_id,batch_id
     ), pc_entry AS (
-        SELECT v.request_id,v.batch_id,MAX(e.at) AS at
+        SELECT v.request_id,v.batch_id,MAX(e.at) AS at,
+            MAX(CASE WHEN json_type(e.detail,'$.guest_entry')='text' THEN e.at END) AS guest_at
         FROM visits v JOIN audit_log e ON e.entity_id=v.request_id AND e.entity='request' AND e.action='PC_COLLECTION'
         LEFT JOIN request_version prior ON prior.request_id=v.request_id AND prior.req_ver=json_extract(e.detail,'$.req_ver')-1
         WHERE json_extract(e.detail,'$.collected_on')=v.work_date AND (
@@ -113,7 +114,9 @@ def _recovery_visits(con, batch_ids):
             )
         ) GROUP BY v.request_id,v.batch_id
     )
-    SELECT v.request_id,v.batch_id,v.receipt_no,v.name,m.at AS mobile_at,p.at AS pc_at,m.uncertain
+    SELECT v.request_id,v.batch_id,v.receipt_no,v.name,
+        CASE WHEN p.guest_at IS NOT NULL AND (m.at IS NULL OR p.guest_at>m.at) THEN p.guest_at ELSE m.at END AS mobile_at,
+        p.at AS pc_at,m.uncertain
     FROM visits v LEFT JOIN mobile m ON m.request_id=v.request_id AND m.batch_id=v.batch_id
     LEFT JOIN pc_entry p ON p.request_id=v.request_id AND p.batch_id=v.batch_id
     WHERE m.at IS NOT NULL OR m.uncertain OR p.at IS NOT NULL OR v.active_batch_id=v.batch_id
@@ -125,7 +128,9 @@ def _recovery_visits(con, batch_ids):
 
 def _team_recovery(con, work_date, crew_id=None):
     batches = rows(con, """SELECT b.id AS batch_id,b.work_date,b.crew_id,c.name AS crew,b.assign_ver,
-        t.displayed_at AS sent_at,t.receipt_confirmed_at
+        t.displayed_at AS sent_at,t.receipt_confirmed_at,
+        (SELECT g.at FROM audit_log g WHERE g.entity_id=b.id AND g.entity='guest_work_list' AND g.action='ISSUE'
+            ORDER BY g.id DESC LIMIT 1) AS guest_issued_at
         FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
         LEFT JOIN transfer_bundle t ON t.id=(
             SELECT id FROM transfer_bundle WHERE batch_id=b.id AND device_id=c.device_id
@@ -145,7 +150,11 @@ def _team_recovery(con, work_date, crew_id=None):
         pc = sum(bool(v["pc_at"]) and not v["mobile_at"] for v in visits)
         last = max((at for v in visits for at in (v["mobile_at"], v["pc_at"]) if at), default=None)
         stage = "EMPTY" if not visits else "COMPLETE" if not waiting else "PARTIAL" if applied or pc else "WAITING"
-        receipt = "UNSENT" if not b["sent_at"] else "CONFIRMED" if b["receipt_confirmed_at"] else "UNCONFIRMED"
+        if b["sent_at"]:
+            receipt = "CONFIRMED" if b["receipt_confirmed_at"] else "UNCONFIRMED"
+        else:
+            receipt = "GUEST_ISSUED" if b["guest_issued_at"] else "UNSENT"
+            b["sent_at"] = b["guest_issued_at"]
         b.update(total=len(visits), applied=applied, pc=pc, missing=len(waiting),
                  uncertain=sum(bool(v["uncertain"]) for v in waiting), last_applied_at=last,
                  stage=stage, receipt_status=receipt)

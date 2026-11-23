@@ -504,6 +504,16 @@ def _strip_request_pii(kind: str, b: dict) -> dict:
     return b
 
 
+def field_intake_dong(con, address, chosen):
+    """현장에서 고른 동을 우선하고, 건물 단위 주소 자료가 있으면 그 행정동을 쓴다."""
+    detected = area.detect_dong(con, address)
+    if detected.get("source") == "ADDR" and detected.get("dong"):
+        return detected["dong"]
+    if chosen and area.get_dong(con, chosen):
+        return chosen
+    return detected.get("dong") or ""
+
+
 def _field_request(con, rid: str, b: dict, dev_id: str, device_ts: str | None = None) -> str:
     """휴대폰 현장 접수로 PC 원본 접수를 만든다(트랜잭션은 호출하는 쪽). 금액은 PC 수수료표로 다시 계산하고,
     PC 표에 없는 품목은 '확인 대기'로 둔다(0원·최저가로 두지 않음). 품목 행 ID는 휴대폰 것을 그대로 써서 현장 결과가 이어진다."""
@@ -531,11 +541,7 @@ def _field_request(con, rid: str, b: dict, dev_id: str, device_ts: str | None = 
     if _num(b.get("lat")) is not None and _num(b.get("lon")) is not None:
         data.update(lat=_num(b["lat"]), lon=_num(b["lon"]), geo_source="ADDR")
     dong_s = str(b.get("dong") or "").strip()[:20]
-    if dong_s and area.get_dong(con, dong_s):
-        data["dong"] = dong_s
-        det = area.detect_dong(con, data["address"])  # PC 주소 자료(건물 단위)로 정한 동이 다르면 그쪽을 쓴다(사무실 확인 대상)
-        if det.get("source") == "ADDR" and det.get("dong") and det["dong"] != dong_s:
-            data["dong"] = det["dong"]
+    data["dong"] = field_intake_dong(con, data["address"], dong_s)
     d = validate(data)
     built = build_items(items, con)
     for it in built:

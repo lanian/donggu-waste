@@ -355,6 +355,7 @@ def field_results(page, url):
     fresh(page, url, "#/results")
     expect(page.get_by_role("heading", name="휴대폰 화면 QR로 받기 (웹캠)", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="휴대폰 단독 방식 자료 옮기기 (.dgb)", exact=True)).to_have_count(0)
+    expect(page.get_by_role("region", name="현장 업무 결과 확인")).to_have_count(0)
     ok(True, "수거팀 결과 가져오기에는 단독 방식 옮기기 카드가 없다")
     fresh(page, url, "#/close")
     expect(page.get_by_role("button", name="하차 기록", exact=True)).to_be_visible()

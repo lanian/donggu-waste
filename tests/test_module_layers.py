@@ -26,7 +26,7 @@ LAYERS = [
     ["privacy", "pc_collection"],
     ["assign", "backup"],
     ["close", "reports", "guest_list"],
-    ["config"],
+    ["config", "guest_work"],
     ["addrsearch", "vworld"],
     ["dong_work"],
     ["followups"],

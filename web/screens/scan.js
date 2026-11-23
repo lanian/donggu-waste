@@ -243,7 +243,11 @@ async function screenScan() {
   if (!readyToSave) setTimeout(() => stillScanning() && startCamera(video, async (text) => {
     if (finishing || !stillScanning()) return;
     if (text.startsWith('DGVIEW1:') || text.startsWith('DGV1.')) {
-      say(msg, '미등록폰 조회용 QR입니다. [등록 없이 배차 목록 보기]에서 열쇠 QR부터 읽으세요.', true);
+      stopCamera();
+      say(msg, '팀 배차 QR입니다. 배차와 현장 기록에서 열쇠 QR부터 읽으세요.');
+      if (!msg.nextElementSibling?.classList.contains('guest-scan-link')) {
+        msg.after(btn('배차와 현장 기록 열기', () => go('#/guest-list'), 'primary guest-scan-link'));
+      }
       return;
     }
     let r;

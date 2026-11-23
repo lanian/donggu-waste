@@ -286,9 +286,13 @@ def pending(con, today: str | None = None) -> dict:
     r = S.one(con, f"SELECT COUNT(*) AS n, MIN(received_at) AS oldest FROM request WHERE {qs}", qa)
     out.append({"key": "nodate", "label": "예정일 없음", "count": r["n"], "oldest": S._kst_date(r["oldest"]), "link": "requests?quick=NODATE"})
     nr = []
-    for d in [x["work_date"] for x in S.rows(con, "SELECT DISTINCT work_date FROM transfer_bundle WHERE work_date BETWEEN ? AND ? ORDER BY work_date",
-                                              ((dt.date.fromisoformat(t) - dt.timedelta(days=7)).isoformat(), t))]:
-        nr += S.crews_without_result(con, d)
+    recent = S.rows(con, """SELECT DISTINCT b.work_date FROM assignment_batch b
+        WHERE b.status='ACTIVE' AND b.work_date BETWEEN ? AND ? AND (
+            EXISTS (SELECT 1 FROM transfer_bundle t WHERE t.batch_id=b.id AND t.displayed_at IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM audit_log g WHERE g.entity_id=b.id AND g.entity='guest_work_list' AND g.action='ISSUE')
+        ) ORDER BY b.work_date""", ((dt.date.fromisoformat(t) - dt.timedelta(days=7)).isoformat(), t))
+    for day in recent:
+        nr += S.crews_without_result(con, day["work_date"])
     out.append({"key": "no_result_crews", "label": "결과 미회수 팀(7일)", "count": len(nr), "oldest": min((x["work_date"] for x in nr), default=None),
                 "link": "import", "crews": nr[:20]})
     r = S.one(con, "SELECT COUNT(*) AS n, MIN(device_ts) AS oldest FROM result_event WHERE apply_status='CONFLICT'")
@@ -307,8 +311,9 @@ def readiness(con) -> dict:
     add("crews", "수거팀·차량(적재 용량) 등록", crews and all((c["capacity_m3"] or 0) > 0 for c in crews), "settings/crews",
         f"사용 중 팀 {len(crews)}개")
     devs = {d["id"]: d for d in S.rows(con, "SELECT id, status, confirmed_at FROM device")}
-    bad = [c["name"] for c in crews if not (c["device_id"] and S.device_ready(devs.get(c["device_id"])))]
-    add("devices", "휴대폰 지문 확인·팀 연결", crews and not bad, "settings/devices", ("연결·확인 필요: " + ", ".join(bad[:5])) if bad else "")
+    bad = [c["name"] for c in crews if c["device_id"] and not S.device_ready(devs.get(c["device_id"]))]
+    add("devices", "선택한 등록 기기 상태", not bad, "settings/devices",
+        ("선택한 기기 확인 필요: " + ", ".join(bad[:5])) if bad else "수거팀은 현장 업무 QR로 시작할 수 있습니다.")
     # 기본값을 None 으로 주어 읽는다 → 담당자가 저장한 적이 있는지(등록표 기본값은 동구청 부근)
     add("depot", "차고지 위치(기본값 아님)", S.get_setting(con, "depot", None) is not None, "settings/route")
     add("unload_site", "반입지 위치", S.get_setting(con, "unload_site") is not None, "settings/route")
@@ -409,13 +414,24 @@ def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dic
     if crew_id is not None:
         dev = (S.one(con, "SELECT device_id FROM crew WHERE id=?", (crew_id,)) or {}).get("device_id") or "-"
         dev_filter = " WHERE device_id=?"; args = [dev]
-    res = S.rows(con, f"""SELECT id, 'RESULT' AS kind, channel, device_id, imported_at, summary_json, release_code, phone_confirmed_at FROM result_import{dev_filter}
-        ORDER BY imported_at DESC LIMIT ?""", args + [limit])
+    # 담당자가 확인한 현장 수거는 직접 수거 이벤트도 만든다. 같은 내용을 아래의 팀별 제출 이력 한 번만 표시한다.
+    res = S.rows(con, """SELECT id, 'RESULT' AS kind, channel, device_id, imported_at, summary_json, release_code, phone_confirmed_at
+        FROM result_import WHERE json_extract(summary_json,'$.guest_entry') IS NULL"""
+        + (" AND device_id=?" if crew_id is not None else "") + " ORDER BY imported_at DESC LIMIT ?", args + [limit])
     phs = S.rows(con, f"""SELECT id, 'PHOTO' AS kind, 'USB' AS channel, device_id, imported_at, summary_json, release_code, phone_confirmed_at FROM photo_import{dev_filter}
         ORDER BY imported_at DESC LIMIT ?""", args + [limit])
     crews = {c["device_id"]: c["name"] for c in S.list_crews(con) if c["device_id"]}
     labels = {d["id"]: d["label"] for d in S.rows(con, "SELECT id, label FROM device")}
-    out = []
+    guest = S.rows(con, """SELECT g.entity_id AS id,g.at AS imported_at,b.crew_id,c.name AS crew,
+        json_extract(g.detail,'$.kind') AS kind,json_extract(g.detail,'$.record_id') AS record_id
+        FROM audit_log g JOIN assignment_batch b ON b.id=json_extract(g.detail,'$.batch_id') JOIN crew c ON c.id=b.crew_id
+        WHERE g.entity='guest_work' AND g.action='APPLY'""" + (" AND b.crew_id=?" if crew_id is not None else "")
+        + " ORDER BY g.id DESC LIMIT ?", ([crew_id] if crew_id is not None else []) + [limit])
+    count_for = {"collection":"applied", "intake":"field_intakes", "unload":"unloads_applied"}
+    out = [{"id":r["id"], "kind":"PC", "channel":"FILE", "device_id":None, "imported_at":r["imported_at"],
+            "crew":r["crew"], "device_label":None, "release_code":None, "photo_code":None,
+            "phone_confirmed":False, "phone_confirmed_by":None,
+            "counts":{"guest_entry":r["id"], "record_id":r["record_id"], count_for[r["kind"]]:1}} for r in guest]
     for r in sorted(res + phs, key=lambda x: x["imported_at"], reverse=True)[:limit]:
         counts = json.loads(r.pop("summary_json") or "{}")
         if r["kind"] == "RESULT" and counts.get("source") == "SOLO":
@@ -432,7 +448,7 @@ def recent_imports(con, limit: int = 30, crew_id: str | None = None) -> list[dic
         out.append({**r, "counts": counts, "crew": crews.get(r["device_id"]), "device_label": labels.get(r["device_id"]),
                     "release_code": r["release_code"], "photo_code": r["release_code"] if r["kind"] == "PHOTO" else None,
                     "phone_confirmed": bool(r["phone_confirmed_at"] or auto), "phone_confirmed_by": "MANUAL" if r["phone_confirmed_at"] else ("DAYLIST" if auto else None)})
-    return out
+    return sorted(out, key=lambda x: x["imported_at"], reverse=True)[:limit]
 
 
 def _rel_covered(con, import_id: str, device_id: str, imported_at: str):

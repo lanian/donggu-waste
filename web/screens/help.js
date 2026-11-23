@@ -1,4 +1,5 @@
 // 휴대폰 화면: 도움말 — 사용 방식마다 한 장(PC 연결 방식 HELP_PC, 단독 방식 HELP_SOLO). 같은 일은 같은 이름으로 적는다.
+import { getRaw } from '../store.js';
 import { backBtn, h, isSolo, tabBar } from '../core.js';
 
 const ONE_STOP = ['한 지점', ['📍 도착 → 전화·문자로 연락 결과를 고릅니다.', '실은 수량을 맞춥니다. 현장 수량보다 더 실었으면 [+]를 한 번 더 눌러 새 수량을 적으세요. 없는 품목은 [+ 현장 품목 추가].', '금액이 늘면 [추가 금액 안내 기록]으로 주민 안내 결과를 남깁니다.', '📷 수거 전·후 사진을 찍습니다(앱 안에만 암호화 저장).', '[전부 실음 · 수거 완료] 또는 일부 수거·미수거·보류. 스티커·필증 상태를 남길 때만 [스티커·필증 기록 (선택)]을 펴세요.', '아래 [다음 N번 ▶]·[N번 길안내]로 넘어갑니다.']];
@@ -19,12 +20,18 @@ const HELP_SOLO = [
   CAUTION,
 ];
 const HELP = HELP_PC;  // 예전 이름(PC 연결 방식 도움말)
-function screenHelp() {
+async function screenHelp() {
   const solo = isSolo();
+  const paired = !solo && !!await getRaw('pc') && !!await getRaw('device');
+  const team = ['현장 업무 QR로 수거하기', [
+    '홈에서 배차 QR로 업무 시작을 누르고 PC의 열쇠 QR과 목록 QR을 차례로 읽습니다.',
+    '방문할 곳에서 실제 품목과 수량을 확인하고 수거 결과를 저장합니다. 새 요청은 현장 접수 추가에서, 반입할 때마다 하차 기록 추가에서 기록합니다.',
+    '결과 파일을 저장해 PC 담당자에게 전달합니다. 담당자가 결과 가져오기에서 파일을 열어 확인한 뒤 반영합니다.',
+  ]];
   return h('main', { class: 'with-tabs help' },
     h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '현장 처리 순서')),
-    ...(solo ? HELP_SOLO : HELP_PC).map(([t, lines]) => h('section', { class: 'card' }, h('h2', {}, t), h('ol', { class: 'help-list' }, ...lines.map((x) => h('li', {}, x))))),
-    solo ? null : h('p', { class: 'small' }, '코드 세 가지: 수신 코드 R-(휴대폰 → PC) · 결과 반영 코드 D-(PC → 휴대폰) · 사진 회수 코드 P-(PC → 휴대폰).'),
+    ...(solo ? HELP_SOLO : paired ? [team, ...HELP_PC] : [team, CAUTION]).map(([t, lines]) => h('section', { class: 'card' }, h('h2', {}, t), h('ol', { class: 'help-list' }, ...lines.map((x) => h('li', {}, x))))),
+    !paired ? null : h('p', { class: 'small' }, '코드 세 가지: 수신 코드 R-(휴대폰 → PC) · 결과 반영 코드 D-(PC → 휴대폰) · 사진 회수 코드 P-(PC → 휴대폰).'),
     tabBar('set'));
 }
 

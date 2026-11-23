@@ -3,6 +3,7 @@ import { Collector } from '/web/proto.js';
 import { CONTACT, NOTICE, NO_PHOTO, REASON, SMS_T, STATUS, STICKER, api, boot, btn, can, cell, chip, fmtPhone, grid, h, kst, pagehead, post, promptDlg, sessionOwner, sortable, statusChip, toast, wrap } from '../core.js';
 import { loadJsQR } from '../widgets.js';
 import { refreshBadges } from './home.js';
+import { guestWorkCard } from './guest-work.js';
 
 // 확인 코드 표시 (휴대폰과 같은 이름·앞 글자): 수신 코드 R- (휴대폰 → PC), 결과 반영 코드 D-, 사진 회수 코드 P- (PC → 휴대폰)
 const CODE_NAME = { R: '수신 코드', D: '결과 반영 코드', P: '사진 회수 코드' };
@@ -108,8 +109,10 @@ async function screenResults() {
   const recentBody = h('tbody');
   const loadRecent = wrap(async () => {
     recent = await api('imports/recent?limit=30');
-    recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, cell(kst(x.imported_at), x.imported_at, 'nowrap'), h('td', {}, IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
-      h('td', {}, x.crew || h('span', { class: 'muted' }, '(팀 없음)'), h('span', { class: 'muted small block' }, x.device_label || (x.device_id || '').slice(0, 8))),
+    recentBody.replaceChildren(...(recent.length ? recent.map((x) => h('tr', { 'data-import': x.id }, cell(kst(x.imported_at), x.imported_at, 'nowrap'),
+      h('td', {}, x.counts?.guest_entry ? '현장 결과 · 담당자 확인' : IMP_KIND[x.kind] || x.kind, x.channel === 'QR' ? chip('웹캠 QR', 'info') : null),
+      h('td', {}, x.crew || h('span', { class: 'muted' }, '(팀 없음)'),
+        x.counts?.guest_entry ? null : h('span', { class: 'muted small block' }, x.device_label || (x.device_id || '').slice(0, 8))),
       h('td', {}, impSummary(x.counts), canReviewField && x.kind === 'RESULT' ? btn('현장 내용 확인', (e) => {
         const cell = e.currentTarget.parentElement;
         const previous = cell.querySelector('.field-review');
@@ -188,6 +191,7 @@ async function screenResults() {
   const field = boot.me.role === 'FIELD';  // 수거팀 계정은 충돌함을 보지 않는다(사무실 판단)
   loadRecent().then(() => { fill(); if (!field) loadConf(); });
   screen.append(h('div', {}, pagehead('결과 가져오기', field ? null : h('a', { href: '#conflicts', class: 'small', onclick: (e) => { e.preventDefault(); conf.scrollIntoView(); } }, '충돌함으로 ↓')),
+    can('work') ? guestWorkCard(active, () => { loadRecent().then(fill); refreshBadges(true); }) : null,
     h('div', { class: 'card' }, h('h2', {}, '결과·사진 파일 넣기'), drop,
       h('p', { class: 'muted small' }, '결과 파일은 업무 메일 첨부, 사진 파일은 승인된 보안 매체로 받습니다. 같은 파일을 여러 번 넣어도 한 번만 반영됩니다.')),
     runCard,

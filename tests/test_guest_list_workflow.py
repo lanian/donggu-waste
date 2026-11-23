@@ -19,6 +19,48 @@ def send_camera_image(phone, image):
     }""", src)
 
 
+def open_scanner(phone, pwa):
+    phone.goto(pwa)
+    phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
+    phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
+    phone.get_by_role("button", name="PIN 설정", exact=True).click()
+    phone.get_by_role("button", name="수거팀으로 시작", exact=True).click()
+    entry = phone.get_by_role("button", name="배차 QR로 업무 시작", exact=True)
+    expect(entry).to_be_visible()
+    phone.evaluate("""() => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 820;
+        window.cameraCanvas = canvas;
+        navigator.mediaDevices.getUserMedia = async () => {
+            const stream = canvas.captureStream(15);
+            const track = stream.getVideoTracks()[0];
+            const redraw = () => {
+                if (track.readyState === 'ended') return;
+                canvas.getContext('2d').fillRect(0, 0, 1, 1);
+                setTimeout(redraw, 100);
+            };
+            redraw(); return stream;
+        };
+    }""")
+    entry.click()
+    expect(phone).to_have_url(pwa + "#/guest-list")
+    phone.get_by_role("button", name="배차 QR 읽기", exact=True).click()
+
+
+def assign_visit(pc, office):
+    api(pc, office, "setup", {"username": "guest_fixture", "display_name": "가상 담당자",
+                              "password": "guest-list-fixture-password"})
+    day = api(pc, office, "bootstrap")["today"]
+    crew = api(pc, office, "crews", {"name": "가상 방문팀", "capacity_m3": 12})["id"]
+    fee = next(r for r in json.loads((ROOT / "data/fee_table.json").read_text(encoding="utf8"))["rows"]
+               if r["status"] == "CONFIRMED" and r["price"] > 0)
+    address = "가상구 시험로 123"
+    req = api(pc, office, "requests", {"name": "가상 비공개 신청인", "address": address,
+        "phone": "01000001234", "memo": "시험용 비공개 메모", "planned_date": day,
+        "lat": 35.146, "lon": 126.922, "items": [{"fee_rate_id": fee["id"], "qty": 3}]})
+    api(pc, office, "assign", {"date": day, "plan": {crew: [{"request_id": req["id"]}]}})
+    return day, crew, req, fee, address
+
+
 def main():
     with mobile_server() as pwa, pc_server() as office, sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.environ.get("CHROME") or pw.chromium.executable_path)
@@ -26,41 +68,9 @@ def main():
         pc = browser.new_context()
         try:
             phone = phone_ctx.new_page()
-            phone.goto(pwa)
-            phone.get_by_placeholder("숫자 6자리 이상").fill(PIN)
-            phone.get_by_placeholder("한 번 더", exact=True).fill(PIN)
-            phone.get_by_role("button", name="PIN 설정", exact=True).click()
-            entry = phone.get_by_role("button", name="등록 없이 배차 목록 보기", exact=True)
-            expect(entry).to_be_visible()
-            phone.evaluate("""() => {
-                const canvas = document.createElement('canvas'); canvas.width = canvas.height = 820;
-                window.cameraCanvas = canvas;
-                navigator.mediaDevices.getUserMedia = async () => {
-                    const stream = canvas.captureStream(15);
-                    const track = stream.getVideoTracks()[0];
-                    const redraw = () => {
-                        if (track.readyState === 'ended') return;
-                        canvas.getContext('2d').fillRect(0, 0, 1, 1);
-                        setTimeout(redraw, 100);
-                    };
-                    redraw(); return stream;
-                };
-            }""")
-            entry.click()
-            expect(phone).to_have_url(pwa + "#/guest-list")
-            phone.get_by_role("button", name="조회용 QR 읽기", exact=True).click()
+            open_scanner(phone, pwa)
 
-            api(pc, office, "setup", {"username": "guest_fixture", "display_name": "가상 담당자",
-                                      "password": "guest-list-fixture-password"})
-            day = api(pc, office, "bootstrap")["today"]
-            crew = api(pc, office, "crews", {"name": "가상 방문팀", "capacity_m3": 12})["id"]
-            fee = next(r for r in json.loads((ROOT / "data/fee_table.json").read_text(encoding="utf8"))["rows"]
-                       if r["status"] == "CONFIRMED" and r["price"] > 0)
-            address = "가상구 시험로 123"
-            req = api(pc, office, "requests", {"name": "가상 비공개 신청인", "address": address,
-                "phone": "01000001234", "memo": "시험용 비공개 메모", "planned_date": day,
-                "lat": 35.146, "lon": 126.922, "items": [{"fee_rate_id": fee["id"], "qty": 3}]})
-            api(pc, office, "assign", {"date": day, "plan": {crew: [{"request_id": req["id"]}]}})
+            day, crew, req, fee, address = assign_visit(pc, office)
             desk = pc.new_page()
             desk.goto(office + "#/send?date=" + day)
             desk.get_by_role("button", name="미등록폰 조회용 QR", exact=True).click()
@@ -94,7 +104,7 @@ def main():
             phone.get_by_label("PIN", exact=True).fill(PIN)
             phone.get_by_role("button", name="잠금 해제").click()
             if phone.url.endswith("#/home"):
-                phone.get_by_role("button", name="등록 없이 배차 목록 보기", exact=True).first.click()
+                phone.get_by_role("button", name="받은 배차 목록 열기", exact=True).click()
             expect(phone.get_by_text(address, exact=False).first).to_be_visible()
             saved = phone.evaluate("import('./store.js').then(S => S.getSecure('guestList'))")
             phone.get_by_role("button", name="목록 지우기", exact=True).click()
@@ -114,7 +124,7 @@ def main():
             }""", saved)
             phone.get_by_label("PIN", exact=True).fill(PIN)
             phone.get_by_role("button", name="잠금 해제").click()
-            expect(phone.get_by_role("button", name="등록 없이 배차 목록 보기", exact=True)).to_be_visible()
+            expect(phone.get_by_role("button", name="배차 QR로 업무 시작", exact=True)).to_be_visible()
             assert phone.evaluate("import('./store.js').then(S => S.getSecure('guestList'))") is None
             print("미등록폰 PC QR 판독, 비공개 필드 제외, 등록·업무 기록 분리, 오프라인 재열람, 삭제·만료 통과")
         finally:

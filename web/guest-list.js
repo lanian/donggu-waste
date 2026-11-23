@@ -22,8 +22,11 @@ function realDate(s) {
 }
 export function validateGuestList(list) {
   const bad = () => { throw new Error('조회용 배차 목록 형식이 맞지 않습니다. PC에서 새 QR을 발급해 주세요.'); };
-  if (!fields(list, ['schema', 'work_date', 'crew', 'crew_id', 'assign_ver', 'issue_no', 'stops']) ||
-      list.schema !== 'dg.guest-list/1' || !realDate(list.work_date) || !named(list.crew) || !named(list.crew_id) ||
+  const work = list?.schema === 'dg.guest-work/1';
+  const names = ['schema', 'work_date', 'crew', 'crew_id', 'assign_ver', 'issue_no', 'stops'];
+  if (work) names.push('ticket', 'return_key');
+  if (!fields(list, names) || (work ? (!named(list.ticket) || !text(list.return_key) || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(list.return_key)) :
+      list.schema !== 'dg.guest-list/1') || !realDate(list.work_date) || !named(list.crew) || !named(list.crew_id) ||
       !positive(list.assign_ver) || !positive(list.issue_no) || !Array.isArray(list.stops)) bad();
   let previous = 0;
   for (const stop of list.stops) {

@@ -251,11 +251,11 @@ def mobile_workflow_regressions(browser, shots):
                "PC 새 기기의 다음 행동은 '오늘 목록 받기'(자주 쓰는 기능과 같은 이름, 주 단추는 지금 할 일 하나)")
 
             seed(page, registered=False)
-            action(page, "기기 등록").click()
-            expect(page).to_have_url(url + "#/register")
+            action(page, "배차 QR로 업무 시작").click()
+            expect(page).to_have_url(url + "#/guest-list")
             go_home(page)
-            ok(page.get_by_role("button", name="+ 접수 등록", exact=True).is_enabled(),
-               "미등록 기기는 등록 안내로 이동하고 현장·전화 접수는 계속 허용")
+            ok(page.get_by_role("button", name="배차 QR로 업무 시작", exact=True).is_enabled(),
+               "개인폰은 배차 QR로 바로 업무를 시작할 수 있다")
 
             stops = [stop(1, today), stop(2, today, dong="가상2동", address="가상시 가상2동 시험길 2")]
             seed(page, {"daylist": daylist(today, stops), "events": [event(1, "CONTACT", result="REACHED")],

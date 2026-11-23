@@ -2354,8 +2354,8 @@ def v13():
 
     # 22. 운영 준비 점검
     rd1 = {x["key"]: x for x in OPS.readiness(con)["items"]}
-    ok(not rd1["depot"]["ok"] and not rd1["devices"]["ok"] and not rd1["backup_key"]["ok"] and not rd1["contact"]["ok"] and rd1["admin_password"]["ok"] is False
-       and len(rd1) == 10 and not rd1["fee"]["ok"], "운영 준비: 차고지 기본값·팀2 휴대폰 없음·백업 키 없음·문의처 기본 문구 → 고칠 곳 표시")
+    ok(not rd1["depot"]["ok"] and rd1["devices"]["ok"] and not rd1["backup_key"]["ok"] and not rd1["contact"]["ok"] and rd1["admin_password"]["ok"] is False
+       and len(rd1) == 10 and not rd1["fee"]["ok"], "운영 준비: 차고지 기본값·휴대폰 연결은 선택·백업 키 없음·문의처 기본 문구 → 고칠 곳 표시")
     S.save_settings(con, {"depot": {"lat": 35.14, "lon": 126.92, "label": "가상 차고지"}, "contact_info": "가상 청소과 000-0000"})
     rd2 = {x["key"]: x for x in OPS.readiness(con)["items"]}
     ok(rd2["depot"]["ok"] and rd2["contact"]["ok"] and rd2["depot"]["fix"] == "settings/route", "설정하면 그 항목 통과")
@@ -2707,7 +2707,7 @@ def v13_refactor():
         ("POST", ("route-path",), ("ADMIN", "INTAKE", "FIELD", "LEAD")),
         ("GET", ("road-rules", "road-rules/roads"), ("ADMIN",)),
         ("POST", ("road-rules/preview", "road-rules/apply", "road-rules/rollback"), ("ADMIN",)),
-        ("POST", ("guest-lists",), ("ADMIN", "INTAKE")),  # 미등록폰 조회용 배차 발급
+        ("POST", ("guest-lists", "guest-work-lists", "guest-work-preview", "guest-work-apply"), ("ADMIN", "INTAKE")),  # 미등록폰 조회용 배차 발급
     ):
         snap.extend({"method": method, "path": path, "roles": roles, "must_change_ok": False} for path in paths)
     self_routes = {("GET", "bootstrap"), ("GET", "me"), ("POST", "prefs"), ("POST", "password")}

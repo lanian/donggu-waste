@@ -493,9 +493,9 @@ def back_and_tabs(browser, url):
         ok(True, "설정 → 기기 등록: [← 설정]으로 설정에 돌아감")
         seed_pc(page)
         seed(page, registered=False)
-        page.locator(".next-action").get_by_role("button", name="기기 등록", exact=True).click()
+        page.locator(".next-action").get_by_role("button", name="배차 QR로 업무 시작", exact=True).click()
         expect(page.locator("main > .bar").get_by_role("button", name="← 목록", exact=True)).to_have_count(1)
-        ok(True, "목록 → 기기 등록: [← 목록]")
+        ok(True, "목록 → 배차와 현장 기록: [← 목록]")
         # 찾기 → 상세 → ← 찾기
         seed_pc(page)
         route(page, "#/find")

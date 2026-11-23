@@ -1,8 +1,14 @@
 import { GuestScan, guestUpdate } from '../guest-list.js';
 import * as S from '../store.js';
+import { guestWorkControls } from './guest-work.js';
 import { backBtn, btn, h, msgBox, onLock, render, say, sheet, st, startCamera, stopCamera, toast, todayKST } from '../core.js';
 
 const STORE = 'guestList';
+const WORK = 'guestWorkJournal';
+export async function pendingGuestRecords() {
+  const groups = await S.getSecure(WORK) || [];
+  return groups.reduce((count, group) => count + (group.closed ? 0 : group.entries.length + Number(!!group.draft)), 0);
+}
 const write = (value) => S.putSecure(STORE, value, { recoverOnFailure: false });
 let pending = Promise.resolve();
 
@@ -51,7 +57,8 @@ export async function screenGuestList() {
   const view = h('main'), body = h('section', { class: 'card' });
   const controller = new AbortController();
   const scan = new GuestScan();
-  const alive = () => !controller.signal.aborted && st === owner && S.isUnlocked() && location.hash === route;
+  const sameSession = () => st === owner && S.isUnlocked();
+  const alive = () => !controller.signal.aborted && sameSession() && location.hash === route;
   const shown = () => alive() && view.isConnected;
   let dayTimer, saved = null, decoded = null;
   leaveView = () => {
@@ -60,10 +67,17 @@ export async function screenGuestList() {
     scan.clear(); saved = null; decoded = null;
     body.replaceChildren(); view.replaceChildren();
   };
-  const stored = await loadGuestList();
+  const [stored, groups] = await withStore(async () => {
+    const today = todayKST();
+    const list = await readCurrent(today);
+    const all = await S.getSecure(WORK) || [];
+    const kept = all.filter(g => !g.closed || g.work_date >= today);
+    if (kept.length !== all.length) await S.putSecure(WORK, kept, {recoverOnFailure:false});
+    return [list, kept];
+  });
   if (!alive()) return view;
   saved = stored;
-  view.append(h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '배차 목록 조회')), body);
+  view.append(h('header', { class: 'bar' }, backBtn(), h('h1', { class: 'bar-title' }, '배차와 현장 기록')), body);
   const onNewDay = () => {
     if (shown() && saved && saved.work_date < todayKST()) { view.replaceChildren(); render(); }
     else if (alive() && saved) scheduleDayCheck();
@@ -78,22 +92,53 @@ export async function screenGuestList() {
     title, text, choices: [{ label, value: true, cls }], signal: controller.signal,
   })) === true && shown();
 
+  const updateWork = (ticket, change, transfer = '') => withStore(async () => {
+    if (!sameSession()) throw new Error('화면을 다시 열어 기록을 확인하세요.');
+    const disk = await S.getSecure(WORK) || [];
+    const index = disk.findIndex(g=>g.ticket === ticket);
+    const observed = groups.find(g=>g.ticket === ticket);
+    const target = disk[index];
+    // 전달 완료/취소는 시도 ID로 자기 예약만 처리한다. 다른 창에서 먼저 끝낼 수도 있다.
+    if ((transfer !== 'settle' && (target?.revision || 0) !== (observed?.revision || 0)) || target?.closed || (observed && !target))
+      throw new Error('다른 창에서 현장 기록이 바뀌었습니다. 배차 화면을 다시 열어 확인하세요.');
+    if (!transfer && target?.delivery) throw new Error('파일 전달이 진행 중입니다. 같은 결과 파일을 저장한 뒤 계속하세요.');
+    let group = target;
+    if (!group) {
+      const current = await S.getSecure(STORE);
+      if (!current || current.ticket !== ticket || current.work_date < todayKST()) throw changed();
+      group = {ticket, return_key:current.return_key, crew:current.crew, work_date:current.work_date,
+        issue_no:current.issue_no, entries:[], draft:null, exported:0, revision:0};
+    }
+    if (change(group) === false) return;
+    group.revision++;
+    if (index < 0) disk.push(group);
+    if (!sameSession()) throw new Error('화면을 다시 열어 기록을 확인하세요.');
+    await S.putSecure(WORK,disk,{recoverOnFailure:false});
+    if (observed) groups.splice(groups.indexOf(observed),1,group);
+    else groups.push(group);
+  });
+
   function showList() {
     scan.clear(); decoded = null;
     const message = msgBox();
+    const work = saved?.schema === 'dg.guest-work/1';
+    const controls = guestWorkControls({list:saved,groups,update:updateWork,body,active:shown,finish:showList,confirm});
     body.replaceChildren(...(saved ? [
       h('h2', {}, titleOf(saved)),
-      h('p', { class: 'small' }, '조회 전용 · ' + saved.assign_ver + '차 배차 · 방문 ' + saved.stops.length + '곳'),
+      h('p', { class: 'small' }, (work ? '현장 업무 · ' : '조회 전용 · ') + saved.assign_ver + '차 배차 · 방문 ' + saved.stops.length + '곳'),
+      controls.actions,
       saved.stops.length ? h('ol', { class: 'stops', 'aria-label': '방문 순서' }, ...saved.stops.map((stop) =>
         h('li', { class: 'card', value: stop.seq },
           h('h3', {}, stop.seq + '번 · ' + (stop.address || stop.dong || '주소 미입력')),
           stop.dong && stop.address ? h('p', { class: 'small' }, stop.dong) : null,
-          ...stop.items.map((item) => h('p', {}, [item.name, item.spec, item.qty + item.unit].filter(Boolean).join(' · ')))))) :
+          ...stop.items.map((item) => h('p', {}, [item.name, item.spec, item.qty + item.unit].filter(Boolean).join(' · '))),
+          controls.stopAction(stop)))) :
         h('p', {}, '이번 배차에는 방문할 수거지가 없습니다.'),
-    ] : [h('p', {}, '받은 배차 목록이 없습니다. PC의 목록 전송 화면에서 조회용 QR을 여세요.')]),
-    btn('조회용 QR 읽기', showScanner, 'primary big'),
+    ].filter(Boolean) : [h('p', {}, '받은 배차 목록이 없습니다. PC의 목록 전송 화면에서 배차 QR을 여세요.')]),
+    ...controls.logs,
+    btn('배차 QR 읽기', showScanner, 'primary big'),
     ...(saved ? [btn('목록 지우기', async () => {
-      if (!await confirm('조회 목록을 지울까요?', titleOf(saved) + ' 배차를 이 휴대폰에서 지웁니다.', '지우기', 'danger')) return;
+      if (!await confirm('조회 목록을 지울까요?', titleOf(saved) + ' 배차를 이 휴대폰에서 지웁니다.' + (work ? ' 저장한 현장 기록과 초안은 별도로 보관됩니다.' : ''), '지우기', 'danger')) return;
       try {
         await withStore(async () => {
           const current = await S.getSecure(STORE);
@@ -116,7 +161,7 @@ export async function screenGuestList() {
       stage.classList.toggle('key-read', hasKey);
       label.textContent = hasKey ? '2단계 · 목록 QR' : '1단계 · 열쇠 QR';
       headline.textContent = hasKey ? '열쇠 읽음' : '열쇠 QR을 비추세요';
-      hint.textContent = hasKey ? 'PC에서 [목록 QR 표시]를 누르세요.' : 'PC의 [미등록폰 조회용 QR]에서 시작하세요.';
+      hint.textContent = hasKey ? 'PC에서 [목록 QR 표시]를 누르세요.' : 'PC의 목록 전송 화면에서 배차 QR을 여세요.';
     }
     const message = msgBox(), retry = btn('카메라 다시 열기', () => decoded ? save() : camera(), 'big', { hidden: true });
     const active = () => shown() && body.contains(video);
@@ -152,7 +197,7 @@ export async function screenGuestList() {
           if (!sameIssue(latest, current)) throw changed();
           if (guestUpdate(latest, decoded, todayKST()) !== 'duplicate') await write(decoded);
         });
-        if (active()) { toast(choice === 'duplicate' ? '이미 받은 조회 목록입니다' : '조회 목록을 저장했습니다'); render(); }
+        if (active()) { toast(choice === 'duplicate' ? '이미 받은 배차 목록입니다' : '배차 목록을 저장했습니다'); render(); }
       } catch (e) {
         if (active()) {
           say(message, readableError(e), true);

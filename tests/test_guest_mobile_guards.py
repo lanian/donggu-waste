@@ -32,7 +32,7 @@ def guest_qr(payload):
 
 def scan(page, payload):
     page.evaluate("frames => { window.guestFrames = frames; }", guest_qr(payload))
-    page.get_by_role("button", name="조회용 QR 읽기", exact=True).click()
+    page.get_by_role("button", name="배차 QR 읽기", exact=True).click()
 
 
 def main():

@@ -156,9 +156,9 @@ def home_one_action(browser, url):
 
         # 기기 미등록: 같은 내용을 되풀이하는 등록 카드 없음
         seed(page, {"daylist": daylist(today, records)}, registered=False)
-        expect(page.locator(".next-action .btn.primary")).to_have_text("기기 등록")
+        expect(page.locator(".next-action .btn.primary")).to_have_text("배차 QR로 업무 시작")
         ok(page.get_by_text("먼저 관리자와 함께 기기 등록을 해 주세요.").count() == 0 and len(visible_primaries(page)) == 1,
-           "기기 미등록: 지금 할 일 [기기 등록] 하나, 별도 등록 카드 없음")
+           "기기 미등록: 지금 할 일 [배차 QR로 업무 시작] 하나, 별도 등록 카드 없음")
 
         # 지난 날짜 목록 띠·대기 사진 띠도 주 단추를 늘리지 않음
         yesterday = page.evaluate("async () => (await import('./core.js')).todayKST(-1)")
@@ -248,8 +248,8 @@ def outbox_terms(browser, url):
         expect(page.locator(".next-action .btn.primary")).to_have_text("오늘 목록 받기")
         ok(True, "목록이 없으면 [배정 목록 수신] → [오늘 목록 받기]")
         seed(page, registered=False)
-        expect(page.locator(".next-action .btn.primary")).to_have_text("기기 등록")
-        ok(True, "미등록이면 [PC 연결 등록하기] → [기기 등록]")
+        expect(page.locator(".next-action .btn.primary")).to_have_text("배차 QR로 업무 시작")
+        ok(True, "개인폰은 배차 QR로 시작")
 
         # 지난 날짜 목록: 목록 받기 전 알림도 같은 두 용어
         yesterday = page.evaluate("async () => (await import('./core.js')).todayKST(-1)")
@@ -309,7 +309,7 @@ def callouts(browser, url):
         reps["info"] = intro.evaluate("e => getComputedStyle(e.closest('.callout') || e).backgroundColor")
         seed(page, {"daylist": daylist(today, [stop(1, today)])}, registered=False)
         route(page, "#/intake")
-        warn = page.locator(".callout.warn", has_text="아직 PC에 등록되지 않았습니다")
+        warn = page.locator(".callout.warn", has_text="팀 배차 QR로 일할 때")
         ok(warn.count() == 1 and page.locator(".card.notice.warn").count() == 0, "기기 미등록 안내는 .callout.warn (규칙 없는 'card notice warn' 정리)")
 
         seed(page, {"daylist": daylist(today, [stop(1, today)])})

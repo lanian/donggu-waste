@@ -488,6 +488,11 @@ main.center > p { color: var(--muted); }
   border-radius: var(--r-control); background: var(--field-bg); color: var(--field-ink); }
 .guest-scan-stage.key-read { background: var(--ok-bg); color: var(--ok-ink); }
 .guest-scan-stage > strong { font-size: var(--t-2xl); line-height: 1.2; }
+.guest-work-form label { display: grid; gap: 4px; margin-block: 9px; }
+.guest-work-form fieldset { border: 1px solid var(--line-strong); border-radius: var(--r-control); margin: 10px 0; padding: 8px 12px; min-width: 0; }
+.guest-work-form legend { font-weight: 700; }
+.guest-work-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.guest-work-actions .btn { flex: 1 1 8em; }
 .toast { position: fixed; left: 50%; bottom: calc(24px + var(--safe-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--card);
   padding: 12px 20px; border-radius: var(--r-pill); font-weight: 700; z-index: 20; max-width: 90vw; pointer-events: none; box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
 .toast.bad { background: var(--bad); color: var(--on-bad); border-radius: var(--r-card); pointer-events: auto; cursor: pointer; display: flex; gap: 12px; align-items: center; min-height: var(--tap); }

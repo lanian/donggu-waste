@@ -2,7 +2,7 @@
 import { chip, h, kst } from '../core.js';
 
 const RECEIPT = {
-  UNSENT: ['목록 미전송', 'warn'], UNCONFIRMED: ['수신 미확인', 'warn'], CONFIRMED: ['수신 확인', 'ok'],
+  GUEST_ISSUED: ['현장 업무 QR 발급', 'info'], UNSENT: ['목록 미전송', 'warn'], UNCONFIRMED: ['수신 미확인', 'warn'], CONFIRMED: ['수신 확인', 'ok'],
 };
 const STAGES = {
   EMPTY: ['확인할 접수 없음', 'neutral'], WAITING: ['현장 결과 기다림', 'neutral'],

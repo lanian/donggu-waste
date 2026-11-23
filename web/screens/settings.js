@@ -7,6 +7,7 @@ import * as M from '../map.js';
 import * as NAV from '../nav.js';
 import * as P from '../proto.js';
 import * as S from '../store.js';
+import { pendingGuestRecords } from './guest-list.js';
 import { BUILTIN_FEES } from '../fees-data.js';
 import { deriveStop } from '../fees.js';
 import { won } from '../fees.js';
@@ -214,13 +215,14 @@ async function screenSettings() {
       btn('기본 문구로', () => set({ smsTemplates: null }, '기본 문구로 되돌렸습니다'), 'big')));
 
   const linkCard = card('이 휴대폰 연결',
-    btn('등록 없이 배차 목록 보기', () => go('#/guest-list'), 'big'),
+    btn('배차와 현장 기록', () => go('#/guest-list'), 'big'),
+    solo ? null : h('p', { class: 'small' }, '기기 등록은 선택입니다. 현장 업무 QR로 배차와 결과 파일을 주고받을 수 있습니다.'),
     solo ? null : btn('기기 등록', () => go('#/register'), 'big'),
     btn('사용 방식 바꾸기', async () => {
       if (st.requests.length || st.daylist || st.events.length) return toast('자료가 있어 바꿀 수 없습니다. 백업·정리 후 바꿔 주세요.', 'bad');
       st.mode = null; await commit(); go('#/mode');
     }, 'big'),
-    h('p', { class: 'small' }, `지금 사용 방식: ${solo ? '이 휴대폰만 사용' : 'PC와 연결'}. 자료가 없을 때만 바꿀 수 있습니다.`));
+    h('p', { class: 'small' }, `지금 사용 방식: ${solo ? '이 휴대폰만 사용' : '수거팀 현장 업무'}. 자료가 없을 때만 바꿀 수 있습니다.`));
 
   const admin = h('details', { class: 'set-group admin', open: ui.adminOpen === true, ontoggle: (e) => { ui.adminOpen = e.target.open; } },
     h('summary', {}, h('h2', { class: 'section-label group-title' }, '관리자 설정'), h('span', { class: 'small admin-brief' }, '주소 검색·지도·문자 문구·' + (solo ? '단가·' : '기기 등록·') + '사용 방식')),
@@ -231,7 +233,7 @@ async function screenSettings() {
   const infoGroup = group('info', '앱 정보', h('section', { class: 'card' }, h('dl', {},
     h('dt', {}, '앱 버전'), h('dd', {}, APP_VERSION),
     h('dt', {}, '실행 위치'), h('dd', {}, runningAsApp() ? '설치한 앱' : '브라우저 탭'),
-    h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : 'PC와 연결'),
+    h('dt', {}, '사용 방식'), h('dd', {}, st.mode === 'SOLO' ? '이 휴대폰만 사용' : '수거팀 현장 업무'),
     h('dt', {}, '기기 번호'), h('dd', {}, dev ? P.uuidStr(dev.id).slice(0, 8) : '미등록'),
     h('dt', {}, '저장소'), h('dd', {}, `${persisted} ${quota}`),
     // 보낼 기록 = 어느 결과 파일에도 없는 기록, 확인 대기 = 보냈지만 결과 반영 코드(D-) 전
@@ -242,10 +244,12 @@ async function screenSettings() {
     h('p', { class: 'small' }, '이 앱은 서버에 자료를 보내지 않습니다. 브라우저의 "사이트 데이터 삭제"를 하면 PC 반영이 확인되지 않은 기록(보낼 기록·확인 대기)이 사라지니 주의하세요.'),
     btn('이 휴대폰의 모든 자료 지우기', async () => {
       const u = unsent().length;
+      const workCount = await pendingGuestRecords().catch(() => null);
+      const workNotice = workCount === null ? '저장한 현장 업무 기록 수도 확인할 수 없습니다. ' : workCount ? `아직 정리하지 않은 현장 기록·초안 ${workCount}건이 사라집니다. ` : '';
       const rec = new Set(st.recoveredPhotos || []);
       const ph = [...st.events.filter((e) => e.kind === 'PHOTO_META').map((e) => e.body.photo_id), ...(st.keptPhotos || []).map((p) => p.photo_id)].filter((x) => !rec.has(x)).length;
-      if (!(await ask((u ? `PC 반영이 확인되지 않은 기록 ${u}건(보낼 기록·확인 대기)이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 기기 키, 목록, 사진을 모두 지웁니다. 다시 등록해야 합니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
-      if ((u || ph) && !(await ask(`정말 지울까요? PC 반영이 확인되지 않은 기록 ${u}건${ph ? `과 회수 안 된 사진 ${ph}장` : ''}은 어디에도 남지 않습니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
+      if (!(await ask(workNotice + (u ? `PC 반영이 확인되지 않은 기록 ${u}건(보낼 기록·확인 대기)이 사라집니다. ` : '') + (ph ? `PC 회수가 확인되지 않은 사진 ${ph}장도 사라집니다. ` : '') + 'PIN, 배차 목록, 현장 업무 초안과 결과, 사진, 선택한 기기 연결을 모두 지웁니다. 되돌릴 수 없습니다.', '모두 지우기', { title: '이 휴대폰의 모든 자료 지우기', danger: true }))) return;
+      if ((u || ph || workCount || workCount === null) && !(await ask(workNotice + `정말 지울까요? 보낼 기록 ${u}건과 회수 전 사진 ${ph}장도 이 휴대폰에서 지웁니다.`, '그래도 지우기', { title: '한 번 더 확인', danger: true }))) return;
       stopCamera();
       try { await S.wipeAll(); } catch (e) { return toast('지우지 못했습니다: ' + errMsg(e), 'bad'); }
       setSt(null); location.hash = ''; location.reload();

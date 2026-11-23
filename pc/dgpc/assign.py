@@ -416,7 +416,9 @@ def _kept_visit(batch_id, active_batch, status):
 
 def list_batches(con, work_date: str, *, route_map=False, current_road=None, for_send=False) -> list[dict]:
     archive_flag = ", c.archived_at IS NOT NULL AS crew_archived" if for_send else ""
-    out = rows(con, f"""SELECT b.*, c.name AS crew_name, c.device_id{archive_flag} FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
+    out = rows(con, f"""SELECT b.*, c.name AS crew_name, c.device_id{archive_flag},
+        EXISTS(SELECT 1 FROM audit_log i WHERE i.entity='guest_work_list' AND i.entity_id=b.id AND i.action='ISSUE') AS guest_work_issued
+        FROM assignment_batch b JOIN crew c ON c.id=b.crew_id
         WHERE b.work_date=? ORDER BY c.name, b.assign_ver DESC""", (work_date,))
     if route_map:
         from dgpc.area import list_dongs
@@ -779,7 +781,7 @@ def dispatch_sheet(con, batch_id: str, protected: bool = False, *, route_positio
     unload_frames = None
     if protected:
         if not b["device_id"]:
-            raise UserError("이 팀에 연결된 휴대폰이 없습니다. 설정 → 수거팀에서 등록된 휴대폰을 연결하세요.")
+            raise UserError("등록 기기용 인쇄 QR을 만들려면 연결된 휴대폰이 필요합니다. 개인폰에는 목록 전송의 현장 업무 QR을 사용하세요.")
         dev = _transfer_device(con, b["device_id"])
         sign = pc_key(con, "sign")
         phone = _phone_daylist(payload, pc_completed, history)

@@ -56,7 +56,7 @@ def main():
             page.get_by_placeholder('숫자 6자리 이상').fill(PIN)
             page.get_by_placeholder('한 번 더', exact=True).fill(PIN)
             page.get_by_role('button', name='PIN 설정', exact=True).click()
-            expect(page.get_by_role('button', name='PC와 연결해서 사용', exact=True)).to_be_visible()
+            expect(page.get_by_role('button', name='수거팀으로 시작', exact=True)).to_be_visible()
             today = page.evaluate("import('./core.js').then(C=>C.todayKST())")
             receipt = stop(1, today)
             seed(page, {'daylist': {'work_date': today, 'crew': '가상 팀', 'stops': [receipt]},
@@ -154,7 +154,7 @@ def main():
             page.get_by_placeholder('숫자 6자리 이상').fill(PIN)
             page.get_by_placeholder('한 번 더', exact=True).fill(PIN)
             page.get_by_role('button', name='PIN 설정', exact=True).click()
-            page.get_by_role('button', name='PC와 연결해서 사용', exact=True).click()
+            page.get_by_role('button', name='수거팀으로 시작', exact=True).click()
             expect(page.get_by_role('button', name='빠른 수수료 계산', exact=True)).to_be_visible()
             toggle = settings(page, url)
             expect(toggle).to_be_checked()
