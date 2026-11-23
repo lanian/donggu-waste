@@ -1476,7 +1476,9 @@ def solo(pw, url, video):
     again_btn = page.get_by_role("button", name="그래도 지우기")
     page.wait_for_timeout(800)
     if again_btn.count():  # 보내지 않은 기록·회수 안 된 사진이 있으면 한 번 더 묻는다
-        ok("어디에도 남지 않습니다" in page.locator("dialog.sheet[open]").last.inner_text(), "모든 자료 지우기: 보내지 않은 기록·회수 안 된 사진이 있으면 한 번 더 확인")
+        warning = page.locator("dialog.sheet[open]").last.inner_text()
+        ok(re.search(r"보낼 기록 \d+건과 회수 전 사진 \d+장도 이 휴대폰에서 지웁니다", warning),
+           "모든 자료 지우기: 보내지 않은 기록·회수 안 된 사진의 수량과 삭제 범위를 한 번 더 확인")
         again_btn.click()
     page.wait_for_load_state()
     expect(page.get_by_placeholder("숫자 6자리 이상")).to_be_visible(timeout=15000)
