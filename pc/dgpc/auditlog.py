@@ -74,7 +74,7 @@ def audit_page(con, f: dict) -> dict:
             "total": total, "page": page, "pages": pages, "size": size}
 
 
-def _audit_detail_text(raw: str | None) -> str:
+def _audit_detail_text(raw: str | None, entity: str) -> str:
     if not raw:
         return ""
     try:
@@ -83,6 +83,8 @@ def _audit_detail_text(raw: str | None) -> str:
         return ""
     if not isinstance(d, dict):
         return str(d)[:200]
+    if entity == "numbered_label" and "from" in d and d["from"] is None:
+        d["from"] = "등록 전"
     return "; ".join(f"{k}={json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v}" for k, v in d.items() if k not in _AUDIT_HIDE)[:500]
 
 
@@ -96,7 +98,7 @@ def audit_csv(con, f: dict) -> bytes:
     for a in rows(con, "SELECT id, entity, entity_id, action, detail, at, actor FROM audit_log" + w + " ORDER BY id DESC LIMIT 100000", args):
         a = _with_note(con, a)
         t = dt.datetime.fromisoformat(a["at"].replace("Z", "+00:00")).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
-        wr.writerow([a["id"], t, a["actor"] or "", AUDIT_ENTITIES.get(a["entity"], a["entity"]), a["action"], (a["entity_id"] or "")[:8], _audit_detail_text(a["detail"])])
+        wr.writerow([a["id"], t, a["actor"] or "", AUDIT_ENTITIES.get(a["entity"], a["entity"]), a["action"], (a["entity_id"] or "")[:8], _audit_detail_text(a["detail"], a["entity"])])
         n += 1
     with tx(con):
         audit(con, "report", "audit", "EXPORT", {"rows": n, **{k: f[k] for k in ("entity", "actor", "date_from", "date_to") if f.get(k)}})

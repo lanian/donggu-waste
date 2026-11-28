@@ -459,14 +459,31 @@ async function screenStop(id) {
 
   const touched = new Set(st.events.filter((e) => e.request_id === stop.request_id && e.kind === 'ITEM_RESULT').map((e) => e.body.line_id));
   const showLeft = (l) => touched.has(l.line_id) || !!d.outcome || ui.tried === id;
-  const stickerRow = (l) => {
+  // 스티커·필증 품목별 상태. '문제'는 이미 확인하고 수거 결정까지 끝낸 품목이라 다시 찾아갈 대상이 아니다.
+  // 찾아갈 대상은 둘: 미확인(확인 기록 없음)과 처리 필요(문제를 확인했지만 수거 결정 전이거나, 수거하기로 했는데 미수거 사유가 남은 품목).
+  const stickerReview = (l, sk) => !!sk && l.reason === 'NO_STICKER' && (sk.result === 'OK' || sk.decision === 'COLLECT');
+  // 다 실어서 못 실은 사유 칸이 보이지 않는데 예전 미수거 사유만 남은 품목: 수량을 사실과 다르게 줄이지 않고 사유만 지울 수 있게 [이전 미수거 사유 해제]를 둔다.
+  const reasonClearable = (l, sk) => stickerReview(l, sk) && !l.remaining;
+  const clearStickerReason = async (line) => {
+    await flushSteps();
+    if (!current() || !S.isUnlocked() || collectionPending()) return;
+    // 누른 시점의 기록으로 조건을 다시 본다. 수량·이전 수거량은 setLine이 지금 기록에서 그대로 가져오고 사유만 비운다(기존 ITEM_RESULT 정정 경로).
+    const now = deriveStop(stop, source.events), item = now.lines.find((x) => x.line_id === line.line_id);
+    if (!item || !reasonClearable(item, now.stickers[item.line_id])) return;
+    await setLine(item, { reason: '' }, true);
+  };
+  const stickerState = (l) => {
     const sk = d.stickers[l.line_id];
-    return h('div', { class: 'chk', 'data-line': l.line_id },
-      h('span', { class: 'section-label chk-label' }, `${l.name}${l.spec ? ' ' + l.spec : ''} · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}`),
+    return !sk ? 'unchecked' : sk.result !== 'OK' && !sk.decision || stickerReview(l, sk) ? 'todo' : sk.result === 'OK' ? 'ok' : 'problem';
+  };
+  const stickerRow = (l) => {
+    const sk = d.stickers[l.line_id], state = stickerState(l);
+    return h('div', { class: 'chk', 'data-line': l.line_id, 'data-sticker': state },
+      h('span', { class: 'section-label chk-label' }, `${l.name}${l.spec ? ' ' + l.spec : ''} · ${!sk ? '미확인' : sk.result === 'OK' ? '확인됨' : '문제 확인'}${state === 'todo' ? ' · 처리 필요' : ''}`),
       h('div', { class: 'chk-opts', role: 'group', 'aria-label': `${l.name} 스티커·신고필증` },
         ...['OK', 'MISSING', 'MISMATCH'].map((k) => btn(LABEL.sticker[k], () => runCollection(() => current() && stickerCheck(stop, l, k), { focusSticker: { line: l.line_id, result: k } })(), 'opt sk' + (sk && sk.result === k ? ' on' : '') + (k !== 'OK' ? ' sk-bad' : ''), { disabled: resultUnsaved, 'data-result': k, 'data-fk': `${l.line_id}:sticker:${k}` }))),
       sk ? h('p', { class: 'sk-note' }, `${LABEL.sticker[sk.result]}${sk.number ? ` (${sk.number})` : ''}${sk.result !== 'OK' ? ` → ${sk.decision === 'LEAVE' ? '미수거 결정' : sk.decision === 'COLLECT' ? '수거 결정' : '결정 전'}` : ''} · 이번 실은 ${Math.max(0, l.qty_collected - priorQty(stop, l))}${l.unit_label}`) : null,
-      sk && l.reason === 'NO_STICKER' && (sk.result === 'OK' || sk.decision === 'COLLECT') ? h('p', { class: 'small sk-review' }, '미수거 사유가 남아 있습니다. 실은 수량·못 실은 사유와 수거 결과를 다시 확인하세요.') : null);
+      stickerReview(l, sk) ? h('p', { class: 'small sk-review' }, '미수거 사유가 남아 있습니다. 실은 수량·못 실은 사유와 수거 결과를 다시 확인하세요.') : null);
   };
   const increaseCollected = async (line) => {
     await flushSteps();
@@ -509,13 +526,44 @@ async function screenStop(id) {
       toggle, confirmedRow];
   };
   const stickerCounts = d.lines.reduce((counts, line) => { const sk = d.stickers[line.line_id]; counts[!sk ? 'unchecked' : sk.result === 'OK' ? 'ok' : 'problem']++; return counts; }, { ok: 0, problem: 0, unchecked: 0 });
+  // 품목이 많을 때 요약의 '미확인 N'에서 첫 미확인 품목으로 바로 간다. 미확인이 없으면 처리 필요 품목으로, 둘 다 없으면 단추를 두지 않는다.
+  // 이동만 한다: 확인·수량·결정 기록은 담당자가 그 품목의 단추를 직접 눌러야 남는다.
+  const stickerTodo = d.lines.filter((line) => stickerState(line) === 'todo');
+  const stickerUnchecked = d.lines.filter((line) => stickerState(line) === 'unchecked');
+  const jumpLines = stickerUnchecked.length ? stickerUnchecked : stickerTodo;
+  // 사유가 남은 품목은 필증 단추를 다시 눌러도 사유가 그대로라, 실제로 고칠 수 있는 위 품목 칸(못 실은 사유, 다 실어 사유 칸이 없으면 [이전 미수거 사유 해제])으로 보낸다.
+  const jumpToItem = !stickerUnchecked.length && !!jumpLines.length && stickerReview(jumpLines[0], d.stickers[jumpLines[0].line_id]);
+  const jumpSticker = () => {
+    if (!current() || !S.isUnlocked()) return;  // 예전 화면에 남은 단추나 잠긴 뒤의 누름은 지금 화면을 움직이지 않는다
+    const line = jumpLines[0];
+    let block, target;
+    if (jumpToItem) {
+      block = [...lines.querySelectorAll('.line')].find((node) => node.dataset.itemLine === line.line_id);
+      target = block?.querySelector('select.reason, .reason-clear') || block?.querySelector('.row.got .qty-value');
+    } else {
+      const key = `${line.line_id}:sticker:${d.stickers[line.line_id]?.result || 'OK'}`;
+      target = [...stickerOptions.querySelectorAll('.chk-opts [data-fk]')].find((node) => node.dataset.fk === key);
+      block = target?.closest('.chk');
+    }
+    if (!block || !target || target.disabled) return;
+    view.querySelectorAll('.sk-jumped').forEach((node) => node.classList.remove('sk-jumped'));
+    block.classList.add('sk-jumped');
+    block.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'center' });
+    target.focus({ preventScroll: true });
+  };
+  const jumpLabel = stickerUnchecked.length ? `미확인 ${jumpLines.length} · 첫 품목으로 ↓`
+    : `처리 필요 ${jumpLines.length} · 첫 품목의 ${jumpToItem ? '수량·사유로 ↑' : '필증 결정으로 ↓'}`;
+  const stickerJump = d.lines.length > 1 && jumpLines.length
+    ? btn(jumpLabel, jumpSticker, 'sk-jump', { disabled: resultUnsaved, 'data-fk': `${id}:sticker-jump` }) : null;
   const stickerOptions = d.lines.length ? h('details', { class: 'sticker-options', open: ui.stickerOpen === id },
     h('summary', { onclick: (event) => { ui.stickerOpen = event.currentTarget.parentElement.open ? null : id; } },
       '스티커·필증 기록 (선택)', stickerCounts.problem ? h('span', { class: 'small sk-review' }, ` · 문제 ${stickerCounts.problem}`) : null),
-    h('p', { class: 'sticker-summary' }, `스티커·필증: 확인 ${stickerCounts.ok} · 문제 ${stickerCounts.problem} · 미확인 ${stickerCounts.unchecked}`),
+    h('p', { class: 'sticker-summary' }, `스티커·필증: 확인 ${stickerCounts.ok} · 문제 ${stickerCounts.problem} · 미확인 ${stickerCounts.unchecked}`,
+      ...(stickerTodo.length ? [' · ', h('span', { class: 'sk-todo-count' }, `확인한 품목 중 처리 필요 ${stickerTodo.length}`)] : [])),
+    stickerJump,
     ...d.lines.map((line) => stickerRow(line))) : null;
   const lines = h('section', { class: 'card' }, h('h2', {}, '품목'),
-    ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig') },
+    ...d.lines.map((l) => h('div', { class: 'line ' + (l.kind === 'FIELD' ? 'field' : 'orig'), 'data-item-line': l.line_id },
       h('div', { class: 'lhead' },
         h('div', { class: 'lname' }, h('em', { class: 'badge ' + (l.kind === 'FIELD' ? 'field' : 'neutral') }, l.kind === 'FIELD' ? '현장 추가' : '처음 접수'), h('strong', {}, `${l.name} ${l.spec}`)),
         l.price == null ? h('span', { class: 'amt pending' }, '확인 대기') : h('span', { class: 'amt', 'aria-label': `금액 ${won(l.price * l.qty_confirmed)}` }, won(l.price * l.qty_confirmed))),
@@ -531,7 +579,12 @@ async function screenStop(id) {
           'aria-describedby': need ? noteId : null, onchange: (e) => setLine(l, { reason: e.target.value }) },
           ...Object.entries(LABEL.reason).map(([k, t]) => h('option', { value: k, selected: k === l.reason }, t)));
         return need ? [sel, h('p', { class: 'reason-need-note', id: noteId }, '사유를 고르세요')] : sel;
-      })() : null)),
+      })() : null,
+      // 자동으로 지우지 않는다: 담당자가 눌러야 사유만 비운 정정 기록이 한 건 남는다.
+      reasonClearable(l, d.stickers[l.line_id]) ? [
+        h('p', { class: 'small reason-stale-note' }, `다 실은 품목에 이전 미수거 사유(${LABEL.reason.NO_STICKER})가 남아 있습니다. 해제해도 수량은 그대로입니다.`),
+        btn('이전 미수거 사유 해제', () => runCollection(() => clearStickerReason(l), { focusKey: `${l.line_id}:collected:value` })(), 'reason-clear',
+          { disabled: resultUnsaved, 'data-fk': `${l.line_id}:reason-clear` })] : null)),
     btn('+ 현장 품목 추가', () => { ui.add = { stop: id, q: '', cat: '', items: [] }; go(`#/add/${id}`); }, 'big'));
 
   const f = d.fee;

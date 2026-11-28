@@ -8,8 +8,8 @@ const ACTIONS = { RECEIVE: '입고', DISTRIBUTE: '배부', USE: '사용', VOID: 
 const stateChip = (status) => chip(STATES[status] || status, status === 'USED' ? 'ok' : status === 'DISTRIBUTED' ? 'info' : status === 'VOID' ? 'neutral' : '');
 const numberInput = (label, value) => h('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]{1,30}', maxlength: 30, value, 'aria-label': label, autocomplete: 'off', spellcheck: 'false' });
 function rangeValues(start, end) {
-  const a = start.trim(), b = end.trim();
-  if (!/^[0-9]{1,30}$/.test(a) || !/^[0-9]{1,30}$/.test(b)) throw new Error('시작·끝 번호를 1~30자리 숫자로 적어 주세요.');
+  const a = start.trim(), b = end.trim() || a;
+  if (!/^[0-9]{1,30}$/.test(a) || !/^[0-9]{1,30}$/.test(b)) throw new Error('번호는 1~30자리 숫자로 적어 주세요.');
   if (a.length !== b.length) throw new Error('시작·끝 번호의 자릿수를 같게 적어 주세요. 앞의 0도 포함합니다.');
   const count = BigInt(b) - BigInt(a) + 1n;
   if (count < 1n) throw new Error('끝 번호는 시작 번호보다 작을 수 없습니다.');
@@ -90,28 +90,37 @@ async function screenNumberedLabels() {
     if (!current() || !work) return;
     const distribute = type === 'distribute', scoping = type === 'stock-dong', draft = s[type];
     const start = numberInput('시작 번호', draft.start), end = numberInput('끝 번호', draft.end);
+    end.placeholder = '한 장이면 비워 두세요';
     const dest = h('input', { value: draft.destination || '', maxlength: 100, 'aria-label': '배부처', placeholder: '예: 가상1동 행정복지센터' });
     const dong = h('select', { 'aria-label': '재고 행정동' }, h('option', { value: '', selected: !draft.dong_id }, scoping ? '행정동 선택' : '공용 보관 · 자동 배정 안 함'),
       ...(boot.dongs || []).map((d) => h('option', { value: d.id, selected: draft.dong_id === d.id }, d.name)));
     const dayLabel = distribute ? '배부일' : '수령일';
-    const day = h('input', { type: 'date', value: draft.day || boot.today, max: boot.today, 'aria-label': dayLabel });
+    const defaultDay = boot.today;
+    const day = h('input', { type: 'date', value: draft.day || defaultDay, max: defaultDay, 'aria-label': dayLabel });
     const rangeMessage = h('p', { class: 'muted small', 'aria-live': 'polite' });
     const remember = () => {
       draft.start = start.value; draft.end = end.value;
       if (distribute) draft.destination = dest.value;
       draft.dong_id = dong.value; draft.day = day.value;
+      rangeMessage.textContent = '';
+      if (!start.value && !end.value) return;
       try { rangeMessage.textContent = `번호 ${rangeValues(start.value, end.value).count.toLocaleString('ko-KR')}개`; }
-      catch (e) { rangeMessage.textContent = start.value || end.value ? e.message : '같은 자릿수의 시작·끝 번호를 적어 주세요. 한 번에 최대 5,000개입니다.'; }
+      catch (e) { rangeMessage.textContent = e.message; }
     };
     [start, end, dest, dong, day].forEach((input) => input.addEventListener('input', remember));
     remember();
     await modal({ title: scoping ? '기존 번호 재고 동 지정' : distribute ? '번호 구간 배부' : '번호 구간 입고', ok: scoping ? '재고 동 저장' : distribute ? '배부 기록' : '입고 기록', body: [
-      h('p', { class: 'muted' }, scoping ? '기존 공용 번호 구간에 재고 행정동을 지정합니다. 이미 사용한 번호의 접수 연결과 이력은 유지됩니다.' : distribute ? '보관 중인 번호 구간을 배부처에 넘긴 기록을 남깁니다.' : '실물로 받은 번호 구간을 원장에 등록합니다. 앞의 0을 포함해 적어 주세요.'),
-      h('div', { class: 'grid2' }, h('label', { class: 'f' }, '시작 번호', start), h('label', { class: 'f' }, '끝 번호', end)),
+      h('p', { class: 'muted' }, scoping ? '기존 공용 번호 구간에 재고 행정동을 지정합니다. 이미 사용한 번호의 접수 연결과 이력은 유지됩니다.' : distribute ? '보관 중인 번호 구간을 배부처에 넘긴 기록을 남깁니다.' : '실물로 받은 번호 구간을 원장에 등록합니다.'),
+      h('p', { class: 'muted small' }, '한 장이면 시작 번호만 적어 주세요. 앞의 0도 포함하고, 끝 번호를 적을 때는 시작 번호와 자릿수를 맞춰 주세요. 한 번에 최대 5,000장입니다.'),
+      h('div', { class: 'grid2' }, h('label', { class: 'f' }, '시작 번호', start), h('label', { class: 'f' }, '끝 번호 (선택)', end)),
       h('div', { class: 'grid2' }, h('label', { class: 'f' }, '재고 행정동', dong), h('label', { class: 'f' }, dayLabel, day)),
       h('p', { class: 'muted small' }, '동을 지정하면 해당 동의 수거분에 자동 배정합니다. 수령·배부일보다 앞선 수거분에는 배정하지 않습니다.'),
       distribute ? h('label', { class: 'f' }, '배부처', dest) : null, rangeMessage,
-      btn('입력 초기화', () => { start.value = ''; end.value = ''; dest.value = ''; remember(); start.focus(); }, 'small')],
+      btn('입력 초기화', () => {
+        start.value = ''; end.value = ''; dest.value = ''; dong.value = '';
+        day.value = defaultDay;
+        remember(); start.focus();
+      }, 'small')],
       onOk: async () => {
         if (!current()) throw new Error('화면을 다시 열어 기록해 주세요.');
         const { start: a, end: b } = rangeValues(start.value, end.value);
@@ -155,6 +164,7 @@ async function screenNumberedLabels() {
       }, localMessage), 'small');
       const fields = [];
       const mutationButtons = [];
+      let useButton;
       const save = async (action, body) => {
         if (!detailCurrent() || mutating) return;
         const seq = ++historySeq;
@@ -165,7 +175,11 @@ async function screenNumberedLabels() {
         } catch (e) { if (detailCurrent()) { localMessage.className = 'err'; localMessage.textContent = e.message; } }
         finally {
           mutating = false;
-          if (detailCurrent()) { mutationButtons.forEach((button) => { button.disabled = false; }); printing.disabled = refresh.disabled = false; }
+          if (detailCurrent()) {
+            mutationButtons.forEach((button) => { button.disabled = false; });
+            if (useButton) useButton.disabled = !draft.selected;
+            printing.disabled = refresh.disabled = false;
+          }
         }
         if (!saved) return;
         // 상세창을 닫아도 같은 목록 화면이면 저장 결과를 반영한다. 다른 화면은 변경하지 않는다.
@@ -191,6 +205,7 @@ async function screenNumberedLabels() {
           selected.textContent = draft.selected ? `선택한 접수: ${draft.selected.receipt_no}` : '연결할 접수를 검색해 선택해 주세요.';
           line.replaceChildren(h('option', { value: '' }, '접수 전체에 연결 (품목 지정 안 함)'), ...(draft.selected?.items || []).map((x) => h('option', { value: x.line_id, selected: x.line_id === draft.line }, `${x.name} ${x.spec || ''} · ${x.qty}${x.unit_label || ''}`)));
           line.disabled = !draft.selected;
+          if (useButton) useButton.disabled = !draft.selected || mutating;
         };
         drawSelection();
         line.addEventListener('change', () => { draft.line = line.value; });
@@ -202,23 +217,32 @@ async function screenNumberedLabels() {
           try {
             const d = await api(`requests?${new URLSearchParams({ q: value, size: 10, page: 1 })}`, { timeoutMs: 15000 });
             if (!detailCurrent() || seq !== searchSeq) return;
-            candidates.replaceChildren(...(d.rows.length ? d.rows.map((r) => h('div', { class: 'row' },
-              btn(`${r.receipt_no} 선택`, () => {
+            const choices = d.rows.map((r) => {
+              const stockDongName = dongNames.get(label.stock_dong_id);
+              let reason = '';
+              if (r.status === 'CANCELLED') reason = '취소된 접수';
+              else if (r.pii_purged_at) reason = '개인정보 파기 완료';
+              else if (stockDongName && r.dong !== stockDongName) reason = `${stockDongName} 재고는 해당 동 접수에만 연결할 수 있습니다.`;
+              const pick = btn(`${r.receipt_no} 선택`, () => {
                 if (!detailCurrent() || mutating) return;
                 draft.selected = { id: r.id, receipt_no: r.receipt_no, items: (r.items || []).filter((x) => x.line_id).map((x) => ({ line_id: x.line_id, name: x.name, spec: x.spec, qty: x.qty, unit_label: x.unit_label })) };
                 draft.line = ''; drawSelection(); candidates.replaceChildren();
-              }, 'small'), chip(STATUS[r.status] || r.status))) : [h('p', { class: 'empty' }, '맞는 접수가 없습니다. 검색어를 바꾸어 주세요.')]),
-              d.total > d.rows.length ? h('p', { class: 'muted small' }, '후보가 많습니다. 접수번호나 검색어를 더 적어 범위를 좁혀 주세요.') : null);
+              }, 'small', { disabled: !!reason });
+              return h('div', { class: 'row' }, pick, chip(STATUS[r.status] || r.status), r.dong, reason ? h('span', { class: 'muted small' }, reason) : null);
+            });
+            if (!choices.length) choices.push(h('p', { class: 'empty' }, '맞는 접수가 없습니다. 검색어를 바꾸어 주세요.'));
+            if (d.total > d.rows.length) choices.push(h('p', { class: 'muted small' }, '후보가 많습니다. 접수번호나 검색어를 더 적어 범위를 좁혀 주세요.'));
+            candidates.replaceChildren(...choices);
           } catch (e) { if (detailCurrent() && seq === searchSeq) candidates.replaceChildren(h('p', { class: 'err', role: 'alert' }, e.message)); }
           finally { if (detailCurrent() && seq === searchSeq) searchButton.disabled = false; }
         }, 'small', { 'data-label-search-button': '1' });
         search.addEventListener('input', () => { draft.q = search.value; draft.selected = null; draft.line = ''; searchSeq++; searchButton.disabled = false; candidates.replaceChildren(); drawSelection(); });
-        const use = btn('접수에 연결하고 사용 기록', () => {
+        useButton = btn('접수에 연결하고 사용 기록', () => {
           if (!draft.selected) { localMessage.textContent = '연결할 접수를 검색해 선택해 주세요.'; return; }
           save('use', { request_id: draft.selected.id, ...(draft.line ? { line_id: draft.line } : {}) });
-        }, 'primary');
-        mutationButtons.push(use);
-        fields.push(h('section', { class: 'card' }, h('h2', {}, '접수 연결 · 사용'), h('label', { class: 'f' }, '접수 찾기', search), h('div', { class: 'row' }, searchButton), candidates, selected, h('label', { class: 'f' }, '연결 품목', line), use));
+        }, 'primary', { disabled: !draft.selected });
+        mutationButtons.push(useButton);
+        fields.push(h('section', { class: 'card' }, h('h2', {}, '접수 연결 · 사용'), h('label', { class: 'f' }, '접수 찾기', search), h('div', { class: 'row' }, searchButton), candidates, selected, h('label', { class: 'f' }, '연결 품목', line), useButton));
       }
       if (work && label.status !== 'VOID') {
         const reason = h('input', { value: draft.reason, maxlength: 300, 'aria-label': '무효 사유', placeholder: '분실·훼손 등 무효 사유' });

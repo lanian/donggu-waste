@@ -127,8 +127,8 @@ def derive_pure(items: list[dict], events: list[dict], links: list[dict]) -> dic
         if k == "CONTACT":
             contact = b.get("result", contact)
         elif k == "FIELD_ITEM_ADD" and b.get("line_id") and b.get("line_id") not in by:
-            l = {"line_id": b["line_id"], "kind": "FIELD", "name": b.get("name"), "spec": b.get("spec", ""), "unit": b.get("unit"),
-                 "unit_label": b.get("unit_label"), "price": _price(b.get("unit_price")) if b.get("price_status") == "CONFIRMED" else None,
+            l = {"line_id": b["line_id"], "kind": "FIELD", "name": b.get("name") or "현장 추가 품목", "spec": b.get("spec") or "", "unit": b.get("unit"),
+                 "unit_label": b.get("unit_label") or "단위 미확인", "price": _price(b.get("unit_price")) if b.get("price_status") == "CONFIRMED" else None,
                  "qty_received": 0, "amount_received": 0, "qty_confirmed": _int_clamp(b.get("qty")), "qty_collected": 0, "reason": "",
                  "fee_rate_id": b.get("fee_rate_id")}
             lines.append(l); by[l["line_id"]] = l; n += 1

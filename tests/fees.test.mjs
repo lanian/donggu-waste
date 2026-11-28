@@ -48,6 +48,10 @@ ok(dup.lines.length === 1, '다시 받은 목록의 현장 추가 줄 + 현장 �
 // 현장 접수·정정·취소 요청 기록만으로는 '처리 중'이 아님
 ok(deriveStop({ request_id: 'r4', req_ver: 1, items: [] }, [{ seq: 1, request_id: 'r4', kind: 'FIELD_INTAKE', body: {} }]).progress !== 'STARTED', '현장 접수 기록만 있으면 처리 중으로 세지 않음');
 // PC·휴대폰 공통 계산 규칙: data/derive_vectors.json (tests/test_pc.py 도 같은 파일로 PC derive_pure·fee_summary 를 확인)
+const sparseStop = { request_id: 'sparse', items: [{ line_id: 'received', name: '가상 의자', spec: null, qty: 1 }] };
+const sparse = deriveStop(sparseStop, [{ request_id: 'sparse', seq: 1, kind: 'FIELD_ITEM_ADD', body: { line_id: 'added', qty: 2 } }]);
+ok(sparse.lines.every((line) => line.spec === '' && line.unit_label === '단위 미확인') && sparse.lines[1].name === '현장 추가 품목',
+  '규격·단위가 없는 복원 품목과 현장 추가 품목도 필증 확인에 이름·수량을 표시한다');
 const VEC = JSON.parse(readFileSync(new URL('../data/derive_vectors.json', import.meta.url), 'utf8')).vectors;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 for (const v of VEC) {

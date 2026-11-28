@@ -7,10 +7,11 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pc"))
-from dgpc import core as C, numbered_labels as NL, privacy as PV, service as S, store
+from dgpc import core as C, numbered_labels as NL, privacy as PV, server, service as S, store
 
 
 class LabelUsageTests(unittest.TestCase):
@@ -63,6 +64,40 @@ class LabelUsageTests(unittest.TestCase):
 
     def page(self, **filters):
         return NL.usage_page(self.con, filters)
+
+    def test_sparse_imported_item_can_be_printed(self):
+        r, _ = self.request()
+        self.events(r, [("FIELD_ITEM_ADD", {"line_id": "field-1", "name": "가상 <선반>", "spec": None, "qty": 1})])
+        handler = object.__new__(server.Handler)
+        with patch.object(server, "CON", self.con):
+            receipt = handler.receipt_html(r["id"])
+            labels = handler.labels_html([r["id"]])
+        self.assertIn("가상 &lt;선반&gt;", receipt)
+        self.assertIn("단위 미확인", receipt)
+        self.assertIn("금액 확인 대기", receipt)
+        self.assertIn("가상 &lt;선반&gt;", labels)
+        self.assertNotIn("None", receipt + labels)
+        self.assertEqual(self.page()["totals"]["used"], 0)
+
+    def test_unscheduled_and_scheduled_attachment_dates(self):
+        r, _ = self.request(qty=1)
+        handler = object.__new__(server.Handler)
+        with patch.object(server, "CON", self.con):
+            self.assertIn('<div class="lday">배출일 미정</div>', handler.labels_html([r["id"]]))
+            self.con.execute("UPDATE request SET planned_date=? WHERE id=?", ("2026-12-09", r["id"]))
+            self.assertIn('<div class="lday">12월 09일</div>', handler.labels_html([r["id"]]))
+
+    def test_reprinting_only_the_remaining_items_preserves_usage(self):
+        r, line = self.request(qty=33)
+        self.result(r, line, 10, "PARTIAL")
+        handler = object.__new__(server.Handler)
+        with patch.object(server, "CON", self.con):
+            for _ in range(2):
+                html = handler.labels_html([r["id"]])
+                self.assertEqual(html.count('class="label"'), 23)
+                self.assertIn('<span>23/23</span>', html)
+        self.assertEqual(self.page()["totals"]["used"], 10)
+        self.assertEqual(NL.label_page(self.con)["total"], 0)
 
     def test_quantity_partial_and_zero_are_counted_in_sheets(self):
         for collected, outcome in ((3, "DONE"), (1, "PARTIAL"), (0, "NOT_COLLECTED")):

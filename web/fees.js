@@ -82,7 +82,7 @@ export function deriveStop(stop, events) {
       || e.base_req_ver >= stop.pc_collection_ver && e.body?.pc_collection_ver === stop.pc_collection_ver));
   // 재방문 목록은 남은 품목만 오며, 이전 방문에서 이미 수거한 수량(prior_collected)에서 이어서 센다.
   const lines = stop.items.map((it) => ({
-    line_id: it.line_id, kind: it.line_kind || 'RECEIVED', name: it.name, spec: it.spec, unit: it.unit, unit_label: it.unit_label,
+    line_id: it.line_id, kind: it.line_kind || 'RECEIVED', name: it.name, spec: it.spec || '', unit: it.unit, unit_label: it.unit_label || '단위 미확인',
     fee_rate_id: it.fee_rate_id, price: it.price_status === 'CONFIRMED' ? it.unit_price : null,
     qty_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' ? (it.qty_received ?? it.qty) : 0,
     amount_received: (it.line_kind || 'RECEIVED') === 'RECEIVED' && it.price_status === 'CONFIRMED' ? it.amount : 0,
@@ -97,7 +97,7 @@ export function deriveStop(stop, events) {
     const b = e.body || {};
     if (e.kind === 'CONTACT') contact = b.result;
     else if (e.kind === 'FIELD_ITEM_ADD' && !byId[b.line_id]) {  // 같은 날 다시 받은 목록에 이미 그 줄이 있으면 두 번 넣지 않음
-      const l = { line_id: b.line_id, kind: 'FIELD', name: b.name, spec: b.spec || '', unit: b.unit, unit_label: b.unit_label,
+      const l = { line_id: b.line_id, kind: 'FIELD', name: b.name || '현장 추가 품목', spec: b.spec || '', unit: b.unit, unit_label: b.unit_label || '단위 미확인',
         fee_rate_id: b.fee_rate_id || null, price: b.price_status === 'CONFIRMED' ? b.unit_price : null,
         qty_received: 0, amount_received: 0, qty_confirmed: b.qty, qty_collected: 0, reason: '' };
       lines.push(l); byId[l.line_id] = l;

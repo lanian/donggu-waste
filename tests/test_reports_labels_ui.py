@@ -45,12 +45,12 @@ def fixture_server():
 
 FIXTURE = r"""async ({screen, role}) => {
   const C = await import('/pc/ui/core.js');
-  C.setBoot({today:'2026-11-07',me:{username:'fixture',role,prefs:{}},settings:{},crews:[],dongs:[]});
+  C.setBoot({today:'2026-11-07',me:{username:'fixture',role,prefs:{}},settings:{},crews:[],dongs:[{id:'dong-1',name:'가상1동'}]});
   window.__calls=[]; window.__gates=[]; window.__hold=null; window.__holdExact=false; window.__fail=null; window.__lose=null; window.__opened=[]; window.__history={};
   window.open=(url) => {window.__opened.push(url); return {};};
   window.__labels=[
     {number:'0001',status:'AVAILABLE',destination:'',request_id:null,line_id:null,received_at:'2026-11-07T01:00:00Z',updated_at:'2026-11-07T01:00:00Z'},
-    {number:'0002',status:'DISTRIBUTED',destination:'가상1동',request_id:null,line_id:null,received_at:'2026-11-07T01:00:00Z',updated_at:'2026-11-07T01:00:00Z'},
+    {number:'0002',status:'DISTRIBUTED',destination:'가상1동',stock_dong_id:'dong-1',request_id:null,line_id:null,received_at:'2026-11-07T01:00:00Z',updated_at:'2026-11-07T01:00:00Z'},
     {number:'0003',status:'VOID',destination:'',request_id:null,line_id:null,received_at:'2026-11-07T01:00:00Z',updated_at:'2026-11-07T01:00:00Z'}];
   const realFetch=window.fetch;
   window.fetch=async (path,options={}) => {
@@ -83,8 +83,9 @@ FIXTURE = r"""async ({screen, role}) => {
     } else if (endpoint.endsWith('/history')) {
       const number=decodeURIComponent(endpoint.split('/')[1]);
       out={label:window.__labels.find(x=>x.number===number),rows:window.__history[number] || [{id:1,action:'RECEIVE',from_status:null,to_status:'AVAILABLE',at:'2026-11-07T01:00:00Z',actor:'가상 담당',reason:null}]};
-    } else if (endpoint === 'numbered-labels/receive') out={count:3,numbers:['0001','0002','0003']};
-    else if (endpoint === 'numbered-labels/distribute') out={count:2};
+    } else if (['numbered-labels/receive', 'numbered-labels/distribute', 'numbered-labels/stock-dong'].includes(endpoint)) {
+      out={count:Number(BigInt(body.end)-BigInt(body.start)+1n)};
+    }
     else if (endpoint.endsWith('/use')) {
       const label=window.__labels.find(x=>x.number===endpoint.split('/')[1]);
       Object.assign(label,{status:'USED',request_id:body.request_id,line_id:body.line_id || null}); out={label,unchanged:false};
@@ -93,6 +94,9 @@ FIXTURE = r"""async ({screen, role}) => {
       window.__history[label.number]=[{id:2,action:'VOID',from_status:'DISTRIBUTED',to_status:'VOID',at:'2026-11-07T01:00:00Z',actor:'가상 담당',reason:body.reason}];
     } else if (endpoint === 'requests') out={rows:[{id:'fixture-request-uuid',receipt_no:'DG-20261107-0001',status:'RECEIVED',name:'불필요한 이름',address:'불필요한 상세주소',items:[{line_id:'line-1',name:'가상 의자',spec:'일반',qty:1,unit_label:'개'}]}],total:1,page:1,pages:1,size:10};
     else if (endpoint === 'requests/fixture-request-uuid') out={id:'fixture-request-uuid',receipt_no:'DG-20261107-0001',items:[{line_id:'line-1',name:'가상 의자',spec:'일반',qty:1,unit_label:'개'}]};
+    if (endpoint === 'requests' && window.__extraCandidates) {
+      out.rows.push(...window.__extraCandidates); out.total = out.rows.length;
+    }
     const json=JSON.stringify(out);
     if (hold) await new Promise(release=>window.__gates.push(release));
     return new Response(json,{status:200,headers:{'Content-Type':'application/json'}});
@@ -218,6 +222,8 @@ def labels_regressions(browser, url):
         dialog.get_by_role("button", name="입고 기록", exact=True).click()
         expect(dialog.get_by_role("alert")).to_contain_text("5,000")
         ok(page.evaluate("window.__calls.filter(x=>x.path==='/api/numbered-labels/receive').length") == before, "5,001개 구간은 서버 요청 없이 차단한다")
+        dialog.get_by_label("끝 번호", exact=True).fill("04999")
+        expect(dialog.get_by_text("번호 5,000개", exact=True)).to_be_visible()
         dialog.get_by_role("button", name="입력 초기화", exact=True).click()
         expect(dialog.get_by_label("시작 번호", exact=True)).to_have_value("")
         dialog.get_by_role("button", name="취소", exact=True).click()
@@ -243,10 +249,15 @@ def labels_regressions(browser, url):
         dialog.get_by_role("button", name="인쇄 화면 열기", exact=True).click()
         page.wait_for_function("window.__opened.length === 1")
         ok(not page.evaluate("window.__calls.some(x=>x.path.endsWith('/use'))"), "배출표 인쇄만으로 사용 처리하지 않는다")
+        page.evaluate("""() => {window.__extraCandidates = [
+          {id:'cancelled',receipt_no:'CANCEL-1',status:'CANCELLED'},
+          {id:'purged',receipt_no:'PURGED-1',status:'DONE',pii_purged_at:'2026-11-06'}];}""")
         dialog.get_by_label("접수 찾기", exact=True).fill("0001")
         dialog.get_by_label("접수 찾기", exact=True).press("Enter")
         expect(dialog).to_be_visible()
         ok(True, "상세 접수찾기 Enter는 창을 닫지 않고 검색한다")
+        expect(dialog.get_by_role("button", name="CANCEL-1 선택", exact=True)).to_be_disabled()
+        expect(dialog.get_by_role("button", name="PURGED-1 선택", exact=True)).to_be_disabled()
         dialog.get_by_role("button", name="DG-20261107-0001 선택", exact=True).click()
         ok("불필요한 이름" not in dialog.inner_text() and "불필요한 상세주소" not in dialog.inner_text(), "접수 연결 후보는 접수번호·상태 위주로 표시한다")
         dialog.get_by_label("연결 품목", exact=True).select_option("line-1")
@@ -262,6 +273,14 @@ def labels_regressions(browser, url):
         ok(True, "저장 중 상세창을 닫아도 성공 응답은 현재 원장의 상태를 갱신한다")
         page.get_by_role("button", name="0002", exact=True).click()
         dialog = page.get_by_role("dialog")
+        page.evaluate("""() => {window.__extraCandidates = [
+          {id:'same',receipt_no:'SAME-1',dong:'가상1동',status:'RECEIVED'},
+          {id:'other',receipt_no:'OTHER-1',dong:'가상2동',status:'RECEIVED'}];}""")
+        dialog.get_by_label("접수 찾기", exact=True).fill("0001")
+        dialog.get_by_role("button", name="접수 검색", exact=True).click()
+        expect(dialog.get_by_role("button", name="SAME-1 선택", exact=True)).to_be_enabled()
+        expect(dialog.get_by_role("button", name="OTHER-1 선택", exact=True)).to_be_disabled()
+        ok(True, "동별 재고는 같은 동의 접수만 선택할 수 있다")
         dialog.get_by_label("무효 사유", exact=True).fill("가상 훼손")
         page.evaluate("() => {window.__fail='numbered-labels/0002/void';}")
         dialog.get_by_role("button", name="무효 기록", exact=True).click()
@@ -299,6 +318,84 @@ def labels_regressions(browser, url):
         context.close()
 
 
+LABEL_RANGE_MODES = [
+    ("receive", "번호 구간 입고", "입고 기록", "수령일", "received_on"),
+    ("distribute", "번호 구간 배부", "배부 기록", "배부일", "distributed_on"),
+    ("stock-dong", "기존 번호 재고 동 지정", "재고 동 저장", "수령일", "received_on"),
+]
+
+
+def label_single_number_regressions(browser, url):
+    context, page = mount(browser, url, "numbered_labels")
+    try:
+        for mode, title, action, _, date_key in LABEL_RANGE_MODES:
+            page.get_by_role("button", name=title, exact=True).click()
+            dialog = page.get_by_role("dialog")
+            start = dialog.get_by_label("시작 번호", exact=True)
+            end = dialog.get_by_label("끝 번호", exact=True)
+            start.fill("0042")
+            expect(end).to_have_value("")
+            expect(dialog.get_by_text("번호 1개", exact=True)).to_be_visible()
+            expect(dialog.get_by_text("한 장이면 시작 번호만", exact=False)).to_be_visible()
+            dialog.get_by_label("재고 행정동", exact=True).select_option("dong-1")
+            if mode == "receive":
+                end.fill("42")
+                dialog.get_by_role("button", name=action, exact=True).click()
+                expect(dialog.get_by_role("alert")).to_contain_text("자릿수를 같게")
+                ok(not page.evaluate("window.__calls.some(x => x.path === '/api/numbered-labels/receive')"),
+                   "명시한 끝 번호의 자릿수가 다르면 API에 보내지 않는다")
+                end.fill("0043")
+                expect(dialog.get_by_text("번호 2개", exact=True)).to_be_visible()
+                end.fill("")
+                expect(dialog.get_by_text("번호 1개", exact=True)).to_be_visible()
+            dialog.get_by_role("button", name=action, exact=True).click()
+            expect(dialog).to_have_count(0)
+            calls = page.evaluate("mode => window.__calls.filter(x => x.path === '/api/numbered-labels/' + mode)", mode)
+            expected = {"start": "0042", "end": "0042", "dong_id": "dong-1", date_key: "2026-11-07"}
+            if mode == "distribute":
+                expected["destination"] = "가상1동"
+            ok(len(calls) == 1 and calls[0]["method"] == "POST" and bool(calls[0]["body"].pop("client_req_id", None))
+               and calls[0]["body"] == expected, f"{title} 한 장 미리보기와 저장 번호가 앞 0을 보존한다")
+    finally:
+        context.close()
+
+
+def label_range_reset_regressions(browser, url):
+    context, page = mount(browser, url, "numbered_labels")
+    try:
+        for mode, title, _, day_label, _ in LABEL_RANGE_MODES:
+            open_button = page.get_by_role("button", name=title, exact=True)
+            open_button.click()
+            dialog = page.get_by_role("dialog")
+            start = dialog.get_by_label("시작 번호", exact=True)
+            end = dialog.get_by_label("끝 번호", exact=True)
+            dong = dialog.get_by_label("재고 행정동", exact=True)
+            day = dialog.get_by_label(day_label, exact=True)
+            destination = dialog.get_by_label("배부처", exact=True)
+            start.fill("0042")
+            end.fill("0043")
+            dong.select_option("dong-1")
+            day.fill("2026-11-06")
+            if mode == "distribute":
+                destination.fill("가상 배부처")
+            dialog.get_by_role("button", name="입력 초기화", exact=True).click()
+            expect(start).to_be_focused()
+            expect(start).to_have_value("")
+            expect(end).to_have_value("")
+            expect(dong).to_have_value("")
+            expect(day).to_have_value("2026-11-07")
+            if mode == "distribute":
+                expect(destination).to_have_value("")
+            dialog.get_by_role("button", name="취소", exact=True).click()
+            open_button.click()
+            expect(dong).to_have_value("")
+            expect(day).to_have_value("2026-11-07")
+            dialog.get_by_role("button", name="취소", exact=True).click()
+            ok(True, f"{title} 초기화는 재고 동과 날짜를 처음 값으로 복원하고 다시 열어도 유지한다")
+    finally:
+        context.close()
+
+
 def labels_mutation_refresh_regression(browser, url):
     context, page = mount(browser, url, "numbered_labels")
     try:
@@ -331,6 +428,8 @@ def main():
         try:
             reports_regressions(browser, url)
             labels_regressions(browser, url)
+            label_single_number_regressions(browser, url)
+            label_range_reset_regressions(browser, url)
             labels_mutation_refresh_regression(browser, url)
         finally:
             browser.close()

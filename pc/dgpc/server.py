@@ -2765,7 +2765,10 @@ class Handler(BaseHTTPRequestHandler):
         e = _h.escape
         c = CON
         ids = S._ids(c, ids)
-        labels = []
+        # A4 20쪽씩 미리 본다. 뒷부분도 최초 조회 시점의 품목·수량으로 인쇄한다.
+        batch_size = 120
+        labels, templates, printed_ids = [], [], []
+        label_count = 0
         for rid in ids:
             r = S.one(c, "SELECT * FROM request WHERE id=?", (rid,))
             if r["status"] == "CANCELLED":
@@ -2773,20 +2776,40 @@ class Handler(BaseHTTPRequestHandler):
             qr = qr_png_data_uri(r["receipt_no"], "M")[0]
             st = S.derive(c, r)
             revisit = st["has_field_records"] and st["remaining_total"] > 0  # 재방문이면 남은 수량만, 아니면 확인 수량만큼
-            units = [(l, i + 1) for l in st["lines"] for i in range(min(l["remaining"] if revisit else l["qty_confirmed"], 20))]
-            total = len(units)
-            for n, (l, _) in enumerate(units, 1):
-                labels.append(f'<div class="label"><div class="lh"><b class="rno">{e(r["receipt_no"])}</b><span>{n}/{total}</span></div>'
-                              f'<div class="lday">{e((r["planned_date"] or "배출일 미정")[5:].replace("-", "월 ") + ("일" if r["planned_date"] else ""))}</div>'
-                              f'<div class="ldong">{e(r["dong"] or "")}</div><div class="litem">{e(l["name"])} <small>{e(l["spec"])}</small></div>'
-                              f'<img class="lqr" src="{qr}" alt="접수번호 QR"><div class="lnote">대형폐기물 배출 표지 · 물건에 붙여 주세요</div></div>')
+            quantity = "remaining" if revisit else "qty_confirmed"
+            total = sum(line[quantity] for line in st["lines"])
+            if not total:
+                continue
+            printed_ids.append(rid)
+            day = r["planned_date"]
+            day_label = day[5:].replace("-", "월 ") + "일" if day else "배출일 미정"
+            first = 1
+            for line in st["lines"]:
+                count = line[quantity]
+                if not count:
+                    continue
+                head = f'<div class="label"><div class="lh"><b class="rno">{e(r["receipt_no"])}</b><span>'
+                tail = (f'/{total}</span></div><div class="lday">{e(day_label)}</div>'
+                        f'<div class="ldong">{e(r["dong"] or "")}</div><div class="litem">{e(line["name"])} <small>{e(line["spec"])}</small></div>'
+                        f'<img class="lqr" src="{qr}" alt="접수번호 QR"><div class="lnote">대형폐기물 배출 표지 · 물건에 붙여 주세요</div></div>')
+                visible = min(count, batch_size - len(labels))
+                labels.extend(f'{head}{n}{tail}' for n in range(first, first + visible))
+                templates.append(f'<template data-count="{count}" data-first="{first}" data-total="{total}">{head}{first}{tail}</template>')
+                first += count
+            label_count += total
         if not labels:
             raise S.UserError("표지를 뽑을 접수가 없습니다(취소된 접수는 제외).")
         with S.tx(c):
-            for rid in ids:
+            for rid in printed_ids:
                 S.audit(c, "request", rid, "PRINT_LABEL", None)
-            PV.record_access(c, "PRINT", ids[0] if len(ids) == 1 else "", len(ids), f"배출 표지 {len(labels)}장")
+            PV.record_access(c, "PRINT", printed_ids[0] if len(printed_ids) == 1 else "", len(printed_ids), f"배출 표지 {label_count}장")
         pages = "".join(f'<div class="sheet">{"".join(labels[i:i + 6])}</div>' for i in range(0, len(labels), 6))
+        if label_count > batch_size:
+            pages = (f'<div class="tools" id="label-batches" data-size="{batch_size}" data-count="{label_count}">'
+                     f'<button type="button" id="label-prev" disabled>이전 묶음</button> '
+                     f'<span id="label-range" aria-live="polite">전체 {label_count:,}장 중 1~{batch_size}장</span> '
+                     '<button type="button" id="label-next">다음 묶음</button> · 현재 묶음만 인쇄합니다.</div>'
+                     f'{"".join(templates)}<div id="label-sheets">{pages}</div>')
         return self._doc("배출 표지", pages, "labels")
 
     def monthly_html(self, start: str, end: str, basis: str) -> str:

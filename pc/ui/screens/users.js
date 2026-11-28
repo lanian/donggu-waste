@@ -81,7 +81,7 @@ async function screenUsers() {
     info.textContent = `총 ${res.total.toLocaleString()}건`;
     tbody.replaceChildren(...(res.rows.length ? res.rows.map((a) => h('tr', {}, cell(kst(a.at), a.at, 'nowrap'), h('td', {}, a.actor || '—'), h('td', {}, ents[a.entity] || a.entity), h('td', {}, ACTION[a.action] || a.action,
       a.detail && a.detail.includes('"after_close"') ? chip('마감 후 수정', 'warn') : null),
-      h('td', { class: 'mono' }, a.entity_id ? a.entity_id.slice(0, 8) : ''), h('td', { class: 'detail' }, summarizeDetail(a.detail)))) : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '기록이 없습니다.'))]));
+      h('td', { class: 'mono' }, a.entity_id ? a.entity_id.slice(0, 8) : ''), h('td', { class: 'detail' }, summarizeDetail(a.detail, a.entity)))) : [h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '기록이 없습니다.'))]));
     pager.replaceChildren(btn('‹ 이전', () => { page -= 1; load(); }, 'small', { disabled: page <= 1 }), h('span', { class: 'pg' }, `${res.page} / ${res.pages}쪽`), btn('다음 ›', () => { page += 1; load(); }, 'small', { disabled: page >= res.pages }));
   });
   [fEntity, fFrom, fTo, fActor].forEach((x) => x.addEventListener('change', () => { page = 1; load(); }));
@@ -119,11 +119,12 @@ function diagCard() {
   return h('div', { class: 'card', id: 'diag' }, h('div', { class: 'panel-h' }, h('h2', {}, '진단'), btn('새로 고침', load, 'small')), body);
 }
 const diagHint = () => h('p', { class: 'muted small' }, '예약 작업은 서버가 켜져 있는 동안 하루 한 번(02:30 이후) 돕니다. 이틀 넘게 기록이 없으면 서버가 밤에 꺼져 있었는지 확인하세요. 큰 DB를 줄이려면 서버를 끄고 python pc/pc_tool.py vacuum.');
-function summarizeDetail(raw) {
+function summarizeDetail(raw, entity) {
   if (!raw) return '';
   let d; try { d = JSON.parse(raw); } catch { return String(raw).slice(0, 120); }
   if (typeof d !== 'object' || d == null) return String(d);
   const val = (k, v) => {
+    if (entity === 'numbered_label' && k === 'from' && v === null) return '등록 전';
     if (v === true) return '예';
     if (k === 'role') return ROLE[v] || v;
     if (k === 'fee_rate_id') { const r = BUILTIN_FEES.rows.find((x) => x.id === v); return r ? `${r.name} ${r.spec}` : v; }

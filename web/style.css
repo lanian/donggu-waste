@@ -653,6 +653,11 @@ html.text-big .reason-chips { grid-template-columns: 1fr; }
 .sk-note { margin: 8px 0 0; font-size: var(--t-md); font-weight: 700; overflow-wrap: anywhere; }
 .sk-review { margin: 6px 0 0; color: var(--warn); }
 .sticker-summary { margin: 0 0 12px; padding: 8px 10px; border-radius: var(--r-control); background: var(--bg); font-size: var(--t-sm); font-weight: 700; }
+.sticker-summary .sk-todo-count { display: inline-block; color: var(--warn); }
+.btn.sk-jump { width: 100%; margin: 0 0 4px; white-space: normal; overflow-wrap: anywhere; }
+.line .reason-stale-note { margin: 8px 0 0; color: var(--warn); }
+.line .btn.reason-clear { width: 100%; margin-top: 8px; white-space: normal; overflow-wrap: anywhere; }
+.chk.sk-jumped, .line.sk-jumped { outline: 3px solid var(--sel-ring); outline-offset: 3px; border-radius: 4px; }
 .sticker-sheet .sheet-head h2 { font-size: var(--t-md); }
 .sticker-context p { margin: 6px 0; line-height: 1.4; }
 .sticker-context .sticker-item { overflow-wrap: anywhere; }
